@@ -12,6 +12,7 @@ use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 struct FakeWorker {
     id: WorkerId,
     profile: PathBuf,
+    terminations: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -48,11 +49,16 @@ impl BrowserWorker for FakeWorker {
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
+    async fn terminate(&self) -> Result<(), CommandError> {
+        self.terminations.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 struct FakeFactory {
     launches: AtomicUsize,
+    terminations: Arc<AtomicUsize>,
 }
 
 struct FailOnceFactory {
@@ -73,6 +79,7 @@ impl WorkerFactory for FailOnceFactory {
         Ok(Arc::new(FakeWorker {
             id: WorkerId::new(),
             profile: PathBuf::from(format!("/profiles/{}", session_id.0)),
+            terminations: Arc::default(),
         }))
     }
 }
@@ -84,6 +91,7 @@ impl WorkerFactory for FakeFactory {
         Ok(Arc::new(FakeWorker {
             id: WorkerId::new(),
             profile: PathBuf::from(format!("/profiles/{}", session_id.0)),
+            terminations: self.terminations.clone(),
         }))
     }
 }
@@ -152,4 +160,26 @@ async fn launch_failure_releases_capacity_for_retry() {
         .await
         .expect("retry should not wait on a leaked permit")
         .unwrap();
+}
+
+#[tokio::test]
+async fn invalidate_terminates_and_replaces_worker_without_changing_profile() {
+    let factory = Arc::new(FakeFactory::default());
+    let pool = WorkerPool::new(1, factory.clone());
+    let session = SessionId::new();
+    let first = pool.lease(session.clone()).await.unwrap();
+    let first_id = first.worker_id();
+    let profile = first.profile_dir().to_path_buf();
+
+    pool.invalidate_session(&session).await.unwrap();
+    assert_eq!(factory.terminations.load(Ordering::SeqCst), 1);
+    assert_eq!(pool.active_workers().await, 0);
+
+    let replacement = pool.lease(session.clone()).await.unwrap();
+    assert_ne!(replacement.worker_id(), first_id);
+    assert_eq!(replacement.profile_dir(), profile);
+    assert_eq!(pool.active_workers().await, 1);
+
+    pool.invalidate_session(&SessionId::new()).await.unwrap();
+    assert_eq!(factory.terminations.load(Ordering::SeqCst), 1);
 }

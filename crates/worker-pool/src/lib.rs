@@ -39,6 +39,9 @@ pub trait BrowserWorker: Send + Sync {
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
     async fn close(&self) -> Result<(), CommandError>;
+    async fn terminate(&self) -> Result<(), CommandError> {
+        self.close().await
+    }
 }
 
 #[async_trait]
@@ -151,6 +154,18 @@ impl WorkerPool {
                 worker.close().await?;
             }
             entry.permit.lock().await.take();
+        }
+        Ok(())
+    }
+
+    pub async fn invalidate_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
+        let entry = self.inner.entries.lock().await.remove(session_id);
+        let Some(entry) = entry else {
+            return Ok(());
+        };
+        entry.permit.lock().await.take();
+        if let Some(worker) = entry.worker.get() {
+            worker.terminate().await?;
         }
         Ok(())
     }
