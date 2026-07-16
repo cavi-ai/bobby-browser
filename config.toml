@@ -28,6 +28,7 @@ directory = "./data/cache"
 [storage]
 directory = "./data/storage"
 journal_path = "./data/storage/commands.jsonl"
+checkpoints_dir = "./data/storage/checkpoints"
 
 [logging]
 level = "info"
