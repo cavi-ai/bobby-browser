@@ -16,6 +16,8 @@ members = [
   "crates/tracing",
   "crates/cdp-gateway",
   "crates/mcp-gateway",
+  "crates/test-site",
+  "crates/runtime-tests",
 ]
 resolver = "2"
 

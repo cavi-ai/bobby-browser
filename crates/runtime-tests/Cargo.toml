@@ -1,0 +1,15 @@
+[package]
+name = "runtime-tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+config = { path = "../config" }
+sdk-core = { path = "../sdk-core" }
+serde_json.workspace = true
+tempfile.workspace = true
+test-site = { path = "../test-site" }
+tokio.workspace = true
+types = { path = "../types" }
+workflow-journal = { path = "../workflow-journal" }
