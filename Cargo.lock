@@ -1146,14 +1146,17 @@ dependencies = [
 name = "runtime-tests"
 version = "0.1.0"
 dependencies = [
+ "checkpoint-store",
  "chrono",
  "config",
+ "page-runtime",
  "sdk-core",
  "serde_json",
  "tempfile",
  "test-site",
  "tokio",
  "types",
+ "worker-pool",
  "workflow-journal",
 ]
 
