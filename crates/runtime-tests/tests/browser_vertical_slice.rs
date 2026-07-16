@@ -200,6 +200,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             _ => None,
         })
         .expect("pre-boundary browser evidence");
+    let boundary_id = CommandId::new();
     runtime
         .checkpoint(
             WorkflowCheckpoint {
@@ -212,6 +213,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
                 restart_url: fixture.base_url(),
                 current_url: current_url.clone(),
                 cursor: Some(command_ids.last().unwrap().clone()),
+                boundary_command_id: Some(boundary_id.clone()),
                 recovery_class: CommandClass::Boundary,
                 invariants: vec![
                     CheckpointInvariant::Url { value: current_url },
@@ -226,7 +228,6 @@ async fn completes_dynamic_form_with_durable_evidence() {
         )
         .await
         .unwrap();
-    let boundary_id = CommandId::new();
     command_ids.push(boundary_id.clone());
     match runtime
         .submit(CommandEnvelope {

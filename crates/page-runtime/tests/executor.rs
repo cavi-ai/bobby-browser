@@ -267,6 +267,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
             restart_url: "https://example.test/".into(),
             current_url: "https://example.test/".into(),
             cursor: None,
+            boundary_command_id: Some(request.command_id.clone()),
             recovery_class: CommandClass::Boundary,
             invariants: Vec::new(),
             replayable_inputs: Vec::new(),
@@ -276,8 +277,14 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
         })
         .await
         .unwrap();
+    let mut reused_request = request.clone();
+    reused_request.command_id = CommandId::new();
     let accepted = runtime.execute(request).await;
     assert!(matches!(accepted, CommandOutcome::Completed { .. }));
+
+    let reused = runtime.execute(reused_request).await;
+    assert!(matches!(reused, CommandOutcome::Failed { error, .. }
+        if error.message.contains("does not match")));
 }
 
 #[tokio::test]
