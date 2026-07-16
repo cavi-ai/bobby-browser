@@ -5,6 +5,7 @@ use std::path::PathBuf;
 pub struct AppConfig {
     pub server: ServerConfig,
     pub browser: BrowserConfig,
+    pub storage: StorageConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,11 @@ pub struct BrowserConfig {
     pub max_active: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    pub journal_path: PathBuf,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -33,6 +39,9 @@ impl Default for AppConfig {
                 profiles_dir: PathBuf::from("./data/profiles"),
                 headless: true,
                 max_active: 8,
+            },
+            storage: StorageConfig {
+                journal_path: PathBuf::from("./data/storage/commands.jsonl"),
             },
         }
     }

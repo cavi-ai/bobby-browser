@@ -156,11 +156,15 @@ dependencies = [
 name = "broker"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "axum",
+ "chrono",
  "config",
  "sdk-core",
  "serde_json",
  "tokio",
+ "tower",
  "types",
 ]
 
@@ -1158,10 +1162,14 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "sdk-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "config",
  "page-runtime",
  "serde_json",
  "session-manager",
  "types",
+ "worker-pool",
+ "workflow-journal",
 ]
 
 [[package]]
@@ -1234,9 +1242,11 @@ dependencies = [
 name = "session-manager"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "tokio",
  "types",
+ "worker-pool",
 ]
 
 [[package]]

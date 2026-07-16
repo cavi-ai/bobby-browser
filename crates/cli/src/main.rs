@@ -8,10 +8,12 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    let cmd = std::env::args().nth(1).unwrap_or_else(|| "serve".to_string());
+    let cmd = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "serve".to_string());
 
     match cmd.as_str() {
-        "serve" => broker::serve(AppConfig::default()).await,
+        "serve" => broker::serve(AppConfig::default()).await?,
         "doctor" => println!("ok"),
         other => {
             eprintln!("unknown command: {other}");
