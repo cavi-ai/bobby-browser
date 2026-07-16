@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use axum::response::Html;
 use axum::routing::get;
@@ -56,12 +58,30 @@ impl Drop for FixtureServer {
 }
 
 pub async fn spawn() -> FixtureServer {
+    let drift_requests = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/healthz", get(|| async { "ok" }))
         .route(
             "/popup",
             get(|| async { Html("<title>Popup</title><p id='details'>Details</p>") }),
+        )
+        .route(
+            "/drift",
+            get({
+                let drift_requests = drift_requests.clone();
+                move || {
+                    let drift_requests = drift_requests.clone();
+                    async move {
+                        let title = if drift_requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                            "Stable Checkpoint"
+                        } else {
+                            "Drifted State"
+                        };
+                        Html(format!("<title>{title}</title><p id='state'>{title}</p>"))
+                    }
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

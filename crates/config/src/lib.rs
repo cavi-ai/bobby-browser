@@ -25,6 +25,7 @@ pub struct BrowserConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub journal_path: PathBuf,
+    pub checkpoints_dir: PathBuf,
 }
 
 impl Default for AppConfig {
@@ -42,6 +43,7 @@ impl Default for AppConfig {
             },
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
+                checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
             },
         }
     }

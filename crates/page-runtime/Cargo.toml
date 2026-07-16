@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+checkpoint-store = { path = "../checkpoint-store" }
 chrono.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -13,3 +14,4 @@ workflow-journal = { path = "../workflow-journal" }
 
 [dev-dependencies]
 async-trait.workspace = true
+tempfile.workspace = true

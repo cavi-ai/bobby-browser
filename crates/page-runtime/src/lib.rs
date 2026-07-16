@@ -1,20 +1,24 @@
 mod executor;
+mod recovery;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use checkpoint_store::CheckpointStore;
 use tokio::sync::RwLock;
 use types::{OpenPageRequest, PageId, PageMode, PageState, RuntimeError, SessionId};
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
 pub use executor::ExecutorError;
+pub use recovery::{evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError};
 
 #[derive(Clone, Default)]
 pub struct PageRuntime {
     inner: Arc<RwLock<HashMap<PageId, PageState>>>,
     journal: Option<Arc<dyn CommandJournal>>,
     workers: Option<Arc<WorkerPool>>,
+    checkpoints: Option<CheckpointStore>,
 }
 
 impl PageRuntime {
@@ -23,6 +27,20 @@ impl PageRuntime {
             inner: Arc::default(),
             journal: Some(journal),
             workers: Some(workers),
+            checkpoints: None,
+        }
+    }
+
+    pub fn new_with_checkpoints(
+        journal: Arc<dyn CommandJournal>,
+        workers: Arc<WorkerPool>,
+        checkpoints: CheckpointStore,
+    ) -> Self {
+        Self {
+            inner: Arc::default(),
+            journal: Some(journal),
+            workers: Some(workers),
+            checkpoints: Some(checkpoints),
         }
     }
 
