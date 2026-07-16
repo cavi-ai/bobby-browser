@@ -4,9 +4,10 @@ use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use sdk_core::RuntimeService;
 use types::{
-    AttemptId, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, CommandPhase,
-    CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, OpenPageRequest, PageId,
-    PrimitiveCommand, SessionId, TypeTextCommand, WaitUntil, WorkflowId,
+    AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandEnvelope,
+    CommandId, CommandOutcome, CommandPhase, CreateSessionRequest, Evidence, InspectCommand,
+    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, SessionId, TypeTextCommand,
+    WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use workflow_journal::{CommandJournal, JsonlJournal};
 
@@ -69,6 +70,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         },
         storage: StorageConfig {
             journal_path: journal_path.clone(),
+            checkpoints_dir: root.path().join("checkpoints"),
         },
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
@@ -171,18 +173,82 @@ async fn completes_dynamic_form_with_durable_evidence() {
     )
     .await;
     let expected_url = format!("{}/complete", fixture.base_url());
-    submit(
-        &runtime,
-        &first_session.id,
-        &page.id,
-        &mut command_ids,
-        PrimitiveCommand::Click(ClickCommand {
-            selector: "#submit".into(),
-            boundary: true,
-            expected_url: Some(expected_url.clone()),
-        }),
-    )
-    .await;
+    let workflow_id = WorkflowId::new();
+    let attempt_id = AttemptId::new();
+    let inspect_id = CommandId::new();
+    command_ids.push(inspect_id.clone());
+    let observed = match runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: inspect_id,
+            workflow_id: workflow_id.clone(),
+            attempt_id: attempt_id.clone(),
+            session_id: first_session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: PrimitiveCommand::Inspect(InspectCommand::default()),
+        })
+        .await
+    {
+        CommandOutcome::Completed { evidence, .. } => evidence,
+        outcome => panic!("pre-boundary inspection failed: {outcome:?}"),
+    };
+    let (current_url, title) = observed
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Inspection { url, title, .. } => Some((url.clone(), title.clone())),
+            _ => None,
+        })
+        .expect("pre-boundary browser evidence");
+    let boundary_id = CommandId::new();
+    runtime
+        .checkpoint(
+            WorkflowCheckpoint {
+                schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+                checkpoint_id: CheckpointId::new(),
+                workflow_id: workflow_id.clone(),
+                attempt_id: attempt_id.clone(),
+                session_id: first_session.id.clone(),
+                page_id: page.id.clone(),
+                restart_url: fixture.base_url(),
+                current_url: current_url.clone(),
+                cursor: Some(command_ids.last().unwrap().clone()),
+                boundary_command_id: Some(boundary_id.clone()),
+                recovery_class: CommandClass::Boundary,
+                invariants: vec![
+                    CheckpointInvariant::Url { value: current_url },
+                    CheckpointInvariant::Title { value: title },
+                ],
+                replayable_inputs: vec!["Ada".into(), "Analytical Engines".into()],
+                evidence: Vec::new(),
+                recovery_history: Vec::new(),
+                created_at: Utc::now(),
+            },
+            observed,
+        )
+        .await
+        .unwrap();
+    command_ids.push(boundary_id.clone());
+    match runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: boundary_id,
+            workflow_id,
+            attempt_id,
+            session_id: first_session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: PrimitiveCommand::Click(ClickCommand {
+                selector: "#submit".into(),
+                boundary: true,
+                expected_url: Some(expected_url.clone()),
+            }),
+        })
+        .await
+    {
+        CommandOutcome::Completed { .. } => {}
+        outcome => panic!("boundary command failed: {outcome:?}"),
+    }
     let result = submit(
         &runtime,
         &first_session.id,

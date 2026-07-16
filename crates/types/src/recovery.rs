@@ -25,11 +25,22 @@ pub struct WorkflowCheckpoint {
     pub restart_url: String,
     pub current_url: String,
     pub cursor: Option<CommandId>,
+    #[serde(default)]
+    pub boundary_command_id: Option<CommandId>,
     pub recovery_class: CommandClass,
     pub invariants: Vec<CheckpointInvariant>,
     pub replayable_inputs: Vec<String>,
     pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub recovery_history: Vec<RecoveryRecord>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRecord {
+    pub recorded_at: DateTime<Utc>,
+    pub decision: RecoveryDecision,
 }
 
 impl WorkflowCheckpoint {

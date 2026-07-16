@@ -48,6 +48,7 @@ pub enum Evidence {
         title: String,
     },
     Inspection {
+        selector: Option<String>,
         url: String,
         title: String,
         text: String,

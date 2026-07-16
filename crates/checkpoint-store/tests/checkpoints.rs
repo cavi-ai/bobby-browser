@@ -15,10 +15,12 @@ fn checkpoint(workflow_id: WorkflowId, current_url: &str) -> WorkflowCheckpoint 
         restart_url: "https://example.test/start".into(),
         current_url: current_url.into(),
         cursor: None,
+        boundary_command_id: None,
         recovery_class: CommandClass::Replayable,
         invariants: Vec::new(),
         replayable_inputs: Vec::new(),
         evidence: Vec::new(),
+        recovery_history: Vec::new(),
         created_at: Utc::now(),
     }
 }
@@ -83,4 +85,22 @@ async fn rejects_corrupt_or_unsupported_checkpoints() {
         store.load(&workflow_id).await,
         Err(CheckpointStoreError::UnsupportedSchema { .. })
     ));
+}
+
+#[tokio::test]
+async fn loads_foundation_v1_checkpoints_without_new_recovery_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let checkpoint = checkpoint(WorkflowId::new(), "https://example.test");
+    let path = root
+        .path()
+        .join(format!("{}.json", checkpoint.workflow_id.0));
+    let mut value = serde_json::to_value(&checkpoint).unwrap();
+    value.as_object_mut().unwrap().remove("boundaryCommandId");
+    value.as_object_mut().unwrap().remove("recoveryHistory");
+    std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let loaded = store.load(&checkpoint.workflow_id).await.unwrap();
+    assert_eq!(loaded.boundary_command_id, None);
+    assert!(loaded.recovery_history.is_empty());
 }

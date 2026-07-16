@@ -2,12 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use checkpoint_store::CheckpointStore;
 use chrono::{Duration, Utc};
 use tokio::sync::Mutex;
 use types::{
-    AttemptId, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
-    CommandPhase, ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand, PageId,
-    PrimitiveCommand, SessionId, TypeTextCommand, WaitUntil, WorkerId, WorkflowId,
+    AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
+    CommandOutcome, CommandPhase, ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand,
+    PageId, PrimitiveCommand, SessionId, TypeTextCommand, WaitUntil, WorkerId, WorkflowCheckpoint,
+    WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan};
@@ -81,6 +83,7 @@ impl BrowserWorker for FakeWorker {
             return Err(driver_failure());
         }
         Ok(vec![Evidence::Inspection {
+            selector: command.selector.clone(),
             url: "https://example.test/".into(),
             title: "Fixture".into(),
             text: command.selector.as_deref().map_or("page", |_| "Ada").into(),
@@ -220,6 +223,68 @@ async fn prepared_failure_never_touches_browser() {
         .await
         .iter()
         .any(|event| event.starts_with("browser:")));
+}
+
+#[tokio::test]
+async fn production_runtime_requires_matching_checkpoint_before_boundary_action() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = page_runtime::PageRuntime::new_with_checkpoints(journal, workers, store.clone());
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let boundary = PrimitiveCommand::Click(ClickCommand {
+        selector: "#submit".into(),
+        boundary: true,
+        expected_url: None,
+    });
+    let request = envelope(session.clone(), page.id.clone(), boundary.clone());
+
+    let rejected = runtime.execute(request.clone()).await;
+    assert!(matches!(rejected, CommandOutcome::Failed { error, .. }
+        if error.code == ErrorCode::InvalidRequest && error.message.contains("checkpoint")));
+    assert!(!events.lock().await.contains(&"browser:click".to_string()));
+
+    store
+        .save(&WorkflowCheckpoint {
+            schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            workflow_id: request.workflow_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            session_id: session,
+            page_id: page.id,
+            restart_url: "https://example.test/".into(),
+            current_url: "https://example.test/".into(),
+            cursor: None,
+            boundary_command_id: Some(request.command_id.clone()),
+            recovery_class: CommandClass::Boundary,
+            invariants: Vec::new(),
+            replayable_inputs: Vec::new(),
+            evidence: Vec::new(),
+            recovery_history: Vec::new(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let mut reused_request = request.clone();
+    reused_request.command_id = CommandId::new();
+    let accepted = runtime.execute(request).await;
+    assert!(matches!(accepted, CommandOutcome::Completed { .. }));
+
+    let reused = runtime.execute(reused_request).await;
+    assert!(matches!(reused, CommandOutcome::Failed { error, .. }
+        if error.message.contains("does not match")));
 }
 
 #[tokio::test]
