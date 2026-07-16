@@ -71,6 +71,26 @@ impl PageRuntime {
             PrimitiveCommand::Inspect(command) => lease.worker().inspect(page_id, command).await,
             PrimitiveCommand::Click(command) => lease.worker().click(page_id, command).await,
             PrimitiveCommand::TypeText(command) => lease.worker().type_text(page_id, command).await,
+            PrimitiveCommand::UploadFiles(command) => {
+                lease.worker().upload_files(page_id, command).await
+            }
+            PrimitiveCommand::OpenPage(command) => lease.worker().open_page_command(command).await,
+            PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await,
+            PrimitiveCommand::ClosePage(command) => {
+                lease.worker().close_page_command(command).await
+            }
+            PrimitiveCommand::ClickAndWaitForPopup(command) => {
+                lease
+                    .worker()
+                    .click_and_wait_for_popup(page_id, command)
+                    .await
+            }
+            PrimitiveCommand::ClickAndWaitForDownload(command) => {
+                lease
+                    .worker()
+                    .click_and_wait_for_download(page_id, command)
+                    .await
+            }
         };
         let evidence = match execution {
             Ok(evidence) => evidence,
@@ -80,6 +100,20 @@ impl PageRuntime {
                     .await;
             }
         };
+        match &envelope.command {
+            PrimitiveCommand::OpenPage(_) => {
+                if let Some(Evidence::Page { page_id, url, .. }) = evidence.first() {
+                    self.register_page_id(
+                        envelope.session_id.clone(),
+                        page_id.clone(),
+                        url.clone(),
+                    )
+                    .await;
+                }
+            }
+            PrimitiveCommand::ClosePage(command) => self.remove_page(&command.page_id).await,
+            _ => {}
+        }
 
         if let Err(error) = journal
             .append(record(&envelope, CommandPhase::Verifying, None, None))
@@ -232,6 +266,60 @@ impl PageRuntime {
                     Ok(evidence)
                 } else {
                     Err(verification_error("click returned no target evidence"))
+                }
+            }
+            PrimitiveCommand::UploadFiles(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Upload { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("upload returned no file evidence"))
+                }
+            }
+            PrimitiveCommand::OpenPage(_) | PrimitiveCommand::ClosePage(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Page { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("page command returned no page evidence"))
+                }
+            }
+            PrimitiveCommand::ListPages(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Pages { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("page listing returned no evidence"))
+                }
+            }
+            PrimitiveCommand::ClickAndWaitForPopup(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Popup { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "popup command returned no popup evidence",
+                    ))
+                }
+            }
+            PrimitiveCommand::ClickAndWaitForDownload(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Download { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "download command returned no download evidence",
+                    ))
                 }
             }
         }
