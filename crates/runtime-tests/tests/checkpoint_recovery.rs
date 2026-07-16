@@ -83,6 +83,8 @@ async fn replaces_chrome_then_resumes_or_restarts_from_verified_state() {
             profiles_dir,
             headless: true,
             max_active: 1,
+            upload_roots: vec![root.path().join("uploads")],
+            downloads_dir: root.path().join("downloads"),
         })),
     ));
     let coordinator = RecoveryCoordinator::with_workers(store.clone(), pool.clone());

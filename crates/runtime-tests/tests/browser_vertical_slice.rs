@@ -67,6 +67,8 @@ async fn completes_dynamic_form_with_durable_evidence() {
             profiles_dir: profiles_dir.clone(),
             headless: true,
             max_active: 8,
+            upload_roots: vec![root.path().join("uploads")],
+            downloads_dir: root.path().join("downloads"),
         },
         storage: StorageConfig {
             journal_path: journal_path.clone(),

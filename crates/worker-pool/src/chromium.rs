@@ -15,7 +15,7 @@ use types::{
     PageId, SessionId, TypeTextCommand, WorkerId,
 };
 
-use crate::{BrowserWorker, WorkerFactory};
+use crate::{session_download_dir, BrowserWorker, WorkerFactory};
 
 #[derive(Clone)]
 pub struct ChromiumWorkerFactory {
@@ -32,7 +32,11 @@ impl ChromiumWorkerFactory {
 impl WorkerFactory for ChromiumWorkerFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         let profile_dir = self.config.profiles_dir.join(session_id.0.to_string());
+        let download_dir = session_download_dir(&self.config.downloads_dir, session_id);
         tokio::fs::create_dir_all(&profile_dir)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+        tokio::fs::create_dir_all(&download_dir)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
 
@@ -62,6 +66,8 @@ impl WorkerFactory for ChromiumWorkerFactory {
         Ok(Arc::new(ChromiumWorker {
             id: WorkerId::new(),
             profile_dir,
+            _upload_roots: self.config.upload_roots.clone(),
+            _download_dir: download_dir,
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
             handler_task: Mutex::new(Some(handler_task)),
@@ -72,6 +78,8 @@ impl WorkerFactory for ChromiumWorkerFactory {
 struct ChromiumWorker {
     id: WorkerId,
     profile_dir: PathBuf,
+    _upload_roots: Vec<PathBuf>,
+    _download_dir: PathBuf,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
     handler_task: Mutex<Option<JoinHandle<()>>>,

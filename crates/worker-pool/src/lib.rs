@@ -1,7 +1,7 @@
 mod chromium;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,6 +12,54 @@ use types::{
 };
 
 pub use chromium::ChromiumWorkerFactory;
+
+pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
+    root.join(session_id.0.to_string())
+}
+
+pub fn resolve_upload_paths(
+    roots: &[PathBuf],
+    paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, CommandError> {
+    let roots = roots
+        .iter()
+        .map(|root| {
+            std::fs::canonicalize(root).map_err(|error| {
+                policy_error(format!("invalid upload root {}: {error}", root.display()))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths
+        .iter()
+        .map(|path| {
+            let canonical = std::fs::canonicalize(path).map_err(|error| {
+                policy_error(format!("invalid upload file {}: {error}", path.display()))
+            })?;
+            if !canonical.is_file() {
+                return Err(policy_error(format!(
+                    "upload path is not a file: {}",
+                    path.display()
+                )));
+            }
+            if !roots.iter().any(|root| canonical.starts_with(root)) {
+                return Err(policy_error(format!(
+                    "upload path is outside configured roots: {}",
+                    path.display()
+                )));
+            }
+            Ok(canonical)
+        })
+        .collect()
+}
+
+fn policy_error(message: impl Into<String>) -> CommandError {
+    CommandError {
+        code: types::ErrorCode::PolicyDenied,
+        message: message.into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: false,
+    }
+}
 
 #[async_trait]
 pub trait BrowserWorker: Send + Sync {
