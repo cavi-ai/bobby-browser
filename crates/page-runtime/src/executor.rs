@@ -111,6 +111,16 @@ impl PageRuntime {
                     .await;
                 }
             }
+            PrimitiveCommand::ClickAndWaitForPopup(_) => {
+                if let Some(Evidence::Popup { page_id, url, .. }) = evidence.first() {
+                    self.register_page_id(
+                        envelope.session_id.clone(),
+                        page_id.clone(),
+                        url.clone(),
+                    )
+                    .await;
+                }
+            }
             PrimitiveCommand::ClosePage(command) => self.remove_page(&command.page_id).await,
             _ => {}
         }

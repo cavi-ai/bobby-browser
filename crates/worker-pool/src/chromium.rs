@@ -5,10 +5,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig};
+use chromiumoxide::cdp::browser_protocol::browser::{
+    DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
+    SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
+};
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
+use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::Page;
 use config::BrowserConfig;
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
@@ -70,7 +76,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             id: WorkerId::new(),
             profile_dir,
             upload_roots: self.config.upload_roots.clone(),
-            _download_dir: download_dir,
+            download_dir,
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
             handler_task: Mutex::new(Some(handler_task)),
@@ -82,7 +88,7 @@ struct ChromiumWorker {
     id: WorkerId,
     profile_dir: PathBuf,
     upload_roots: Vec<PathBuf>,
-    _download_dir: PathBuf,
+    download_dir: PathBuf,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
@@ -331,23 +337,150 @@ impl BrowserWorker for ChromiumWorker {
 
     async fn click_and_wait_for_popup(
         &self,
-        _page_id: &PageId,
-        _command: &ClickAndWaitForPopupCommand,
+        page_id: &PageId,
+        command: &ClickAndWaitForPopupCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Err(driver_error(
-            ErrorCode::BrowserCommandFailed,
-            "popup observer is not implemented",
-        ))
+        let browser = self.browser.lock().await;
+        let browser = browser.as_ref().ok_or_else(closed_error)?;
+        let mut events = browser
+            .event_listener::<EventTargetCreated>()
+            .await
+            .map_err(command_failed)?;
+        let pages = self.pages.lock().await;
+        let opener = pages.get(page_id).ok_or_else(page_missing)?;
+        let opener_target = opener.target_id().clone();
+        opener
+            .find_element(&command.selector)
+            .await
+            .map_err(command_failed)?
+            .click()
+            .await
+            .map_err(command_failed)?;
+        let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+            loop {
+                let event = events.next().await.ok_or_else(|| {
+                    driver_error(ErrorCode::BrowserCommandFailed, "popup event stream closed")
+                })?;
+                if event.target_info.opener_id.as_ref() == Some(&opener_target)
+                    && event.target_info.r#type == "page"
+                {
+                    return Ok::<_, CommandError>(event);
+                }
+            }
+        })
+        .await
+        .map_err(|_| timeout_error(command.timeout_ms))??;
+        drop(pages);
+        let popup = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+            loop {
+                if let Some(page) = browser
+                    .pages()
+                    .await
+                    .map_err(command_failed)?
+                    .into_iter()
+                    .find(|page| page.target_id() == &event.target_info.target_id)
+                {
+                    return Ok::<_, CommandError>(page);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| timeout_error(command.timeout_ms))??;
+        let popup_id = PageId::new();
+        let page = page_evidence(popup_id.clone(), &popup).await?;
+        self.pages.lock().await.insert(popup_id.clone(), popup);
+        Ok(vec![Evidence::Popup {
+            opener_page_id: page_id.clone(),
+            page_id: popup_id,
+            url: page.url,
+            title: page.title,
+        }])
     }
     async fn click_and_wait_for_download(
         &self,
-        _page_id: &PageId,
-        _command: &ClickAndWaitForDownloadCommand,
+        page_id: &PageId,
+        command: &ClickAndWaitForDownloadCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Err(driver_error(
-            ErrorCode::BrowserCommandFailed,
-            "download observer is not implemented",
-        ))
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        tokio::time::timeout(
+            Duration::from_millis(command.timeout_ms),
+            page.execute(
+                SetDownloadBehaviorParams::builder()
+                    .behavior(SetDownloadBehaviorBehavior::Allow)
+                    .download_path(self.download_dir.to_string_lossy())
+                    .events_enabled(true)
+                    .build()
+                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
+            ),
+        )
+        .await
+        .map_err(|_| timeout_error(command.timeout_ms))?
+        .map_err(command_failed)?;
+        let mut begins = page
+            .event_listener::<EventDownloadWillBegin>()
+            .await
+            .map_err(command_failed)?;
+        let mut progress = page
+            .event_listener::<EventDownloadProgress>()
+            .await
+            .map_err(command_failed)?;
+        let element = page
+            .find_element(&command.selector)
+            .await
+            .map_err(command_failed)?;
+        element
+            .call_js_fn("function() { this.click(); }", false)
+            .await
+            .map_err(command_failed)?;
+        let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), begins.next())
+            .await
+            .map_err(|_| timeout_error(command.timeout_ms))?
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "download event stream closed",
+                )
+            })?;
+        let completed = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+            loop {
+                let event = progress.next().await.ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "download progress stream closed",
+                    )
+                })?;
+                if event.guid == begin.guid {
+                    match event.state {
+                        DownloadProgressState::Completed => return Ok::<_, CommandError>(event),
+                        DownloadProgressState::Canceled => {
+                            return Err(driver_error(
+                                ErrorCode::BrowserCommandFailed,
+                                "download was canceled",
+                            ))
+                        }
+                        DownloadProgressState::InProgress => {}
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| timeout_error(command.timeout_ms))??;
+        let path = completed
+            .file_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.download_dir.join(&begin.suggested_filename));
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(vec![Evidence::Download {
+            filename: begin.suggested_filename.clone(),
+            path: path.to_string_lossy().into_owned(),
+            bytes: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+        }])
     }
 
     async fn close(&self) -> Result<(), CommandError> {

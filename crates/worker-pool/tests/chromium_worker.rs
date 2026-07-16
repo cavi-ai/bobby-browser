@@ -1,8 +1,9 @@
 use config::BrowserConfig;
 use std::path::PathBuf;
 use types::{
-    ClosePageCommand, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId,
-    SessionId, TypeTextCommand, UploadFilesCommand, WaitUntil,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClosePageCommand, InspectCommand,
+    ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, SessionId, TypeTextCommand,
+    UploadFilesCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -24,6 +25,66 @@ fn upload_paths_are_canonical_and_confined_to_roots() {
     );
     let error = resolve_upload_paths(&[root.path().join("allowed")], &[outside]).unwrap_err();
     assert_eq!(error.code, types::ErrorCode::PolicyDenied);
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn correlates_popup_and_download_before_clicking() {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: fixture.base_url(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let popup = worker
+        .click_and_wait_for_popup(
+            &page_id,
+            &ClickAndWaitForPopupCommand {
+                selector: "#root-popup".into(),
+                timeout_ms: 5_000,
+            },
+        )
+        .await
+        .unwrap();
+    println!("popup={popup:?}");
+    assert!(matches!(&popup[0], types::Evidence::Popup { title, .. } if title == "Popup"));
+    let download = worker
+        .click_and_wait_for_download(
+            &page_id,
+            &ClickAndWaitForDownloadCommand {
+                selector: "#download".into(),
+                timeout_ms: 5_000,
+            },
+        )
+        .await
+        .unwrap();
+    println!("download={download:?}");
+    assert!(
+        matches!(&download[0], types::Evidence::Download { filename, bytes, sha256, .. } if filename == "workflow-fixture.bin" && *bytes == 20 && sha256.len() == 64)
+    );
+    worker.close().await.unwrap();
+    println!("closed");
 }
 
 #[cfg(unix)]

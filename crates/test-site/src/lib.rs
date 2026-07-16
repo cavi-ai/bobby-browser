@@ -2,7 +2,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use axum::response::Html;
+use axum::http::{header, HeaderValue};
+use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
 use tokio::task::JoinHandle;
@@ -15,6 +16,9 @@ const INDEX: &str = r#"<!doctype html>
       <label for="name">Name</label>
       <input id="name" autocomplete="off">
       <button id="continue" type="button">Continue</button>
+      <input id="resume" type="file">
+      <a id="download" href="/download">Download fixture</a>
+      <a id="root-popup" href="/popup" target="_blank">Open details</a>
     </main>
     <script>
       document.querySelector('#continue').addEventListener('click', () => {
@@ -62,6 +66,21 @@ pub async fn spawn() -> FixtureServer {
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/download",
+            get(|| async {
+                let mut response = b"workflow-download-v1".to_vec().into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+                response.headers_mut().insert(
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment; filename=workflow-fixture.bin"),
+                );
+                response
+            }),
+        )
         .route(
             "/popup",
             get(|| async { Html("<title>Popup</title><p id='details'>Details</p>") }),
