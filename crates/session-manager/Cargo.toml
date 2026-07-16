@@ -7,3 +7,7 @@ edition.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 types = { path = "../types" }
+worker-pool = { path = "../worker-pool" }
+
+[dev-dependencies]
+async-trait.workspace = true
