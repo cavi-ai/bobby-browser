@@ -7,8 +7,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use types::{
-    ClickCommand, CommandError, Evidence, InspectCommand, NavigateCommand, PageId, SessionId,
-    TypeTextCommand, WorkerId,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
+    CommandError, Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand,
+    PageId, SessionId, TypeTextCommand, UploadFilesCommand, WorkerId,
 };
 
 pub use chromium::ChromiumWorkerFactory;
@@ -86,9 +87,54 @@ pub trait BrowserWorker: Send + Sync {
         page_id: &PageId,
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
+    async fn upload_files(
+        &self,
+        _page_id: &PageId,
+        _command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn open_page_command(
+        &self,
+        _command: &OpenPageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn close_page_command(
+        &self,
+        _command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn click_and_wait_for_popup(
+        &self,
+        _page_id: &PageId,
+        _command: &ClickAndWaitForPopupCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn click_and_wait_for_download(
+        &self,
+        _page_id: &PageId,
+        _command: &ClickAndWaitForDownloadCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
     async fn close(&self) -> Result<(), CommandError>;
     async fn terminate(&self) -> Result<(), CommandError> {
         self.close().await
+    }
+}
+
+fn unsupported_error() -> CommandError {
+    CommandError {
+        code: types::ErrorCode::BrowserCommandFailed,
+        message: "browser primitive is not supported by this worker".into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: false,
     }
 }
 

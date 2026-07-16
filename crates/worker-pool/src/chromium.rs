@@ -5,17 +5,20 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig};
+use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
-    ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand,
-    PageId, SessionId, TypeTextCommand, WorkerId,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
+    CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, ListPagesCommand,
+    NavigateCommand, OpenPageCommand, PageEvidence, PageId, SessionId, TypeTextCommand,
+    UploadFilesCommand, WorkerId,
 };
 
-use crate::{session_download_dir, BrowserWorker, WorkerFactory};
+use crate::{resolve_upload_paths, session_download_dir, BrowserWorker, WorkerFactory};
 
 #[derive(Clone)]
 pub struct ChromiumWorkerFactory {
@@ -66,7 +69,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
         Ok(Arc::new(ChromiumWorker {
             id: WorkerId::new(),
             profile_dir,
-            _upload_roots: self.config.upload_roots.clone(),
+            upload_roots: self.config.upload_roots.clone(),
             _download_dir: download_dir,
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
@@ -78,7 +81,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
 struct ChromiumWorker {
     id: WorkerId,
     profile_dir: PathBuf,
-    _upload_roots: Vec<PathBuf>,
+    upload_roots: Vec<PathBuf>,
     _download_dir: PathBuf,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
@@ -245,6 +248,108 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn upload_files(
+        &self,
+        page_id: &PageId,
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let requested = command.paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let paths = resolve_upload_paths(&self.upload_roots, &requested)?;
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let element = page
+            .find_element(&command.selector)
+            .await
+            .map_err(command_failed)?;
+        let path_strings = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        page.execute(
+            SetFileInputFilesParams::builder()
+                .files(path_strings.clone())
+                .backend_node_id(element.backend_node_id)
+                .build()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
+        )
+        .await
+        .map_err(command_failed)?;
+        Ok(vec![Evidence::Upload {
+            selector: command.selector.clone(),
+            paths: path_strings,
+        }])
+    }
+
+    async fn open_page_command(
+        &self,
+        command: &OpenPageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page_id = PageId::new();
+        let browser = self.browser.lock().await;
+        let browser = browser.as_ref().ok_or_else(closed_error)?;
+        let page = browser
+            .new_page(command.url.as_deref().unwrap_or("about:blank"))
+            .await
+            .map_err(command_failed)?;
+        let evidence = page_evidence(page_id.clone(), &page).await?;
+        self.pages.lock().await.insert(page_id, page);
+        Ok(vec![Evidence::Page {
+            page_id: evidence.page_id,
+            url: evidence.url,
+            title: evidence.title,
+        }])
+    }
+
+    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let mut listed = Vec::with_capacity(pages.len());
+        for (page_id, page) in pages.iter() {
+            listed.push(page_evidence(page_id.clone(), page).await?);
+        }
+        listed.sort_by(|left, right| left.page_id.0.cmp(&right.page_id.0));
+        Ok(vec![Evidence::Pages { pages: listed }])
+    }
+
+    async fn close_page_command(
+        &self,
+        command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page = self
+            .pages
+            .lock()
+            .await
+            .remove(&command.page_id)
+            .ok_or_else(page_missing)?;
+        let evidence = page_evidence(command.page_id.clone(), &page).await?;
+        page.close().await.map_err(command_failed)?;
+        Ok(vec![Evidence::Page {
+            page_id: evidence.page_id,
+            url: evidence.url,
+            title: evidence.title,
+        }])
+    }
+
+    async fn click_and_wait_for_popup(
+        &self,
+        _page_id: &PageId,
+        _command: &ClickAndWaitForPopupCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "popup observer is not implemented",
+        ))
+    }
+    async fn click_and_wait_for_download(
+        &self,
+        _page_id: &PageId,
+        _command: &ClickAndWaitForDownloadCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "download observer is not implemented",
+        ))
+    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
         if let Some(mut browser) = self.browser.lock().await.take() {
@@ -268,6 +373,22 @@ impl BrowserWorker for ChromiumWorker {
         }
         close_result
     }
+}
+
+async fn page_evidence(page_id: PageId, page: &Page) -> Result<PageEvidence, CommandError> {
+    Ok(PageEvidence {
+        page_id,
+        url: page
+            .url()
+            .await
+            .map_err(command_failed)?
+            .unwrap_or_default(),
+        title: page
+            .get_title()
+            .await
+            .map_err(command_failed)?
+            .unwrap_or_default(),
+    })
 }
 
 fn command_failed(error: chromiumoxide::error::CdpError) -> CommandError {

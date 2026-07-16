@@ -1,6 +1,9 @@
 use config::BrowserConfig;
 use std::path::PathBuf;
-use types::{InspectCommand, NavigateCommand, PageId, SessionId, TypeTextCommand, WaitUntil};
+use types::{
+    ClosePageCommand, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId,
+    SessionId, TypeTextCommand, UploadFilesCommand, WaitUntil,
+};
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
 };
@@ -56,6 +59,8 @@ fn download_directories_are_session_private() {
 #[ignore = "requires installed Chrome or Chromium"]
 async fn drives_a_real_chromium_page() {
     let profiles = tempfile::tempdir().unwrap();
+    let upload = profiles.path().join("resume.txt");
+    std::fs::write(&upload, b"Ada Lovelace").unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
         executable: Some(PathBuf::from(
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -73,7 +78,7 @@ async fn drives_a_real_chromium_page() {
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<title>Worker Proof</title><input id='name'>".into(),
+                url: "data:text/html,<title>Worker Proof</title><input id='name'><input id='resume' type='file'>".into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -102,5 +107,39 @@ async fn drives_a_real_chromium_page() {
         .await
         .unwrap();
     assert!(format!("{evidence:?}").contains("Ada"));
+    let upload_evidence = worker
+        .upload_files(
+            &page_id,
+            &UploadFilesCommand {
+                selector: "#resume".into(),
+                paths: vec![upload.to_string_lossy().into_owned()],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(format!("{upload_evidence:?}").contains("resume.txt"));
+    let opened = worker
+        .open_page_command(&OpenPageCommand {
+            url: Some("data:text/html,<title>Second Page</title>".into()),
+        })
+        .await
+        .unwrap();
+    let second_page = match &opened[0] {
+        types::Evidence::Page { page_id, title, .. } => {
+            assert_eq!(title, "Second Page");
+            page_id.clone()
+        }
+        other => panic!("unexpected evidence: {other:?}"),
+    };
+    let listed = worker.list_pages(&ListPagesCommand).await.unwrap();
+    assert!(matches!(&listed[0], types::Evidence::Pages { pages } if pages.len() == 2));
+    worker
+        .close_page_command(&ClosePageCommand {
+            page_id: second_page,
+        })
+        .await
+        .unwrap();
+    let listed = worker.list_pages(&ListPagesCommand).await.unwrap();
+    assert!(matches!(&listed[0], types::Evidence::Pages { pages } if pages.len() == 1));
     worker.close().await.unwrap();
 }

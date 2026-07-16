@@ -81,6 +81,29 @@ impl PageRuntime {
         page
     }
 
+    pub(crate) async fn register_page_id(
+        &self,
+        session_id: SessionId,
+        page_id: PageId,
+        url: String,
+    ) {
+        self.inner.write().await.insert(
+            page_id.clone(),
+            PageState {
+                id: page_id,
+                session_id,
+                url: Some(url),
+                mode: PageMode::Document,
+                ready_state: "interactive".into(),
+                pending_requests: 0,
+            },
+        );
+    }
+
+    pub(crate) async fn remove_page(&self, page_id: &PageId) {
+        self.inner.write().await.remove(page_id);
+    }
+
     pub async fn get(&self, id: &PageId) -> Result<PageState, RuntimeError> {
         self.inner
             .read()
