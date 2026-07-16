@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{AttemptId, CommandId};
+use crate::{AttemptId, CommandId, PageId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
@@ -58,6 +58,38 @@ pub enum Evidence {
         selector: String,
         text: Option<String>,
     },
+    Upload {
+        selector: String,
+        paths: Vec<String>,
+    },
+    Page {
+        page_id: PageId,
+        url: String,
+        title: String,
+    },
+    Pages {
+        pages: Vec<PageEvidence>,
+    },
+    Popup {
+        opener_page_id: PageId,
+        page_id: PageId,
+        url: String,
+        title: String,
+    },
+    Download {
+        filename: String,
+        path: String,
+        bytes: u64,
+        sha256: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PageEvidence {
+    pub page_id: PageId,
+    pub url: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
