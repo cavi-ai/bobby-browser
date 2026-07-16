@@ -53,8 +53,8 @@ impl RuntimeService {
         let checkpoints = checkpoint_store::CheckpointStore::open(&config.storage.checkpoints_dir)
             .await
             .map_err(|error| RuntimeError::Internal(error.to_string()))?;
-        let recovery = RecoveryCoordinator::with_workers(checkpoints, workers.clone());
-        let pages = PageRuntime::new(journal, workers.clone());
+        let recovery = RecoveryCoordinator::with_workers(checkpoints.clone(), workers.clone());
+        let pages = PageRuntime::new_with_checkpoints(journal, workers.clone(), checkpoints);
         let sessions = SessionManager::new(workers);
         Ok(Self::with_recovery(sessions, pages, recovery))
     }
