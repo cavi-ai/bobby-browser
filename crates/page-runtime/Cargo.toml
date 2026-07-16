@@ -1,0 +1,8 @@
+[package]
+name = "page-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+types = { path = "../types" }

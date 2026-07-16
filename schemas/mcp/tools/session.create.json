@@ -1,0 +1,13 @@
+{
+  "name": "session.create",
+  "description": "Create a new isolated browser session",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "profile": { "type": "string" },
+      "proxy": { "type": ["string", "null"] },
+      "ttlSeconds": { "type": "integer", "minimum": 1 }
+    },
+    "required": ["profile"]
+  }
+}

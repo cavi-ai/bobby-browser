@@ -1,0 +1,16 @@
+/target
+/data/cache
+/data/storage
+.DS_Store
+.env
+# Added by code-review-graph
+.code-review-graph/
+.vscode/
+.cursor/
+.claude/
+.codex/
+.kiro/
+.qoder/
+.gemini/
+.cursorrules
+./gemini

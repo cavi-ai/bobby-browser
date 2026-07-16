@@ -1,0 +1,33 @@
+[server]
+host = "127.0.0.1"
+port = 7777
+
+[cdp]
+enabled = true
+port = 9222
+
+[mcp]
+enabled = true
+stdio = true
+http = true
+http_port = 7788
+
+[sessions]
+default_ttl_seconds = 1800
+max_sessions = 100
+max_pages_per_session = 20
+
+[workers]
+max_concurrency = 32
+queue_capacity = 10000
+
+[cache]
+enabled = true
+directory = "./data/cache"
+
+[storage]
+directory = "./data/storage"
+
+[logging]
+level = "info"
+json = true

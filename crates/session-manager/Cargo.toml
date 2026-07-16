@@ -1,0 +1,9 @@
+[package]
+name = "session-manager"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+tokio.workspace = true
+types = { path = "../types" }
