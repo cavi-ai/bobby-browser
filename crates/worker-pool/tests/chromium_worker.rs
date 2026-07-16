@@ -20,7 +20,7 @@ fn upload_paths_are_canonical_and_confined_to_roots() {
     std::fs::write(&outside, b"nope").unwrap();
 
     assert_eq!(
-        resolve_upload_paths(&[allowed], &[file.clone()]).unwrap(),
+        resolve_upload_paths(&[allowed], std::slice::from_ref(&file)).unwrap(),
         vec![file.canonicalize().unwrap()]
     );
     let error = resolve_upload_paths(&[root.path().join("allowed")], &[outside]).unwrap_err();
