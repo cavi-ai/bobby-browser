@@ -953,7 +953,9 @@ name = "page-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "checkpoint-store",
  "chrono",
+ "tempfile",
  "thiserror",
  "tokio",
  "types",
