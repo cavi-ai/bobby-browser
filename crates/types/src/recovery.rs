@@ -29,7 +29,15 @@ pub struct WorkflowCheckpoint {
     pub invariants: Vec<CheckpointInvariant>,
     pub replayable_inputs: Vec<String>,
     pub evidence: Vec<Evidence>,
+    pub recovery_history: Vec<RecoveryRecord>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRecord {
+    pub recorded_at: DateTime<Utc>,
+    pub decision: RecoveryDecision,
 }
 
 impl WorkflowCheckpoint {
