@@ -1,4 +1,5 @@
 mod executor;
+mod recovery;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
 pub use executor::ExecutorError;
+pub use recovery::{evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError};
 
 #[derive(Clone, Default)]
 pub struct PageRuntime {

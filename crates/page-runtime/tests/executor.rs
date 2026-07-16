@@ -81,6 +81,7 @@ impl BrowserWorker for FakeWorker {
             return Err(driver_failure());
         }
         Ok(vec![Evidence::Inspection {
+            selector: command.selector.clone(),
             url: "https://example.test/".into(),
             title: "Fixture".into(),
             text: command.selector.as_deref().map_or("page", |_| "Ada").into(),

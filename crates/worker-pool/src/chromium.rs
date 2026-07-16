@@ -179,6 +179,7 @@ impl BrowserWorker for ChromiumWorker {
             (text, html)
         };
         Ok(vec![Evidence::Inspection {
+            selector: command.selector.clone(),
             url,
             title,
             text,
