@@ -312,7 +312,7 @@ impl BrowserWorker for ChromiumWorker {
         for (page_id, page) in pages.iter() {
             listed.push(page_evidence(page_id.clone(), page).await?);
         }
-        listed.sort_by(|left, right| left.page_id.0.cmp(&right.page_id.0));
+        listed.sort_by_key(|page| page.page_id.0);
         Ok(vec![Evidence::Pages { pages: listed }])
     }
 
