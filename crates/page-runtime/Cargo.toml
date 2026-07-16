@@ -4,5 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+chrono.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 types = { path = "../types" }
+worker-pool = { path = "../worker-pool" }
+workflow-journal = { path = "../workflow-journal" }
+
+[dev-dependencies]
+async-trait.workspace = true
