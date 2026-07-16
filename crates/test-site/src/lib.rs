@@ -17,9 +17,10 @@ const INDEX: &str = r#"<!doctype html>
       <input id="name" autocomplete="off">
       <button id="continue" type="button">Continue</button>
       <input id="resume" type="file">
-      <a id="download" href="/download">Download fixture</a>
-      <a id="root-popup" href="/popup" target="_blank">Open details</a>
     </main>
+    <a id="root-popup" href="/popup" target="_blank">Open details</a>
+    <iframe name="download-frame" hidden></iframe>
+    <a id="download" href="/download" target="download-frame">Download fixture</a>
     <script>
       document.querySelector('#continue').addEventListener('click', () => {
         setTimeout(() => {
