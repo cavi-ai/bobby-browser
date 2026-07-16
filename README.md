@@ -31,3 +31,14 @@ Then open:
 2. Add MCP stdio and Streamable HTTP.
 3. Add CDP discovery and WebSocket routing.
 4. Introduce V8-backed `js-engine`.
+
+## Quality gates
+
+The health smoke script is preliminary and does not prove browser behavior. The
+vertical slice requires both the complete workspace suite and the live Chromium
+workflow proof:
+
+```bash
+cargo test --workspace
+cargo test -p runtime-tests --test browser_vertical_slice -- --ignored --nocapture
+```

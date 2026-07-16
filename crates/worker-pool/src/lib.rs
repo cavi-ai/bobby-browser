@@ -1,3 +1,176 @@
-pub fn init() {
-    // TODO: implement
+mod chromium;
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
+use types::{
+    ClickCommand, CommandError, Evidence, InspectCommand, NavigateCommand, PageId, SessionId,
+    TypeTextCommand, WorkerId,
+};
+
+pub use chromium::ChromiumWorkerFactory;
+
+#[async_trait]
+pub trait BrowserWorker: Send + Sync {
+    fn worker_id(&self) -> WorkerId;
+    fn profile_dir(&self) -> &Path;
+    async fn open_page(&self, page_id: PageId) -> Result<(), CommandError>;
+    async fn navigate(
+        &self,
+        page_id: &PageId,
+        command: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError>;
+    async fn inspect(
+        &self,
+        page_id: &PageId,
+        command: &InspectCommand,
+    ) -> Result<Vec<Evidence>, CommandError>;
+    async fn click(
+        &self,
+        page_id: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError>;
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError>;
+    async fn close(&self) -> Result<(), CommandError>;
+}
+
+#[async_trait]
+pub trait WorkerFactory: Send + Sync {
+    async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError>;
+}
+
+#[derive(Clone)]
+pub struct WorkerPool {
+    inner: Arc<PoolInner>,
+}
+
+struct PoolInner {
+    factory: Arc<dyn WorkerFactory>,
+    permits: Arc<Semaphore>,
+    entries: Mutex<HashMap<SessionId, Arc<WorkerEntry>>>,
+}
+
+struct WorkerEntry {
+    worker: OnceCell<Arc<dyn BrowserWorker>>,
+    permit: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl WorkerEntry {
+    fn new() -> Self {
+        Self {
+            worker: OnceCell::new(),
+            permit: Mutex::new(None),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct WorkerLease {
+    worker: Arc<dyn BrowserWorker>,
+}
+
+impl WorkerLease {
+    pub fn worker_id(&self) -> WorkerId {
+        self.worker.worker_id()
+    }
+
+    pub fn profile_dir(&self) -> &Path {
+        self.worker.profile_dir()
+    }
+
+    pub fn worker(&self) -> &Arc<dyn BrowserWorker> {
+        &self.worker
+    }
+}
+
+impl WorkerPool {
+    pub fn new(max_active: usize, factory: Arc<dyn WorkerFactory>) -> Self {
+        assert!(max_active > 0, "worker pool capacity must be positive");
+        Self {
+            inner: Arc::new(PoolInner {
+                factory,
+                permits: Arc::new(Semaphore::new(max_active)),
+                entries: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    pub async fn lease(&self, session_id: SessionId) -> Result<WorkerLease, CommandError> {
+        let entry = {
+            let mut entries = self.inner.entries.lock().await;
+            entries
+                .entry(session_id.clone())
+                .or_insert_with(|| Arc::new(WorkerEntry::new()))
+                .clone()
+        };
+
+        let factory = self.inner.factory.clone();
+        let permits = self.inner.permits.clone();
+        let entry_for_init = entry.clone();
+        let session_for_init = session_id.clone();
+        let result = entry
+            .worker
+            .get_or_try_init(|| async move {
+                let permit = permits.acquire_owned().await.map_err(|_| {
+                    resource_error("worker pool is shutting down; no new leases are available")
+                })?;
+                let worker = factory.launch(&session_for_init).await?;
+                *entry_for_init.permit.lock().await = Some(permit);
+                Ok(worker)
+            })
+            .await;
+
+        match result {
+            Ok(worker) => Ok(WorkerLease {
+                worker: worker.clone(),
+            }),
+            Err(error) => {
+                let mut entries = self.inner.entries.lock().await;
+                if entries
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                {
+                    entries.remove(&session_id);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn release_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
+        let entry = self.inner.entries.lock().await.remove(session_id);
+        if let Some(entry) = entry {
+            if let Some(worker) = entry.worker.get() {
+                worker.close().await?;
+            }
+            entry.permit.lock().await.take();
+        }
+        Ok(())
+    }
+
+    pub async fn active_workers(&self) -> usize {
+        self.inner
+            .entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| entry.worker.initialized())
+            .count()
+    }
+}
+
+fn resource_error(message: impl Into<String>) -> CommandError {
+    CommandError {
+        code: types::ErrorCode::ResourceExhausted,
+        message: message.into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: true,
+    }
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Preliminary health signal only. See README.md for the live Chromium release gate.
+
 cargo run -p cli -- serve &
 PID=$!
 trap 'kill $PID' EXIT
