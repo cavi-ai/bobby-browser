@@ -144,12 +144,8 @@ impl BrowserWorker for ChromiumWorker {
             .unwrap_or_default();
         let (text, html) = if let Some(selector) = &command.selector {
             let element = page.find_element(selector).await.map_err(command_failed)?;
-            let text = match element
-                .string_property("value")
-                .await
-                .map_err(command_failed)?
-            {
-                Some(value) if !value.is_empty() => value,
+            let text = match element.string_property("value").await {
+                Ok(Some(value)) if !value.is_empty() => value,
                 _ => element
                     .inner_text()
                     .await
