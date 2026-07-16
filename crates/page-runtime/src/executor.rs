@@ -149,6 +149,22 @@ impl PageRuntime {
                 return Err(validation_error("navigation URL scheme is not supported"));
             }
         }
+        if envelope.command.class() == CommandClass::Boundary {
+            if let Some(checkpoints) = &self.checkpoints {
+                let checkpoint = checkpoints.load(&envelope.workflow_id).await.map_err(|_| {
+                    validation_error("a verified pre-action checkpoint is required")
+                })?;
+                if checkpoint.attempt_id != envelope.attempt_id
+                    || checkpoint.session_id != envelope.session_id
+                    || checkpoint.page_id != *page_id
+                    || checkpoint.recovery_class != CommandClass::Boundary
+                {
+                    return Err(validation_error(
+                        "boundary checkpoint does not match the command context",
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
