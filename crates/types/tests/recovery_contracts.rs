@@ -15,6 +15,7 @@ fn checkpoint() -> WorkflowCheckpoint {
         restart_url: "https://example.test/start".into(),
         current_url: "https://example.test/step-two".into(),
         cursor: Some(CommandId::new()),
+        boundary_command_id: None,
         recovery_class: CommandClass::Reconciliable,
         invariants: vec![
             CheckpointInvariant::Url {

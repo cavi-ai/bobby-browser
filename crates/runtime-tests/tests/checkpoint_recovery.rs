@@ -29,6 +29,7 @@ fn checkpoint(
         restart_url,
         current_url: current_url.clone(),
         cursor: None,
+        boundary_command_id: None,
         recovery_class: CommandClass::Reconciliable,
         invariants: vec![
             CheckpointInvariant::Url { value: current_url },

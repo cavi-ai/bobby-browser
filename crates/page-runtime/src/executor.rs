@@ -158,6 +158,7 @@ impl PageRuntime {
                     || checkpoint.session_id != envelope.session_id
                     || checkpoint.page_id != *page_id
                     || checkpoint.recovery_class != CommandClass::Boundary
+                    || checkpoint.boundary_command_id.as_ref() != Some(&envelope.command_id)
                 {
                     return Err(validation_error(
                         "boundary checkpoint does not match the command context",

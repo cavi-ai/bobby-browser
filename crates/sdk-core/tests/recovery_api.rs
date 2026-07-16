@@ -26,6 +26,7 @@ async fn runtime_service_exposes_durable_checkpoint_and_recovery_boundary() {
         restart_url: "https://example.test".into(),
         current_url: "https://example.test".into(),
         cursor: None,
+        boundary_command_id: None,
         recovery_class: CommandClass::Replayable,
         invariants: Vec::new(),
         replayable_inputs: Vec::new(),
