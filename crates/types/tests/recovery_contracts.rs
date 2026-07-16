@@ -33,6 +33,7 @@ fn checkpoint() -> WorkflowCheckpoint {
             url: "https://example.test/step-two".into(),
             title: "Step Two".into(),
         }],
+        recovery_history: Vec::new(),
         created_at: Utc::now(),
     }
 }

@@ -19,6 +19,7 @@ fn checkpoint(workflow_id: WorkflowId, current_url: &str) -> WorkflowCheckpoint 
         invariants: Vec::new(),
         replayable_inputs: Vec::new(),
         evidence: Vec::new(),
+        recovery_history: Vec::new(),
         created_at: Utc::now(),
     }
 }

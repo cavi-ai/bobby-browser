@@ -1,6 +1,13 @@
 use checkpoint_store::{CheckpointStore, CheckpointStoreError};
+use chrono::Utc;
+use std::sync::Arc;
 use thiserror::Error;
-use types::{CheckpointInvariant, Evidence, WorkflowCheckpoint};
+use types::{
+    AttemptId, CheckpointInvariant, CommandClass, CommandError, Evidence, InspectCommand,
+    NavigateCommand, RecoveryDecision, RecoveryRecord, RestartLineage, WaitUntil,
+    WorkflowCheckpoint, WorkflowId,
+};
+use worker_pool::WorkerPool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvariantEvaluation {
@@ -65,16 +72,31 @@ pub enum RecoveryError {
     InvariantMismatch(String),
     #[error(transparent)]
     Store(#[from] CheckpointStoreError),
+    #[error("browser workers are not configured for recovery")]
+    WorkersUnavailable,
+    #[error("browser recovery failed: {0}")]
+    Browser(String),
 }
 
 #[derive(Clone)]
 pub struct RecoveryCoordinator {
     store: CheckpointStore,
+    workers: Option<Arc<WorkerPool>>,
 }
 
 impl RecoveryCoordinator {
     pub fn new(store: CheckpointStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            workers: None,
+        }
+    }
+
+    pub fn with_workers(store: CheckpointStore, workers: Arc<WorkerPool>) -> Self {
+        Self {
+            store,
+            workers: Some(workers),
+        }
     }
 
     pub async fn save_verified(
@@ -92,4 +114,115 @@ impl RecoveryCoordinator {
         self.store.save(&checkpoint).await?;
         Ok(checkpoint)
     }
+
+    pub async fn recover(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        let mut checkpoint = self.store.load(workflow_id).await?;
+        let workers = self
+            .workers
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        workers
+            .invalidate_session(&checkpoint.session_id)
+            .await
+            .map_err(browser_error)?;
+        let lease = workers
+            .lease(checkpoint.session_id.clone())
+            .await
+            .map_err(browser_error)?;
+        lease
+            .worker()
+            .open_page(checkpoint.page_id.clone())
+            .await
+            .map_err(browser_error)?;
+
+        let mut evidence = lease
+            .worker()
+            .navigate(
+                &checkpoint.page_id,
+                &NavigateCommand {
+                    url: checkpoint.current_url.clone(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 30_000,
+                },
+            )
+            .await
+            .map_err(browser_error)?;
+        evidence.extend(
+            lease
+                .worker()
+                .inspect(&checkpoint.page_id, &InspectCommand::default())
+                .await
+                .map_err(browser_error)?,
+        );
+        for selector in checkpoint.invariants.iter().filter_map(|item| match item {
+            CheckpointInvariant::Text { selector, .. } => Some(selector),
+            _ => None,
+        }) {
+            evidence.extend(
+                lease
+                    .worker()
+                    .inspect(
+                        &checkpoint.page_id,
+                        &InspectCommand {
+                            selector: Some(selector.clone()),
+                            include_html: false,
+                        },
+                    )
+                    .await
+                    .map_err(browser_error)?,
+            );
+        }
+
+        let evaluation = evaluate_invariants(&checkpoint.invariants, &evidence);
+        let decision = if evaluation.is_match() {
+            RecoveryDecision::Resumed {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                attempt_id: checkpoint.attempt_id.clone(),
+                evidence,
+            }
+        } else if checkpoint.recovery_class == CommandClass::Boundary {
+            RecoveryDecision::NeedsReconciliation {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                attempt_id: checkpoint.attempt_id.clone(),
+                reason: evaluation.failures.join("; "),
+                evidence,
+            }
+        } else {
+            let reason = evaluation.failures.join("; ");
+            lease
+                .worker()
+                .navigate(
+                    &checkpoint.page_id,
+                    &NavigateCommand {
+                        url: checkpoint.restart_url.clone(),
+                        wait_until: WaitUntil::Interactive,
+                        timeout_ms: 30_000,
+                    },
+                )
+                .await
+                .map_err(browser_error)?;
+            RecoveryDecision::Restarted {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                lineage: RestartLineage {
+                    workflow_id: checkpoint.workflow_id.clone(),
+                    abandoned_attempt_id: checkpoint.attempt_id.clone(),
+                    attempt_id: AttemptId::new(),
+                    reason,
+                },
+            }
+        };
+        checkpoint.recovery_history.push(RecoveryRecord {
+            recorded_at: Utc::now(),
+            decision: decision.clone(),
+        });
+        self.store.save(&checkpoint).await?;
+        Ok(decision)
+    }
+}
+
+fn browser_error(error: CommandError) -> RecoveryError {
+    RecoveryError::Browser(error.message)
 }
