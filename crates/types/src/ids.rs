@@ -30,3 +30,4 @@ uuid_id!(EvidenceId);
 uuid_id!(WorkerId);
 uuid_id!(JobId);
 uuid_id!(ArtifactId);
+uuid_id!(CheckpointId);

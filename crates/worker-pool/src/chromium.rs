@@ -246,6 +246,19 @@ impl BrowserWorker for ChromiumWorker {
         }
         Ok(())
     }
+
+    async fn terminate(&self) -> Result<(), CommandError> {
+        self.pages.lock().await.clear();
+        let close_result = if let Some(mut browser) = self.browser.lock().await.take() {
+            browser.close().await.map(|_| ()).map_err(command_failed)
+        } else {
+            Ok(())
+        };
+        if let Some(task) = self.handler_task.lock().await.take() {
+            task.abort();
+        }
+        close_result
+    }
 }
 
 fn command_failed(error: chromiumoxide::error::CdpError) -> CommandError {
