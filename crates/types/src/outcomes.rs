@@ -215,6 +215,7 @@ pub enum CommandPhase {
     Accepted,
     Prepared,
     Executing,
+    ResultPrepared,
     Verifying,
     Recovering,
     Completed,

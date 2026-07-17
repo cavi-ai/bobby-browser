@@ -1,4 +1,4 @@
-use artifact_store::ArtifactStore;
+use artifact_store::{ArtifactStore, PendingArtifact};
 use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
@@ -12,6 +12,14 @@ use worker_pool::WorkerLease;
 pub struct AdaptiveExecution {
     pub evidence: Vec<Evidence>,
     pub used_browser: bool,
+    pub prepared_download: Option<PreparedDownload>,
+}
+
+#[derive(Debug)]
+pub struct PreparedDownload {
+    pub state_version: u64,
+    pub state: network_engine::ResponseStateDelta,
+    pub artifact: PendingArtifact,
 }
 
 #[derive(Clone, Default)]
@@ -133,6 +141,7 @@ impl AdaptivePageEngine {
                                 ),
                             ],
                             used_browser: false,
+                            prepared_download: None,
                         })
                     }
                     HttpCandidate::Download {
@@ -155,11 +164,7 @@ impl AdaptivePageEngine {
                             )
                             .await
                             .map_err(artifact_error)?;
-                        lease
-                            .worker()
-                            .commit_http_state(page_id, version, state)
-                            .await?;
-                        let record = pending.commit();
+                        let record = pending.record().clone();
                         Ok(AdaptiveExecution {
                             evidence: vec![
                                 Evidence::Download {
@@ -178,6 +183,11 @@ impl AdaptivePageEngine {
                                 ),
                             ],
                             used_browser: false,
+                            prepared_download: Some(PreparedDownload {
+                                state_version: version,
+                                state,
+                                artifact: pending,
+                            }),
                         })
                     }
                 }
@@ -289,5 +299,6 @@ async fn browser_execute(
     Ok(AdaptiveExecution {
         evidence,
         used_browser: true,
+        prepared_download: None,
     })
 }

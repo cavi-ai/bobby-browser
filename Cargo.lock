@@ -1301,6 +1301,7 @@ dependencies = [
  "checkpoint-store",
  "chrono",
  "network-engine",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

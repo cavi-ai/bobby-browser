@@ -7,3 +7,4 @@ pub mod state;
 pub use eligibility::{EligibilityDecision, EligibilityPolicy};
 pub use executor::{DirectHttpExecutor, HttpCandidate, HttpMeta};
 pub use policy::{DestinationPolicy, NetworkPolicy, ValidatedDestination};
+pub use state::ResponseStateDelta;

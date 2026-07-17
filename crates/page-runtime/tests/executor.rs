@@ -12,7 +12,7 @@ use types::{
     TargetSpec, TypeTextCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
-use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan};
+use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan, PreparedResult};
 
 #[derive(Clone, Copy)]
 enum DriverMode {
@@ -27,6 +27,23 @@ enum DriverMode {
 struct RecordingJournal {
     events: Arc<Mutex<Vec<String>>>,
     fail_on: Option<CommandPhase>,
+}
+
+struct RecoveryJournal {
+    records: Vec<JournalRecord>,
+}
+
+#[async_trait]
+impl CommandJournal for RecoveryJournal {
+    async fn append(&self, _: JournalRecord) -> Result<(), JournalError> {
+        Ok(())
+    }
+    async fn history(&self, _: CommandId) -> Result<JournalScan, JournalError> {
+        Ok(JournalScan {
+            records: self.records.clone(),
+            torn_tail: false,
+        })
+    }
 }
 
 #[async_trait]
@@ -181,10 +198,23 @@ async fn adaptive_runtime(
     Arc<Mutex<Vec<String>>>,
     tempfile::TempDir,
 ) {
+    adaptive_runtime_with_failure(mode, None).await
+}
+
+async fn adaptive_runtime_with_failure(
+    mode: DriverMode,
+    fail_on: Option<CommandPhase>,
+) -> (
+    page_runtime::PageRuntime,
+    SessionId,
+    PageId,
+    Arc<Mutex<Vec<String>>>,
+    tempfile::TempDir,
+) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
-        fail_on: None,
+        fail_on,
     });
     let workers = Arc::new(WorkerPool::new(
         1,
@@ -655,6 +685,19 @@ async fn download_url_persists_then_returns_download_and_execution_evidence() {
     assert!(evidence.iter().any(|item| matches!(item, Evidence::ExecutionPath { path: ExecutionPath::DirectHttp, sha256: Some(execution_sha), .. } if execution_sha == sha)));
     let events = events.lock().await;
     assert!(!events.iter().any(|event| event.starts_with("browser:")));
+    let prepared = events
+        .iter()
+        .position(|event| event == "journal:resultprepared")
+        .unwrap();
+    let committed = events
+        .iter()
+        .position(|event| event == "http:commit")
+        .unwrap();
+    let completed = events
+        .iter()
+        .position(|event| event == "journal:completed")
+        .unwrap();
+    assert!(prepared < committed && committed < completed);
     assert_one_lifecycle(&events);
 }
 
@@ -675,7 +718,7 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
         ))
         .await;
     assert!(
-        matches!(outcome, CommandOutcome::Failed { error, .. } if error.code == ErrorCode::HttpEquivalenceUnproven)
+        matches!(outcome, CommandOutcome::NeedsReconciliation { error, .. } if error.code == ErrorCode::HttpEquivalenceUnproven)
     );
     let events = events.lock().await;
     assert!(!events.iter().any(|event| event.starts_with("browser:")));
@@ -698,7 +741,10 @@ async fn download_state_commit_failure_removes_pending_artifact_and_leaks_no_evi
             }),
         ))
         .await;
-    assert!(matches!(outcome, CommandOutcome::Failed { .. }));
+    assert!(matches!(
+        outcome,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
     let session_dir = root.path().join(session.0.to_string());
     assert!(!session_dir.exists() || std::fs::read_dir(session_dir).unwrap().next().is_none());
     assert!(!format!("{outcome:?}").contains("Download"));
@@ -739,6 +785,100 @@ async fn download_state_commit_cancellation_removes_pending_artifact() {
     let _ = handle.await;
     let session_dir = root.path().join(session.0.to_string());
     assert!(!session_dir.exists() || std::fs::read_dir(session_dir).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn prepared_result_journal_failure_prevents_state_commit_and_cleans_artifact() {
+    let url = http_fixture("prepared-failure", "application/octet-stream").await;
+    let (runtime, session, page, events, root) =
+        adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::ResultPrepared))
+            .await;
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert!(!events.lock().await.contains(&"http:commit".to_string()));
+    let dir = root.path().join(session.0.to_string());
+    assert!(!dir.exists() || std::fs::read_dir(dir).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn completed_journal_failure_keeps_prepared_state_reconcilable_and_cleans_artifact() {
+    let url = http_fixture("completion-failure", "application/octet-stream").await;
+    let (runtime, session, page, events, root) =
+        adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::Completed)).await;
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert!(events.lock().await.contains(&"http:commit".to_string()));
+    let dir = root.path().join(session.0.to_string());
+    assert!(!dir.exists() || std::fs::read_dir(dir).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn recovery_never_replays_a_durable_prepared_download() {
+    let command_id = CommandId::new();
+    let attempt_id = AttemptId::new();
+    let evidence = vec![Evidence::Download {
+        filename: "x.bin".into(),
+        path: "abc".into(),
+        bytes: 1,
+        sha256: "abc".into(),
+    }];
+    let journal = Arc::new(RecoveryJournal {
+        records: vec![JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: CommandPhase::ResultPrepared,
+            envelope: None,
+            outcome: None,
+            prepared_result: Some(PreparedResult {
+                command_id: command_id.clone(),
+                attempt_id,
+                state_version: 1,
+                state_delta: serde_json::json!({}),
+                evidence: evidence.clone(),
+                artifact_id: Some("abc".into()),
+                artifact_sha256: Some("abc".into()),
+            }),
+        }],
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: Arc::new(Mutex::new(Vec::new())),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let outcome = runtime.recover_command(command_id).await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence: actual, .. } if actual == evidence)
+    );
 }
 
 #[tokio::test]

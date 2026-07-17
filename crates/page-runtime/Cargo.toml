@@ -8,6 +8,7 @@ artifact-store = { path = "../artifact-store" }
 checkpoint-store = { path = "../checkpoint-store" }
 chrono.workspace = true
 network-engine = { path = "../network-engine" }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 types = { path = "../types" }

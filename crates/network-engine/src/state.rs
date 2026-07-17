@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HttpCookie {
     pub name: String,
     pub value: String,
@@ -17,7 +18,7 @@ pub struct HttpCookie {
     pub partition_key: Option<HttpCookiePartitionKey>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HttpCookiePartitionKey {
     pub top_level_site: String,
     pub has_cross_site_ancestor: bool,
@@ -32,7 +33,7 @@ pub struct HttpStateSnapshot {
     pub language: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResponseStateDelta {
     pub cookies: Vec<HttpCookie>,
     pub cache_validators: BTreeMap<String, String>,
