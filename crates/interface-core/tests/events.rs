@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use interface_core::{Event, EventGapReason, EventStore, MAX_EVENT_PAYLOAD_BYTES};
+use interface_core::{
+    Event, EventGapReason, EventStore, MAX_EVENT_PAYLOAD_BYTES, MAX_EVENT_PAYLOAD_NODES,
+};
 use serde_json::json;
 use tokio::time::timeout;
 use types::EventCursor;
@@ -14,6 +16,14 @@ fn event(sequence: u64) -> Event {
             "nested": { "cookie": "session=secret" }
         }),
     )
+}
+
+fn retained_node_count(value: &serde_json::Value) -> usize {
+    1 + match value {
+        serde_json::Value::Array(values) => values.iter().map(retained_node_count).sum(),
+        serde_json::Value::Object(values) => values.values().map(retained_node_count).sum(),
+        _ => 0,
+    }
 }
 
 #[tokio::test]
@@ -168,6 +178,7 @@ async fn branching_payload_has_one_exact_aggregate_byte_budget_after_sanitizing(
         .await;
 
     let batch = events.read_after(EventCursor::ZERO, 1).await.unwrap();
+    assert!(retained_node_count(&batch.events[0].payload) <= MAX_EVENT_PAYLOAD_NODES);
     let serialized = serde_json::to_vec(&batch.events[0].payload).unwrap();
     assert!(serialized.len() <= MAX_EVENT_PAYLOAD_BYTES);
     let retained = String::from_utf8(serialized).unwrap();

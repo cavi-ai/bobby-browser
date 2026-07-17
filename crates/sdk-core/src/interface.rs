@@ -23,6 +23,7 @@ pub struct AuthenticatedRuntime {
     authorization: AuthorizationGuard,
     idempotency: IdempotencyStore,
     submit_dispatches: Arc<AtomicUsize>,
+    create_session_dispatches: Arc<AtomicUsize>,
     session_ownership: Option<SessionOwnershipRecorder>,
 }
 
@@ -41,6 +42,7 @@ impl AuthenticatedRuntime {
             authorization: AuthorizationGuard::new(authority),
             idempotency,
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
+            create_session_dispatches: Arc::new(AtomicUsize::new(0)),
             session_ownership: None,
         }
     }
@@ -55,12 +57,17 @@ impl AuthenticatedRuntime {
             authorization: AuthorizationGuard::new(authority),
             idempotency: IdempotencyStore::default(),
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
+            create_session_dispatches: Arc::new(AtomicUsize::new(0)),
             session_ownership: Some(session_ownership),
         }
     }
 
     pub fn submit_dispatch_count(&self) -> usize {
         self.submit_dispatches.load(Ordering::Acquire)
+    }
+
+    pub fn create_session_dispatch_count(&self) -> usize {
+        self.create_session_dispatches.load(Ordering::Acquire)
     }
 }
 
@@ -85,21 +92,36 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<SessionState> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateSession)?;
-        let session = self
-            .inner
-            .create_session(req)
-            .await
-            .map_err(|error| map_runtime_error(&ctx, error))?;
-        if let Some(ownership) = &self.session_ownership {
-            ownership
-                .record_authenticated_session(ctx.principal_id.clone(), session.id.clone())
-                .map_err(|_| {
-                    error_with(
-                        &ctx,
-                        InterfaceErrorCode::ResourceExhausted,
-                        "session ownership capacity exhausted",
-                    )
-                })?;
+        let ownership_reservation = self
+            .session_ownership
+            .as_ref()
+            .map(|ownership| ownership.reserve(ctx.principal_id.clone()))
+            .transpose()
+            .map_err(|_| {
+                error_with(
+                    &ctx,
+                    InterfaceErrorCode::ResourceExhausted,
+                    "session ownership capacity exhausted",
+                )
+            })?;
+        self.create_session_dispatches
+            .fetch_add(1, Ordering::AcqRel);
+        let session = match self.inner.create_session(req).await {
+            Ok(session) => session,
+            Err(error) => {
+                drop(ownership_reservation);
+                return Err(map_runtime_error(&ctx, error));
+            }
+        };
+        if let Some(reservation) = ownership_reservation {
+            if reservation.finalize(session.id.clone()).is_err() {
+                let _ = self.inner.sessions.delete(&session.id).await;
+                return Err(error_with(
+                    &ctx,
+                    InterfaceErrorCode::ResourceExhausted,
+                    "session ownership finalization failed",
+                ));
+            }
         }
         Ok(session)
     }

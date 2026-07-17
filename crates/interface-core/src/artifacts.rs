@@ -55,6 +55,22 @@ impl std::fmt::Display for ArtifactReaderInitError {
 
 impl std::error::Error for ArtifactReaderInitError {}
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactPersistenceTestAction {
+    Continue,
+    SimulateCrash,
+}
+
+#[doc(hidden)]
+pub trait ArtifactBoundaryTestObserver: Send + Sync {
+    fn ownership_record_scanned(&self) {}
+
+    fn after_ownership_temporary_created(&self) -> ArtifactPersistenceTestAction {
+        ArtifactPersistenceTestAction::Continue
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct OwnershipUsage {
     records: usize,
@@ -68,6 +84,7 @@ pub struct ArtifactReader {
     max_read_bytes: u64,
     ownership_limits: ArtifactOwnershipLimits,
     ownership_usage: Arc<Mutex<OwnershipUsage>>,
+    test_observer: Option<Arc<dyn ArtifactBoundaryTestObserver>>,
 }
 
 impl ArtifactReader {
@@ -77,23 +94,57 @@ impl ArtifactReader {
         max_read_bytes: usize,
         ownership_limits: ArtifactOwnershipLimits,
     ) -> Result<Self, ArtifactReaderInitError> {
+        Self::new_inner(
+            store,
+            session_ownership,
+            max_read_bytes,
+            ownership_limits,
+            None,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_test_observer(
+        store: ArtifactStore,
+        session_ownership: Arc<dyn SessionOwnershipAuthority>,
+        max_read_bytes: usize,
+        ownership_limits: ArtifactOwnershipLimits,
+        test_observer: Arc<dyn ArtifactBoundaryTestObserver>,
+    ) -> Result<Self, ArtifactReaderInitError> {
+        Self::new_inner(
+            store,
+            session_ownership,
+            max_read_bytes,
+            ownership_limits,
+            Some(test_observer),
+        )
+    }
+
+    fn new_inner(
+        store: ArtifactStore,
+        session_ownership: Arc<dyn SessionOwnershipAuthority>,
+        max_read_bytes: usize,
+        ownership_limits: ArtifactOwnershipLimits,
+        test_observer: Option<Arc<dyn ArtifactBoundaryTestObserver>>,
+    ) -> Result<Self, ArtifactReaderInitError> {
         assert!(max_read_bytes > 0, "artifact read bound must be positive");
         assert!(
             ownership_limits.max_records > 0 && ownership_limits.max_bytes > 0,
             "artifact ownership limits must be positive"
         );
-        let usage =
-            scan_ownership_usage(store.configured_root()).map_err(|_| ArtifactReaderInitError)?;
-        if usage.records > ownership_limits.max_records || usage.bytes > ownership_limits.max_bytes
-        {
-            return Err(ArtifactReaderInitError);
-        }
+        let usage = scan_ownership_usage(
+            store.configured_root(),
+            ownership_limits,
+            test_observer.as_deref(),
+        )
+        .map_err(|_| ArtifactReaderInitError)?;
         Ok(Self {
             store,
             session_ownership,
             max_read_bytes: max_read_bytes as u64,
             ownership_limits,
             ownership_usage: Arc::new(Mutex::new(usage)),
+            test_observer,
         })
     }
 
@@ -119,6 +170,7 @@ impl ArtifactReader {
         let max_read_bytes = self.max_read_bytes;
         let ownership_limits = self.ownership_limits;
         let ownership_usage = self.ownership_usage.clone();
+        let test_observer = self.test_observer.clone();
         let result = tokio::task::spawn_blocking(move || {
             let verified = read_committed_artifact(
                 &root,
@@ -146,7 +198,12 @@ impl ArtifactReader {
                 reference: reference.clone(),
                 committed_path: verified.committed_path,
             };
-            let usage = persist_ownership(&root, &ownership, ownership_limits)?;
+            let usage = persist_ownership(
+                &root,
+                &ownership,
+                ownership_limits,
+                test_observer.as_deref(),
+            )?;
             *ownership_usage.lock().map_err(|_| BoundaryError::Denied)? = usage;
             Ok::<_, BoundaryError>(reference)
         })
@@ -474,6 +531,8 @@ fn read_ownership_from_directory(
 #[cfg(unix)]
 fn scan_ownership_usage_locked(
     ownership_fd: &std::os::fd::OwnedFd,
+    limits: ArtifactOwnershipLimits,
+    test_observer: Option<&dyn ArtifactBoundaryTestObserver>,
 ) -> Result<OwnershipUsage, BoundaryError> {
     use rustix::fs::{unlinkat, AtFlags, Dir};
 
@@ -498,20 +557,30 @@ fn scan_ownership_usage_locked(
         let reference_id = Uuid::parse_str(reference).map_err(|_| BoundaryError::Denied)?;
         let (_, bytes) = read_ownership_from_directory(ownership_fd, reference_id)?
             .ok_or(BoundaryError::Denied)?;
+        if let Some(observer) = test_observer {
+            observer.ownership_record_scanned();
+        }
         usage.records = usage.records.checked_add(1).ok_or(BoundaryError::Denied)?;
         usage.bytes = usage
             .bytes
             .checked_add(bytes)
             .ok_or(BoundaryError::Denied)?;
+        if usage.records > limits.max_records || usage.bytes > limits.max_bytes {
+            return Err(BoundaryError::Denied);
+        }
     }
     Ok(usage)
 }
 
 #[cfg(unix)]
-fn scan_ownership_usage(root: &std::path::Path) -> Result<OwnershipUsage, BoundaryError> {
+fn scan_ownership_usage(
+    root: &std::path::Path,
+    limits: ArtifactOwnershipLimits,
+    test_observer: Option<&dyn ArtifactBoundaryTestObserver>,
+) -> Result<OwnershipUsage, BoundaryError> {
     std::fs::create_dir_all(root).map_err(|_| BoundaryError::Denied)?;
     let (_root_fd, ownership_fd, _lock_file) = open_locked_ownership_directory(root)?;
-    scan_ownership_usage_locked(&ownership_fd)
+    scan_ownership_usage_locked(&ownership_fd, limits, test_observer)
 }
 
 #[cfg(unix)]
@@ -519,6 +588,7 @@ fn persist_ownership(
     root: &std::path::Path,
     ownership: &OwnershipMetadata,
     limits: ArtifactOwnershipLimits,
+    test_observer: Option<&dyn ArtifactBoundaryTestObserver>,
 ) -> Result<OwnershipUsage, BoundaryError> {
     use std::io::Write;
 
@@ -529,7 +599,7 @@ fn persist_ownership(
         return Err(BoundaryError::Denied);
     }
     let (_root_fd, ownership_fd, _lock_file) = open_locked_ownership_directory(root)?;
-    let usage = scan_ownership_usage_locked(&ownership_fd)?;
+    let usage = scan_ownership_usage_locked(&ownership_fd, limits, test_observer)?;
     let final_name = format!("{}.json", ownership.reference.reference_id);
     if let Some((existing, _)) =
         read_ownership_from_directory(&ownership_fd, ownership.reference.reference_id)?
@@ -561,6 +631,12 @@ fn persist_ownership(
         Mode::from_bits_truncate(0o600),
     )
     .map_err(|_| BoundaryError::Denied)?;
+    if test_observer.is_some_and(|observer| {
+        observer.after_ownership_temporary_created() == ArtifactPersistenceTestAction::SimulateCrash
+    }) {
+        drop(temporary_fd);
+        return Err(BoundaryError::Denied);
+    }
     let write_result = (|| {
         let mut file = std::fs::File::from(temporary_fd);
         file.write_all(&bytes).map_err(|_| BoundaryError::Denied)?;
@@ -610,12 +686,17 @@ fn persist_ownership(
     _root: &std::path::Path,
     _ownership: &OwnershipMetadata,
     _limits: ArtifactOwnershipLimits,
+    _test_observer: Option<&dyn ArtifactBoundaryTestObserver>,
 ) -> Result<OwnershipUsage, BoundaryError> {
     Err(BoundaryError::Unsupported)
 }
 
 #[cfg(not(unix))]
-fn scan_ownership_usage(_root: &std::path::Path) -> Result<OwnershipUsage, BoundaryError> {
+fn scan_ownership_usage(
+    _root: &std::path::Path,
+    _limits: ArtifactOwnershipLimits,
+    _test_observer: Option<&dyn ArtifactBoundaryTestObserver>,
+) -> Result<OwnershipUsage, BoundaryError> {
     Ok(OwnershipUsage::default())
 }
 

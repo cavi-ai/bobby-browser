@@ -2,14 +2,17 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier, RwLock,
+    },
 };
 
 use artifact_store::{ArtifactRecord, ArtifactStore};
 use chrono::{Duration, Utc};
 use interface_core::{
-    ArtifactOwnershipLimits, ArtifactReader, ArtifactReference, Authority, AuthorityStore,
-    SessionOwnershipAuthority,
+    ArtifactBoundaryTestObserver, ArtifactOwnershipLimits, ArtifactPersistenceTestAction,
+    ArtifactReader, ArtifactReference, Authority, AuthorityStore, SessionOwnershipAuthority,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -59,6 +62,44 @@ fn ownership_record_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
                 .is_some_and(|extension| extension == "json")
         })
         .collect()
+}
+
+fn ownership_temporary_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let directory = root.join(".interface-artifact-ownership");
+    if !directory.exists() {
+        return Vec::new();
+    }
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .collect()
+}
+
+#[derive(Default)]
+struct CountingScanObserver {
+    scanned: AtomicUsize,
+}
+
+impl ArtifactBoundaryTestObserver for CountingScanObserver {
+    fn ownership_record_scanned(&self) {
+        self.scanned.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct BlockingCrashObserver {
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+    leaving: Arc<Barrier>,
+}
+
+impl ArtifactBoundaryTestObserver for BlockingCrashObserver {
+    fn after_ownership_temporary_created(&self) -> ArtifactPersistenceTestAction {
+        self.entered.wait();
+        self.release.wait();
+        self.leaving.wait();
+        ArtifactPersistenceTestAction::SimulateCrash
+    }
 }
 
 struct Fixture {
@@ -557,6 +598,51 @@ async fn restart_scans_existing_count_and_refuses_new_record_at_global_quota() {
 }
 
 #[tokio::test]
+async fn reduced_restart_quota_stops_scanning_at_the_first_over_limit_record() {
+    let fixture = fixture_reader().await;
+    for index in 0..8 {
+        let bytes = format!("quota-record-{index}");
+        let record = fixture
+            .store
+            .put(
+                &fixture.session,
+                &PageId::new(),
+                "application/octet-stream",
+                "bin",
+                bytes.as_bytes(),
+                4096,
+            )
+            .await
+            .unwrap();
+        fixture
+            .reader
+            .register(
+                &fixture.owner_handle,
+                &fixture.owner_context,
+                &fixture.session,
+                &record,
+            )
+            .await
+            .unwrap();
+    }
+    let observer = Arc::new(CountingScanObserver::default());
+
+    let result = ArtifactReader::new_with_test_observer(
+        fixture.store.clone(),
+        fixture.ownership.clone(),
+        4096,
+        ArtifactOwnershipLimits {
+            max_records: 3,
+            max_bytes: 256 * 1024,
+        },
+        observer.clone(),
+    );
+
+    assert!(result.is_err(), "reduced configuration must fail closed");
+    assert_eq!(observer.scanned.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
 async fn restart_counts_exact_existing_bytes_against_aggregate_quota() {
     let fixture = fixture_reader().await;
     let existing_bytes = std::fs::metadata(&ownership_record_paths(fixture._root.path())[0])
@@ -599,6 +685,25 @@ async fn restart_counts_exact_existing_bytes_against_aggregate_quota() {
 }
 
 #[tokio::test]
+async fn restart_rejects_a_reduced_aggregate_byte_limit_during_initialization() {
+    let fixture = fixture_reader().await;
+    let existing_bytes = std::fs::metadata(&ownership_record_paths(fixture._root.path())[0])
+        .unwrap()
+        .len();
+
+    assert!(ArtifactReader::new(
+        fixture.store.clone(),
+        fixture.ownership.clone(),
+        4096,
+        ArtifactOwnershipLimits {
+            max_records: 32,
+            max_bytes: existing_bytes - 1,
+        },
+    )
+    .is_err());
+}
+
+#[tokio::test]
 async fn cancelled_registration_cannot_leave_an_unreachable_ownership_record() {
     let root = tempfile::tempdir().unwrap();
     let store = ArtifactStore::new(root.path(), 4096, 4096);
@@ -618,7 +723,22 @@ async fn cancelled_registration_cannot_leave_an_unreachable_ownership_record() {
     let (handle, context) = identity(&authority, PrincipalId::from_uuid(Uuid::from_u128(12))).await;
     let ownership = Arc::new(FakeSessionOwnership::default());
     ownership.grant(context.principal_id.clone(), session.clone());
-    let reader = ArtifactReader::new(store, ownership, 4096, limits()).unwrap();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let leaving = Arc::new(Barrier::new(2));
+    let observer = Arc::new(BlockingCrashObserver {
+        entered: entered.clone(),
+        release: release.clone(),
+        leaving: leaving.clone(),
+    });
+    let reader = ArtifactReader::new_with_test_observer(
+        store.clone(),
+        ownership.clone(),
+        4096,
+        limits(),
+        observer,
+    )
+    .unwrap();
     let task = tokio::spawn({
         let reader = reader.clone();
         let handle = handle.clone();
@@ -627,15 +747,26 @@ async fn cancelled_registration_cannot_leave_an_unreachable_ownership_record() {
         let record = record.clone();
         async move { reader.register(&handle, &context, &session, &record).await }
     });
-    tokio::task::yield_now().await;
+    tokio::task::spawn_blocking(move || entered.wait())
+        .await
+        .unwrap();
     task.abort();
-    let _ = task.await;
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::task::spawn_blocking(move || release.wait())
+        .await
+        .unwrap();
+    tokio::task::spawn_blocking(move || leaving.wait())
+        .await
+        .unwrap();
 
-    let recovered = reader
+    let restarted = ArtifactReader::new(store, ownership, 4096, limits()).unwrap();
+    assert!(ownership_temporary_paths(root.path()).is_empty());
+
+    let recovered = restarted
         .register(&handle, &context, &session, &record)
         .await
         .unwrap();
-    let again = reader
+    let again = restarted
         .register(&handle, &context, &session, &record)
         .await
         .unwrap();

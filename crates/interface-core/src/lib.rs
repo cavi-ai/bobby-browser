@@ -13,19 +13,20 @@ use types::{
 };
 
 pub use artifacts::{
-    ArtifactContent, ArtifactOwnershipLimits, ArtifactReader, ArtifactReaderInitError,
-    ArtifactReference,
+    ArtifactBoundaryTestObserver, ArtifactContent, ArtifactOwnershipLimits,
+    ArtifactPersistenceTestAction, ArtifactReader, ArtifactReaderInitError, ArtifactReference,
 };
 pub use auth::{Authority, AuthorityStore, CapabilityHandle, IssuedToken};
 pub use events::{
     Event, EventBatch, EventGap, EventGapReason, EventStore, MAX_EVENT_PAYLOAD_BYTES,
+    MAX_EVENT_PAYLOAD_NODES,
 };
 pub use idempotency::{
     canonical_sha256, IdempotencyPermit, IdempotencyReservation, IdempotencyStore,
 };
 pub use session_ownership::{
     SessionOwnershipAuthority, SessionOwnershipRecordError, SessionOwnershipRecorder,
-    SessionOwnershipRegistry,
+    SessionOwnershipRegistry, SessionOwnershipReservation,
 };
 
 pub type InterfaceResult<T> = Result<T, InterfaceError>;
