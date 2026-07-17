@@ -61,6 +61,7 @@ async fn inspects_static_selector_and_reports_state() {
             assert_eq!(title, "Static Fixture");
             assert_eq!(meta.redirect_chain.len(), 1);
             assert!(!state.cookies.is_empty());
+            assert_eq!(state.cookies[0].source_scheme.as_deref(), Some("NonSecure"));
         }
         _ => panic!("unexpected candidate"),
     }

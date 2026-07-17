@@ -114,12 +114,14 @@ async fn synchronizes_versioned_http_state() {
         assert_eq!(unchanged.cookies.len(), snapshot.cookies.len());
     }
 
+    let mut direct = cookie("direct", "beta");
+    direct.source_scheme = Some("NonSecure".into());
     worker
         .commit_http_state(
             &page_id,
             snapshot.version,
             ResponseStateDelta {
-                cookies: vec![cookie("direct", "beta")],
+                cookies: vec![direct],
                 cache_validators: BTreeMap::new(),
             },
         )
