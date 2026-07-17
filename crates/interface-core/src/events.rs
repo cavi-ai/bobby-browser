@@ -7,7 +7,7 @@ use types::EventCursor;
 
 const MAX_EVENT_KIND_BYTES: usize = 128;
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
-const MAX_EVENT_PAYLOAD_NODES: usize = 1024;
+pub const MAX_EVENT_PAYLOAD_NODES: usize = 1024;
 const MAX_PAYLOAD_DEPTH: usize = 8;
 const MAX_PAYLOAD_ENTRIES: usize = 64;
 const MAX_PAYLOAD_KEY_BYTES: usize = 128;
@@ -225,6 +225,7 @@ fn sanitize_value(value: &mut Value, depth: usize, remaining_nodes: &mut usize) 
                 let sensitive = is_sensitive_key(&key);
                 let key = truncate_utf8(key, MAX_PAYLOAD_KEY_BYTES);
                 if sensitive {
+                    *remaining_nodes -= 1;
                     value = Value::String("[REDACTED]".to_owned());
                 } else {
                     sanitize_value(&mut value, depth + 1, remaining_nodes);
@@ -260,4 +261,33 @@ fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
     }
     value.truncate(boundary);
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_count(value: &Value) -> usize {
+        1 + match value {
+            Value::Array(values) => values.iter().map(node_count).sum(),
+            Value::Object(values) => values.values().map(node_count).sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn redacted_values_consume_the_same_node_budget_as_other_values() {
+        let mut payload = serde_json::json!({
+            "token-a": "secret-a",
+            "token-b": "secret-b",
+            "token-c": "secret-c"
+        });
+        let mut remaining_nodes = 2;
+
+        sanitize_value(&mut payload, 0, &mut remaining_nodes);
+
+        assert!(node_count(&payload) <= 2);
+        assert_eq!(remaining_nodes, 0);
+        assert!(!payload.to_string().contains("secret"));
+    }
 }

@@ -294,9 +294,15 @@ fn trusted_session_ownership_recorder_is_bounded_and_cannot_rebind() {
     let owner = principal();
     let attacker = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000002"));
 
-    recorder
-        .record_authenticated_session(owner.clone(), session_id.clone())
-        .unwrap();
+    let reservation = recorder.reserve(owner.clone()).unwrap();
+    assert!(matches!(
+        recorder.reserve(attacker.clone()),
+        Err(SessionOwnershipRecordError::CapacityExhausted)
+    ));
+    drop(reservation);
+
+    let reservation = recorder.reserve(owner.clone()).unwrap();
+    reservation.finalize(session_id.clone()).unwrap();
 
     assert!(registry.owns_session(&owner, &session_id));
     assert_eq!(
