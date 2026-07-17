@@ -20,6 +20,8 @@ pub struct BrowserConfig {
     pub profiles_dir: PathBuf,
     pub headless: bool,
     pub max_active: usize,
+    pub upload_roots: Vec<PathBuf>,
+    pub downloads_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +42,8 @@ impl Default for AppConfig {
                 profiles_dir: PathBuf::from("./data/profiles"),
                 headless: true,
                 max_active: 8,
+                upload_roots: vec![PathBuf::from("./data/uploads")],
+                downloads_dir: PathBuf::from("./data/downloads"),
             },
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
