@@ -1,5 +1,8 @@
 use chrono::{Duration, Utc};
-use interface_core::{AuthorityStore, CapabilityHandle, RuntimeInterface};
+use interface_core::{
+    canonical_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyPermit,
+    IdempotencyReservation, IdempotencyStore, RuntimeInterface,
+};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
@@ -31,6 +34,98 @@ async fn authenticated(runtime: RuntimeService) -> (AuthenticatedRuntime, Capabi
         .expose_once();
     let handle = authority.verify(&token).await.unwrap();
     (AuthenticatedRuntime::new(runtime, handle.clone()), handle)
+}
+
+async fn authenticated_with_store(
+    runtime: RuntimeService,
+    authority: &AuthorityStore,
+    handle_expiry: chrono::DateTime<Utc>,
+    idempotency: IdempotencyStore,
+) -> (AuthenticatedRuntime, CapabilityHandle) {
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000001")),
+            [Capability::BrowserMutate],
+            handle_expiry,
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let handle = authority.verify(&token).await.unwrap();
+    (
+        AuthenticatedRuntime::with_idempotency(runtime, handle.clone(), idempotency),
+        handle,
+    )
+}
+
+fn submit_request() -> CommandEnvelope {
+    CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: expiry(),
+        command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+    }
+}
+
+async fn hold_reservation(
+    store: &IdempotencyStore,
+    context: &types::RequestContext,
+    request: &CommandEnvelope,
+) -> IdempotencyPermit {
+    match store
+        .reserve(
+            context.principal_id.clone(),
+            context.idempotency_key.clone().unwrap(),
+            types::InterfaceOperation::SubmitCommand,
+            canonical_sha256(request).unwrap(),
+            Utc::now(),
+            context.deadline,
+            context.correlation_id.clone(),
+        )
+        .await
+        .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => unreachable!(),
+    }
+}
+
+fn retryable_release() -> CommandOutcome {
+    CommandOutcome::RetryableFailure {
+        command_id: CommandId::new(),
+        error: types::CommandError {
+            code: types::ErrorCode::Internal,
+            message: "retry".into(),
+            layer: types::ErrorLayer::Page,
+            retryable: true,
+        },
+    }
+}
+
+async fn assert_reservation_released(
+    store: &IdempotencyStore,
+    context: &types::RequestContext,
+    request: &CommandEnvelope,
+) {
+    assert!(matches!(
+        store
+            .reserve(
+                context.principal_id.clone(),
+                context.idempotency_key.clone().unwrap(),
+                types::InterfaceOperation::SubmitCommand,
+                canonical_sha256(request).unwrap(),
+                Utc::now(),
+                Utc::now() + Duration::seconds(1),
+                context.correlation_id.clone(),
+            )
+            .await
+            .unwrap(),
+        IdempotencyReservation::Acquired(_)
+    ));
 }
 
 #[tokio::test]
@@ -141,4 +236,119 @@ async fn authenticated_submit_replays_retained_outcome_and_conflicts_before_disp
         .unwrap_err();
     assert_eq!(conflict.code, InterfaceErrorCode::IdempotencyConflict);
     assert_eq!(conflict.correlation_id, correlation_id);
+}
+
+#[tokio::test]
+async fn revoked_waiter_revalidates_and_abandons_without_runtime_dispatch() {
+    let authority = AuthorityStore::in_memory();
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let (api, handle) = authenticated_with_store(
+        RuntimeService::default(),
+        &authority,
+        expiry(),
+        store.clone(),
+    )
+    .await;
+    let request = submit_request();
+    let context = handle.context(
+        Utc::now() + Duration::seconds(2),
+        Some(IdempotencyKey::try_from("revoked-waiter").unwrap()),
+    );
+    let permit = hold_reservation(&store, &context, &request).await;
+    let waiter_api = api.clone();
+    let waiter_context = context.clone();
+    let waiter_request = request.clone();
+    let waiter =
+        tokio::spawn(async move { waiter_api.submit(waiter_context, waiter_request).await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        !waiter.is_finished(),
+        "request must be waiting on the reservation"
+    );
+    authority.revoke(&context.principal_id).await.unwrap();
+    store
+        .finish(permit, retryable_release(), Utc::now())
+        .await
+        .unwrap();
+
+    let error = waiter.await.unwrap().unwrap_err();
+    assert_eq!(error.code, InterfaceErrorCode::AuthenticationFailed);
+    assert_eq!(api.submit_dispatch_count(), 0);
+    assert_reservation_released(&store, &context, &request).await;
+}
+
+#[tokio::test]
+async fn expired_handle_waiter_revalidates_and_abandons_without_runtime_dispatch() {
+    let authority = AuthorityStore::in_memory();
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let handle_expiry = Utc::now() + Duration::milliseconds(80);
+    let (api, handle) = authenticated_with_store(
+        RuntimeService::default(),
+        &authority,
+        handle_expiry,
+        store.clone(),
+    )
+    .await;
+    let request = submit_request();
+    let context = handle.context(
+        Utc::now() + Duration::seconds(2),
+        Some(IdempotencyKey::try_from("expired-waiter").unwrap()),
+    );
+    let permit = hold_reservation(&store, &context, &request).await;
+    let waiter_api = api.clone();
+    let waiter_context = context.clone();
+    let waiter_request = request.clone();
+    let waiter =
+        tokio::spawn(async move { waiter_api.submit(waiter_context, waiter_request).await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        !waiter.is_finished(),
+        "request must be waiting on the reservation"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    store
+        .finish(permit, retryable_release(), Utc::now())
+        .await
+        .unwrap();
+
+    let error = waiter.await.unwrap().unwrap_err();
+    assert_eq!(error.code, InterfaceErrorCode::AuthenticationFailed);
+    assert_eq!(api.submit_dispatch_count(), 0);
+    assert_reservation_released(&store, &context, &request).await;
+}
+
+#[tokio::test]
+async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandoned() {
+    let authority = AuthorityStore::in_memory();
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let (api, handle) = authenticated_with_store(
+        RuntimeService::default(),
+        &authority,
+        expiry(),
+        store.clone(),
+    )
+    .await;
+    let request = submit_request();
+    let context = handle.context(
+        Utc::now() + Duration::milliseconds(50),
+        Some(IdempotencyKey::try_from("deadline-waiter").unwrap()),
+    );
+    let permit = hold_reservation(&store, &context, &request).await;
+    let waiter_api = api.clone();
+    let waiter_context = context.clone();
+    let waiter_request = request.clone();
+    let waiter =
+        tokio::spawn(async move { waiter_api.submit(waiter_context, waiter_request).await });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        !waiter.is_finished(),
+        "request must be waiting on the reservation"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+    let error = waiter.await.unwrap().unwrap_err();
+    assert_eq!(error.code, InterfaceErrorCode::DeadlineExceeded);
+    assert_eq!(api.submit_dispatch_count(), 0);
+    store.abandon(permit).await;
+    assert_reservation_released(&store, &context, &request).await;
 }

@@ -1,3 +1,8 @@
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use async_trait::async_trait;
 use chrono::Utc;
 use interface_core::{
@@ -17,6 +22,7 @@ pub struct AuthenticatedRuntime {
     inner: RuntimeService,
     authorization: AuthorizationGuard,
     idempotency: IdempotencyStore,
+    submit_dispatches: Arc<AtomicUsize>,
 }
 
 impl AuthenticatedRuntime {
@@ -33,7 +39,12 @@ impl AuthenticatedRuntime {
             inner,
             authorization: AuthorizationGuard::new(authority),
             idempotency,
+            submit_dispatches: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub fn submit_dispatch_count(&self) -> usize {
+        self.submit_dispatches.load(Ordering::Acquire)
     }
 }
 
@@ -88,7 +99,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
             return Ok(self.inner.submit(envelope).await);
         };
         let digest = canonical_sha256(&envelope)?;
-        match self
+        let reservation = self
             .idempotency
             .reserve(
                 ctx.principal_id.clone(),
@@ -99,10 +110,29 @@ impl RuntimeInterface for AuthenticatedRuntime {
                 ctx.deadline,
                 ctx.correlation_id.clone(),
             )
-            .await?
-        {
-            IdempotencyReservation::Replay(outcome) => Ok(outcome),
+            .await?;
+        match reservation {
+            IdempotencyReservation::Replay(outcome) => {
+                self.authorization
+                    .authorize(&ctx, InterfaceOperation::SubmitCommand)?;
+                Ok(outcome)
+            }
             IdempotencyReservation::Acquired(permit) => {
+                if let Err(error) = self
+                    .authorization
+                    .authorize(&ctx, InterfaceOperation::SubmitCommand)
+                {
+                    self.idempotency.abandon(permit).await;
+                    return Err(error);
+                }
+                if let Err(error) = self
+                    .authorization
+                    .authorize(&ctx, InterfaceOperation::SubmitCommand)
+                {
+                    self.idempotency.abandon(permit).await;
+                    return Err(error);
+                }
+                self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
                 let outcome = self.inner.submit(envelope).await;
                 self.idempotency
                     .finish(permit, outcome.clone(), Utc::now())

@@ -242,11 +242,12 @@ impl IdempotencyStore {
             ReservationUpdate::Replay(outcome.clone())
         };
         if !releases {
+            let safety_relevant = !matches!(outcome, CommandOutcome::Completed { .. });
             state.sequence = state.sequence.wrapping_add(1);
             entry.last_used = state.sequence;
-            entry.expires_at = Some(now + self.ttl);
+            entry.expires_at = (!safety_relevant).then_some(now + self.ttl);
             entry.state = EntryState::Retained {
-                safety_relevant: !matches!(outcome, CommandOutcome::Completed { .. }),
+                safety_relevant,
                 outcome,
             };
             state
@@ -258,6 +259,73 @@ impl IdempotencyStore {
         remove_empty_buckets(&mut state);
         changed.send_replace(update);
         Ok(())
+    }
+
+    pub async fn abandon(&self, permit: IdempotencyPermit) {
+        let mut state = self.state.lock().await;
+        let changed = state
+            .entries
+            .get_mut(&permit.principal_id)
+            .and_then(|entries| {
+                let index = entries.iter().position(|entry| {
+                    entry.key == permit.key
+                        && entry.operation == permit.operation
+                        && entry.canonical_sha256 == permit.canonical_sha256
+                        && matches!(
+                            &entry.state,
+                            EntryState::Reserved { generation, .. }
+                                if *generation == permit.generation
+                        )
+                })?;
+                let entry = entries.remove(index);
+                match entry.state {
+                    EntryState::Reserved { changed, .. } => Some(changed),
+                    EntryState::Retained { .. } => None,
+                }
+            });
+        remove_empty_buckets(&mut state);
+        if let Some(changed) = changed {
+            changed.send_replace(ReservationUpdate::Released);
+        }
+    }
+
+    pub async fn resolve_safety_tombstone(
+        &self,
+        principal_id: &PrincipalId,
+        key: &IdempotencyKey,
+        operation: InterfaceOperation,
+        canonical_sha256: [u8; 32],
+        correlation_id: CorrelationId,
+    ) -> Result<CommandOutcome, InterfaceError> {
+        let mut state = self.state.lock().await;
+        let outcome = {
+            let Some(entries) = state.entries.get_mut(principal_id) else {
+                return Err(conflict_error(correlation_id));
+            };
+            let Some(index) = entries.iter().position(|entry| entry.key == *key) else {
+                return Err(conflict_error(correlation_id));
+            };
+            let entry = &entries[index];
+            if entry.operation != operation || entry.canonical_sha256 != canonical_sha256 {
+                return Err(conflict_error(correlation_id));
+            }
+            match &entry.state {
+                EntryState::Retained {
+                    outcome,
+                    safety_relevant: true,
+                } => outcome.clone(),
+                EntryState::Reserved { .. }
+                | EntryState::Retained {
+                    safety_relevant: false,
+                    ..
+                } => return Err(conflict_error(correlation_id)),
+            }
+        };
+        if let Some(entries) = state.entries.get_mut(principal_id) {
+            entries.retain(|entry| entry.key != *key);
+        }
+        remove_empty_buckets(&mut state);
+        Ok(outcome)
     }
 }
 
