@@ -148,6 +148,7 @@ impl ArtifactStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn put_pending_addressed(
         &self,
         session_id: &SessionId,
