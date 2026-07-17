@@ -14,6 +14,8 @@ use types::{
 use worker_pool::{ChromiumWorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
 
+mod interface;
+
 #[derive(Clone, Default)]
 pub struct RuntimeService {
     pub sessions: SessionManager,

@@ -73,3 +73,11 @@ fn interface_inputs_reject_unsupported_values_before_dispatch() {
     );
     assert!(context.validate_at(Utc::now()).is_err());
 }
+
+#[test]
+fn idempotency_conflict_has_a_stable_wire_code() {
+    assert_eq!(
+        serde_json::to_value(InterfaceErrorCode::IdempotencyConflict).unwrap(),
+        json!("idempotencyConflict")
+    );
+}

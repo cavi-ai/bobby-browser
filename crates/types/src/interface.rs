@@ -239,6 +239,7 @@ pub enum InterfaceErrorCode {
     InvalidRequest,
     UnsupportedInterfaceVersion,
     InvalidIdempotencyKey,
+    IdempotencyConflict,
     DeadlineExceeded,
     AuthenticationFailed,
     TokenExpired,
