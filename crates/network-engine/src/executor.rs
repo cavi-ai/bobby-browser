@@ -594,6 +594,7 @@ fn sanitize_filename(name: String) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod cookie_context_tests {
     use super::*;
     use crate::state::{HttpCookie, HttpStateSnapshot};
