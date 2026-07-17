@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use artifact_store::{ArtifactRecord, ArtifactStore};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -7,9 +9,10 @@ use types::{
 };
 use uuid::Uuid;
 
-use crate::CapabilityHandle;
+use crate::{CapabilityHandle, SessionOwnershipAuthority};
 
 const OWNERSHIP_DIRECTORY: &str = ".interface-artifact-ownership";
+const OWNERSHIP_LOCK_FILE: &str = ".quota.lock";
 const MAX_OWNERSHIP_BYTES: u64 = 64 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
@@ -35,19 +38,63 @@ pub struct ArtifactContent {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactOwnershipLimits {
+    pub max_records: usize,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactReaderInitError;
+
+impl std::fmt::Display for ArtifactReaderInitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("artifact ownership boundary initialization failed")
+    }
+}
+
+impl std::error::Error for ArtifactReaderInitError {}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct OwnershipUsage {
+    records: usize,
+    bytes: u64,
+}
+
 #[derive(Clone)]
 pub struct ArtifactReader {
     store: ArtifactStore,
+    session_ownership: Arc<dyn SessionOwnershipAuthority>,
     max_read_bytes: u64,
+    ownership_limits: ArtifactOwnershipLimits,
+    ownership_usage: Arc<Mutex<OwnershipUsage>>,
 }
 
 impl ArtifactReader {
-    pub fn new(store: ArtifactStore, max_read_bytes: usize) -> Self {
+    pub fn new(
+        store: ArtifactStore,
+        session_ownership: Arc<dyn SessionOwnershipAuthority>,
+        max_read_bytes: usize,
+        ownership_limits: ArtifactOwnershipLimits,
+    ) -> Result<Self, ArtifactReaderInitError> {
         assert!(max_read_bytes > 0, "artifact read bound must be positive");
-        Self {
-            store,
-            max_read_bytes: max_read_bytes as u64,
+        assert!(
+            ownership_limits.max_records > 0 && ownership_limits.max_bytes > 0,
+            "artifact ownership limits must be positive"
+        );
+        let usage =
+            scan_ownership_usage(store.configured_root()).map_err(|_| ArtifactReaderInitError)?;
+        if usage.records > ownership_limits.max_records || usage.bytes > ownership_limits.max_bytes
+        {
+            return Err(ArtifactReaderInitError);
         }
+        Ok(Self {
+            store,
+            session_ownership,
+            max_read_bytes: max_read_bytes as u64,
+            ownership_limits,
+            ownership_usage: Arc::new(Mutex::new(usage)),
+        })
     }
 
     pub async fn register(
@@ -57,7 +104,11 @@ impl ArtifactReader {
         session_id: &SessionId,
         record: &ArtifactRecord,
     ) -> Result<ArtifactReference, InterfaceError> {
-        if !authenticated_for(handle, ctx, Capability::ArtifactCapture) {
+        if !authenticated_for(handle, ctx, Capability::ArtifactCapture)
+            || !self
+                .session_ownership
+                .owns_session(&ctx.principal_id, session_id)
+        {
             return Err(artifact_denied(ctx));
         }
 
@@ -66,6 +117,8 @@ impl ArtifactReader {
         let record = record.clone();
         let principal_id = ctx.principal_id.clone();
         let max_read_bytes = self.max_read_bytes;
+        let ownership_limits = self.ownership_limits;
+        let ownership_usage = self.ownership_usage.clone();
         let result = tokio::task::spawn_blocking(move || {
             let verified = read_committed_artifact(
                 &root,
@@ -77,7 +130,11 @@ impl ArtifactReader {
                 max_read_bytes,
             )?;
             let reference = ArtifactReference {
-                reference_id: Uuid::new_v4(),
+                reference_id: deterministic_reference_id(
+                    &principal_id,
+                    &session_id,
+                    &record.artifact_id,
+                )?,
                 artifact_id: record.artifact_id,
                 sha256: record.sha256,
                 bytes: record.bytes,
@@ -89,7 +146,8 @@ impl ArtifactReader {
                 reference: reference.clone(),
                 committed_path: verified.committed_path,
             };
-            persist_ownership(&root, &ownership)?;
+            let usage = persist_ownership(&root, &ownership, ownership_limits)?;
+            *ownership_usage.lock().map_err(|_| BoundaryError::Denied)? = usage;
             Ok::<_, BoundaryError>(reference)
         })
         .await;
@@ -150,7 +208,7 @@ impl ArtifactReader {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OwnershipMetadata {
     principal_id: PrincipalId,
@@ -220,6 +278,21 @@ fn valid_sha256(value: &str) -> bool {
 
 fn valid_extension(value: &str) -> bool {
     !value.is_empty() && value.len() <= 10 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn deterministic_reference_id(
+    principal_id: &PrincipalId,
+    session_id: &SessionId,
+    artifact_id: &str,
+) -> Result<Uuid, BoundaryError> {
+    use sha2::{Digest, Sha256};
+
+    let key = serde_json::to_vec(&(principal_id, session_id, artifact_id))
+        .map_err(|_| BoundaryError::Denied)?;
+    let digest = Sha256::digest(key);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Ok(Uuid::from_bytes(bytes))
 }
 
 #[cfg(unix)]
@@ -335,10 +408,118 @@ fn open_ownership_directory(
 }
 
 #[cfg(unix)]
+fn open_locked_ownership_directory(
+    root: &std::path::Path,
+) -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd, std::fs::File), BoundaryError> {
+    use rustix::fs::{flock, openat, FlockOperation, Mode, OFlags};
+
+    let (root_fd, ownership_fd) = open_ownership_directory(root, true)?;
+    let lock_fd = openat(
+        &ownership_fd,
+        OWNERSHIP_LOCK_FILE,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|_| BoundaryError::Denied)?;
+    let lock_file = std::fs::File::from(lock_fd);
+    if !lock_file
+        .metadata()
+        .map_err(|_| BoundaryError::Denied)?
+        .file_type()
+        .is_file()
+    {
+        return Err(BoundaryError::Denied);
+    }
+    flock(&lock_file, FlockOperation::LockExclusive).map_err(|_| BoundaryError::Denied)?;
+    Ok((root_fd, ownership_fd, lock_file))
+}
+
+#[cfg(unix)]
+fn read_ownership_from_directory(
+    ownership_fd: &std::os::fd::OwnedFd,
+    reference_id: Uuid,
+) -> Result<Option<(OwnershipMetadata, u64)>, BoundaryError> {
+    use rustix::fs::{openat, Mode, OFlags};
+
+    let filename = format!("{reference_id}.json");
+    let fd = match openat(
+        ownership_fd,
+        &filename,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(BoundaryError::Denied),
+    };
+    let file = std::fs::File::from(fd);
+    let length = file.metadata().map_err(|_| BoundaryError::Denied)?.len();
+    let bytes = read_bounded_file(file, MAX_OWNERSHIP_BYTES)?;
+    let ownership: OwnershipMetadata =
+        serde_json::from_slice(&bytes).map_err(|_| BoundaryError::Denied)?;
+    if ownership.reference.reference_id != reference_id
+        || deterministic_reference_id(
+            &ownership.principal_id,
+            &ownership.session_id,
+            &ownership.reference.artifact_id,
+        )? != reference_id
+        || !valid_artifact_id(&ownership.reference.artifact_id)
+        || !valid_sha256(&ownership.reference.sha256)
+    {
+        return Err(BoundaryError::Denied);
+    }
+    Ok(Some((ownership, length)))
+}
+
+#[cfg(unix)]
+fn scan_ownership_usage_locked(
+    ownership_fd: &std::os::fd::OwnedFd,
+) -> Result<OwnershipUsage, BoundaryError> {
+    use rustix::fs::{unlinkat, AtFlags, Dir};
+
+    let mut directory = Dir::read_from(ownership_fd).map_err(|_| BoundaryError::Denied)?;
+    let mut usage = OwnershipUsage::default();
+    while let Some(entry) = directory.read() {
+        let entry = entry.map_err(|_| BoundaryError::Denied)?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .map_err(|_| BoundaryError::Denied)?;
+        if name == "." || name == ".." || name == OWNERSHIP_LOCK_FILE {
+            continue;
+        }
+        if name.starts_with('.') && name.ends_with(".tmp") {
+            unlinkat(ownership_fd, name, AtFlags::empty()).map_err(|_| BoundaryError::Denied)?;
+            continue;
+        }
+        let Some(reference) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let reference_id = Uuid::parse_str(reference).map_err(|_| BoundaryError::Denied)?;
+        let (_, bytes) = read_ownership_from_directory(ownership_fd, reference_id)?
+            .ok_or(BoundaryError::Denied)?;
+        usage.records = usage.records.checked_add(1).ok_or(BoundaryError::Denied)?;
+        usage.bytes = usage
+            .bytes
+            .checked_add(bytes)
+            .ok_or(BoundaryError::Denied)?;
+    }
+    Ok(usage)
+}
+
+#[cfg(unix)]
+fn scan_ownership_usage(root: &std::path::Path) -> Result<OwnershipUsage, BoundaryError> {
+    std::fs::create_dir_all(root).map_err(|_| BoundaryError::Denied)?;
+    let (_root_fd, ownership_fd, _lock_file) = open_locked_ownership_directory(root)?;
+    scan_ownership_usage_locked(&ownership_fd)
+}
+
+#[cfg(unix)]
 fn persist_ownership(
     root: &std::path::Path,
     ownership: &OwnershipMetadata,
-) -> Result<(), BoundaryError> {
+    limits: ArtifactOwnershipLimits,
+) -> Result<OwnershipUsage, BoundaryError> {
     use std::io::Write;
 
     use rustix::fs::{fsync, openat, renameat, unlinkat, AtFlags, Mode, OFlags};
@@ -347,13 +528,32 @@ fn persist_ownership(
     if bytes.len() as u64 > MAX_OWNERSHIP_BYTES {
         return Err(BoundaryError::Denied);
     }
-    let (_root_fd, ownership_fd) = open_ownership_directory(root, true)?;
+    let (_root_fd, ownership_fd, _lock_file) = open_locked_ownership_directory(root)?;
+    let usage = scan_ownership_usage_locked(&ownership_fd)?;
     let final_name = format!("{}.json", ownership.reference.reference_id);
-    let temporary_name = format!(
-        ".{}.{}.tmp",
-        ownership.reference.reference_id,
-        Uuid::new_v4()
-    );
+    if let Some((existing, _)) =
+        read_ownership_from_directory(&ownership_fd, ownership.reference.reference_id)?
+    {
+        return if existing == *ownership {
+            Ok(usage)
+        } else {
+            Err(BoundaryError::Denied)
+        };
+    }
+    let new_records = usage.records.checked_add(1).ok_or(BoundaryError::Denied)?;
+    let new_bytes = usage
+        .bytes
+        .checked_add(bytes.len() as u64)
+        .ok_or(BoundaryError::Denied)?;
+    if new_records > limits.max_records || new_bytes > limits.max_bytes {
+        return Err(BoundaryError::Denied);
+    }
+
+    let temporary_name = format!(".{}.tmp", ownership.reference.reference_id);
+    match unlinkat(&ownership_fd, &temporary_name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(_) => return Err(BoundaryError::Denied),
+    }
     let temporary_fd = openat(
         &ownership_fd,
         &temporary_name,
@@ -367,7 +567,11 @@ fn persist_ownership(
         file.sync_all().map_err(|_| BoundaryError::Denied)?;
         renameat(&ownership_fd, &temporary_name, &ownership_fd, &final_name)
             .map_err(|_| BoundaryError::Denied)?;
-        fsync(&ownership_fd).map_err(|_| BoundaryError::Denied)
+        fsync(&ownership_fd).map_err(|_| BoundaryError::Denied)?;
+        Ok(OwnershipUsage {
+            records: new_records,
+            bytes: new_bytes,
+        })
     })();
     if write_result.is_err() {
         let _ = unlinkat(&ownership_fd, &temporary_name, AtFlags::empty());
@@ -380,19 +584,10 @@ fn read_ownership(
     root: &std::path::Path,
     reference_id: Uuid,
 ) -> Result<OwnershipMetadata, BoundaryError> {
-    use rustix::fs::{openat, Mode, OFlags};
-
     let (_root_fd, ownership_fd) = open_ownership_directory(root, false)?;
-    let filename = format!("{reference_id}.json");
-    let fd = openat(
-        &ownership_fd,
-        &filename,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-        Mode::empty(),
-    )
-    .map_err(|_| BoundaryError::Denied)?;
-    let bytes = read_bounded_file(fd.into(), MAX_OWNERSHIP_BYTES)?;
-    serde_json::from_slice(&bytes).map_err(|_| BoundaryError::Denied)
+    read_ownership_from_directory(&ownership_fd, reference_id)?
+        .map(|(ownership, _)| ownership)
+        .ok_or(BoundaryError::Denied)
 }
 
 // There is no canonicalize-then-open fallback. Non-Unix builds fail closed until
@@ -414,8 +609,14 @@ fn read_committed_artifact(
 fn persist_ownership(
     _root: &std::path::Path,
     _ownership: &OwnershipMetadata,
-) -> Result<(), BoundaryError> {
+    _limits: ArtifactOwnershipLimits,
+) -> Result<OwnershipUsage, BoundaryError> {
     Err(BoundaryError::Unsupported)
+}
+
+#[cfg(not(unix))]
+fn scan_ownership_usage(_root: &std::path::Path) -> Result<OwnershipUsage, BoundaryError> {
+    Ok(OwnershipUsage::default())
 }
 
 #[cfg(not(unix))]

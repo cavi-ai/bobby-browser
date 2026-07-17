@@ -4,7 +4,10 @@ use std::sync::{
 };
 
 use chrono::{Duration, Utc};
-use interface_core::{Authority, AuthorityStore, AuthorizationGuard};
+use interface_core::{
+    Authority, AuthorityStore, AuthorizationGuard, SessionOwnershipAuthority,
+    SessionOwnershipRecordError, SessionOwnershipRegistry,
+};
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, InterfaceErrorCode,
     InterfaceOperation, PrincipalId, RequestContext, SessionId, WorkflowId,
@@ -282,4 +285,27 @@ async fn revocation_invalidates_an_already_issued_handle_before_dispatch() {
         .unwrap_err();
     assert_eq!(error.code, InterfaceErrorCode::AuthenticationFailed);
     assert_eq!(runtime.calls(), 0);
+}
+
+#[test]
+fn trusted_session_ownership_recorder_is_bounded_and_cannot_rebind() {
+    let (registry, recorder) = SessionOwnershipRegistry::bounded(1);
+    let session_id = SessionId::new();
+    let owner = principal();
+    let attacker = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000002"));
+
+    recorder
+        .record_authenticated_session(owner.clone(), session_id.clone())
+        .unwrap();
+
+    assert!(registry.owns_session(&owner, &session_id));
+    assert_eq!(
+        recorder.record_authenticated_session(attacker, session_id.clone()),
+        Err(SessionOwnershipRecordError::OwnershipConflict)
+    );
+    assert_eq!(
+        recorder.record_authenticated_session(owner.clone(), SessionId::new()),
+        Err(SessionOwnershipRecordError::CapacityExhausted)
+    );
+    assert!(registry.owns_session(&owner, &session_id));
 }

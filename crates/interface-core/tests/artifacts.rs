@@ -1,14 +1,65 @@
-use std::sync::Arc;
+#![cfg(unix)]
 
-use artifact_store::ArtifactStore;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+
+use artifact_store::{ArtifactRecord, ArtifactStore};
 use chrono::{Duration, Utc};
-use interface_core::{ArtifactReader, ArtifactReference, Authority, AuthorityStore};
+use interface_core::{
+    ArtifactOwnershipLimits, ArtifactReader, ArtifactReference, Authority, AuthorityStore,
+    SessionOwnershipAuthority,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use types::{Capability, InterfaceErrorCode, PageId, PrincipalId, RequestContext, SessionId};
 use uuid::Uuid;
 
 const PAYLOAD: &[u8] = b"authenticated artifact bytes";
+
+#[derive(Default)]
+struct FakeSessionOwnership {
+    owners: RwLock<HashMap<SessionId, PrincipalId>>,
+}
+
+impl FakeSessionOwnership {
+    fn grant(&self, principal: PrincipalId, session: SessionId) {
+        self.owners.write().unwrap().insert(session, principal);
+    }
+}
+
+impl SessionOwnershipAuthority for FakeSessionOwnership {
+    fn owns_session(&self, principal: &PrincipalId, session: &SessionId) -> bool {
+        self.owners
+            .read()
+            .unwrap()
+            .get(session)
+            .is_some_and(|owner| owner == principal)
+    }
+}
+
+fn limits() -> ArtifactOwnershipLimits {
+    ArtifactOwnershipLimits {
+        max_records: 32,
+        max_bytes: 256 * 1024,
+    }
+}
+
+fn ownership_record_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let directory = root.join(".interface-artifact-ownership");
+    if !directory.exists() {
+        return Vec::new();
+    }
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect()
+}
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -21,6 +72,8 @@ struct Fixture {
     session: SessionId,
     other_session: SessionId,
     reference: ArtifactReference,
+    record: ArtifactRecord,
+    ownership: Arc<FakeSessionOwnership>,
 }
 
 async fn identity(
@@ -63,7 +116,9 @@ async fn fixture_reader() -> Fixture {
         identity(&authority, PrincipalId::from_uuid(Uuid::from_u128(1))).await;
     let (other_handle, other_context) =
         identity(&authority, PrincipalId::from_uuid(Uuid::from_u128(2))).await;
-    let reader = ArtifactReader::new(store.clone(), 4096);
+    let ownership = Arc::new(FakeSessionOwnership::default());
+    ownership.grant(owner_context.principal_id.clone(), session.clone());
+    let reader = ArtifactReader::new(store.clone(), ownership.clone(), 4096, limits()).unwrap();
     let reference = reader
         .register(&owner_handle, &owner_context, &session, &record)
         .await
@@ -79,6 +134,8 @@ async fn fixture_reader() -> Fixture {
         session,
         other_session: SessionId::new(),
         reference,
+        record,
+        ownership,
     }
 }
 
@@ -150,7 +207,13 @@ async fn committed_ownership_survives_reader_recovery_without_exposing_paths() {
     with_path["committedPath"] = json!("/etc/passwd");
     assert!(serde_json::from_value::<ArtifactReference>(with_path).is_err());
 
-    let recovered = ArtifactReader::new(fixture.store.clone(), 4096);
+    let recovered = ArtifactReader::new(
+        fixture.store.clone(),
+        fixture.ownership.clone(),
+        4096,
+        limits(),
+    )
+    .unwrap();
     let content = recovered
         .read(
             &fixture.owner_handle,
@@ -167,7 +230,13 @@ async fn committed_ownership_survives_reader_recovery_without_exposing_paths() {
 #[tokio::test]
 async fn recovered_reader_enforces_its_streaming_byte_bound() {
     let fixture = fixture_reader().await;
-    let bounded = ArtifactReader::new(fixture.store.clone(), PAYLOAD.len() - 1);
+    let bounded = ArtifactReader::new(
+        fixture.store.clone(),
+        fixture.ownership.clone(),
+        PAYLOAD.len() - 1,
+        limits(),
+    )
+    .unwrap();
     let denial = bounded
         .read(
             &fixture.owner_handle,
@@ -337,4 +406,239 @@ async fn concurrent_path_replacement_never_returns_uncommitted_bytes() {
         }
     }
     replacer.join().unwrap();
+}
+
+#[tokio::test]
+async fn attacker_cannot_bind_known_session_and_record_to_their_principal() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 4096, 4096);
+    let session = SessionId::new();
+    let record = store
+        .put(
+            &session,
+            &PageId::new(),
+            "application/octet-stream",
+            "bin",
+            PAYLOAD,
+            4096,
+        )
+        .await
+        .unwrap();
+    let authority = AuthorityStore::in_memory();
+    let (owner_handle, owner_context) =
+        identity(&authority, PrincipalId::from_uuid(Uuid::from_u128(10))).await;
+    let (attacker_handle, attacker_context) =
+        identity(&authority, PrincipalId::from_uuid(Uuid::from_u128(11))).await;
+    let ownership = Arc::new(FakeSessionOwnership::default());
+    ownership.grant(owner_context.principal_id.clone(), session.clone());
+    let reader = ArtifactReader::new(store, ownership, 4096, limits()).unwrap();
+
+    let denial = reader
+        .register(&attacker_handle, &attacker_context, &session, &record)
+        .await
+        .unwrap_err();
+    assert_eq!(denial.code, InterfaceErrorCode::ArtifactDenied);
+    let wrong_session = reader
+        .register(&owner_handle, &owner_context, &SessionId::new(), &record)
+        .await
+        .unwrap_err();
+    assert_eq!(denial_shape(&denial), denial_shape(&wrong_session));
+    assert!(ownership_record_paths(root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn repeated_and_concurrent_registration_converges_on_one_reference_and_record() {
+    let fixture = Arc::new(fixture_reader().await);
+    let recovered_reader = ArtifactReader::new(
+        fixture.store.clone(),
+        fixture.ownership.clone(),
+        4096,
+        limits(),
+    )
+    .unwrap();
+    let repeated = fixture
+        .reader
+        .register(
+            &fixture.owner_handle,
+            &fixture.owner_context,
+            &fixture.session,
+            &fixture.record,
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeated, fixture.reference);
+
+    let mut tasks = Vec::new();
+    for index in 0..16 {
+        let fixture = fixture.clone();
+        let reader = if index % 2 == 0 {
+            fixture.reader.clone()
+        } else {
+            recovered_reader.clone()
+        };
+        tasks.push(tokio::spawn(async move {
+            reader
+                .register(
+                    &fixture.owner_handle,
+                    &fixture.owner_context,
+                    &fixture.session,
+                    &fixture.record,
+                )
+                .await
+        }));
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap().unwrap(), fixture.reference);
+    }
+    assert_eq!(ownership_record_paths(fixture._root.path()).len(), 1);
+}
+
+#[test]
+fn reader_initialization_creates_a_missing_trusted_artifact_root() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("not-created-yet");
+    let store = ArtifactStore::new(&root, 4096, 4096);
+    let ownership = Arc::new(FakeSessionOwnership::default());
+
+    ArtifactReader::new(store, ownership, 4096, limits()).unwrap();
+    assert!(root.join(".interface-artifact-ownership").is_dir());
+}
+
+#[tokio::test]
+async fn restart_scans_existing_count_and_refuses_new_record_at_global_quota() {
+    let fixture = fixture_reader().await;
+    let second = fixture
+        .store
+        .put(
+            &fixture.session,
+            &PageId::new(),
+            "application/octet-stream",
+            "bin",
+            b"second artifact",
+            4096,
+        )
+        .await
+        .unwrap();
+    let quota = ArtifactOwnershipLimits {
+        max_records: 1,
+        max_bytes: 256 * 1024,
+    };
+    let recovered = ArtifactReader::new(
+        fixture.store.clone(),
+        fixture.ownership.clone(),
+        4096,
+        quota,
+    )
+    .unwrap();
+
+    assert_eq!(
+        recovered
+            .register(
+                &fixture.owner_handle,
+                &fixture.owner_context,
+                &fixture.session,
+                &fixture.record,
+            )
+            .await
+            .unwrap(),
+        fixture.reference
+    );
+    let denial = recovered
+        .register(
+            &fixture.owner_handle,
+            &fixture.owner_context,
+            &fixture.session,
+            &second,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denial.code, InterfaceErrorCode::ArtifactDenied);
+    assert_eq!(ownership_record_paths(fixture._root.path()).len(), 1);
+}
+
+#[tokio::test]
+async fn restart_counts_exact_existing_bytes_against_aggregate_quota() {
+    let fixture = fixture_reader().await;
+    let existing_bytes = std::fs::metadata(&ownership_record_paths(fixture._root.path())[0])
+        .unwrap()
+        .len();
+    let second = fixture
+        .store
+        .put(
+            &fixture.session,
+            &PageId::new(),
+            "application/octet-stream",
+            "bin",
+            b"aggregate byte quota",
+            4096,
+        )
+        .await
+        .unwrap();
+    let recovered = ArtifactReader::new(
+        fixture.store.clone(),
+        fixture.ownership.clone(),
+        4096,
+        ArtifactOwnershipLimits {
+            max_records: 32,
+            max_bytes: existing_bytes,
+        },
+    )
+    .unwrap();
+
+    let denial = recovered
+        .register(
+            &fixture.owner_handle,
+            &fixture.owner_context,
+            &fixture.session,
+            &second,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denial.code, InterfaceErrorCode::ArtifactDenied);
+    assert_eq!(ownership_record_paths(fixture._root.path()).len(), 1);
+}
+
+#[tokio::test]
+async fn cancelled_registration_cannot_leave_an_unreachable_ownership_record() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 4096, 4096);
+    let session = SessionId::new();
+    let record = store
+        .put(
+            &session,
+            &PageId::new(),
+            "application/octet-stream",
+            "bin",
+            PAYLOAD,
+            4096,
+        )
+        .await
+        .unwrap();
+    let authority = AuthorityStore::in_memory();
+    let (handle, context) = identity(&authority, PrincipalId::from_uuid(Uuid::from_u128(12))).await;
+    let ownership = Arc::new(FakeSessionOwnership::default());
+    ownership.grant(context.principal_id.clone(), session.clone());
+    let reader = ArtifactReader::new(store, ownership, 4096, limits()).unwrap();
+    let task = tokio::spawn({
+        let reader = reader.clone();
+        let handle = handle.clone();
+        let context = context.clone();
+        let session = session.clone();
+        let record = record.clone();
+        async move { reader.register(&handle, &context, &session, &record).await }
+    });
+    tokio::task::yield_now().await;
+    task.abort();
+    let _ = task.await;
+
+    let recovered = reader
+        .register(&handle, &context, &session, &record)
+        .await
+        .unwrap();
+    let again = reader
+        .register(&handle, &context, &session, &record)
+        .await
+        .unwrap();
+    assert_eq!(recovered, again);
+    assert_eq!(ownership_record_paths(root.path()).len(), 1);
 }

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use interface_core::{
     canonical_sha256, AuthorizationGuard, CapabilityHandle, IdempotencyReservation,
-    IdempotencyStore, InterfaceResult, RuntimeInterface,
+    IdempotencyStore, InterfaceResult, RuntimeInterface, SessionOwnershipRecorder,
 };
 use types::{
     CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence, InterfaceError,
@@ -23,6 +23,7 @@ pub struct AuthenticatedRuntime {
     authorization: AuthorizationGuard,
     idempotency: IdempotencyStore,
     submit_dispatches: Arc<AtomicUsize>,
+    session_ownership: Option<SessionOwnershipRecorder>,
 }
 
 impl AuthenticatedRuntime {
@@ -40,6 +41,21 @@ impl AuthenticatedRuntime {
             authorization: AuthorizationGuard::new(authority),
             idempotency,
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
+            session_ownership: None,
+        }
+    }
+
+    pub fn with_session_ownership(
+        inner: RuntimeService,
+        authority: CapabilityHandle,
+        session_ownership: SessionOwnershipRecorder,
+    ) -> Self {
+        Self {
+            inner,
+            authorization: AuthorizationGuard::new(authority),
+            idempotency: IdempotencyStore::default(),
+            submit_dispatches: Arc::new(AtomicUsize::new(0)),
+            session_ownership: Some(session_ownership),
         }
     }
 
@@ -69,10 +85,23 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<SessionState> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateSession)?;
-        self.inner
+        let session = self
+            .inner
             .create_session(req)
             .await
-            .map_err(|error| map_runtime_error(&ctx, error))
+            .map_err(|error| map_runtime_error(&ctx, error))?;
+        if let Some(ownership) = &self.session_ownership {
+            ownership
+                .record_authenticated_session(ctx.principal_id.clone(), session.id.clone())
+                .map_err(|_| {
+                    error_with(
+                        &ctx,
+                        InterfaceErrorCode::ResourceExhausted,
+                        "session ownership capacity exhausted",
+                    )
+                })?;
+        }
+        Ok(session)
     }
 
     async fn open_page(

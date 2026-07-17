@@ -6,6 +6,8 @@ use tokio::sync::{Mutex, Notify};
 use types::EventCursor;
 
 const MAX_EVENT_KIND_BYTES: usize = 128;
+pub const MAX_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
+const MAX_EVENT_PAYLOAD_NODES: usize = 1024;
 const MAX_PAYLOAD_DEPTH: usize = 8;
 const MAX_PAYLOAD_ENTRIES: usize = 64;
 const MAX_PAYLOAD_KEY_BYTES: usize = 128;
@@ -84,7 +86,7 @@ impl EventStore {
 
     pub async fn append(&self, mut event: Event) -> EventCursor {
         event.kind = truncate_utf8(event.kind, MAX_EVENT_KIND_BYTES);
-        sanitize_value(&mut event.payload, 0);
+        sanitize_payload(&mut event.payload);
 
         let cursor = {
             let mut state = self.inner.state.lock().await;
@@ -180,7 +182,20 @@ fn read_decision(state: &EventState, cursor: EventCursor, limit: usize) -> ReadD
     }
 }
 
-fn sanitize_value(value: &mut Value, depth: usize) {
+fn sanitize_payload(value: &mut Value) {
+    let mut remaining_nodes = MAX_EVENT_PAYLOAD_NODES;
+    sanitize_value(value, 0, &mut remaining_nodes);
+    if serde_json::to_vec(value).map_or(true, |bytes| bytes.len() > MAX_EVENT_PAYLOAD_BYTES) {
+        *value = serde_json::json!({ "truncated": true });
+    }
+}
+
+fn sanitize_value(value: &mut Value, depth: usize, remaining_nodes: &mut usize) {
+    if *remaining_nodes == 0 {
+        *value = Value::String("[TRUNCATED]".to_owned());
+        return;
+    }
+    *remaining_nodes -= 1;
     if depth >= MAX_PAYLOAD_DEPTH {
         *value = Value::String("[TRUNCATED]".to_owned());
         return;
@@ -191,19 +206,28 @@ fn sanitize_value(value: &mut Value, depth: usize) {
         }
         Value::Array(values) => {
             values.truncate(MAX_PAYLOAD_ENTRIES);
-            for value in values {
-                sanitize_value(value, depth + 1);
+            let mut retained = Vec::with_capacity(values.len().min(*remaining_nodes));
+            for mut value in std::mem::take(values) {
+                if *remaining_nodes == 0 {
+                    break;
+                }
+                sanitize_value(&mut value, depth + 1, remaining_nodes);
+                retained.push(value);
             }
+            *values = retained;
         }
         Value::Object(values) => {
             let retained = std::mem::take(values);
             for (key, mut value) in retained.into_iter().take(MAX_PAYLOAD_ENTRIES) {
+                if *remaining_nodes == 0 {
+                    break;
+                }
                 let sensitive = is_sensitive_key(&key);
                 let key = truncate_utf8(key, MAX_PAYLOAD_KEY_BYTES);
                 if sensitive {
                     value = Value::String("[REDACTED]".to_owned());
                 } else {
-                    sanitize_value(&mut value, depth + 1);
+                    sanitize_value(&mut value, depth + 1, remaining_nodes);
                 }
                 values.entry(key).or_insert(value);
             }
