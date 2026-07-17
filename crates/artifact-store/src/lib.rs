@@ -92,15 +92,18 @@ impl ArtifactStore {
             return Err(ArtifactError::TooLarge);
         }
         let mut record = self
-            .put(
+            .put_pending_with_before_publish(
                 session_id,
                 page_id,
                 "image/png",
                 "png",
                 bytes,
                 self.max_bytes,
+                false,
+                std::future::ready(()),
             )
-            .await?;
+            .await?
+            .commit();
         record.width = width;
         record.height = height;
         Ok(record)
@@ -123,6 +126,7 @@ impl ArtifactStore {
                 extension,
                 bytes,
                 max_bytes,
+                true,
                 std::future::ready(()),
             )
             .await?
@@ -138,6 +142,22 @@ impl ArtifactStore {
         bytes: &[u8],
         max_bytes: usize,
     ) -> Result<PendingArtifact, ArtifactError> {
+        self.put_pending_addressed(
+            session_id, page_id, media_type, extension, bytes, max_bytes, true,
+        )
+        .await
+    }
+
+    async fn put_pending_addressed(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        media_type: &str,
+        extension: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+        content_addressed: bool,
+    ) -> Result<PendingArtifact, ArtifactError> {
         self.put_pending_with_before_publish(
             session_id,
             page_id,
@@ -145,6 +165,7 @@ impl ArtifactStore {
             extension,
             bytes,
             max_bytes,
+            content_addressed,
             std::future::ready(()),
         )
         .await
@@ -159,6 +180,7 @@ impl ArtifactStore {
         extension: &str,
         bytes: &[u8],
         max_bytes: usize,
+        content_addressed: bool,
         before_publish: F,
     ) -> Result<PendingArtifact, ArtifactError>
     where
@@ -171,10 +193,15 @@ impl ArtifactStore {
             return Err(ArtifactError::InvalidMetadata);
         }
 
-        let artifact_id = Uuid::new_v4().to_string();
-        let session_directory = self.session_dir(session_id);
-        let filename = format!("{artifact_id}.{extension}");
         let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let artifact_id = if content_addressed {
+            sha256.clone()
+        } else {
+            Uuid::new_v4().to_string()
+        };
+        let session_directory = self.session_dir(session_id);
+        let final_path = session_directory.join(&artifact_id);
+        let filename = format!("{artifact_id}.{extension}");
         let manifest = ArtifactManifest {
             filename: filename.clone(),
             media_type: media_type.to_owned(),
@@ -187,8 +214,33 @@ impl ArtifactStore {
         tokio::fs::create_dir_all(&session_directory)
             .await
             .map_err(storage_error)?;
+        if final_path.exists() {
+            let manifest_path = final_path.join(format!("{artifact_id}.json"));
+            let existing = std::fs::read(manifest_path).map_err(storage_error)?;
+            let existing: ArtifactManifest =
+                serde_json::from_slice(&existing).map_err(storage_error)?;
+            if existing.media_type != media_type
+                || existing.filename != filename
+                || existing.sha256 != sha256
+                || existing.bytes != bytes.len() as u64
+                || existing.page_id != *page_id
+            {
+                return Err(ArtifactError::InvalidMetadata);
+            }
+            return Ok(PendingArtifact {
+                record: Some(ArtifactRecord {
+                    artifact_id,
+                    page_id: page_id.clone(),
+                    media_type: media_type.to_owned(),
+                    width: 0,
+                    height: 0,
+                    bytes: bytes.len() as u64,
+                    sha256,
+                }),
+                path: None,
+            });
+        }
         let staging_path = session_directory.join(format!(".{artifact_id}.tmp"));
-        let final_path = session_directory.join(&artifact_id);
         std::fs::create_dir(&staging_path).map_err(storage_error)?;
         let mut staging = StagingGuard::new(staging_path);
 
@@ -241,6 +293,7 @@ impl ArtifactStore {
                 extension,
                 bytes,
                 max_bytes,
+                false,
                 async move {
                     staged.notify_one();
                     publish.notified().await;
@@ -255,8 +308,12 @@ impl ArtifactStore {
         session_id: &SessionId,
         artifact_id: &str,
     ) -> Result<Vec<u8>, ArtifactError> {
-        let artifact_id = Uuid::parse_str(artifact_id).map_err(|_| ArtifactError::NotFound)?;
-        let directory = self.session_dir(session_id).join(artifact_id.to_string());
+        if Uuid::parse_str(artifact_id).is_err()
+            && (artifact_id.len() != 64 || !artifact_id.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(ArtifactError::NotFound);
+        }
+        let directory = self.session_dir(session_id).join(artifact_id);
         let manifest_path = directory.join(format!("{artifact_id}.json"));
         let manifest_bytes = tokio::fs::read(manifest_path).await.map_err(read_error)?;
         let manifest: ArtifactManifest =

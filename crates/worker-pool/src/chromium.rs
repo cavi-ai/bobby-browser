@@ -862,13 +862,14 @@ fn validate_state_delta(
                 "cookie source scheme does not match the current page",
             ));
         }
-        if cookie
-            .source_port
-            .is_some_and(|port| port != -1 && !(1..=65_535).contains(&port))
-        {
+        if cookie.source_port.is_some_and(|port| {
+            port == -1
+                || !(1..=65_535).contains(&port)
+                || current_url.port_or_known_default().map(i64::from) != Some(port)
+        }) {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
-                "cookie source port is invalid",
+                "cookie source port does not match the current page",
             ));
         }
         if let Some(key) = &cookie.partition_key {

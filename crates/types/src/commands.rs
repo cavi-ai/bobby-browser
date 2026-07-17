@@ -19,6 +19,14 @@ pub struct CommandEnvelope {
 
 impl CommandEnvelope {
     pub const SCHEMA_VERSION: u16 = 1;
+
+    /// Returns an envelope suitable for durable journals and diagnostics.
+    /// The live envelope must remain in memory for execution.
+    pub fn journal_safe(&self) -> Self {
+        let mut safe = self.clone();
+        safe.command.sanitize_urls();
+        safe
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,18 +48,46 @@ pub enum PrimitiveCommand {
 }
 
 impl PrimitiveCommand {
+    fn sanitize_urls(&mut self) {
+        fn sanitize(value: &mut String) {
+            let Ok(mut url) = url::Url::parse(value) else {
+                return;
+            };
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            *value = url.to_string();
+        }
+        match self {
+            Self::Navigate(command) => sanitize(&mut command.url),
+            Self::DownloadUrl(command) => sanitize(&mut command.url),
+            Self::OpenPage(command) => {
+                if let Some(url) = &mut command.url {
+                    sanitize(url);
+                }
+            }
+            Self::Click(command) => {
+                if let Some(url) = &mut command.expected_url {
+                    sanitize(url);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn class(&self) -> CommandClass {
         match self {
             Self::Navigate(_)
-            | Self::DownloadUrl(_)
             | Self::Inspect(_)
             | Self::OpenPage(_)
             | Self::ListPages(_)
             | Self::WaitFor(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
-            Self::TypeText(_) | Self::UploadFiles(_) | Self::ClosePage(_) => {
-                CommandClass::Reconciliable
-            }
+            Self::DownloadUrl(_)
+            | Self::TypeText(_)
+            | Self::UploadFiles(_)
+            | Self::ClosePage(_) => CommandClass::Reconciliable,
             Self::ClickAndWaitForPopup(_) | Self::ClickAndWaitForDownload(_) => {
                 CommandClass::Boundary
             }
