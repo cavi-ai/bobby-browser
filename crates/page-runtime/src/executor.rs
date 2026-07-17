@@ -66,38 +66,22 @@ impl PageRuntime {
             }
         };
         let page_id = envelope.page_id.as_ref().expect("validated page id");
-        let execution = match &envelope.command {
-            PrimitiveCommand::Navigate(command) => lease.worker().navigate(page_id, command).await,
-            PrimitiveCommand::Inspect(command) => lease.worker().inspect(page_id, command).await,
-            PrimitiveCommand::Click(command) => lease.worker().click(page_id, command).await,
-            PrimitiveCommand::TypeText(command) => lease.worker().type_text(page_id, command).await,
-            PrimitiveCommand::UploadFiles(command) => {
-                lease.worker().upload_files(page_id, command).await
-            }
-            PrimitiveCommand::OpenPage(command) => lease.worker().open_page_command(command).await,
-            PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await,
-            PrimitiveCommand::ClosePage(command) => {
-                lease.worker().close_page_command(command).await
-            }
-            PrimitiveCommand::ClickAndWaitForPopup(command) => {
-                lease
-                    .worker()
-                    .click_and_wait_for_popup(page_id, command)
-                    .await
-            }
-            PrimitiveCommand::ClickAndWaitForDownload(command) => {
-                lease
-                    .worker()
-                    .click_and_wait_for_download(page_id, command)
-                    .await
-            }
-            PrimitiveCommand::WaitFor(command) => lease.worker().wait_for(page_id, command).await,
-            PrimitiveCommand::CaptureScreenshot(command) => {
-                lease.worker().capture_screenshot(page_id, command).await
+        let page_state = match self.get(page_id).await {
+            Ok(page) => page,
+            Err(_) => {
+                return self
+                    .finish_failure(
+                        &envelope,
+                        classify_failure(
+                            &envelope,
+                            internal_error("page disappeared before dispatch"),
+                        ),
+                    )
+                    .await;
             }
         };
-        let evidence = match execution {
-            Ok(evidence) => evidence,
+        let evidence = match self.adaptive.execute(&envelope, &lease, page_state).await {
+            Ok(execution) => execution.evidence,
             Err(error) => {
                 return self
                     .finish_failure(&envelope, classify_failure(&envelope, error))
@@ -337,6 +321,25 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::DownloadUrl(_) => {
+                let download = evidence.iter().find_map(|item| match item {
+                    Evidence::Download { bytes, sha256, .. } => Some((*bytes, sha256)),
+                    _ => None,
+                });
+                let execution = evidence.iter().find_map(|item| match item {
+                    Evidence::ExecutionPath { bytes, sha256, .. } => Some((*bytes, sha256)),
+                    _ => None,
+                });
+                match (download, execution) {
+                    (
+                        Some((download_bytes, download_sha)),
+                        Some((Some(exec_bytes), Some(exec_sha))),
+                    ) if download_bytes == exec_bytes && download_sha == exec_sha => Ok(evidence),
+                    _ => Err(verification_error(
+                        "download lacks matching durable execution evidence",
+                    )),
+                }
+            }
             PrimitiveCommand::WaitFor(_) => {
                 if evidence
                     .iter()
@@ -386,7 +389,15 @@ impl PageRuntime {
 }
 
 fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandOutcome {
-    if envelope.command.class() == CommandClass::Boundary {
+    if matches!(
+        error.code,
+        ErrorCode::NetworkPolicyDenied | ErrorCode::PolicyDenied
+    ) {
+        CommandOutcome::PolicyDenied {
+            command_id: envelope.command_id.clone(),
+            error,
+        }
+    } else if envelope.command.class() == CommandClass::Boundary {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
