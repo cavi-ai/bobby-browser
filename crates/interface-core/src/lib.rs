@@ -1,4 +1,6 @@
+mod artifacts;
 mod auth;
+mod events;
 mod idempotency;
 
 use async_trait::async_trait;
@@ -9,7 +11,9 @@ use types::{
     RecoveryDecision, RequestContext, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
 };
 
+pub use artifacts::{ArtifactContent, ArtifactReader, ArtifactReference};
 pub use auth::{Authority, AuthorityStore, CapabilityHandle, IssuedToken};
+pub use events::{Event, EventBatch, EventGap, EventGapReason, EventStore};
 pub use idempotency::{
     canonical_sha256, IdempotencyPermit, IdempotencyReservation, IdempotencyStore,
 };

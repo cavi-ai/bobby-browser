@@ -91,6 +91,15 @@ impl ArtifactStore {
         }
     }
 
+    /// Returns the trusted, configured storage root for handle-relative access.
+    ///
+    /// Artifact request values are never joined to this path directly. Security
+    /// boundaries should open this root once and traverse validated components
+    /// relative to that directory handle.
+    pub fn configured_root(&self) -> &Path {
+        &self.root
+    }
+
     pub async fn put_png(
         &self,
         session_id: &SessionId,
