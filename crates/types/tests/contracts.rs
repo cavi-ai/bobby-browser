@@ -1,8 +1,10 @@
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 use types::{
-    AttemptId, ClickCommand, CommandClass, CommandEnvelope, CommandId, InspectCommand, PageId,
-    PrimitiveCommand, SessionId, TypeTextCommand, WaitUntil, WorkflowId,
+    AttemptId, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
+    ClosePageCommand, CommandClass, CommandEnvelope, CommandId, Evidence, InspectCommand,
+    ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand, SessionId, TypeTextCommand,
+    UploadFilesCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -60,4 +62,72 @@ fn commands_expose_recovery_class() {
         .class(),
         CommandClass::Boundary
     );
+}
+
+#[test]
+fn workflow_io_commands_have_stable_json_and_recovery_classes() {
+    let cases = [
+        (
+            PrimitiveCommand::UploadFiles(UploadFilesCommand {
+                selector: "#resume".into(),
+                paths: vec!["/uploads/resume.pdf".into()],
+            }),
+            "uploadFiles",
+            CommandClass::Reconciliable,
+        ),
+        (
+            PrimitiveCommand::OpenPage(OpenPageCommand {
+                url: Some("https://example.com".into()),
+            }),
+            "openPage",
+            CommandClass::Replayable,
+        ),
+        (
+            PrimitiveCommand::ListPages(ListPagesCommand),
+            "listPages",
+            CommandClass::Replayable,
+        ),
+        (
+            PrimitiveCommand::ClosePage(ClosePageCommand {
+                page_id: PageId(uuid(9)),
+            }),
+            "closePage",
+            CommandClass::Reconciliable,
+        ),
+        (
+            PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
+                selector: "#popup".into(),
+                timeout_ms: 5_000,
+            }),
+            "clickAndWaitForPopup",
+            CommandClass::Boundary,
+        ),
+        (
+            PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
+                selector: "#download".into(),
+                timeout_ms: 5_000,
+            }),
+            "clickAndWaitForDownload",
+            CommandClass::Boundary,
+        ),
+    ];
+
+    for (command, kind, class) in cases {
+        assert_eq!(command.class(), class);
+        assert_eq!(serde_json::to_value(command).unwrap()["kind"], json!(kind));
+    }
+}
+
+#[test]
+fn workflow_evidence_is_typed_and_camel_case() {
+    let evidence = Evidence::Download {
+        filename: "fixture.bin".into(),
+        path: "/downloads/session/fixture.bin".into(),
+        bytes: 4,
+        sha256: "9f64a747".into(),
+    };
+    let value = serde_json::to_value(evidence).unwrap();
+    assert_eq!(value["kind"], json!("download"));
+    assert_eq!(value["sha256"], json!("9f64a747"));
+    assert_eq!(value["bytes"], json!(4));
 }

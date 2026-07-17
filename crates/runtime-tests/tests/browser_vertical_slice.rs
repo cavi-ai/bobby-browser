@@ -4,10 +4,11 @@ use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use sdk_core::RuntimeService;
 use types::{
-    AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandEnvelope,
+    AttemptId, CheckpointId, CheckpointInvariant, ClickAndWaitForDownloadCommand,
+    ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
     CommandId, CommandOutcome, CommandPhase, CreateSessionRequest, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, SessionId, TypeTextCommand,
-    WaitUntil, WorkflowCheckpoint, WorkflowId,
+    ListPagesCommand, NavigateCommand, OpenPageCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    SessionId, TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use workflow_journal::{CommandJournal, JsonlJournal};
 
@@ -48,6 +49,84 @@ async fn submit(
     }
 }
 
+async fn submit_boundary(
+    runtime: &RuntimeService,
+    session_id: &SessionId,
+    page_id: &PageId,
+    command: PrimitiveCommand,
+) -> Vec<Evidence> {
+    let workflow_id = WorkflowId::new();
+    let attempt_id = AttemptId::new();
+    let inspect_id = CommandId::new();
+    let observed = match runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: inspect_id.clone(),
+            workflow_id: workflow_id.clone(),
+            attempt_id: attempt_id.clone(),
+            session_id: session_id.clone(),
+            page_id: Some(page_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: PrimitiveCommand::Inspect(InspectCommand::default()),
+        })
+        .await
+    {
+        CommandOutcome::Completed { evidence, .. } => evidence,
+        outcome => panic!("boundary preflight failed: {outcome:?}"),
+    };
+    let (url, title) = observed
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Inspection { url, title, .. } => Some((url.clone(), title.clone())),
+            _ => None,
+        })
+        .unwrap();
+    let command_id = CommandId::new();
+    runtime
+        .checkpoint(
+            WorkflowCheckpoint {
+                schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+                checkpoint_id: CheckpointId::new(),
+                workflow_id: workflow_id.clone(),
+                attempt_id: attempt_id.clone(),
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                restart_url: url.clone(),
+                current_url: url.clone(),
+                cursor: Some(inspect_id),
+                boundary_command_id: Some(command_id.clone()),
+                recovery_class: CommandClass::Boundary,
+                invariants: vec![
+                    CheckpointInvariant::Url { value: url },
+                    CheckpointInvariant::Title { value: title },
+                ],
+                replayable_inputs: Vec::new(),
+                evidence: Vec::new(),
+                recovery_history: Vec::new(),
+                created_at: Utc::now(),
+            },
+            observed,
+        )
+        .await
+        .unwrap();
+    match runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id,
+            workflow_id,
+            attempt_id,
+            session_id: session_id.clone(),
+            page_id: Some(page_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command,
+        })
+        .await
+    {
+        CommandOutcome::Completed { evidence, .. } => evidence,
+        outcome => panic!("boundary command failed: {outcome:?}"),
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn completes_dynamic_form_with_durable_evidence() {
@@ -55,6 +134,10 @@ async fn completes_dynamic_form_with_durable_evidence() {
     let root = tempfile::tempdir().unwrap();
     let journal_path = root.path().join("commands.jsonl");
     let profiles_dir = root.path().join("profiles");
+    let uploads_dir = root.path().join("uploads");
+    std::fs::create_dir(&uploads_dir).unwrap();
+    let resume = uploads_dir.join("resume.txt");
+    std::fs::write(&resume, b"Ada Lovelace").unwrap();
     let config = AppConfig {
         server: ServerConfig {
             host: "127.0.0.1".into(),
@@ -67,6 +150,8 @@ async fn completes_dynamic_form_with_durable_evidence() {
             profiles_dir: profiles_dir.clone(),
             headless: true,
             max_active: 8,
+            upload_roots: vec![uploads_dir],
+            downloads_dir: root.path().join("downloads"),
         },
         storage: StorageConfig {
             journal_path: journal_path.clone(),
@@ -112,6 +197,20 @@ async fn completes_dynamic_form_with_durable_evidence() {
         |item| matches!(item, Evidence::Navigation { title, .. } if title == "Runtime Fixture")
     ));
 
+    let uploaded = submit(
+        &runtime,
+        &first_session.id,
+        &page.id,
+        &mut command_ids,
+        PrimitiveCommand::UploadFiles(UploadFilesCommand {
+            selector: "#resume".into(),
+            paths: vec![resume.to_string_lossy().into_owned()],
+        }),
+    )
+    .await;
+    assert!(matches!(&uploaded[0], Evidence::Upload { paths, .. } if paths.len() == 1));
+    println!("workflow-proof upload={uploaded:?}");
+
     submit(
         &runtime,
         &first_session.id,
@@ -124,6 +223,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         }),
     )
     .await;
+    println!("workflow-proof name typed");
     submit(
         &runtime,
         &first_session.id,
@@ -136,6 +236,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         }),
     )
     .await;
+    println!("workflow-proof continued");
 
     let mut company_ready = false;
     for _ in 0..20 {
@@ -159,6 +260,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     assert!(company_ready, "dynamic second step did not appear");
+    println!("workflow-proof company ready");
 
     submit(
         &runtime,
@@ -172,6 +274,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         }),
     )
     .await;
+    println!("workflow-proof company typed");
     let expected_url = format!("{}/complete", fixture.base_url());
     let workflow_id = WorkflowId::new();
     let attempt_id = AttemptId::new();
@@ -264,6 +367,105 @@ async fn completes_dynamic_form_with_durable_evidence() {
         matches!(item, Evidence::Inspection { url, text, .. }
             if url == &expected_url && text == "Submitted: Ada @ Analytical Engines")
     }));
+
+    let popup = submit_boundary(
+        &runtime,
+        &first_session.id,
+        &page.id,
+        PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
+            selector: "#root-popup".into(),
+            timeout_ms: 5_000,
+        }),
+    )
+    .await;
+    let popup_id = match &popup[0] {
+        Evidence::Popup { page_id, title, .. } => {
+            assert_eq!(title, "Popup");
+            page_id.clone()
+        }
+        other => panic!("unexpected popup evidence: {other:?}"),
+    };
+    println!("workflow-proof popup={popup:?}");
+    let popup_details = submit(
+        &runtime,
+        &first_session.id,
+        &popup_id,
+        &mut command_ids,
+        PrimitiveCommand::Inspect(InspectCommand {
+            selector: Some("#details".into()),
+            include_html: false,
+        }),
+    )
+    .await;
+    assert!(matches!(&popup_details[0], Evidence::Inspection { text, .. } if text == "Details"));
+    let denied = runtime
+        .submit(envelope(
+            &second_session.id,
+            &popup_id,
+            CommandId::new(),
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    assert!(
+        matches!(denied, CommandOutcome::Failed { error, .. } if error.code == types::ErrorCode::InvalidRequest)
+    );
+
+    let opened = submit(
+        &runtime,
+        &first_session.id,
+        &page.id,
+        &mut command_ids,
+        PrimitiveCommand::OpenPage(OpenPageCommand {
+            url: Some(format!("{}/popup", fixture.base_url())),
+        }),
+    )
+    .await;
+    let tab_id = match &opened[0] {
+        Evidence::Page { page_id, title, .. } => {
+            assert_eq!(title, "Popup");
+            page_id.clone()
+        }
+        other => panic!("unexpected page evidence: {other:?}"),
+    };
+    let listed = submit(
+        &runtime,
+        &first_session.id,
+        &page.id,
+        &mut command_ids,
+        PrimitiveCommand::ListPages(ListPagesCommand),
+    )
+    .await;
+    assert!(
+        matches!(&listed[0], Evidence::Pages { pages } if pages.iter().any(|item| item.page_id == tab_id))
+    );
+
+    submit(
+        &runtime,
+        &first_session.id,
+        &page.id,
+        &mut command_ids,
+        PrimitiveCommand::ClosePage(ClosePageCommand {
+            page_id: tab_id.clone(),
+        }),
+    )
+    .await;
+    assert!(runtime.pages.get(&tab_id).await.is_err());
+    println!("workflow-proof tab={tab_id:?} closed");
+
+    let downloaded = submit_boundary(
+        &runtime,
+        &first_session.id,
+        &page.id,
+        PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
+            selector: "#download".into(),
+            timeout_ms: 5_000,
+        }),
+    )
+    .await;
+    assert!(
+        matches!(&downloaded[0], Evidence::Download { filename, bytes, sha256, .. } if filename == "workflow-fixture.bin" && *bytes == 20 && sha256 == "c0613f7c18f7f41e5720bb3d95b6f6411e8a8b2f3b08d1ad011760069f3949ed")
+    );
+    println!("workflow-proof download={downloaded:?}");
 
     let first_profile = profiles_dir.join(first_session.id.0.to_string());
     let second_profile = profiles_dir.join(second_session.id.0.to_string());

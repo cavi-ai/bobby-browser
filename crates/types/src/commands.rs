@@ -27,13 +27,26 @@ pub enum PrimitiveCommand {
     Inspect(InspectCommand),
     Click(ClickCommand),
     TypeText(TypeTextCommand),
+    UploadFiles(UploadFilesCommand),
+    OpenPage(OpenPageCommand),
+    ListPages(ListPagesCommand),
+    ClosePage(ClosePageCommand),
+    ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
+    ClickAndWaitForDownload(ClickAndWaitForDownloadCommand),
 }
 
 impl PrimitiveCommand {
     pub fn class(&self) -> CommandClass {
         match self {
-            Self::Navigate(_) | Self::Inspect(_) => CommandClass::Replayable,
-            Self::TypeText(_) => CommandClass::Reconciliable,
+            Self::Navigate(_) | Self::Inspect(_) | Self::OpenPage(_) | Self::ListPages(_) => {
+                CommandClass::Replayable
+            }
+            Self::TypeText(_) | Self::UploadFiles(_) | Self::ClosePage(_) => {
+                CommandClass::Reconciliable
+            }
+            Self::ClickAndWaitForPopup(_) | Self::ClickAndWaitForDownload(_) => {
+                CommandClass::Boundary
+            }
             Self::Click(command) if command.boundary => CommandClass::Boundary,
             Self::Click(_) => CommandClass::Reconciliable,
         }
@@ -86,6 +99,42 @@ pub struct TypeTextCommand {
     pub selector: String,
     pub value: String,
     pub clear_first: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadFilesCommand {
+    pub selector: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPageCommand {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ListPagesCommand;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosePageCommand {
+    pub page_id: PageId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClickAndWaitForPopupCommand {
+    pub selector: String,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClickAndWaitForDownloadCommand {
+    pub selector: String,
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
