@@ -25,6 +25,7 @@ impl CommandEnvelope {
 #[serde(tag = "kind", content = "input", rename_all = "camelCase")]
 pub enum PrimitiveCommand {
     Navigate(NavigateCommand),
+    DownloadUrl(DownloadUrlCommand),
     Inspect(InspectCommand),
     Click(ClickCommand),
     TypeText(TypeTextCommand),
@@ -42,6 +43,7 @@ impl PrimitiveCommand {
     pub fn class(&self) -> CommandClass {
         match self {
             Self::Navigate(_)
+            | Self::DownloadUrl(_)
             | Self::Inspect(_)
             | Self::OpenPage(_)
             | Self::ListPages(_)
@@ -57,6 +59,14 @@ impl PrimitiveCommand {
             Self::Click(_) => CommandClass::Reconciliable,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadUrlCommand {
+    pub url: String,
+    pub expected_content_type: Option<String>,
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
