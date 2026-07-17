@@ -79,7 +79,7 @@ pub async fn spawn() -> FixtureServer {
             "/static",
             get(|| async {
                 let mut response = Html(
-                    "<!doctype html><title>Static Fixture</title><p id='message'>café fixture</p>",
+                    "<!doctype html><title>Static Fixture</title><p id='message' role='status'>café fixture</p>",
                 )
                 .into_response();
                 response.headers_mut().append(
@@ -131,7 +131,9 @@ pub async fn spawn() -> FixtureServer {
         )
         .route(
             "/js-shell",
-            get(|| async { Html("<!doctype html><div id='app'></div><script>render()</script>") }),
+            get(|| async {
+                Html("<!doctype html><div id='app'></div><script>document.querySelector('#app').innerHTML='<p id=dynamic>rendered fixture</p>'</script>")
+            }),
         )
         .route(
             "/misleading",
@@ -163,6 +165,10 @@ pub async fn spawn() -> FixtureServer {
             "/download",
             get(|| async {
                 let mut response = b"workflow-download-v1".to_vec().into_response();
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static("downloaded=yes; Path=/; HttpOnly"),
+                );
                 response.headers_mut().insert(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("application/octet-stream"),
@@ -237,7 +243,7 @@ pub async fn spawn() -> FixtureServer {
             "/cookie-echo",
             get(|headers: axum::http::HeaderMap| async move {
                 Html(format!(
-                    "<title>Cookies</title><p>{}</p>",
+                    "<title>Cookies</title><p role='status'>{}</p>",
                     headers
                         .get(header::COOKIE)
                         .and_then(|v| v.to_str().ok())

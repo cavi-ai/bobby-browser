@@ -1708,9 +1708,11 @@ dependencies = [
 name = "runtime-tests"
 version = "0.1.0"
 dependencies = [
+ "artifact-store",
  "checkpoint-store",
  "chrono",
  "config",
+ "network-engine",
  "page-runtime",
  "sdk-core",
  "serde_json",
