@@ -314,7 +314,7 @@ async fn different_digest_concurrent_callers_conflict_before_second_dispatch() {
 }
 
 #[tokio::test]
-async fn global_bound_refuses_safety_relevant_entries_and_reclaims_safe_or_expired_state() {
+async fn global_bound_refuses_safety_relevant_entries_even_after_ttl() {
     let store = IdempotencyStore::with_global_capacity(2, 2, Duration::milliseconds(20));
     let first_principal = principal("10000000-0000-0000-0000-000000000001");
     let second_principal = principal("20000000-0000-0000-0000-000000000002");
@@ -353,16 +353,135 @@ async fn global_bound_refuses_safety_relevant_entries_and_reclaims_safe_or_expir
     assert_eq!(full.correlation_id, correlation_id);
 
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    assert!(matches!(
-        reserve(
-            &store,
-            principal("30000000-0000-0000-0000-000000000003"),
-            key("third"),
-            canonical_sha256(&"third").unwrap(),
+    let still_full = reserve(
+        &store,
+        principal("30000000-0000-0000-0000-000000000003"),
+        key("third"),
+        canonical_sha256(&"third").unwrap(),
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(still_full.code, InterfaceErrorCode::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
+    let store = IdempotencyStore::with_global_capacity(1, 1, Duration::milliseconds(1));
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let idempotency_key = key("durable-uncertain");
+    let digest = canonical_sha256(&"durable-uncertain").unwrap();
+    let command_id = CommandId::new();
+    let started_at = Utc::now();
+    let permit = match store
+        .reserve(
+            principal.clone(),
+            idempotency_key.clone(),
+            InterfaceOperation::SubmitCommand,
+            digest,
+            started_at,
+            started_at + Duration::hours(2),
             CorrelationId::new(),
         )
         .await
-        .unwrap(),
+        .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => unreachable!(),
+    };
+    store
+        .finish(permit, reconciliation(command_id.clone()), started_at)
+        .await
+        .unwrap();
+
+    let much_later = started_at + Duration::hours(1);
+    assert!(matches!(
+        store
+            .reserve(
+                principal.clone(),
+                idempotency_key.clone(),
+                InterfaceOperation::SubmitCommand,
+                digest,
+                much_later,
+                much_later + Duration::minutes(1),
+                CorrelationId::new(),
+            )
+            .await
+            .unwrap(),
+        IdempotencyReservation::Replay(CommandOutcome::NeedsReconciliation {
+            command_id: actual,
+            ..
+        }) if actual == command_id
+    ));
+
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let replay = counted_dispatch(
+        DispatchCase {
+            store: store.clone(),
+            principal: principal.clone(),
+            key: idempotency_key.clone(),
+            digest,
+            correlation_id: CorrelationId::new(),
+        },
+        dispatches.clone(),
+        Arc::new(Barrier::new(1)),
+        completed(CommandId::new()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        replay,
+        CommandOutcome::NeedsReconciliation {
+            command_id: actual,
+            ..
+        } if actual == command_id
+    ));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+
+    let full = store
+        .reserve(
+            principal.clone(),
+            key("blocked-by-safety"),
+            InterfaceOperation::SubmitCommand,
+            canonical_sha256(&"blocked-by-safety").unwrap(),
+            much_later,
+            much_later + Duration::minutes(1),
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(full.code, InterfaceErrorCode::ResourceExhausted);
+
+    let resolved = store
+        .resolve_safety_tombstone(
+            &principal,
+            &idempotency_key,
+            InterfaceOperation::SubmitCommand,
+            digest,
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        resolved,
+        CommandOutcome::NeedsReconciliation {
+            command_id: actual,
+            ..
+        } if actual == command_id
+    ));
+    assert!(matches!(
+        store
+            .reserve(
+                principal,
+                idempotency_key,
+                InterfaceOperation::SubmitCommand,
+                digest,
+                much_later,
+                much_later + Duration::minutes(1),
+                CorrelationId::new(),
+            )
+            .await
+            .unwrap(),
         IdempotencyReservation::Acquired(_)
     ));
 }
