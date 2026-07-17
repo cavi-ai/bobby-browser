@@ -137,6 +137,16 @@ impl<'de> Deserialize<'de> for IdempotencyKey {
 #[serde(transparent)]
 pub struct EventCursor(pub u64);
 
+impl EventCursor {
+    pub const ZERO: Self = Self(0);
+}
+
+impl From<u64> for EventCursor {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestContext {
@@ -245,6 +255,7 @@ pub enum InterfaceErrorCode {
     TokenExpired,
     MissingCapability,
     MalformedScope,
+    ArtifactDenied,
     UnsupportedOperation,
     NotFound,
     ResourceExhausted,
