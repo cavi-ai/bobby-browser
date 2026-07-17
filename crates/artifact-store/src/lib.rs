@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -82,6 +85,32 @@ impl ArtifactStore {
         bytes: &[u8],
         max_bytes: usize,
     ) -> Result<ArtifactRecord, ArtifactError> {
+        self.put_with_before_publish(
+            session_id,
+            page_id,
+            media_type,
+            extension,
+            bytes,
+            max_bytes,
+            std::future::ready(()),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn put_with_before_publish<F>(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        media_type: &str,
+        extension: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+        before_publish: F,
+    ) -> Result<ArtifactRecord, ArtifactError>
+    where
+        F: Future<Output = ()>,
+    {
         if bytes.len() > self.max_bytes.min(max_bytes) {
             return Err(ArtifactError::TooLarge);
         }
@@ -90,7 +119,7 @@ impl ArtifactStore {
         }
 
         let artifact_id = Uuid::new_v4().to_string();
-        let directory = self.session_dir(session_id);
+        let session_directory = self.session_dir(session_id);
         let filename = format!("{artifact_id}.{extension}");
         let sha256 = format!("{:x}", Sha256::digest(bytes));
         let manifest = ArtifactManifest {
@@ -102,31 +131,31 @@ impl ArtifactStore {
         };
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_error)?;
 
-        tokio::fs::create_dir_all(&directory)
+        tokio::fs::create_dir_all(&session_directory)
             .await
             .map_err(storage_error)?;
-        let final_path = directory.join(&filename);
-        let manifest_path = directory.join(format!("{artifact_id}.json"));
-        let temporary_path = directory.join(format!(".{artifact_id}.{extension}.tmp"));
-        let temporary_manifest_path = directory.join(format!(".{artifact_id}.json.tmp"));
+        let staging_path = session_directory.join(format!(".{artifact_id}.tmp"));
+        let final_path = session_directory.join(&artifact_id);
+        tokio::fs::create_dir(&staging_path)
+            .await
+            .map_err(storage_error)?;
+        let mut staging = StagingGuard::new(staging_path);
 
-        if let Err(error) = tokio::fs::write(&temporary_path, bytes).await {
-            return Err(storage_error(error));
-        }
-        if let Err(error) = tokio::fs::write(&temporary_manifest_path, manifest_bytes).await {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-            return Err(storage_error(error));
-        }
-        if let Err(error) = tokio::fs::rename(&temporary_path, &final_path).await {
-            let _ = tokio::fs::remove_file(&temporary_path).await;
-            let _ = tokio::fs::remove_file(&temporary_manifest_path).await;
-            return Err(storage_error(error));
-        }
-        if let Err(error) = tokio::fs::rename(&temporary_manifest_path, &manifest_path).await {
-            let _ = tokio::fs::remove_file(&final_path).await;
-            let _ = tokio::fs::remove_file(&temporary_manifest_path).await;
-            return Err(storage_error(error));
-        }
+        tokio::fs::write(staging.path().join(&filename), bytes)
+            .await
+            .map_err(storage_error)?;
+        tokio::fs::write(
+            staging.path().join(format!("{artifact_id}.json")),
+            manifest_bytes,
+        )
+        .await
+        .map_err(storage_error)?;
+
+        before_publish.await;
+        tokio::fs::rename(staging.path(), &final_path)
+            .await
+            .map_err(storage_error)?;
+        staging.disarm();
 
         Ok(ArtifactRecord {
             artifact_id,
@@ -139,13 +168,41 @@ impl ArtifactStore {
         })
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    async fn put_paused_before_publish(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        media_type: &str,
+        extension: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+        staged: std::sync::Arc<tokio::sync::Notify>,
+        publish: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Result<ArtifactRecord, ArtifactError> {
+        self.put_with_before_publish(
+            session_id,
+            page_id,
+            media_type,
+            extension,
+            bytes,
+            max_bytes,
+            async move {
+                staged.notify_one();
+                publish.notified().await;
+            },
+        )
+        .await
+    }
+
     pub async fn get(
         &self,
         session_id: &SessionId,
         artifact_id: &str,
     ) -> Result<Vec<u8>, ArtifactError> {
         let artifact_id = Uuid::parse_str(artifact_id).map_err(|_| ArtifactError::NotFound)?;
-        let directory = self.session_dir(session_id);
+        let directory = self.session_dir(session_id).join(artifact_id.to_string());
         let manifest_path = directory.join(format!("{artifact_id}.json"));
         let manifest_bytes = tokio::fs::read(manifest_path).await.map_err(read_error)?;
         let manifest: ArtifactManifest =
@@ -173,6 +230,40 @@ struct ArtifactManifest {
     page_id: PageId,
     bytes: u64,
     sha256: String,
+}
+
+#[derive(Debug)]
+struct StagingGuard {
+    path: Option<PathBuf>,
+}
+
+impl StagingGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        self.path.as_deref().expect("staging guard is armed")
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = tokio::fs::remove_dir_all(path).await;
+            });
+        } else {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 fn valid_extension(extension: &str) -> bool {
@@ -207,5 +298,60 @@ fn storage_error(error: impl std::fmt::Display) -> ArtifactError {
 
 pub fn artifact_path(root: &Path, session_id: &SessionId, artifact_id: &str) -> PathBuf {
     root.join(session_id.0.to_string())
+        .join(artifact_id)
         .join(format!("{artifact_id}.png"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn abort_before_publish_removes_staging_without_visible_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(root.path(), 1024, 4096);
+        let session = SessionId::new();
+        let session_dir = store.session_dir(&session);
+        let page = PageId::new();
+        let staged = Arc::new(Notify::new());
+        let publish = Arc::new(Notify::new());
+
+        let task = tokio::spawn({
+            let store = store.clone();
+            let session = session.clone();
+            let staged = Arc::clone(&staged);
+            let publish = Arc::clone(&publish);
+            async move {
+                store
+                    .put_paused_before_publish(
+                        &session,
+                        &page,
+                        "application/octet-stream",
+                        "bin",
+                        b"partial-transfer",
+                        1024,
+                        staged,
+                        publish,
+                    )
+                    .await
+            }
+        });
+
+        staged.notified().await;
+        assert_eq!(std::fs::read_dir(&session_dir).unwrap().count(), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        for _ in 0..100 {
+            if std::fs::read_dir(&session_dir).unwrap().next().is_none() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("aborted publication left a visible artifact or staging residue");
+    }
 }
