@@ -11,6 +11,48 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceConfig {
+    pub max_request_bytes: usize,
+    pub max_event_batch: usize,
+    pub max_event_retention: usize,
+    pub max_connections: usize,
+    pub token_records_path: PathBuf,
+}
+
+impl Default for InterfaceConfig {
+    fn default() -> Self {
+        Self {
+            max_request_bytes: 1024 * 1024,
+            max_event_batch: 256,
+            max_event_retention: 16_384,
+            max_connections: 64,
+            token_records_path: PathBuf::from("./data/storage/authorities.json"),
+        }
+    }
+}
+
+impl InterfaceConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.max_request_bytes == 0 {
+            return Err("interface max_request_bytes must be positive");
+        }
+        if self.max_event_batch == 0 {
+            return Err("interface max_event_batch must be positive");
+        }
+        if self.max_event_retention == 0 {
+            return Err("interface max_event_retention must be positive");
+        }
+        if self.max_connections == 0 {
+            return Err("interface max_connections must be positive");
+        }
+        if self.token_records_path.as_os_str().is_empty() {
+            return Err("interface token_records_path must not be empty");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
     pub allow_loopback: bool,
     pub allow_private_network: bool,
@@ -20,6 +62,8 @@ pub struct HttpConfig {
     pub max_download_bytes: usize,
     pub request_timeout_ms: u64,
     pub max_concurrent_requests: usize,
+    #[serde(default)]
+    pub interface: InterfaceConfig,
 }
 
 impl Default for HttpConfig {
@@ -33,6 +77,7 @@ impl Default for HttpConfig {
             max_download_bytes: 64 * 1024 * 1024,
             request_timeout_ms: 30_000,
             max_concurrent_requests: 8,
+            interface: InterfaceConfig::default(),
         }
     }
 }
@@ -91,7 +136,7 @@ impl Default for AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::AppConfig;
+    use super::{AppConfig, InterfaceConfig};
 
     #[test]
     fn http_defaults_deny_private_destinations_and_bound_concurrency() {
@@ -101,5 +146,51 @@ mod tests {
         assert_eq!(http.max_concurrent_requests, 8);
         assert!(http.max_redirects > 0);
         assert!(http.request_timeout_ms > 0);
+    }
+
+    #[test]
+    fn interface_defaults_are_bounded_and_store_only_an_authority_record_path() {
+        let interface = InterfaceConfig::default();
+
+        assert_eq!(interface.max_request_bytes, 1024 * 1024);
+        assert_eq!(interface.max_event_batch, 256);
+        assert_eq!(interface.max_event_retention, 16_384);
+        assert_eq!(interface.max_connections, 64);
+        assert_eq!(
+            interface.token_records_path,
+            std::path::PathBuf::from("./data/storage/authorities.json")
+        );
+        assert!(interface.validate().is_ok());
+        assert!(!format!("{:?}", AppConfig::default())
+            .to_ascii_lowercase()
+            .contains("bearer"));
+    }
+
+    #[test]
+    fn interface_rejects_zero_bounds_and_an_empty_authority_path() {
+        for invalid in [
+            InterfaceConfig {
+                max_request_bytes: 0,
+                ..InterfaceConfig::default()
+            },
+            InterfaceConfig {
+                max_event_batch: 0,
+                ..InterfaceConfig::default()
+            },
+            InterfaceConfig {
+                max_event_retention: 0,
+                ..InterfaceConfig::default()
+            },
+            InterfaceConfig {
+                max_connections: 0,
+                ..InterfaceConfig::default()
+            },
+            InterfaceConfig {
+                token_records_path: std::path::PathBuf::new(),
+                ..InterfaceConfig::default()
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
     }
 }
