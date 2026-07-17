@@ -87,6 +87,9 @@ impl AuthorityStore {
         expires_at: DateTime<Utc>,
     ) -> Result<CapabilityHandle, InterfaceError> {
         let now = Utc::now();
+        if expires_at <= now {
+            return Err(authentication_error());
+        }
         let mut records = self.records.write().await;
         records.retain(|record| record.expires_at > now && !record.revoked.load(Ordering::Acquire));
         if records.len() >= self.capacity {
@@ -205,6 +208,10 @@ impl CapabilityHandle {
         self.capabilities.contains(capability)
     }
 
+    pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
+        !self.is_invalid_at(now)
+    }
+
     pub(crate) fn is_invalid_at(&self, now: DateTime<Utc>) -> bool {
         self.expires_at <= now || self.revoked.load(Ordering::Acquire)
     }
@@ -254,5 +261,29 @@ fn resource_exhausted_error() -> InterfaceError {
         retry_after_ms: None,
         reconciliation_required: false,
         required_capability: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+    use types::{Capability, PrincipalId};
+    use uuid::Uuid;
+
+    use super::AuthorityStore;
+
+    #[tokio::test]
+    async fn rejected_expired_hash_is_never_retained() {
+        let store = AuthorityStore::with_capacity(1);
+        assert!(store
+            .enroll_hash(
+                [7; 32],
+                PrincipalId::from_uuid(Uuid::nil()),
+                [Capability::SessionRead],
+                Utc::now() - Duration::seconds(1),
+            )
+            .await
+            .is_err());
+        assert!(store.records.read().await.is_empty());
     }
 }

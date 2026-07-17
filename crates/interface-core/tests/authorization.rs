@@ -37,6 +37,27 @@ fn envelope() -> CommandEnvelope {
 }
 
 #[tokio::test]
+async fn expired_hash_enrollment_is_rejected_without_consuming_capacity() {
+    let store = AuthorityStore::with_capacity(1);
+    let bearer = "expired-external-authority-bearer";
+    let token_hash: [u8; 32] = Sha256::digest(bearer.as_bytes()).into();
+
+    assert!(store
+        .enroll_hash(
+            token_hash,
+            principal(),
+            [Capability::SessionRead],
+            Utc::now() - Duration::seconds(1),
+        )
+        .await
+        .is_err());
+    assert!(store
+        .enroll_hash(token_hash, principal(), [Capability::SessionRead], expiry())
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
 async fn externally_enrolled_hash_and_handle_share_expiry_and_revocation_state() {
     let store = AuthorityStore::with_capacity(1);
     let bearer = "external-authority-bearer-0000001";
@@ -76,32 +97,26 @@ async fn externally_enrolled_hash_and_handle_share_expiry_and_revocation_state()
         InterfaceErrorCode::AuthenticationFailed
     );
 
-    let expired = AuthorityStore::with_capacity(1);
-    let expired_handle = expired
+    let expiring = AuthorityStore::with_capacity(1);
+    let expires_at = Utc::now() + Duration::minutes(1);
+    let expired_handle = expiring
         .enroll_hash(
             token_hash,
             principal(),
             [Capability::SessionRead],
-            Utc::now() - Duration::seconds(1),
+            expires_at,
         )
         .await
         .unwrap();
-    let expired_context = expired_handle.context(expiry(), None);
     assert_eq!(
-        expired
-            .authenticate(bearer, Utc::now())
+        expiring
+            .authenticate(bearer, expires_at + Duration::seconds(1))
             .await
             .unwrap_err()
             .code,
         InterfaceErrorCode::AuthenticationFailed
     );
-    assert_eq!(
-        AuthorizationGuard::new(expired_handle)
-            .authorize(&expired_context, InterfaceOperation::RuntimeInfo)
-            .unwrap_err()
-            .code,
-        InterfaceErrorCode::AuthenticationFailed
-    );
+    assert!(!expired_handle.is_valid_at(expires_at + Duration::seconds(1)));
 }
 
 #[tokio::test]
@@ -146,7 +161,7 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
         .issue(
             PrincipalId::from_uuid(uuid!("20000000-0000-0000-0000-000000000002")),
             [Capability::SessionRead],
-            now - Duration::seconds(1),
+            now + Duration::seconds(1),
         )
         .await
         .unwrap()
@@ -166,9 +181,15 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
 
     let unknown = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let malformed = "not+a+url-safe-token";
+    let validation_time = now + Duration::seconds(2);
     let errors = [unknown, malformed, expired.as_str(), revoked.as_str()]
         .into_iter()
-        .map(|token| async { store.authenticate(token, now).await.unwrap_err() });
+        .map(|token| async {
+            store
+                .authenticate(token, validation_time)
+                .await
+                .unwrap_err()
+        });
     let errors = futures::future::join_all(errors).await;
     for error in &errors {
         assert_eq!(error.code, InterfaceErrorCode::AuthenticationFailed);
@@ -182,7 +203,11 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
     }
 
     assert_eq!(
-        store.authenticate(&live, now).await.unwrap_err().message,
+        store
+            .authenticate(&live, validation_time)
+            .await
+            .unwrap_err()
+            .message,
         errors[0].message
     );
 }
@@ -220,14 +245,14 @@ async fn authority_capacity_refuses_live_overflow_and_reclaims_invalid_records()
         .is_ok());
 
     let expired = AuthorityStore::with_capacity(1);
-    expired
+    assert!(expired
         .issue(
             principal(),
             [Capability::SessionRead],
             now - Duration::seconds(1),
         )
         .await
-        .unwrap();
+        .is_err());
     assert!(expired
         .issue(
             PrincipalId::from_uuid(uuid!("40000000-0000-0000-0000-000000000004")),

@@ -130,12 +130,13 @@ impl std::error::Error for StartupCredentialError {}
 #[derive(Clone)]
 pub struct EnrolledAuthority {
     store: AuthorityStore,
+    startup_handle: CapabilityHandle,
 }
 
 impl EnrolledAuthority {
     pub async fn enroll(startup: StartupCredential) -> Result<Self, StartupCredentialError> {
         let store = AuthorityStore::with_capacity(1);
-        store
+        let startup_handle = store
             .enroll_hash(
                 startup.token_hash,
                 startup.principal_id,
@@ -144,7 +145,14 @@ impl EnrolledAuthority {
             )
             .await
             .map_err(|_| StartupCredentialError::EnrollmentFailed)?;
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            startup_handle,
+        })
+    }
+
+    pub(crate) fn startup_handle(&self) -> CapabilityHandle {
+        self.startup_handle.clone()
     }
 }
 
@@ -184,16 +192,13 @@ pub(crate) async fn authenticate(
         Ok(value) => value,
         Err(error) => return error.into_response(),
     };
+    let handle = match state.authority.authenticate(&bearer, Utc::now()).await {
+        Ok(handle) => handle,
+        Err(error) => return ProtocolError::from(error).into_response(),
+    };
     let parsed = match parse_context_headers(request.headers()) {
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
-    };
-    let handle = match state.authority.authenticate(&bearer, Utc::now()).await {
-        Ok(handle) => handle,
-        Err(mut error) => {
-            error.correlation_id = parsed.correlation_id;
-            return ProtocolError::from(error).into_response();
-        }
     };
     let mut context = handle.context(parsed.deadline, parsed.idempotency_key);
     context.interface_version = parsed.interface_version;
@@ -216,17 +221,17 @@ pub(crate) async fn authenticate(
         .context
         .correlation_id
         .clone();
-    let mut response = match crate::routes::validate_request_boundary(&state, &mut request).await {
-        Err(error) => error.into_response(),
-        Ok(()) => match state.in_flight_requests.clone().try_acquire_owned() {
-            Ok(_permit) => next.run(request).await,
-            Err(_) => ProtocolError::from(interface_error(
-                InterfaceErrorCode::ResourceExhausted,
-                "interface in-flight request capacity exhausted",
-                correlation_id,
-                Some(1_000),
-            ))
-            .into_response(),
+    let mut response = match state.in_flight_requests.clone().try_acquire_owned() {
+        Err(_) => ProtocolError::from(interface_error(
+            InterfaceErrorCode::ResourceExhausted,
+            "interface in-flight request capacity exhausted",
+            correlation_id,
+            Some(1_000),
+        ))
+        .into_response(),
+        Ok(_permit) => match crate::routes::validate_request_boundary(&state, &mut request).await {
+            Err(error) => error.into_response(),
+            Ok(()) => next.run(request).await,
         },
     };
     response.headers_mut().insert(

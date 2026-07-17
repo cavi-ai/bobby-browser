@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use axum::body::{to_bytes, Body};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::http::{Request, StatusCode};
 use broker::{router, AppState};
 use chrono::{Duration, SecondsFormat, Utc};
@@ -243,6 +243,50 @@ async fn streamed_oversize_bodies_are_rejected_before_runtime_dispatch() {
 
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn body_collection_obeys_deadline_and_releases_the_in_flight_permit() {
+    let interface = InterfaceConfig {
+        max_connections: 1,
+        ..InterfaceConfig::default()
+    };
+    let (app, token, calls) = counted_app(
+        [Capability::SessionRead, Capability::SessionWrite],
+        interface,
+    )
+    .await;
+    let delayed = futures_util::stream::once(async {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        Ok::<_, Infallible>(Bytes::from_static(br#"{"profile":"late","proxy":null}"#))
+    });
+    let mut request = authorized("POST", "/v1/sessions", &token, Body::from_stream(delayed));
+    request.headers_mut().insert(
+        "x-deadline",
+        (Utc::now() + Duration::milliseconds(150))
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+            .parse()
+            .unwrap(),
+    );
+
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(
+        response.headers()["x-interface-version"],
+        CURRENT_INTERFACE_VERSION
+    );
+    assert_eq!(
+        response.headers()["x-correlation-id"],
+        "10000000-0000-0000-0000-000000000011"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let next = app
+        .oneshot(authorized("GET", "/v1/runtime", &token, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
