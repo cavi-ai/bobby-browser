@@ -152,7 +152,7 @@ async fn repeated_generic_bytes_converge_on_one_content_addressed_artifact() {
 }
 
 #[tokio::test]
-async fn pending_artifact_drop_removes_published_directory_and_commit_disarms_cleanup() {
+async fn content_addressed_pending_drop_never_deletes_published_bytes() {
     let root = tempfile::tempdir().unwrap();
     let store = ArtifactStore::new(root.path(), 1024, 4096);
     let session = SessionId::new();
@@ -176,11 +176,7 @@ async fn pending_artifact_drop_removes_published_directory_and_commit_disarms_cl
         .join(&dropped_id)
         .is_dir());
     drop(pending);
-    assert!(!root
-        .path()
-        .join(session.0.to_string())
-        .join(dropped_id)
-        .exists());
+    assert_eq!(store.get(&session, &dropped_id).await.unwrap(), b"guarded");
 
     let pending = store
         .put_pending(
@@ -197,5 +193,41 @@ async fn pending_artifact_drop_removes_published_directory_and_commit_disarms_cl
     assert_eq!(
         store.get(&session, &record.artifact_id).await.unwrap(),
         b"committed"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_identical_publications_converge_without_loser_deleting_winner() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let page = PageId::new();
+
+    let (first, second) = tokio::join!(
+        store.put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"same-concurrent-bytes",
+            1024,
+        ),
+        store.put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"same-concurrent-bytes",
+            1024,
+        )
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first.record().artifact_id, second.record().artifact_id);
+    let record = second.commit();
+    drop(first);
+    assert_eq!(
+        store.get(&session, &record.artifact_id).await.unwrap(),
+        b"same-concurrent-bytes"
     );
 }
