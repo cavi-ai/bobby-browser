@@ -114,6 +114,23 @@ async fn synchronizes_versioned_http_state() {
         assert_eq!(unchanged.cookies.len(), snapshot.cookies.len());
     }
 
+    worker
+        .commit_http_state(
+            &page_id,
+            snapshot.version,
+            ResponseStateDelta {
+                cookies: Vec::new(),
+                cache_validators: BTreeMap::from([("state".into(), "fixture-v1".into())]),
+            },
+        )
+        .await
+        .expect("empty cookie delta commits validators without invalid CDP call");
+    let snapshot = worker.http_state(&page_id).await.unwrap();
+    assert_eq!(
+        snapshot.cache_validators.get("state").unwrap(),
+        "fixture-v1"
+    );
+
     let mut direct = cookie("direct", "beta");
     direct.source_scheme = Some("NonSecure".into());
     worker
