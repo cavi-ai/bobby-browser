@@ -37,7 +37,7 @@ impl PageRuntime {
             .append(record(
                 &envelope,
                 CommandPhase::Accepted,
-                Some(envelope.clone()),
+                Some(envelope.journal_safe()),
                 None,
             ))
             .await

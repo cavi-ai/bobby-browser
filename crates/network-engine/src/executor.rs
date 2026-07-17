@@ -115,7 +115,8 @@ impl DirectHttpExecutor {
         }
         let body = decode_text(&response.body, &response.headers)
             .ok_or_else(|| transfer_error("response text decoding was incomplete"))?;
-        let evidence = match inspect_document(response.url.as_str(), &body, command) {
+        let safe_final_url = journal_safe_url(&response.url);
+        let evidence = match inspect_document(&safe_final_url, &body, command) {
             Ok(evidence) => evidence,
             Err(reason) => return Ok(HttpCandidate::FallbackRequired(reason)),
         };
@@ -193,7 +194,7 @@ impl DirectHttpExecutor {
         for hop in 0..=self.network.max_redirects {
             let destination = self.destinations.resolve_and_validate(&current).await?;
             let url = destination.url().clone();
-            redirects.push(url.to_string());
+            redirects.push(journal_safe_url(&url));
             let host = url
                 .host_str()
                 .ok_or_else(|| policy_error("URL must include a host"))?;
@@ -266,7 +267,7 @@ impl DirectHttpExecutor {
 impl BoundedResponse {
     fn meta(&self) -> HttpMeta {
         HttpMeta {
-            final_url: self.url.to_string(),
+            final_url: journal_safe_url(&self.url),
             status: self.status.as_u16(),
             redirect_chain: self.redirects.clone(),
             bytes: self.body.len() as u64,
@@ -274,6 +275,15 @@ impl BoundedResponse {
             elapsed_ms: self.elapsed_ms,
         }
     }
+}
+
+fn journal_safe_url(url: &Url) -> String {
+    let mut safe = url.clone();
+    let _ = safe.set_username("");
+    let _ = safe.set_password(None);
+    safe.set_query(None);
+    safe.set_fragment(None);
+    safe.to_string()
 }
 
 fn bound_headers(headers: &HeaderMap, limit: usize) -> Result<(), CommandError> {
@@ -324,6 +334,26 @@ fn cookie_header(
     }
     let mut sent = Vec::new();
     for cookie in jar.into_values() {
+        if cookie.same_site.as_deref().is_some_and(|value| {
+            value.eq_ignore_ascii_case("strict") || value.eq_ignore_ascii_case("lax")
+        }) && (url.scheme() != top_level.scheme()
+            || url.host_str().map(str::to_ascii_lowercase)
+                != top_level.host_str().map(str::to_ascii_lowercase))
+        {
+            return Err(equivalence_error(
+                "schemeful SameSite request context cannot be proven equivalent",
+            ));
+        }
+        if cookie
+            .same_site
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+            && (!cookie.secure || url.scheme() != "https")
+        {
+            return Err(equivalence_error(
+                "SameSite=None cookie requires Secure HTTPS",
+            ));
+        }
         if cookie.expires_unix.is_some_and(|expiry| expiry <= now)
             || (cookie.secure && url.scheme() != "https")
         {
@@ -345,6 +375,14 @@ fn cookie_header(
                     || request_path.as_bytes().get(cookie.path.len()) == Some(&b'/')));
         if !domain_matches || !path_matches {
             continue;
+        }
+        if let Some(source_port) = cookie.source_port {
+            let request_port = url.port_or_known_default().map(i64::from);
+            if source_port == -1 || request_port != Some(source_port) {
+                return Err(equivalence_error(
+                    "cookie source port does not match the request URL",
+                ));
+            }
         }
         if let Some(partition) = &cookie.partition_key {
             let site = Url::parse(&partition.top_level_site)
@@ -421,13 +459,13 @@ fn collect_state(
     }
     let mut validators = BTreeMap::new();
     if let Some(value) = headers.get(header::ETAG).and_then(|v| v.to_str().ok()) {
-        validators.insert(url.to_string(), value.to_owned());
+        validators.insert(journal_safe_url(url), value.to_owned());
     }
     if let Some(value) = headers
         .get(header::LAST_MODIFIED)
         .and_then(|v| v.to_str().ok())
     {
-        validators.insert(url.to_string(), value.to_owned());
+        validators.insert(journal_safe_url(url), value.to_owned());
     }
     state.cache_validators.extend(validators);
     Ok(())
@@ -552,6 +590,114 @@ fn sanitize_filename(name: String) -> Option<String> {
         None
     } else {
         Some(name)
+    }
+}
+
+#[cfg(test)]
+mod cookie_context_tests {
+    use super::*;
+    use crate::state::{HttpCookie, HttpStateSnapshot};
+
+    fn snapshot(
+        current_url: &str,
+        same_site: &str,
+        secure: bool,
+        source_port: Option<i64>,
+    ) -> HttpStateSnapshot {
+        HttpStateSnapshot {
+            version: 1,
+            current_url: current_url.into(),
+            cache_validators: BTreeMap::new(),
+            user_agent: "test".into(),
+            language: "en".into(),
+            cookies: vec![HttpCookie {
+                name: "sid".into(),
+                value: "secret".into(),
+                domain: "example.com".into(),
+                host_only: true,
+                path: "/".into(),
+                secure,
+                http_only: true,
+                same_site: Some(same_site.into()),
+                expires_unix: None,
+                priority: None,
+                source_scheme: None,
+                source_port,
+                partition_key: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn strict_and_lax_fail_closed_across_scheme_or_host() {
+        for mode in ["Strict", "Lax"] {
+            let state = snapshot("https://example.com/", mode, false, None);
+            assert_eq!(
+                cookie_header(
+                    &state,
+                    &ResponseStateDelta::default(),
+                    &Url::parse("http://example.com/").unwrap()
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::HttpEquivalenceUnproven
+            );
+            assert_eq!(
+                cookie_header(
+                    &state,
+                    &ResponseStateDelta::default(),
+                    &Url::parse("https://other.example/").unwrap()
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::HttpEquivalenceUnproven
+            );
+        }
+    }
+
+    #[test]
+    fn same_host_schemeful_cookie_is_sent_and_source_port_must_match() {
+        let state = snapshot("https://example.com/", "Strict", true, Some(443));
+        assert_eq!(
+            cookie_header(
+                &state,
+                &ResponseStateDelta::default(),
+                &Url::parse("https://example.com/path").unwrap()
+            )
+            .unwrap(),
+            "sid=secret"
+        );
+        let mismatch = snapshot("https://example.com/", "Lax", true, Some(8443));
+        assert_eq!(
+            cookie_header(
+                &mismatch,
+                &ResponseStateDelta::default(),
+                &Url::parse("https://example.com/").unwrap()
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::HttpEquivalenceUnproven
+        );
+    }
+
+    #[test]
+    fn same_site_none_requires_secure_https() {
+        for (secure, url) in [
+            (false, "https://example.com/"),
+            (true, "http://example.com/"),
+        ] {
+            let state = snapshot("https://example.com/", "None", secure, None);
+            assert_eq!(
+                cookie_header(
+                    &state,
+                    &ResponseStateDelta::default(),
+                    &Url::parse(url).unwrap()
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::HttpEquivalenceUnproven
+            );
+        }
     }
 }
 

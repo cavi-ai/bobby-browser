@@ -114,6 +114,44 @@ async fn generic_artifacts_are_private_validated_and_atomic() {
 }
 
 #[tokio::test]
+async fn repeated_generic_bytes_converge_on_one_content_addressed_artifact() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let page = PageId::new();
+    let first = store
+        .put(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"same",
+            1024,
+        )
+        .await
+        .unwrap();
+    let second = store
+        .put(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"same",
+            1024,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.artifact_id, first.sha256);
+    assert_eq!(second.artifact_id, first.artifact_id);
+    assert_eq!(
+        std::fs::read_dir(root.path().join(session.0.to_string()))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn pending_artifact_drop_removes_published_directory_and_commit_disarms_cleanup() {
     let root = tempfile::tempdir().unwrap();
     let store = ArtifactStore::new(root.path(), 1024, 4096);

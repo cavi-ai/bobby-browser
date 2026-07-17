@@ -15,14 +15,14 @@ fn uuid(value: u128) -> Uuid {
 }
 
 #[test]
-fn adaptive_http_download_command_is_replayable_and_round_trips() {
+fn adaptive_http_download_command_is_reconciliable_and_round_trips() {
     let command = PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
         url: "https://example.test/report.bin".into(),
         expected_content_type: Some("application/octet-stream".into()),
         max_bytes: 1_048_576,
     });
 
-    assert_eq!(command.class(), CommandClass::Replayable);
+    assert_eq!(command.class(), CommandClass::Reconciliable);
     let value = serde_json::to_value(&command).unwrap();
     assert_eq!(value["kind"], "downloadUrl");
     let round_tripped: PrimitiveCommand = serde_json::from_value(value.clone()).unwrap();
@@ -194,6 +194,33 @@ fn command_envelope_uses_stable_camel_case_json() {
     assert_eq!(value["pageId"], json!(uuid(5)));
     assert_eq!(value["command"]["kind"], json!("navigate"));
     assert_eq!(value["command"]["input"]["waitUntil"], json!("interactive"));
+}
+
+#[test]
+fn journal_safe_envelope_removes_all_url_secrets_without_mutating_live_command() {
+    let mut envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId(uuid(1)),
+        workflow_id: WorkflowId(uuid(2)),
+        attempt_id: AttemptId(uuid(3)),
+        session_id: SessionId(uuid(4)),
+        page_id: Some(PageId(uuid(5))),
+        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        command: PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
+            url: "https://alice:pw@example.com/file?token=signed#secret".into(),
+            expected_content_type: None,
+            max_bytes: 10,
+        }),
+    };
+    let safe = envelope.journal_safe();
+    let safe_json = serde_json::to_string(&safe).unwrap();
+    assert!(!safe_json.contains("alice"));
+    assert!(!safe_json.contains("signed"));
+    assert!(!safe_json.contains("secret"));
+    let PrimitiveCommand::DownloadUrl(live) = &mut envelope.command else {
+        unreachable!()
+    };
+    assert!(live.url.contains("token=signed"));
 }
 
 #[test]
