@@ -99,6 +99,11 @@ impl DirectHttpExecutor {
         let response = self
             .execute(snapshot, &snapshot.current_url, self.network.max_body_bytes)
             .await?;
+        if matches!(response.status.as_u16(), 204 | 205 | 304) || response.body.is_empty() {
+            return Ok(HttpCandidate::FallbackRequired(
+                ExecutionReason::StateConflict,
+            ));
+        }
         let media_type = content_type(&response.headers);
         if !matches!(
             media_type.as_str(),
@@ -218,7 +223,7 @@ impl DirectHttpExecutor {
                 .map_err(|_| transfer_error("HTTP request failed"))?;
             bound_headers(response.headers(), self.network.max_header_bytes)?;
             collect_state(response.headers(), &url, &mut state)?;
-            if response.status().is_redirection() {
+            if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
                 if hop == self.network.max_redirects {
                     return Err(transfer_error("redirect limit exceeded"));
                 }
@@ -310,8 +315,7 @@ fn cookie_header(
         jar.insert(
             (
                 cookie.name.clone(),
-                cookie.domain.to_ascii_lowercase(),
-                cookie.host_only,
+                cookie.domain.trim_start_matches('.').to_ascii_lowercase(),
                 cookie.path.clone(),
                 partition,
             ),
@@ -372,18 +376,10 @@ fn collect_state(
                 "partitioned response cookie cannot be represented safely",
             ));
         }
-        let response_host = url.host_str().unwrap_or_default();
-        if let Some(domain) = cookie.domain() {
-            let domain = domain.trim_start_matches('.');
-            if !response_host.eq_ignore_ascii_case(domain)
-                && !response_host
-                    .to_ascii_lowercase()
-                    .ends_with(&format!(".{}", domain.to_ascii_lowercase()))
-            {
-                return Err(policy_error(
-                    "response cookie domain is outside the response host",
-                ));
-            }
+        if cookie.domain().is_some() {
+            return Err(equivalence_error(
+                "response Domain cookies require browser fallback",
+            ));
         }
         let response_cookie = HttpCookie {
             name: cookie.name().to_owned(),
@@ -409,8 +405,8 @@ fn collect_state(
             existing.name != response_cookie.name
                 || !existing
                     .domain
-                    .eq_ignore_ascii_case(&response_cookie.domain)
-                || existing.host_only != response_cookie.host_only
+                    .trim_start_matches('.')
+                    .eq_ignore_ascii_case(response_cookie.domain.trim_start_matches('.'))
                 || existing.path != response_cookie.path
                 || !same_partition(existing, &response_cookie)
         });
@@ -520,6 +516,19 @@ fn percent_decode(input: &str) -> Option<String> {
 }
 
 fn sanitize_filename(name: String) -> Option<String> {
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+    let reserved = matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || base
+            .strip_prefix("COM")
+            .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+        || base
+            .strip_prefix("LPT")
+            .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
     if name.is_empty()
         || name.len() > 255
         || name == "."
@@ -528,6 +537,9 @@ fn sanitize_filename(name: String) -> Option<String> {
         || name.starts_with('\\')
         || name.contains('/')
         || name.contains('\\')
+        || name.contains(':')
+        || name.ends_with(['.', ' '])
+        || reserved
         || name.chars().any(char::is_control)
     {
         None
@@ -546,6 +558,9 @@ fn error(code: ErrorCode, message: impl Into<String>, retryable: bool) -> Comman
 }
 fn policy_error(message: impl Into<String>) -> CommandError {
     error(ErrorCode::NetworkPolicyDenied, message, false)
+}
+fn equivalence_error(message: impl Into<String>) -> CommandError {
+    error(ErrorCode::HttpEquivalenceUnproven, message, false)
 }
 fn transfer_error(message: impl Into<String>) -> CommandError {
     error(ErrorCode::HttpTransferFailed, message, true)
