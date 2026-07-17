@@ -1,21 +1,54 @@
 use async_trait::async_trait;
-use interface_core::{InterfaceResult, RuntimeInterface};
+use chrono::Utc;
+use interface_core::{
+    canonical_sha256, AuthorizationGuard, CapabilityHandle, IdempotencyReservation,
+    IdempotencyStore, InterfaceResult, RuntimeInterface,
+};
 use types::{
     CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence, InterfaceError,
-    InterfaceErrorCode, OpenPageRequest, PageState, RecoveryDecision, RequestContext, RuntimeError,
-    RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
+    InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState, RecoveryDecision,
+    RequestContext, RuntimeError, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
 };
 
 use crate::RuntimeService;
 
-#[async_trait]
-impl RuntimeInterface for RuntimeService {
-    async fn runtime_info(&self, _ctx: RequestContext) -> InterfaceResult<RuntimeInfo> {
-        Ok(RuntimeService::runtime_info(self).await)
+#[derive(Clone)]
+pub struct AuthenticatedRuntime {
+    inner: RuntimeService,
+    authorization: AuthorizationGuard,
+    idempotency: IdempotencyStore,
+}
+
+impl AuthenticatedRuntime {
+    pub fn new(inner: RuntimeService, authority: CapabilityHandle) -> Self {
+        Self::with_idempotency(inner, authority, IdempotencyStore::default())
     }
 
-    async fn list_sessions(&self, _ctx: RequestContext) -> InterfaceResult<Vec<SessionState>> {
-        Ok(RuntimeService::list_sessions(self).await)
+    pub fn with_idempotency(
+        inner: RuntimeService,
+        authority: CapabilityHandle,
+        idempotency: IdempotencyStore,
+    ) -> Self {
+        Self {
+            inner,
+            authorization: AuthorizationGuard::new(authority),
+            idempotency,
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeInterface for AuthenticatedRuntime {
+    async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::RuntimeInfo)?;
+        Ok(self.inner.runtime_info().await)
+    }
+
+    async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::ReadSession)?;
+        Ok(self.inner.list_sessions().await)
     }
 
     async fn create_session(
@@ -23,7 +56,10 @@ impl RuntimeInterface for RuntimeService {
         ctx: RequestContext,
         req: CreateSessionRequest,
     ) -> InterfaceResult<SessionState> {
-        RuntimeService::create_session(self, req)
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::CreateSession)?;
+        self.inner
+            .create_session(req)
             .await
             .map_err(|error| map_runtime_error(&ctx, error))
     }
@@ -33,17 +69,47 @@ impl RuntimeInterface for RuntimeService {
         ctx: RequestContext,
         req: OpenPageRequest,
     ) -> InterfaceResult<PageState> {
-        RuntimeService::open_page(self, req)
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::OpenPage)?;
+        self.inner
+            .open_page(req)
             .await
             .map_err(|error| map_runtime_error(&ctx, error))
     }
 
     async fn submit(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         envelope: CommandEnvelope,
     ) -> InterfaceResult<CommandOutcome> {
-        Ok(RuntimeService::submit(self, envelope).await)
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::SubmitCommand)?;
+        let Some(key) = ctx.idempotency_key.clone() else {
+            return Ok(self.inner.submit(envelope).await);
+        };
+        let digest = canonical_sha256(&envelope)?;
+        match self
+            .idempotency
+            .reserve(
+                ctx.principal_id.clone(),
+                key,
+                InterfaceOperation::SubmitCommand,
+                digest,
+                Utc::now(),
+                ctx.deadline,
+                ctx.correlation_id.clone(),
+            )
+            .await?
+        {
+            IdempotencyReservation::Replay(outcome) => Ok(outcome),
+            IdempotencyReservation::Acquired(permit) => {
+                let outcome = self.inner.submit(envelope).await;
+                self.idempotency
+                    .finish(permit, outcome.clone(), Utc::now())
+                    .await?;
+                Ok(outcome)
+            }
+        }
     }
 
     async fn checkpoint(
@@ -52,7 +118,10 @@ impl RuntimeInterface for RuntimeService {
         checkpoint: WorkflowCheckpoint,
         evidence: Vec<Evidence>,
     ) -> InterfaceResult<WorkflowCheckpoint> {
-        RuntimeService::checkpoint(self, checkpoint, evidence)
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        self.inner
+            .checkpoint(checkpoint, evidence)
             .await
             .map_err(|_| internal_error(&ctx))
     }
@@ -62,7 +131,10 @@ impl RuntimeInterface for RuntimeService {
         ctx: RequestContext,
         workflow: WorkflowId,
     ) -> InterfaceResult<RecoveryDecision> {
-        RuntimeService::recover(self, &workflow)
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::RecoverWorkflow)?;
+        self.inner
+            .recover(&workflow)
             .await
             .map_err(|_| internal_error(&ctx))
     }

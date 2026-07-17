@@ -3,14 +3,11 @@ use std::sync::{
     Arc,
 };
 
-use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use interface_core::{AuthenticatedRuntime, Authority, AuthorityStore, RuntimeInterface};
+use interface_core::{Authority, AuthorityStore, AuthorizationGuard};
 use types::{
-    AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
-    Evidence, IdempotencyKey, InterfaceErrorCode, OpenPageRequest, PageState, PrincipalId,
-    RecoveryDecision, RequestContext, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint,
-    WorkflowId,
+    AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, InterfaceErrorCode,
+    InterfaceOperation, PrincipalId, RequestContext, SessionId, WorkflowId,
 };
 use uuid::uuid;
 
@@ -118,6 +115,57 @@ async fn unknown_expired_revoked_and_malformed_tokens_are_indistinguishable() {
     );
 }
 
+#[tokio::test]
+async fn authority_capacity_refuses_live_overflow_and_reclaims_invalid_records() {
+    let store = AuthorityStore::with_capacity(1);
+    let now = Utc::now();
+    store
+        .issue(
+            principal(),
+            [Capability::SessionRead],
+            now + Duration::minutes(5),
+        )
+        .await
+        .unwrap();
+    let full = store
+        .issue(
+            PrincipalId::from_uuid(uuid!("30000000-0000-0000-0000-000000000003")),
+            [Capability::SessionRead],
+            now + Duration::minutes(5),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(full.code, InterfaceErrorCode::ResourceExhausted);
+
+    store.revoke(&principal()).await.unwrap();
+    assert!(store
+        .issue(
+            PrincipalId::from_uuid(uuid!("30000000-0000-0000-0000-000000000003")),
+            [Capability::SessionRead],
+            now + Duration::minutes(5),
+        )
+        .await
+        .is_ok());
+
+    let expired = AuthorityStore::with_capacity(1);
+    expired
+        .issue(
+            principal(),
+            [Capability::SessionRead],
+            now - Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    assert!(expired
+        .issue(
+            PrincipalId::from_uuid(uuid!("40000000-0000-0000-0000-000000000004")),
+            [Capability::SessionRead],
+            now + Duration::minutes(5),
+        )
+        .await
+        .is_ok());
+}
+
 #[derive(Clone, Default)]
 struct RecordingRuntime {
     calls: Arc<AtomicUsize>,
@@ -131,74 +179,24 @@ impl RecordingRuntime {
     fn record(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
     }
-}
 
-#[async_trait]
-impl RuntimeInterface for RecordingRuntime {
-    async fn runtime_info(
-        &self,
-        _ctx: RequestContext,
-    ) -> interface_core::InterfaceResult<RuntimeInfo> {
+    async fn submit(&self, envelope: CommandEnvelope) -> CommandOutcome {
         self.record();
-        unreachable!("authorization tests must not dispatch")
-    }
-
-    async fn list_sessions(
-        &self,
-        _ctx: RequestContext,
-    ) -> interface_core::InterfaceResult<Vec<SessionState>> {
-        self.record();
-        unreachable!("authorization tests must not dispatch")
-    }
-
-    async fn create_session(
-        &self,
-        _ctx: RequestContext,
-        _req: CreateSessionRequest,
-    ) -> interface_core::InterfaceResult<SessionState> {
-        self.record();
-        unreachable!("authorization tests must not dispatch")
-    }
-
-    async fn open_page(
-        &self,
-        _ctx: RequestContext,
-        _req: OpenPageRequest,
-    ) -> interface_core::InterfaceResult<PageState> {
-        self.record();
-        unreachable!("authorization tests must not dispatch")
-    }
-
-    async fn submit(
-        &self,
-        _ctx: RequestContext,
-        envelope: CommandEnvelope,
-    ) -> interface_core::InterfaceResult<CommandOutcome> {
-        self.record();
-        Ok(CommandOutcome::Completed {
+        CommandOutcome::Completed {
             command_id: envelope.command_id,
             evidence: Vec::new(),
-        })
+        }
     }
+}
 
-    async fn checkpoint(
-        &self,
-        _ctx: RequestContext,
-        _checkpoint: WorkflowCheckpoint,
-        _evidence: Vec<Evidence>,
-    ) -> interface_core::InterfaceResult<WorkflowCheckpoint> {
-        self.record();
-        unreachable!("authorization tests must not dispatch")
-    }
-
-    async fn recover(
-        &self,
-        _ctx: RequestContext,
-        _workflow: WorkflowId,
-    ) -> interface_core::InterfaceResult<RecoveryDecision> {
-        self.record();
-        unreachable!("authorization tests must not dispatch")
-    }
+async fn dispatch_submit(
+    guard: &AuthorizationGuard,
+    runtime: &RecordingRuntime,
+    context: RequestContext,
+    envelope: CommandEnvelope,
+) -> interface_core::InterfaceResult<CommandOutcome> {
+    guard.authorize(&context, InterfaceOperation::SubmitCommand)?;
+    Ok(runtime.submit(envelope).await)
 }
 
 #[tokio::test]
@@ -213,9 +211,11 @@ async fn authorization_denies_missing_capability_before_runtime_dispatch() {
     let authority = store.verify(&token).await.unwrap();
     let context = authority.context(expiry(), None);
     let runtime = RecordingRuntime::default();
-    let api = AuthenticatedRuntime::new(runtime.clone(), authority);
+    let api = AuthorizationGuard::new(authority);
 
-    let error = api.submit(context, envelope()).await.unwrap_err();
+    let error = dispatch_submit(&api, &runtime, context, envelope())
+        .await
+        .unwrap_err();
     assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
     assert_eq!(error.required_capability, Some(Capability::BrowserMutate));
     assert_eq!(runtime.calls(), 0);
@@ -233,9 +233,11 @@ async fn handle_authority_cannot_be_expanded_by_a_forged_context() {
     let authority = store.verify(&token).await.unwrap();
     let forged = RequestContext::new_for_test(principal(), [Capability::BrowserMutate], expiry());
     let runtime = RecordingRuntime::default();
-    let api = AuthenticatedRuntime::new(runtime.clone(), authority);
+    let api = AuthorizationGuard::new(authority);
 
-    let error = api.submit(forged, envelope()).await.unwrap_err();
+    let error = dispatch_submit(&api, &runtime, forged, envelope())
+        .await
+        .unwrap_err();
     assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
     assert_eq!(runtime.calls(), 0);
 }
@@ -252,9 +254,11 @@ async fn deadline_is_rejected_before_capability_and_dispatch() {
     let authority = store.verify(&token).await.unwrap();
     let expired = authority.context(Utc::now() - Duration::seconds(1), None);
     let runtime = RecordingRuntime::default();
-    let api = AuthenticatedRuntime::new(runtime.clone(), authority);
+    let api = AuthorizationGuard::new(authority);
 
-    let error = api.submit(expired, envelope()).await.unwrap_err();
+    let error = dispatch_submit(&api, &runtime, expired, envelope())
+        .await
+        .unwrap_err();
     assert_eq!(error.code, InterfaceErrorCode::DeadlineExceeded);
     assert_eq!(runtime.calls(), 0);
 }
@@ -270,38 +274,12 @@ async fn revocation_invalidates_an_already_issued_handle_before_dispatch() {
     let authority = store.verify(&token).await.unwrap();
     let context = authority.context(expiry(), None);
     let runtime = RecordingRuntime::default();
-    let api = AuthenticatedRuntime::new(runtime.clone(), authority);
+    let api = AuthorizationGuard::new(authority);
     store.revoke(&principal()).await.unwrap();
 
-    let error = api.submit(context, envelope()).await.unwrap_err();
+    let error = dispatch_submit(&api, &runtime, context, envelope())
+        .await
+        .unwrap_err();
     assert_eq!(error.code, InterfaceErrorCode::AuthenticationFailed);
     assert_eq!(runtime.calls(), 0);
-}
-
-#[tokio::test]
-async fn matching_idempotent_submit_reuses_only_the_committed_outcome() {
-    let store = AuthorityStore::in_memory();
-    let token = store
-        .issue(principal(), [Capability::BrowserMutate], expiry())
-        .await
-        .unwrap()
-        .expose_once()
-        .to_owned();
-    let authority = store.verify(&token).await.unwrap();
-    let key = IdempotencyKey::try_from("same-submit").unwrap();
-    let context = authority.context(expiry(), Some(key.clone()));
-    let runtime = RecordingRuntime::default();
-    let api = AuthenticatedRuntime::new(runtime.clone(), authority);
-    let request = envelope();
-
-    api.submit(context.clone(), request.clone()).await.unwrap();
-    api.submit(context.clone(), request).await.unwrap();
-    assert_eq!(runtime.calls(), 1);
-
-    let error = api
-        .submit(context, envelope())
-        .await
-        .expect_err("same key with different request must fail closed");
-    assert_eq!(error.code, InterfaceErrorCode::IdempotencyConflict);
-    assert_eq!(runtime.calls(), 1);
 }

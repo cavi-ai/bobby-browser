@@ -16,6 +16,17 @@ use workflow_journal::JsonlJournal;
 
 mod interface;
 
+pub use interface::AuthenticatedRuntime;
+
+/// The unauthenticated application service is not a public interface adapter.
+///
+/// ```compile_fail
+/// use interface_core::RuntimeInterface;
+/// use sdk_core::RuntimeService;
+///
+/// fn requires_runtime_interface<T: RuntimeInterface>() {}
+/// requires_runtime_interface::<RuntimeService>();
+/// ```
 #[derive(Clone, Default)]
 pub struct RuntimeService {
     pub sessions: SessionManager,

@@ -26,9 +26,16 @@ struct AuthorityRecord {
     revoked: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AuthorityStore {
     records: Arc<RwLock<Vec<AuthorityRecord>>>,
+    capacity: usize,
+}
+
+impl Default for AuthorityStore {
+    fn default() -> Self {
+        Self::with_capacity(1024)
+    }
 }
 
 impl fmt::Debug for AuthorityStore {
@@ -36,6 +43,7 @@ impl fmt::Debug for AuthorityStore {
         formatter
             .debug_struct("AuthorityStore")
             .field("credentials", &"[REDACTED]")
+            .field("capacity", &self.capacity)
             .finish()
     }
 }
@@ -45,16 +53,29 @@ impl AuthorityStore {
         Self::default()
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            records: Arc::new(RwLock::new(Vec::new())),
+            capacity,
+        }
+    }
+
     pub async fn issue(
         &self,
         principal_id: PrincipalId,
         capabilities: impl IntoIterator<Item = Capability>,
         expires_at: DateTime<Utc>,
     ) -> Result<IssuedToken, InterfaceError> {
+        let now = Utc::now();
+        let mut records = self.records.write().await;
+        records.retain(|record| record.expires_at > now && !record.revoked.load(Ordering::Acquire));
+        if records.len() >= self.capacity {
+            return Err(resource_exhausted_error());
+        }
         let mut token_bytes = [0_u8; 32];
         getrandom::fill(&mut token_bytes).map_err(|_| authentication_error())?;
         let token_hash = sha256(token_bytes);
-        self.records.write().await.push(AuthorityRecord {
+        records.push(AuthorityRecord {
             token_hash,
             principal_id,
             capabilities: CapabilitySet::new(capabilities),
@@ -192,6 +213,20 @@ fn authentication_error() -> InterfaceError {
         code: InterfaceErrorCode::AuthenticationFailed,
         layer: ErrorLayer::Interface,
         message: "authentication failed".to_owned(),
+        correlation_id: CorrelationId::new(),
+        command_id: None,
+        retryable: false,
+        retry_after_ms: None,
+        reconciliation_required: false,
+        required_capability: None,
+    }
+}
+
+fn resource_exhausted_error() -> InterfaceError {
+    InterfaceError {
+        code: InterfaceErrorCode::ResourceExhausted,
+        layer: ErrorLayer::Interface,
+        message: "authority capacity exhausted".to_owned(),
         correlation_id: CorrelationId::new(),
         command_id: None,
         retryable: false,
