@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+artifact-store = { path = "../artifact-store" }
 checkpoint-store = { path = "../checkpoint-store" }
 chrono.workspace = true
 config = { path = "../config" }
+network-engine = { path = "../network-engine" }
 sdk-core = { path = "../sdk-core" }
+session-manager = { path = "../session-manager" }
 page-runtime = { path = "../page-runtime" }
 serde_json.workspace = true
 tempfile.workspace = true

@@ -1,4 +1,6 @@
 use config::BrowserConfig;
+use network_engine::state::{HttpCookie, ResponseStateDelta};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
@@ -10,6 +12,187 @@ use types::{
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
 };
+
+fn cookie(name: &str, value: &str) -> HttpCookie {
+    HttpCookie {
+        name: name.into(),
+        value: value.into(),
+        domain: String::new(),
+        host_only: true,
+        path: "/".into(),
+        secure: false,
+        http_only: false,
+        same_site: None,
+        expires_unix: None,
+        priority: None,
+        source_scheme: None,
+        source_port: None,
+        partition_key: None,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn synchronizes_versioned_http_state() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: session=alpha; HttpOnly; SameSite=Lax; Path=/\r\nContent-Length: 32\r\nConnection: close\r\n\r\n<title>HTTP state fixture</title>")
+                    .await
+                    .unwrap();
+            });
+        }
+    });
+    let state_url = format!("http://{address}/state");
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: state_url.clone(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let snapshot = worker.http_state(&page_id).await.unwrap();
+    assert_eq!(snapshot.current_url, state_url);
+    assert!(snapshot
+        .cookies
+        .iter()
+        .any(|cookie| { cookie.name == "session" && cookie.value == "alpha" && cookie.http_only }));
+    assert!(!snapshot.user_agent.is_empty());
+
+    let mut unrelated = cookie("unrelated", "blocked");
+    unrelated.domain = "example.invalid".into();
+    let mut nonfinite = cookie("nonfinite", "blocked");
+    nonfinite.expires_unix = Some(f64::NAN);
+    let mut invalid_expiry = cookie("invalid-expiry", "blocked");
+    invalid_expiry.expires_unix = Some(-1.0);
+    let mut secure_over_http = cookie("secure", "blocked");
+    secure_over_http.secure = true;
+    for rejected in [unrelated, nonfinite, invalid_expiry, secure_over_http] {
+        let error = worker
+            .commit_http_state(
+                &page_id,
+                snapshot.version,
+                ResponseStateDelta {
+                    cookies: vec![rejected],
+                    cache_validators: BTreeMap::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        let unchanged = worker.http_state(&page_id).await.unwrap();
+        assert_eq!(unchanged.version, snapshot.version);
+        assert_eq!(unchanged.cookies.len(), snapshot.cookies.len());
+    }
+
+    worker
+        .commit_http_state(
+            &page_id,
+            snapshot.version,
+            ResponseStateDelta {
+                cookies: Vec::new(),
+                cache_validators: BTreeMap::from([("state".into(), "fixture-v1".into())]),
+            },
+        )
+        .await
+        .expect("empty cookie delta commits validators without invalid CDP call");
+    let snapshot = worker.http_state(&page_id).await.unwrap();
+    assert_eq!(
+        snapshot.cache_validators.get("state").unwrap(),
+        "fixture-v1"
+    );
+
+    let mut direct = cookie("direct", "beta");
+    direct.source_scheme = Some("NonSecure".into());
+    worker
+        .commit_http_state(
+            &page_id,
+            snapshot.version,
+            ResponseStateDelta {
+                cookies: vec![direct],
+                cache_validators: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let committed = worker.http_state(&page_id).await.unwrap();
+    assert!(committed
+        .cookies
+        .iter()
+        .any(|cookie| cookie.name == "direct" && cookie.value == "beta"));
+
+    let conflict = worker
+        .commit_http_state(
+            &page_id,
+            snapshot.version,
+            ResponseStateDelta {
+                cookies: Vec::new(),
+                cache_validators: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::HttpStateConflict);
+
+    for sequence in 0..16 {
+        let before = worker.http_state(&page_id).await.unwrap();
+        let name = format!("coherent-{sequence}");
+        let expected_name = name.clone();
+        let (observed, committed) = tokio::join!(
+            worker.http_state(&page_id),
+            worker.commit_http_state(
+                &page_id,
+                before.version,
+                ResponseStateDelta {
+                    cookies: vec![cookie(&name, "set")],
+                    cache_validators: BTreeMap::new(),
+                },
+            )
+        );
+        committed.unwrap();
+        let observed = observed.unwrap();
+        let contains_commit = observed
+            .cookies
+            .iter()
+            .any(|cookie| cookie.name == expected_name);
+        assert!(
+            (observed.version == before.version && !contains_commit)
+                || (observed.version == before.version + 1 && contains_commit),
+            "snapshot mixed cookie state and version"
+        );
+    }
+    worker.close().await.unwrap();
+    fixture.abort();
+}
 
 #[test]
 fn upload_paths_are_canonical_and_confined_to_roots() {

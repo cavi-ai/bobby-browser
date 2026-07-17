@@ -43,6 +43,22 @@ pub enum CommandOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Evidence {
+    ExecutionPath {
+        path: ExecutionPath,
+        reason: ExecutionReason,
+        state_version: u64,
+        elapsed_ms: u64,
+        bytes: Option<u64>,
+        sha256: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        redirect_chain: Vec<String>,
+    },
     Navigation {
         url: String,
         title: String,
@@ -103,6 +119,89 @@ pub enum Evidence {
     },
 }
 
+impl Evidence {
+    pub fn journal_safe(&self) -> Self {
+        fn safe_url(value: &str) -> String {
+            let Ok(mut url) = url::Url::parse(value) else {
+                return "[redacted-invalid-url]".into();
+            };
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        let mut safe = self.clone();
+        match &mut safe {
+            Self::ExecutionPath {
+                final_url,
+                redirect_chain,
+                ..
+            } => {
+                if let Some(url) = final_url {
+                    *url = safe_url(url);
+                }
+                for url in redirect_chain {
+                    *url = safe_url(url);
+                }
+            }
+            Self::Navigation { url, .. }
+            | Self::Inspection { url, .. }
+            | Self::Page { url, .. }
+            | Self::Popup { url, .. } => *url = safe_url(url),
+            Self::Pages { pages } => {
+                for page in pages {
+                    page.url = safe_url(&page.url);
+                }
+            }
+            _ => {}
+        }
+        safe
+    }
+}
+
+impl CommandOutcome {
+    pub fn journal_safe(&self) -> Self {
+        let mut safe = self.clone();
+        match &mut safe {
+            Self::Completed { evidence, .. } | Self::NeedsReconciliation { evidence, .. } => {
+                *evidence = evidence.iter().map(Evidence::journal_safe).collect();
+            }
+            _ => {}
+        }
+        match &mut safe {
+            Self::RetryableFailure { error, .. }
+            | Self::NeedsReconciliation { error, .. }
+            | Self::PolicyDenied { error, .. }
+            | Self::ResourceExhausted { error, .. }
+            | Self::Failed { error, .. } => error.message = "redacted durable diagnostic".into(),
+            _ => {}
+        }
+        safe
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionPath {
+    DirectHttp,
+    Chromium,
+    ChromiumFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionReason {
+    EligibleStaticDocument,
+    EligibleExplicitDownload,
+    IneligibleCommand,
+    SemanticTargetRequired,
+    JavascriptRequired,
+    UnsupportedContentType,
+    StateConflict,
+    PolicyRequired,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateEvidence {
@@ -159,6 +258,11 @@ pub enum ErrorCode {
     TargetDetached,
     WaitConditionTimedOut,
     ScreenshotCaptureFailed,
+    NetworkPolicyDenied,
+    HttpResponseTooLarge,
+    HttpTransferFailed,
+    HttpStateConflict,
+    HttpEquivalenceUnproven,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +285,7 @@ pub enum CommandPhase {
     Accepted,
     Prepared,
     Executing,
+    ResultPrepared,
     Verifying,
     Recovering,
     Completed,

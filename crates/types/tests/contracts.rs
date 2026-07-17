@@ -3,14 +3,133 @@ use serde_json::json;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandId, ElementState, Evidence, InspectCommand, ListPagesCommand, OpenPageCommand, PageId,
-    PrimitiveCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    CommandId, CommandOutcome, DownloadUrlCommand, ElementState, Evidence, ExecutionPath,
+    ExecutionReason, InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand,
+    ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
+}
+
+fn test_envelope(command: PrimitiveCommand) -> CommandEnvelope {
+    CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: Some(PageId::new()),
+        deadline: Utc::now() + chrono::Duration::minutes(1),
+        command,
+    }
+}
+
+#[test]
+fn journal_safe_replaces_malformed_url_instead_of_persisting_secrets() {
+    let envelope = test_envelope(PrimitiveCommand::Navigate(types::NavigateCommand {
+        url: "https://user:password@example.test/%zz?token=top-secret#fragment".into(),
+        wait_until: WaitUntil::Commit,
+        timeout_ms: 1000,
+    }));
+    let durable = serde_json::to_string(&envelope.journal_safe()).unwrap();
+    assert!(!durable.contains("password"));
+    assert!(!durable.contains("top-secret"));
+    assert!(!durable.contains("fragment"));
+}
+
+#[test]
+fn journal_safe_outcome_redacts_all_evidence_urls() {
+    let outcome = CommandOutcome::Completed {
+        command_id: CommandId::new(),
+        evidence: vec![
+            Evidence::Navigation {
+                url: "https://user:pass@example.test/page?token=secret#frag".into(),
+                title: "page".into(),
+            },
+            Evidence::ExecutionPath {
+                path: ExecutionPath::DirectHttp,
+                reason: ExecutionReason::EligibleStaticDocument,
+                state_version: 1,
+                elapsed_ms: 2,
+                bytes: Some(3),
+                sha256: Some("abc".into()),
+                final_url: Some("https://example.test/final?signed=secret".into()),
+                content_type: Some("text/html".into()),
+                status: Some(200),
+                redirect_chain: vec!["https://example.test/hop?key=secret".into()],
+            },
+        ],
+    };
+    let durable = serde_json::to_string(&outcome.journal_safe()).unwrap();
+    assert!(!durable.contains("user"));
+    assert!(!durable.contains("pass"));
+    assert!(!durable.contains("secret"));
+    assert!(!durable.contains("frag"));
+    assert!(durable.contains("text/html"));
+    assert!(durable.contains("\"status\":200"));
+}
+
+#[test]
+fn adaptive_http_download_command_is_reconciliable_and_round_trips() {
+    let command = PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+        url: "https://example.test/report.bin".into(),
+        expected_content_type: Some("application/octet-stream".into()),
+        max_bytes: 1_048_576,
+    });
+
+    assert_eq!(command.class(), CommandClass::Reconciliable);
+    let value = serde_json::to_value(&command).unwrap();
+    assert_eq!(value["kind"], "downloadUrl");
+    let round_tripped: PrimitiveCommand = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+#[test]
+fn adaptive_http_execution_path_evidence_is_stable_and_round_trips() {
+    let evidence = Evidence::ExecutionPath {
+        path: ExecutionPath::ChromiumFallback,
+        reason: ExecutionReason::JavascriptRequired,
+        state_version: 7,
+        elapsed_ms: 12,
+        bytes: Some(128),
+        sha256: Some("abc".into()),
+        final_url: None,
+        content_type: None,
+        status: None,
+        redirect_chain: Vec::new(),
+    };
+
+    let value = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(value["path"], "chromiumFallback");
+    let round_tripped: Evidence = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+#[test]
+fn adaptive_http_failures_have_stable_error_codes() {
+    let cases = [
+        (types::ErrorCode::NetworkPolicyDenied, "networkPolicyDenied"),
+        (
+            types::ErrorCode::HttpResponseTooLarge,
+            "httpResponseTooLarge",
+        ),
+        (types::ErrorCode::HttpTransferFailed, "httpTransferFailed"),
+        (types::ErrorCode::HttpStateConflict, "httpStateConflict"),
+        (
+            types::ErrorCode::HttpEquivalenceUnproven,
+            "httpEquivalenceUnproven",
+        ),
+    ];
+
+    for (code, expected) in cases {
+        let value = serde_json::to_value(code).unwrap();
+        assert_eq!(value, json!(expected));
+        let round_tripped: types::ErrorCode = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped, code);
+    }
 }
 
 #[test]
@@ -137,6 +256,33 @@ fn command_envelope_uses_stable_camel_case_json() {
     assert_eq!(value["pageId"], json!(uuid(5)));
     assert_eq!(value["command"]["kind"], json!("navigate"));
     assert_eq!(value["command"]["input"]["waitUntil"], json!("interactive"));
+}
+
+#[test]
+fn journal_safe_envelope_removes_all_url_secrets_without_mutating_live_command() {
+    let mut envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId(uuid(1)),
+        workflow_id: WorkflowId(uuid(2)),
+        attempt_id: AttemptId(uuid(3)),
+        session_id: SessionId(uuid(4)),
+        page_id: Some(PageId(uuid(5))),
+        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        command: PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
+            url: "https://alice:pw@example.com/file?token=signed#secret".into(),
+            expected_content_type: None,
+            max_bytes: 10,
+        }),
+    };
+    let safe = envelope.journal_safe();
+    let safe_json = serde_json::to_string(&safe).unwrap();
+    assert!(!safe_json.contains("alice"));
+    assert!(!safe_json.contains("signed"));
+    assert!(!safe_json.contains("secret"));
+    let PrimitiveCommand::DownloadUrl(live) = &mut envelope.command else {
+        unreachable!()
+    };
+    assert!(live.url.contains("token=signed"));
 }
 
 #[test]
