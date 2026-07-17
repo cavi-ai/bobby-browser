@@ -33,10 +33,13 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing 0.1.44",
  "types",
+ "uuid",
 ]
 
 [[package]]
@@ -228,8 +231,6 @@ dependencies = [
 [[package]]
 name = "chromiumoxide"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ed067eb6c1f660bdb87c05efb964421d2ca262bae0296cdfe38cf0cd949a3e"
 dependencies = [
  "async-tungstenite",
  "base64",
@@ -379,6 +380,7 @@ name = "dom-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",
@@ -1895,10 +1897,13 @@ name = "worker-pool"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "artifact-store",
  "async-trait",
  "chromiumoxide",
  "config",
+ "dom-engine",
  "futures",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

@@ -1,15 +1,116 @@
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 use types::{
-    AttemptId, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
-    ClosePageCommand, CommandClass, CommandEnvelope, CommandId, Evidence, InspectCommand,
-    ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand, SessionId, TypeTextCommand,
-    UploadFilesCommand, WaitUntil, WorkflowId,
+    AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
+    ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
+    CommandId, ElementState, Evidence, InspectCommand, ListPagesCommand, OpenPageCommand, PageId,
+    PrimitiveCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
+}
+
+#[test]
+fn semantic_target_wait_and_screenshot_contracts_are_stable() {
+    let target = TargetSpec {
+        role: Some("button".into()),
+        accessible_name: Some("Continue".into()),
+        label: None,
+        text: Some(TextMatch::Exact("Continue".into())),
+        test_id: Some("continue".into()),
+        css: None,
+        attributes: Default::default(),
+        frame_path: Vec::new(),
+        shadow_path: Vec::new(),
+        ordinal: None,
+        allow_best_match: false,
+    };
+    let wait = PrimitiveCommand::WaitFor(WaitForCommand {
+        condition: WaitCondition::Element {
+            target: Box::new(target.clone()),
+            state: ElementState::Visible,
+        },
+        timeout_ms: 5_000,
+    });
+    let screenshot = PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+        mode: ScreenshotMode::Element {
+            target: Box::new(target),
+        },
+    });
+    let click = PrimitiveCommand::Click(ClickCommand {
+        selector: String::new(),
+        target: Some(target_spec("button", "Continue")),
+        boundary: false,
+        expected_url: None,
+    });
+
+    assert_eq!(wait.class(), CommandClass::Replayable);
+    assert_eq!(screenshot.class(), CommandClass::Replayable);
+    assert_eq!(
+        serde_json::to_value(click).unwrap()["input"]["target"]["role"],
+        json!("button")
+    );
+    assert_eq!(
+        serde_json::to_value(wait).unwrap()["kind"],
+        json!("waitFor")
+    );
+    assert_eq!(
+        serde_json::to_value(screenshot).unwrap()["kind"],
+        json!("captureScreenshot")
+    );
+}
+
+fn target_spec(role: &str, name: &str) -> TargetSpec {
+    TargetSpec {
+        role: Some(role.into()),
+        accessible_name: Some(name.into()),
+        ..TargetSpec::default()
+    }
+}
+
+#[test]
+fn new_target_failures_have_stable_error_codes() {
+    assert_eq!(
+        serde_json::to_value(types::ErrorCode::TargetAmbiguous).unwrap(),
+        json!("targetAmbiguous")
+    );
+    assert_eq!(
+        serde_json::to_value(types::ErrorCode::WaitConditionTimedOut).unwrap(),
+        json!("waitConditionTimedOut")
+    );
+    assert_eq!(
+        serde_json::to_value(types::ErrorCode::ScreenshotCaptureFailed).unwrap(),
+        json!("screenshotCaptureFailed")
+    );
+}
+
+#[test]
+fn resolution_wait_and_screenshot_evidence_are_typed() {
+    let evidence = types::Evidence::Screenshot {
+        artifact_id: "artifact-1".into(),
+        media_type: "image/png".into(),
+        width: 800,
+        height: 600,
+        bytes: 42,
+        sha256: "abc".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(evidence).unwrap()["kind"],
+        json!("screenshot")
+    );
+    let candidate = types::CandidateEvidence {
+        role: Some("button".into()),
+        name: Some("Continue".into()),
+        score: 100,
+        reasons: vec!["exactAccessibleName".into()],
+    };
+    assert_eq!(
+        serde_json::to_value(candidate).unwrap()["score"],
+        json!(100)
+    );
 }
 
 #[test]
@@ -47,6 +148,7 @@ fn commands_expose_recovery_class() {
     assert_eq!(
         PrimitiveCommand::TypeText(TypeTextCommand {
             selector: "#name".into(),
+            target: None,
             value: "Ada".into(),
             clear_first: true,
         })
@@ -56,6 +158,7 @@ fn commands_expose_recovery_class() {
     assert_eq!(
         PrimitiveCommand::Click(ClickCommand {
             selector: "#submit".into(),
+            target: None,
             boundary: true,
             expected_url: None,
         })
@@ -70,6 +173,7 @@ fn workflow_io_commands_have_stable_json_and_recovery_classes() {
         (
             PrimitiveCommand::UploadFiles(UploadFilesCommand {
                 selector: "#resume".into(),
+                target: None,
                 paths: vec!["/uploads/resume.pdf".into()],
             }),
             "uploadFiles",
@@ -97,6 +201,7 @@ fn workflow_io_commands_have_stable_json_and_recovery_classes() {
         (
             PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
                 selector: "#popup".into(),
+                target: None,
                 timeout_ms: 5_000,
             }),
             "clickAndWaitForPopup",
@@ -105,6 +210,7 @@ fn workflow_io_commands_have_stable_json_and_recovery_classes() {
         (
             PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
                 selector: "#download".into(),
+                target: None,
                 timeout_ms: 5_000,
             }),
             "clickAndWaitForDownload",
