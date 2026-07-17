@@ -4,12 +4,16 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, HttpConfig, ServerConfig, StorageConfig};
+use network_engine::state::HttpStateSnapshot;
+use network_engine::{DirectHttpExecutor, HttpCandidate, NetworkPolicy};
 use sdk_core::RuntimeService;
+use std::collections::BTreeMap;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence,
     ExecutionPath, InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
-    SessionId, TargetSpec, WaitUntil, WorkflowId,
+    SessionId, WaitUntil, WorkflowId,
 };
+use worker_pool::{ChromiumWorkerFactory, WorkerFactory};
 
 fn config(root: &tempfile::TempDir) -> AppConfig {
     AppConfig {
@@ -59,6 +63,15 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
 fn median(mut samples: Vec<StdDuration>) -> StdDuration {
     samples.sort_unstable();
     samples[samples.len() / 2]
+}
+
+fn dispersion(samples: &[StdDuration]) -> (u128, u128) {
+    let mut millis = samples
+        .iter()
+        .map(StdDuration::as_millis)
+        .collect::<Vec<_>>();
+    millis.sort_unstable();
+    (millis[millis.len() / 4], millis[(millis.len() * 3) / 4])
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -144,113 +157,89 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
     let batch_elapsed = batch_started.elapsed();
     assert_eq!(site.peak_requests(), 4);
 
-    let (chromium_session, chromium_page) = &pages[0];
-    let direct_warmup = runtime
-        .submit(envelope(
-            chromium_session,
-            chromium_page,
-            PrimitiveCommand::Inspect(InspectCommand::default()),
-        ))
-        .await;
-    assert!(matches!(direct_warmup, CommandOutcome::Completed { .. }));
+    let direct = DirectHttpExecutor::new(NetworkPolicy {
+        allow_loopback: true,
+        ..NetworkPolicy::default()
+    });
+    let snapshot = HttpStateSnapshot {
+        version: 1,
+        current_url: slow_url.clone(),
+        cookies: Vec::new(),
+        cache_validators: BTreeMap::new(),
+        user_agent: "capacity-proof".into(),
+        language: "en-US".into(),
+    };
+    assert!(matches!(
+        direct
+            .inspect(&snapshot, &InspectCommand::default())
+            .await
+            .unwrap(),
+        HttpCandidate::Inspection { .. }
+    ));
     let mut direct_wall_clock = Vec::new();
     for _ in 0..7 {
         let started = Instant::now();
-        let outcome = runtime
-            .submit(envelope(
-                chromium_session,
-                chromium_page,
-                PrimitiveCommand::Inspect(InspectCommand::default()),
-            ))
-            .await;
-        assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+        assert!(matches!(
+            direct
+                .inspect(&snapshot, &InspectCommand::default())
+                .await
+                .unwrap(),
+            HttpCandidate::Inspection { .. }
+        ));
         direct_wall_clock.push(started.elapsed());
     }
 
-    let chromium_warmup_navigation = runtime
-        .submit(envelope(
-            chromium_session,
-            chromium_page,
-            PrimitiveCommand::Navigate(NavigateCommand {
+    let factory = ChromiumWorkerFactory::new(config(&root).browser);
+    let chromium = factory.launch(&SessionId::new()).await.unwrap();
+    let chromium_page = PageId::new();
+    chromium.open_page(chromium_page.clone()).await.unwrap();
+    chromium
+        .navigate(
+            &chromium_page,
+            &NavigateCommand {
                 url: slow_url.clone(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 5_000,
-            }),
-        ))
-        .await;
-    assert!(matches!(
-        chromium_warmup_navigation,
-        CommandOutcome::Completed { .. }
-    ));
-    let chromium_warmup_inspection = runtime
-        .submit(envelope(
-            chromium_session,
-            chromium_page,
-            PrimitiveCommand::Inspect(InspectCommand {
-                selector: None,
-                target: Some(TargetSpec {
-                    css: Some("#slow-proof".into()),
-                    ..TargetSpec::default()
-                }),
-                include_html: false,
-            }),
-        ))
-        .await;
-    assert!(matches!(
-        chromium_warmup_inspection,
-        CommandOutcome::Completed { .. }
-    ));
+            },
+        )
+        .await
+        .unwrap();
+    chromium
+        .inspect(&chromium_page, &InspectCommand::default())
+        .await
+        .unwrap();
     let mut chromium_wall_clock = Vec::new();
     for _ in 0..7 {
         let started = Instant::now();
-        let navigation = runtime
-            .submit(envelope(
-                chromium_session,
-                chromium_page,
-                PrimitiveCommand::Navigate(NavigateCommand {
+        chromium
+            .navigate(
+                &chromium_page,
+                &NavigateCommand {
                     url: slow_url.clone(),
                     wait_until: WaitUntil::Interactive,
                     timeout_ms: 5_000,
-                }),
-            ))
-            .await;
-        assert!(matches!(navigation, CommandOutcome::Completed { .. }));
-        let inspection = runtime
-            .submit(envelope(
-                chromium_session,
-                chromium_page,
-                PrimitiveCommand::Inspect(InspectCommand {
-                    selector: None,
-                    target: Some(TargetSpec {
-                        css: Some("#slow-proof".into()),
-                        ..TargetSpec::default()
-                    }),
-                    include_html: false,
-                }),
-            ))
-            .await;
-        let evidence = match inspection {
-            CommandOutcome::Completed { evidence, .. } => evidence,
-            outcome => panic!("Chromium workload failed: {outcome:?}"),
-        };
-        assert!(evidence.iter().any(|item| matches!(
-            item,
-            Evidence::ExecutionPath {
-                path: ExecutionPath::Chromium,
-                ..
-            }
-        )));
+                },
+            )
+            .await
+            .unwrap();
+        chromium
+            .inspect(&chromium_page, &InspectCommand::default())
+            .await
+            .unwrap();
         chromium_wall_clock.push(started.elapsed());
     }
 
-    let direct_median = median(direct_wall_clock);
-    let chromium_median = median(chromium_wall_clock);
+    let direct_spread = dispersion(&direct_wall_clock);
+    let chromium_spread = dispersion(&chromium_wall_clock);
+    let direct_median = median(direct_wall_clock.clone());
+    let chromium_median = median(chromium_wall_clock.clone());
     println!(
-        "capacity correctness: peak={} completed=8 eligible_browser_dispatches=0 batch_wall_clock_ms={} queued_request_median_ms={}; performance wall-clock after_warmup=1 samples=7 workload_direct=runtime_inspect_fetch workload_chromium=navigate_plus_forced_css_inspect direct_http_median_ms={} chromium_only_median_ms={}",
+        "capacity correctness: peak={} completed=8 eligible_browser_dispatches=0 batch_wall_clock_ms={} queued_request_median_ms={}; performance report_only=true same_url=/slow wall_clock_boundary=transport_plus_parse after_warmup=1 samples=7 workload_direct=direct_executor_get_plus_parse workload_chromium=raw_worker_navigate_plus_inspect direct_http_median_ms={} direct_http_iqr_ms={}-{} chromium_median_ms={} chromium_iqr_ms={}-{}",
         site.peak_requests(),
         batch_elapsed.as_millis(),
         median(queued_direct_wall_clock).as_millis(),
         direct_median.as_millis(),
-        chromium_median.as_millis()
+        direct_spread.0, direct_spread.1,
+        chromium_median.as_millis(), chromium_spread.0, chromium_spread.1
     );
 }
