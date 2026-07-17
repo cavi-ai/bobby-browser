@@ -221,15 +221,12 @@ impl ArtifactStore {
         };
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_error)?;
 
-        let root_was_missing = !self.root.exists();
         tokio::fs::create_dir_all(&self.root)
             .await
             .map_err(storage_error)?;
         sync_directory(&self.root)?;
-        if root_was_missing {
-            if let Some(parent) = self.root.parent() {
-                sync_directory(parent)?;
-            }
+        if let Some(parent) = self.root.parent() {
+            sync_directory(parent)?;
         }
         tokio::fs::create_dir_all(&session_directory)
             .await
