@@ -3,14 +3,71 @@ use serde_json::json;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandId, ElementState, Evidence, InspectCommand, ListPagesCommand, OpenPageCommand, PageId,
-    PrimitiveCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    CommandId, DownloadUrlCommand, ElementState, Evidence, ExecutionPath, ExecutionReason,
+    InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand, ScreenshotMode,
+    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
+}
+
+#[test]
+fn adaptive_http_download_command_is_replayable_and_round_trips() {
+    let command = PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+        url: "https://example.test/report.bin".into(),
+        expected_content_type: Some("application/octet-stream".into()),
+        max_bytes: 1_048_576,
+    });
+
+    assert_eq!(command.class(), CommandClass::Replayable);
+    let value = serde_json::to_value(&command).unwrap();
+    assert_eq!(value["kind"], "downloadUrl");
+    let round_tripped: PrimitiveCommand = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+#[test]
+fn adaptive_http_execution_path_evidence_is_stable_and_round_trips() {
+    let evidence = Evidence::ExecutionPath {
+        path: ExecutionPath::ChromiumFallback,
+        reason: ExecutionReason::JavascriptRequired,
+        state_version: 7,
+        elapsed_ms: 12,
+        bytes: Some(128),
+        sha256: Some("abc".into()),
+    };
+
+    let value = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(value["path"], "chromiumFallback");
+    let round_tripped: Evidence = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+#[test]
+fn adaptive_http_failures_have_stable_error_codes() {
+    let cases = [
+        (types::ErrorCode::NetworkPolicyDenied, "networkPolicyDenied"),
+        (
+            types::ErrorCode::HttpResponseTooLarge,
+            "httpResponseTooLarge",
+        ),
+        (types::ErrorCode::HttpTransferFailed, "httpTransferFailed"),
+        (types::ErrorCode::HttpStateConflict, "httpStateConflict"),
+        (
+            types::ErrorCode::HttpEquivalenceUnproven,
+            "httpEquivalenceUnproven",
+        ),
+    ];
+
+    for (code, expected) in cases {
+        let value = serde_json::to_value(code).unwrap();
+        assert_eq!(value, json!(expected));
+        let round_tripped: types::ErrorCode = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped, code);
+    }
 }
 
 #[test]

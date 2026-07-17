@@ -43,6 +43,14 @@ pub enum CommandOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Evidence {
+    ExecutionPath {
+        path: ExecutionPath,
+        reason: ExecutionReason,
+        state_version: u64,
+        elapsed_ms: u64,
+        bytes: Option<u64>,
+        sha256: Option<String>,
+    },
     Navigation {
         url: String,
         title: String,
@@ -103,6 +111,27 @@ pub enum Evidence {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionPath {
+    DirectHttp,
+    Chromium,
+    ChromiumFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionReason {
+    EligibleStaticDocument,
+    EligibleExplicitDownload,
+    IneligibleCommand,
+    SemanticTargetRequired,
+    JavascriptRequired,
+    UnsupportedContentType,
+    StateConflict,
+    PolicyRequired,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateEvidence {
@@ -159,6 +188,11 @@ pub enum ErrorCode {
     TargetDetached,
     WaitConditionTimedOut,
     ScreenshotCaptureFailed,
+    NetworkPolicyDenied,
+    HttpResponseTooLarge,
+    HttpTransferFailed,
+    HttpStateConflict,
+    HttpEquivalenceUnproven,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
