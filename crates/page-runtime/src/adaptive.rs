@@ -12,14 +12,14 @@ use worker_pool::WorkerLease;
 pub struct AdaptiveExecution {
     pub evidence: Vec<Evidence>,
     pub used_browser: bool,
-    pub prepared_download: Option<PreparedDownload>,
+    pub prepared_http: Option<PreparedHttpResult>,
 }
 
 #[derive(Debug)]
-pub struct PreparedDownload {
+pub struct PreparedHttpResult {
     pub state_version: u64,
     pub state: network_engine::ResponseStateDelta,
-    pub artifact: PendingArtifact,
+    pub artifact: Option<PendingArtifact>,
 }
 
 #[derive(Clone, Default)]
@@ -110,44 +110,23 @@ impl AdaptivePageEngine {
                         evidence,
                         state,
                         meta,
-                    } => {
-                        if let Err(error) = lease
-                            .worker()
-                            .commit_http_state(page_id, version, state)
-                            .await
-                        {
-                            if error.code == ErrorCode::HttpStateConflict {
-                                return browser_execute(
-                                    envelope,
-                                    lease,
-                                    ExecutionPath::ChromiumFallback,
-                                    ExecutionReason::StateConflict,
-                                    version,
-                                )
-                                .await;
-                            }
-                            return Err(error);
-                        }
-                        Ok(AdaptiveExecution {
-                            evidence: vec![
-                                evidence,
-                                execution_evidence(
-                                    ExecutionPath::DirectHttp,
-                                    reason,
-                                    version,
-                                    meta.elapsed_ms,
-                                    Some(meta.bytes),
-                                    Some(meta.sha256),
-                                    Some(meta.final_url),
-                                    Some(meta.content_type),
-                                    Some(meta.status),
-                                    meta.redirect_chain,
-                                ),
-                            ],
-                            used_browser: false,
-                            prepared_download: None,
-                        })
-                    }
+                    } => Ok(AdaptiveExecution {
+                        evidence: vec![
+                            evidence,
+                            execution_evidence(
+                                ExecutionPath::DirectHttp,
+                                reason,
+                                version,
+                                ExecutionMetrics::http(meta),
+                            ),
+                        ],
+                        used_browser: false,
+                        prepared_http: Some(PreparedHttpResult {
+                            state_version: version,
+                            state,
+                            artifact: None,
+                        }),
+                    }),
                     HttpCandidate::Download {
                         bytes,
                         filename,
@@ -181,20 +160,14 @@ impl AdaptivePageEngine {
                                     ExecutionPath::DirectHttp,
                                     reason,
                                     version,
-                                    meta.elapsed_ms,
-                                    Some(meta.bytes),
-                                    Some(meta.sha256),
-                                    Some(meta.final_url),
-                                    Some(meta.content_type),
-                                    Some(meta.status),
-                                    meta.redirect_chain,
+                                    ExecutionMetrics::http(meta),
                                 ),
                             ],
                             used_browser: false,
-                            prepared_download: Some(PreparedDownload {
+                            prepared_http: Some(PreparedHttpResult {
                                 state_version: version,
                                 state,
-                                artifact: pending,
+                                artifact: Some(pending),
                             }),
                         })
                     }
@@ -238,6 +211,23 @@ fn execution_evidence(
     path: ExecutionPath,
     reason: ExecutionReason,
     state_version: u64,
+    metrics: ExecutionMetrics,
+) -> Evidence {
+    Evidence::ExecutionPath {
+        path,
+        reason,
+        state_version,
+        elapsed_ms: metrics.elapsed_ms,
+        bytes: metrics.bytes,
+        sha256: metrics.sha256,
+        final_url: metrics.final_url,
+        content_type: metrics.content_type,
+        status: metrics.status,
+        redirect_chain: metrics.redirect_chain,
+    }
+}
+
+struct ExecutionMetrics {
     elapsed_ms: u64,
     bytes: Option<u64>,
     sha256: Option<String>,
@@ -245,18 +235,31 @@ fn execution_evidence(
     content_type: Option<String>,
     status: Option<u16>,
     redirect_chain: Vec<String>,
-) -> Evidence {
-    Evidence::ExecutionPath {
-        path,
-        reason,
-        state_version,
-        elapsed_ms,
-        bytes,
-        sha256,
-        final_url,
-        content_type,
-        status,
-        redirect_chain,
+}
+
+impl ExecutionMetrics {
+    fn http(meta: network_engine::HttpMeta) -> Self {
+        Self {
+            elapsed_ms: meta.elapsed_ms,
+            bytes: Some(meta.bytes),
+            sha256: Some(meta.sha256),
+            final_url: Some(meta.final_url),
+            content_type: Some(meta.content_type),
+            status: Some(meta.status),
+            redirect_chain: meta.redirect_chain,
+        }
+    }
+
+    fn browser(bytes: Option<u64>, sha256: Option<String>) -> Self {
+        Self {
+            elapsed_ms: 0,
+            bytes,
+            sha256,
+            final_url: None,
+            content_type: None,
+            status: None,
+            redirect_chain: Vec::new(),
+        }
     }
 }
 
@@ -308,17 +311,11 @@ async fn browser_execute(
         path,
         reason,
         state_version,
-        0,
-        bytes,
-        sha256,
-        None,
-        None,
-        None,
-        Vec::new(),
+        ExecutionMetrics::browser(bytes, sha256),
     ));
     Ok(AdaptiveExecution {
         evidence,
         used_browser: true,
-        prepared_download: None,
+        prepared_http: None,
     })
 }
