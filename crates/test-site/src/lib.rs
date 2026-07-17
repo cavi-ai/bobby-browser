@@ -126,6 +126,9 @@ pub async fn spawn_frame_host(child_url: &str) -> FixtureServer {
                     r#"<!doctype html><title>Frame Host</title>
                     <iframe name="outer" aria-label="Outer" srcdoc='<iframe name="fixture" aria-label="Cross" src="{child_url}"></iframe>'></iframe>
                     <div id="host"></div>
+                    <button id="old-action" aria-label="Drift action" onclick="this.outerHTML='<button aria-label=&quot;Drift action&quot; onclick=&quot;document.querySelector(\'#status\').textContent=\'ready\'&quot;>replacement</button>'">initial</button>
+                    <p id="status">waiting</p>
+                    <button aria-label="Ambiguous">one</button><button aria-label="Ambiguous">two</button>
                     <script>
                       const root = host.attachShadow({{mode:'open'}});
                       root.innerHTML = `<button aria-label="Inside" onclick="document.title='shadow-clicked'">inside</button>`;
