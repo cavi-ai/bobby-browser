@@ -91,6 +91,10 @@ impl PageRuntime {
                     .click_and_wait_for_download(page_id, command)
                     .await
             }
+            PrimitiveCommand::WaitFor(command) => lease.worker().wait_for(page_id, command).await,
+            PrimitiveCommand::CaptureScreenshot(command) => {
+                lease.worker().capture_screenshot(page_id, command).await
+            }
         };
         let evidence = match execution {
             Ok(evidence) => evidence,
@@ -239,6 +243,7 @@ impl PageRuntime {
                         page_id,
                         &InspectCommand {
                             selector: Some(command.selector.clone()),
+                            target: command.target.clone(),
                             include_html: false,
                         },
                     )
@@ -329,6 +334,28 @@ impl PageRuntime {
                 } else {
                     Err(verification_error(
                         "download command returned no download evidence",
+                    ))
+                }
+            }
+            PrimitiveCommand::WaitFor(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Wait { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("wait returned no condition evidence"))
+                }
+            }
+            PrimitiveCommand::CaptureScreenshot(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Screenshot { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "screenshot returned no artifact evidence",
                     ))
                 }
             }

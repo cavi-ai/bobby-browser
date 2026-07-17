@@ -1,4 +1,5 @@
 mod chromium;
+mod targeting;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,9 +8,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use types::{
-    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
-    CommandError, Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand,
-    PageId, SessionId, TypeTextCommand, UploadFilesCommand, WorkerId,
+    CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
+    ClickCommand, ClosePageCommand, CommandError, Evidence, InspectCommand, ListPagesCommand,
+    NavigateCommand, OpenPageCommand, PageId, SessionId, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand, WorkerId,
 };
 
 pub use chromium::ChromiumWorkerFactory;
@@ -120,6 +122,20 @@ pub trait BrowserWorker: Send + Sync {
         &self,
         _page_id: &PageId,
         _command: &ClickAndWaitForDownloadCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn wait_for(
+        &self,
+        _page_id: &PageId,
+        _command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn capture_screenshot(
+        &self,
+        _page_id: &PageId,
+        _command: &CaptureScreenshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }

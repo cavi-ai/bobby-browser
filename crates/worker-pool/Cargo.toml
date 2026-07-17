@@ -8,7 +8,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true
 config = { path = "../config" }
+dom-engine = { path = "../dom-engine" }
 futures.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -17,6 +19,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 types = { path = "../types" }
+artifact-store = { path = "../artifact-store" }
 
 [dev-dependencies]
 test-site = { path = "../test-site" }

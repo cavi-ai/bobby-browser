@@ -22,6 +22,9 @@ pub struct BrowserConfig {
     pub max_active: usize,
     pub upload_roots: Vec<PathBuf>,
     pub downloads_dir: PathBuf,
+    pub artifacts_dir: PathBuf,
+    pub max_artifact_bytes: usize,
+    pub max_screenshot_dimension: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +47,9 @@ impl Default for AppConfig {
                 max_active: 8,
                 upload_roots: vec![PathBuf::from("./data/uploads")],
                 downloads_dir: PathBuf::from("./data/downloads"),
+                artifacts_dir: PathBuf::from("./data/artifacts"),
+                max_artifact_bytes: 8 * 1024 * 1024,
+                max_screenshot_dimension: 16_384,
             },
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
