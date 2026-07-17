@@ -241,7 +241,7 @@ impl ArtifactStore {
                 path: None,
             });
         }
-        let staging_path = session_directory.join(format!(".{artifact_id}.tmp"));
+        let staging_path = session_directory.join(format!(".{artifact_id}.{}.tmp", Uuid::new_v4()));
         std::fs::create_dir(&staging_path).map_err(storage_error)?;
         let mut staging = StagingGuard::new(staging_path);
 
@@ -256,8 +256,24 @@ impl ArtifactStore {
         .map_err(storage_error)?;
 
         before_publish.await;
-        std::fs::rename(staging.path(), &final_path).map_err(storage_error)?;
-        staging.disarm();
+        match std::fs::rename(staging.path(), &final_path) {
+            Ok(()) => staging.disarm(),
+            Err(_) if content_addressed && final_path.exists() => {
+                let manifest_path = final_path.join(format!("{artifact_id}.json"));
+                let existing = std::fs::read(manifest_path).map_err(storage_error)?;
+                let existing: ArtifactManifest =
+                    serde_json::from_slice(&existing).map_err(storage_error)?;
+                if existing.media_type != media_type
+                    || existing.filename != filename
+                    || existing.sha256 != sha256
+                    || existing.bytes != bytes.len() as u64
+                    || existing.page_id != *page_id
+                {
+                    return Err(ArtifactError::InvalidMetadata);
+                }
+            }
+            Err(error) => return Err(storage_error(error)),
+        }
 
         Ok(PendingArtifact {
             record: Some(ArtifactRecord {
@@ -269,7 +285,7 @@ impl ArtifactStore {
                 bytes: bytes.len() as u64,
                 sha256,
             }),
-            path: Some(final_path),
+            path: (!content_addressed).then_some(final_path),
         })
     }
 
