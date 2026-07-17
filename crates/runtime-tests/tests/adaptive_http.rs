@@ -154,6 +154,7 @@ async fn adaptive_http() {
             max_concurrent_requests: 4,
             ..HttpConfig::default()
         },
+        interface: config::InterfaceConfig::default(),
     };
     let (runtime, workers, artifacts) = build_runtime(&config).await;
     let session = runtime

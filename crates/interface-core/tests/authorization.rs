@@ -8,6 +8,7 @@ use interface_core::{
     Authority, AuthorityStore, AuthorizationGuard, SessionOwnershipAuthority,
     SessionOwnershipRecordError, SessionOwnershipRegistry,
 };
+use sha2::{Digest, Sha256};
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, InterfaceErrorCode,
     InterfaceOperation, PrincipalId, RequestContext, SessionId, WorkflowId,
@@ -33,6 +34,74 @@ fn envelope() -> CommandEnvelope {
         deadline: expiry(),
         command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
     }
+}
+
+#[tokio::test]
+async fn externally_enrolled_hash_and_handle_share_expiry_and_revocation_state() {
+    let store = AuthorityStore::with_capacity(1);
+    let bearer = "external-authority-bearer-0000001";
+    let token_hash: [u8; 32] = Sha256::digest(bearer.as_bytes()).into();
+    let handle = store
+        .enroll_hash(token_hash, principal(), [Capability::SessionRead], expiry())
+        .await
+        .unwrap();
+
+    assert!(store.authenticate(bearer, Utc::now()).await.is_ok());
+    let wrong = store
+        .authenticate("different-authority-bearer-00001", Utc::now())
+        .await
+        .unwrap_err();
+    let malformed = store
+        .authenticate("not a bearer", Utc::now())
+        .await
+        .unwrap_err();
+    assert_eq!(wrong.code, InterfaceErrorCode::AuthenticationFailed);
+    assert_eq!(wrong.message, malformed.message);
+
+    let context = handle.context(expiry(), None);
+    store.revoke(&principal()).await.unwrap();
+    assert_eq!(
+        store
+            .authenticate(bearer, Utc::now())
+            .await
+            .unwrap_err()
+            .code,
+        InterfaceErrorCode::AuthenticationFailed
+    );
+    assert_eq!(
+        AuthorizationGuard::new(handle)
+            .authorize(&context, InterfaceOperation::RuntimeInfo)
+            .unwrap_err()
+            .code,
+        InterfaceErrorCode::AuthenticationFailed
+    );
+
+    let expired = AuthorityStore::with_capacity(1);
+    let expired_handle = expired
+        .enroll_hash(
+            token_hash,
+            principal(),
+            [Capability::SessionRead],
+            Utc::now() - Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    let expired_context = expired_handle.context(expiry(), None);
+    assert_eq!(
+        expired
+            .authenticate(bearer, Utc::now())
+            .await
+            .unwrap_err()
+            .code,
+        InterfaceErrorCode::AuthenticationFailed
+    );
+    assert_eq!(
+        AuthorizationGuard::new(expired_handle)
+            .authorize(&expired_context, InterfaceOperation::RuntimeInfo)
+            .unwrap_err()
+            .code,
+        InterfaceErrorCode::AuthenticationFailed
+    );
 }
 
 #[tokio::test]

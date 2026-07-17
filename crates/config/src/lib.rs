@@ -8,25 +8,52 @@ pub struct AppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub http: HttpConfig,
+    #[serde(default)]
+    pub interface: InterfaceConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceConfig {
+    #[serde(default = "default_max_request_bytes", alias = "maxRequestBytes")]
     pub max_request_bytes: usize,
+    #[serde(default = "default_max_event_batch", alias = "maxEventBatch")]
     pub max_event_batch: usize,
+    #[serde(default = "default_max_event_retention", alias = "maxEventRetention")]
     pub max_event_retention: usize,
+    #[serde(default = "default_max_connections", alias = "maxConnections")]
     pub max_connections: usize,
+    #[serde(default = "default_token_records_path", alias = "tokenRecordsPath")]
     pub token_records_path: PathBuf,
+}
+
+const fn default_max_request_bytes() -> usize {
+    1024 * 1024
+}
+
+const fn default_max_event_batch() -> usize {
+    256
+}
+
+const fn default_max_event_retention() -> usize {
+    16_384
+}
+
+const fn default_max_connections() -> usize {
+    64
+}
+
+fn default_token_records_path() -> PathBuf {
+    PathBuf::from("./data/storage/authorities.json")
 }
 
 impl Default for InterfaceConfig {
     fn default() -> Self {
         Self {
-            max_request_bytes: 1024 * 1024,
-            max_event_batch: 256,
-            max_event_retention: 16_384,
-            max_connections: 64,
-            token_records_path: PathBuf::from("./data/storage/authorities.json"),
+            max_request_bytes: default_max_request_bytes(),
+            max_event_batch: default_max_event_batch(),
+            max_event_retention: default_max_event_retention(),
+            max_connections: default_max_connections(),
+            token_records_path: default_token_records_path(),
         }
     }
 }
@@ -52,6 +79,12 @@ impl InterfaceConfig {
     }
 }
 
+impl AppConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        self.interface.validate()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
     pub allow_loopback: bool,
@@ -62,8 +95,6 @@ pub struct HttpConfig {
     pub max_download_bytes: usize,
     pub request_timeout_ms: u64,
     pub max_concurrent_requests: usize,
-    #[serde(default)]
-    pub interface: InterfaceConfig,
 }
 
 impl Default for HttpConfig {
@@ -77,7 +108,6 @@ impl Default for HttpConfig {
             max_download_bytes: 64 * 1024 * 1024,
             request_timeout_ms: 30_000,
             max_concurrent_requests: 8,
-            interface: InterfaceConfig::default(),
         }
     }
 }
@@ -130,6 +160,7 @@ impl Default for AppConfig {
                 checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
             },
             http: HttpConfig::default(),
+            interface: InterfaceConfig::default(),
         }
     }
 }
@@ -150,7 +181,8 @@ mod tests {
 
     #[test]
     fn interface_defaults_are_bounded_and_store_only_an_authority_record_path() {
-        let interface = InterfaceConfig::default();
+        let config = AppConfig::default();
+        let interface = config.interface;
 
         assert_eq!(interface.max_request_bytes, 1024 * 1024);
         assert_eq!(interface.max_event_batch, 256);
@@ -164,6 +196,27 @@ mod tests {
         assert!(!format!("{:?}", AppConfig::default())
             .to_ascii_lowercase()
             .contains("bearer"));
+    }
+
+    #[test]
+    fn partial_interface_blocks_use_field_defaults_and_app_validation() {
+        let baseline = AppConfig::default();
+        let mut value = serde_json::to_value(&baseline).unwrap();
+        value["interface"] = serde_json::json!({ "maxRequestBytes": 4096 });
+        let parsed: AppConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(parsed.interface.max_request_bytes, 4096);
+        assert_eq!(parsed.interface.max_event_batch, 256);
+        assert!(parsed.validate().is_ok());
+
+        let invalid = AppConfig {
+            interface: InterfaceConfig {
+                max_connections: 0,
+                ..InterfaceConfig::default()
+            },
+            ..baseline
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

@@ -1,10 +1,4 @@
-use std::{
-    fmt,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::{fmt, sync::Arc};
 
 use axum::{
     extract::{Request, State},
@@ -16,7 +10,6 @@ use axum::{
 use chrono::{DateTime, Utc};
 use interface_core::{Authority, AuthorityStore, AuthorizationGuard, CapabilityHandle};
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 use types::{
     Capability, CorrelationId, ErrorLayer, IdempotencyKey, InterfaceError, InterfaceErrorCode,
     InterfaceVersion, PrincipalId, RequestContext,
@@ -25,7 +18,10 @@ use uuid::Uuid;
 
 use crate::AppState;
 
-const MAX_AUTHORIZATION_BYTES: usize = 512;
+const MAX_AUTHORIZATION_HEADER_BYTES: usize = 512;
+const BEARER_PREFIX_BYTES: usize = "Bearer ".len();
+const MAX_BEARER_BYTES: usize = MAX_AUTHORIZATION_HEADER_BYTES - BEARER_PREFIX_BYTES;
+const MIN_BEARER_BYTES: usize = 32;
 const MAX_VERSION_BYTES: usize = 64;
 const MAX_CORRELATION_BYTES: usize = 64;
 const MAX_DEADLINE_BYTES: usize = 64;
@@ -39,7 +35,7 @@ pub(crate) struct AuthenticatedRequest {
 }
 
 pub struct StartupCredential {
-    bearer: String,
+    token_hash: [u8; 32],
     principal_id: PrincipalId,
     capabilities: Vec<Capability>,
     expires_at: DateTime<Utc>,
@@ -61,8 +57,9 @@ impl StartupCredential {
         if expires_at <= Utc::now() {
             return Err(StartupCredentialError::Expired);
         }
+        let token_hash = Sha256::digest(bearer.as_bytes()).into();
         Ok(Self {
-            bearer,
+            token_hash,
             principal_id,
             capabilities,
             expires_at,
@@ -93,7 +90,7 @@ impl fmt::Debug for StartupCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StartupCredential")
-            .field("bearer", &"[REDACTED]")
+            .field("token_hash", &"[REDACTED]")
             .field("principal_id", &self.principal_id)
             .field("capabilities", &self.capabilities)
             .field("expires_at", &self.expires_at)
@@ -132,39 +129,22 @@ impl std::error::Error for StartupCredentialError {}
 
 #[derive(Clone)]
 pub struct EnrolledAuthority {
-    token_hash: [u8; 32],
-    principal_id: PrincipalId,
-    expires_at: DateTime<Utc>,
-    handle: CapabilityHandle,
     store: AuthorityStore,
-    revoked: Arc<AtomicBool>,
 }
 
 impl EnrolledAuthority {
     pub async fn enroll(startup: StartupCredential) -> Result<Self, StartupCredentialError> {
-        let token_hash = Sha256::digest(startup.bearer.as_bytes()).into();
         let store = AuthorityStore::with_capacity(1);
-        let internal = store
-            .issue(
-                startup.principal_id.clone(),
+        store
+            .enroll_hash(
+                startup.token_hash,
+                startup.principal_id,
                 startup.capabilities,
                 startup.expires_at,
             )
             .await
-            .map_err(|_| StartupCredentialError::EnrollmentFailed)?
-            .expose_once();
-        let handle = store
-            .verify(&internal)
-            .await
             .map_err(|_| StartupCredentialError::EnrollmentFailed)?;
-        Ok(Self {
-            token_hash,
-            principal_id: startup.principal_id,
-            expires_at: startup.expires_at,
-            handle,
-            store,
-            revoked: Arc::new(AtomicBool::new(false)),
-        })
+        Ok(Self { store })
     }
 }
 
@@ -184,23 +164,14 @@ impl Authority for EnrolledAuthority {
         bearer: &str,
         now: DateTime<Utc>,
     ) -> Result<CapabilityHandle, InterfaceError> {
-        let candidate: [u8; 32] = Sha256::digest(bearer.as_bytes()).into();
-        if !valid_bearer(bearer)
-            || !bool::from(self.token_hash.ct_eq(&candidate))
-            || self.expires_at <= now
-            || self.revoked.load(Ordering::Acquire)
-        {
+        if !valid_bearer(bearer) {
             return Err(authentication_error(CorrelationId::new()));
         }
-        Ok(self.handle.clone())
+        self.store.authenticate(bearer, now).await
     }
 
     async fn revoke(&self, principal: &PrincipalId) -> Result<(), InterfaceError> {
-        if principal == &self.principal_id {
-            self.revoked.store(true, Ordering::Release);
-            self.store.revoke(principal).await?;
-        }
-        Ok(())
+        self.store.revoke(principal).await
     }
 }
 
@@ -238,22 +209,26 @@ pub(crate) async fn authenticate(
         runtime,
     });
 
-    let Ok(_permit) = state.connections.clone().try_acquire_owned() else {
-        return ProtocolError::from(interface_error(
-            InterfaceErrorCode::ResourceExhausted,
-            "interface connection capacity exhausted",
-            request
-                .extensions()
-                .get::<AuthenticatedRequest>()
-                .unwrap()
-                .context
-                .correlation_id
-                .clone(),
-            Some(1_000),
-        ))
-        .into_response();
+    let correlation_id = request
+        .extensions()
+        .get::<AuthenticatedRequest>()
+        .expect("authenticated request context is present")
+        .context
+        .correlation_id
+        .clone();
+    let mut response = match crate::routes::validate_request_boundary(&state, &mut request).await {
+        Err(error) => error.into_response(),
+        Ok(()) => match state.in_flight_requests.clone().try_acquire_owned() {
+            Ok(_permit) => next.run(request).await,
+            Err(_) => ProtocolError::from(interface_error(
+                InterfaceErrorCode::ResourceExhausted,
+                "interface in-flight request capacity exhausted",
+                correlation_id,
+                Some(1_000),
+            ))
+            .into_response(),
+        },
     };
-    let mut response = next.run(request).await;
     response.headers_mut().insert(
         "x-interface-version",
         HeaderValue::from_static(types::CURRENT_INTERFACE_VERSION),
@@ -274,7 +249,7 @@ struct ParsedHeaders {
 }
 
 fn bearer(headers: &HeaderMap) -> Result<String, ProtocolError> {
-    let value = exactly_one(headers, "authorization", MAX_AUTHORIZATION_BYTES)
+    let value = exactly_one(headers, "authorization", MAX_AUTHORIZATION_HEADER_BYTES)
         .map_err(|_| ProtocolError::authentication())?;
     let value = value
         .to_str()
@@ -387,7 +362,7 @@ fn optional_text<'a>(
 }
 
 fn valid_bearer(value: &str) -> bool {
-    (32..=MAX_AUTHORIZATION_BYTES).contains(&value.len())
+    (MIN_BEARER_BYTES..=MAX_BEARER_BYTES).contains(&value.len())
         && value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 

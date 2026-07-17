@@ -5,12 +5,12 @@ use axum::http::{header::WWW_AUTHENTICATE, Request, StatusCode};
 use broker::{router, AppState, EnrolledAuthority, StartupCredential};
 use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
-use interface_core::{Authority, AuthorityStore, RuntimeInterface};
+use interface_core::{Authority, AuthorityStore, AuthorizationGuard, RuntimeInterface};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tower::ServiceExt;
 use types::{
-    AttemptId, Capability, CommandEnvelope, CommandId, PrimitiveCommand, PrincipalId, WorkflowId,
-    CURRENT_INTERFACE_VERSION,
+    AttemptId, Capability, CommandEnvelope, CommandId, InterfaceOperation, PrimitiveCommand,
+    PrincipalId, WorkflowId, CURRENT_INTERFACE_VERSION,
 };
 use uuid::uuid;
 
@@ -161,7 +161,8 @@ async fn startup_enrollment_accepts_only_the_explicit_bearer_and_honors_revocati
     .await
     .unwrap();
 
-    assert!(authority.authenticate(&bearer, Utc::now()).await.is_ok());
+    let handle = authority.authenticate(&bearer, Utc::now()).await.unwrap();
+    let context = handle.context(Utc::now() + Duration::minutes(2), None);
     assert!(authority
         .authenticate("different-startup-bearer-000000", Utc::now())
         .await
@@ -170,4 +171,64 @@ async fn startup_enrollment_accepts_only_the_explicit_bearer_and_honors_revocati
 
     authority.revoke(&principal).await.unwrap();
     assert!(authority.authenticate(&bearer, Utc::now()).await.is_err());
+    assert!(AuthorizationGuard::new(handle)
+        .authorize(&context, InterfaceOperation::RuntimeInfo)
+        .is_err());
+}
+
+#[tokio::test]
+async fn startup_bearer_limits_fit_the_authorization_header_exactly() {
+    let principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000078"));
+    let expires = Utc::now() + Duration::minutes(5);
+    let max = "x".repeat(505);
+
+    let credential = StartupCredential::new(
+        max.clone(),
+        principal.clone(),
+        vec![Capability::SessionRead],
+        expires,
+    )
+    .unwrap();
+    assert!(!format!("{credential:?}").contains(&max));
+    let authority = EnrolledAuthority::enroll(credential).await.unwrap();
+    let runtime = RuntimeService::default();
+    let app = router(AppState::new(
+        Arc::new(authority),
+        move |handle| {
+            Arc::new(AuthenticatedRuntime::new(runtime.clone(), handle))
+                as Arc<dyn RuntimeInterface>
+        },
+        InterfaceConfig::default(),
+    ));
+    let response = app
+        .oneshot(
+            Request::get("/v1/runtime")
+                .header("authorization", format!("Bearer {max}"))
+                .header("x-interface-version", CURRENT_INTERFACE_VERSION)
+                .header("x-correlation-id", "10000000-0000-0000-0000-000000000079")
+                .header(
+                    "x-deadline",
+                    (Utc::now() + Duration::minutes(2))
+                        .to_rfc3339_opts(SecondsFormat::Millis, true),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(StartupCredential::new(
+        "x".repeat(506),
+        principal.clone(),
+        vec![Capability::SessionRead],
+        expires,
+    )
+    .is_err());
+    assert!(StartupCredential::new(
+        "x".repeat(31),
+        principal,
+        vec![Capability::SessionRead],
+        expires,
+    )
+    .is_err());
 }

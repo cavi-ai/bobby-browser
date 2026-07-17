@@ -1,7 +1,10 @@
 use axum::{
-    body::{Body, Bytes},
-    extract::{rejection::BytesRejection, Extension, Path, RawQuery, State},
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    body::{to_bytes, Body, Bytes},
+    extract::{rejection::BytesRejection, Extension, Path, Request, State},
+    http::{
+        header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
+        HeaderMap, HeaderValue, Method, StatusCode,
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -167,17 +170,24 @@ async fn recover(
 
 async fn events(
     State(state): State<AppState>,
-    RawQuery(raw_query): RawQuery,
+    Extension(query): Extension<EventQuery>,
     Extension(request): Extension<AuthenticatedRequest>,
 ) -> Result<Response, ProtocolError> {
-    let (after, limit) = parse_event_query(raw_query.as_deref(), &state, &request)?;
     authorize_boundary(&request, InterfaceOperation::SubscribeEvents)?;
     let wait = (request.context.deadline - Utc::now())
         .to_std()
         .map_err(|_| deadline_error(&request.context.correlation_id))?;
-    match tokio::time::timeout(wait, state.events.read_after(after.into(), limit)).await {
+    match tokio::time::timeout(
+        wait,
+        state.events.read_after(query.after.into(), query.limit),
+    )
+    .await
+    {
         Ok(Ok(batch)) => Ok(Json(batch).into_response()),
-        Ok(Err(gap)) => Ok(event_gap_response(gap)),
+        Ok(Err(gap)) => Ok(event_gap_response(
+            gap,
+            request.context.correlation_id.clone(),
+        )),
         Err(_) => Err(deadline_error(&request.context.correlation_id)),
     }
 }
@@ -185,18 +195,9 @@ async fn events(
 async fn artifact(
     State(state): State<AppState>,
     Path(artifact_id): Path<String>,
-    RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     Extension(request): Extension<AuthenticatedRequest>,
 ) -> Result<Response, ProtocolError> {
-    if raw_query.as_deref().is_some_and(|query| !query.is_empty()) {
-        return Err(ProtocolError::from(interface_error(
-            InterfaceErrorCode::InvalidRequest,
-            "artifact ownership is determined by the authenticated boundary",
-            request.context.correlation_id,
-            None,
-        )));
-    }
     if artifact_id.is_empty()
         || artifact_id.len() > 128
         || !artifact_id
@@ -258,16 +259,96 @@ fn parse_json<T: DeserializeOwned>(
     })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct EventQuery {
+    after: u64,
+    limit: usize,
+}
+
+pub(crate) async fn validate_request_boundary(
+    state: &AppState,
+    request: &mut Request,
+) -> Result<(), ProtocolError> {
+    let authenticated = request
+        .extensions()
+        .get::<AuthenticatedRequest>()
+        .expect("authentication inserts trusted request context");
+    let correlation_id = authenticated.context.correlation_id.clone();
+    let path = request.uri().path();
+    let bodyful = matches!(
+        (request.method(), path),
+        (&Method::POST, "/v1/sessions")
+            | (&Method::POST, "/v1/pages")
+            | (&Method::POST, "/v1/commands")
+            | (&Method::POST, "/v1/checkpoints")
+    );
+
+    if path == "/v1/events" {
+        let query = parse_event_query(request.uri().query(), state, &correlation_id)?;
+        request.extensions_mut().insert(query);
+    } else if request.uri().query().is_some() {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            correlation_id,
+        ));
+    }
+
+    if !bodyful && declared_body(request.headers()) {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            correlation_id,
+        ));
+    }
+
+    let body = std::mem::replace(request.body_mut(), Body::empty());
+    let bytes = match to_bytes(body, state.interface.max_request_bytes).await {
+        Ok(bytes) => bytes,
+        Err(_) if bodyful => return Err(ProtocolError::oversized(correlation_id)),
+        Err(_) => {
+            return Err(ProtocolError::invalid_with(
+                InterfaceErrorCode::InvalidRequest,
+                correlation_id,
+            ))
+        }
+    };
+    if !bodyful && !bytes.is_empty() {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            correlation_id,
+        ));
+    }
+    *request.body_mut() = Body::from(bytes);
+    Ok(())
+}
+
+fn declared_body(headers: &HeaderMap) -> bool {
+    if headers.get_all(TRANSFER_ENCODING).iter().next().is_some() {
+        return true;
+    }
+    let mut lengths = headers.get_all(CONTENT_LENGTH).iter();
+    let Some(length) = lengths.next() else {
+        return false;
+    };
+    if lengths.next().is_some() {
+        return true;
+    }
+    length
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        != Some(0)
+}
+
 fn parse_event_query(
     raw: Option<&str>,
     state: &AppState,
-    request: &AuthenticatedRequest,
-) -> Result<(u64, usize), ProtocolError> {
+    correlation_id: &CorrelationId,
+) -> Result<EventQuery, ProtocolError> {
     let raw = raw.unwrap_or_default();
-    if raw.len() > 1024 {
+    if raw.len() > 1024 || !valid_query_encoding(raw) {
         return Err(ProtocolError::invalid_with(
             InterfaceErrorCode::InvalidRequest,
-            request.context.correlation_id.clone(),
+            correlation_id.clone(),
         ));
     }
     let mut after = None;
@@ -278,7 +359,7 @@ fn parse_event_query(
                 after = Some(value.parse::<u64>().map_err(|_| {
                     ProtocolError::invalid_with(
                         InterfaceErrorCode::InvalidRequest,
-                        request.context.correlation_id.clone(),
+                        correlation_id.clone(),
                     )
                 })?)
             }
@@ -286,14 +367,14 @@ fn parse_event_query(
                 limit = Some(value.parse::<usize>().map_err(|_| {
                     ProtocolError::invalid_with(
                         InterfaceErrorCode::InvalidRequest,
-                        request.context.correlation_id.clone(),
+                        correlation_id.clone(),
                     )
                 })?)
             }
             _ => {
                 return Err(ProtocolError::invalid_with(
                     InterfaceErrorCode::InvalidRequest,
-                    request.context.correlation_id.clone(),
+                    correlation_id.clone(),
                 ))
             }
         }
@@ -303,15 +384,47 @@ fn parse_event_query(
         return Err(ProtocolError::from(interface_error(
             InterfaceErrorCode::InvalidRequest,
             "event limit is outside the configured bound",
-            request.context.correlation_id.clone(),
+            correlation_id.clone(),
             None,
         )));
     }
-    Ok((after.unwrap_or(0), limit))
+    Ok(EventQuery {
+        after: after.unwrap_or(0),
+        limit,
+    })
 }
 
-fn event_gap_response(gap: EventGap) -> Response {
-    (StatusCode::CONFLICT, Json(gap)).into_response()
+fn valid_query_encoding(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    true
+}
+
+fn event_gap_response(gap: EventGap, correlation_id: CorrelationId) -> Response {
+    let error = interface_error(
+        InterfaceErrorCode::InvalidRequest,
+        "event history has a cursor gap",
+        correlation_id,
+        None,
+    );
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": error, "gap": gap })),
+    )
+        .into_response()
 }
 
 fn deadline_error(correlation_id: &CorrelationId) -> ProtocolError {
