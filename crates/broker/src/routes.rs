@@ -274,6 +274,10 @@ pub(crate) async fn validate_request_boundary(
         .get::<AuthenticatedRequest>()
         .expect("authentication inserts trusted request context");
     let correlation_id = authenticated.context.correlation_id.clone();
+    let remaining = (authenticated.context.deadline - Utc::now())
+        .to_std()
+        .map_err(|_| deadline_error(&correlation_id))?;
+    let body_deadline = tokio::time::Instant::now() + remaining;
     let path = request.uri().path();
     let bodyful = matches!(
         (request.method(), path),
@@ -301,10 +305,16 @@ pub(crate) async fn validate_request_boundary(
     }
 
     let body = std::mem::replace(request.body_mut(), Body::empty());
-    let bytes = match to_bytes(body, state.interface.max_request_bytes).await {
-        Ok(bytes) => bytes,
-        Err(_) if bodyful => return Err(ProtocolError::oversized(correlation_id)),
-        Err(_) => {
+    let bytes = match tokio::time::timeout_at(
+        body_deadline,
+        to_bytes(body, state.interface.max_request_bytes),
+    )
+    .await
+    {
+        Err(_) => return Err(deadline_error(&correlation_id)),
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) if bodyful => return Err(ProtocolError::oversized(correlation_id)),
+        Ok(Err(_)) => {
             return Err(ProtocolError::invalid_with(
                 InterfaceErrorCode::InvalidRequest,
                 correlation_id,

@@ -250,10 +250,56 @@ pub async fn serve_listener(
     .await
 }
 
-pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
+struct StartupGate {
+    authority: Arc<EnrolledAuthority>,
+    handle: CapabilityHandle,
+}
+
+impl StartupGate {
+    fn validate_at(&self, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
+        if !self.handle.is_valid_at(now) {
+            return Err(StartupCredentialError::Expired.into());
+        }
+        Ok(())
+    }
+
+    async fn bind_if_valid_at<T, Bind, BindFuture>(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        bind: Bind,
+    ) -> anyhow::Result<T>
+    where
+        Bind: FnOnce() -> BindFuture,
+        BindFuture: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        self.validate_at(now)?;
+        bind().await
+    }
+}
+
+async fn bootstrap_listener_with<T, Clock, Build, BuildFuture, Bind, BindFuture>(
+    config: AppConfig,
+    startup: StartupCredential,
+    now: Clock,
+    build_runtime: Build,
+    bind_listener: Bind,
+) -> anyhow::Result<(Router, T)>
+where
+    Clock: Fn() -> chrono::DateTime<chrono::Utc>,
+    Build: FnOnce(AppConfig) -> BuildFuture,
+    BuildFuture: std::future::Future<Output = anyhow::Result<RuntimeService>>,
+    Bind: FnOnce(SocketAddr) -> BindFuture,
+    BindFuture: std::future::Future<Output = anyhow::Result<T>>,
+{
     config.validate().map_err(anyhow::Error::msg)?;
-    let runtime = RuntimeService::build(&config).await?;
     let authority = Arc::new(EnrolledAuthority::enroll(startup).await?);
+    let gate = StartupGate {
+        handle: authority.startup_handle(),
+        authority: authority.clone(),
+    };
+    gate.validate_at(now())?;
+    let runtime = build_runtime(config.clone()).await?;
+    gate.validate_at(now())?;
     let (ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
     let artifact_reader = ArtifactReader::new(
         artifact_store::ArtifactStore::new(
@@ -273,7 +319,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     let bound_runtime = Arc::new(OnceLock::<AuthenticatedRuntime>::new());
     let app = router(
         AppState::new(
-            authority,
+            gate.authority.clone(),
             move |handle| {
                 Arc::new(
                     bound_runtime
@@ -295,7 +341,77 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         ),
     );
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_listener(listener, app, config.interface.max_connections).await?;
+    let listener = gate.bind_if_valid_at(now(), || bind_listener(addr)).await?;
+    Ok((app, listener))
+}
+
+pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
+    let max_connections = config.interface.max_connections;
+    let (app, listener) = bootstrap_listener_with(
+        config,
+        startup,
+        chrono::Utc::now,
+        |config| async move {
+            RuntimeService::build(&config)
+                .await
+                .map_err(anyhow::Error::new)
+        },
+        |addr| async move {
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(anyhow::Error::new)
+        },
+    )
+    .await?;
+    serve_listener(listener, app, max_connections).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
+    use chrono::{Duration, Utc};
+    use types::{Capability, PrincipalId};
+    use uuid::uuid;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn credential_expiring_during_runtime_construction_prevents_listener_bind() {
+        let initial = Utc::now();
+        let expires_at = initial + Duration::minutes(1);
+        let clock = Arc::new(Mutex::new(initial));
+        let construction_clock = clock.clone();
+        let bind_calls = Arc::new(AtomicUsize::new(0));
+        let observed_bind_calls = bind_calls.clone();
+        let startup = StartupCredential::new(
+            "startup-expiry-race-bearer-000001".to_owned(),
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000088")),
+            vec![Capability::SessionRead],
+            expires_at,
+        )
+        .unwrap();
+
+        let result = bootstrap_listener_with(
+            AppConfig::default(),
+            startup,
+            move || *clock.lock().unwrap(),
+            move |_| async move {
+                *construction_clock.lock().unwrap() = expires_at + Duration::seconds(1);
+                Ok(RuntimeService::default())
+            },
+            move |_| async move {
+                observed_bind_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(bind_calls.load(Ordering::SeqCst), 0);
+    }
 }
