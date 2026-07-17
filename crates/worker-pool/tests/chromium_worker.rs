@@ -1,9 +1,9 @@
 use config::BrowserConfig;
 use std::path::PathBuf;
 use types::{
-    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClosePageCommand, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, SessionId, TypeTextCommand,
-    UploadFilesCommand, WaitUntil,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
+    ErrorCode, Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand,
+    PageId, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -62,6 +62,7 @@ async fn correlates_popup_and_download_before_clicking() {
             &page_id,
             &ClickAndWaitForPopupCommand {
                 selector: "#root-popup".into(),
+                target: None,
                 timeout_ms: 5_000,
             },
         )
@@ -74,6 +75,7 @@ async fn correlates_popup_and_download_before_clicking() {
             &page_id,
             &ClickAndWaitForDownloadCommand {
                 selector: "#download".into(),
+                target: None,
                 timeout_ms: 5_000,
             },
         )
@@ -151,6 +153,7 @@ async fn drives_a_real_chromium_page() {
             &page_id,
             &TypeTextCommand {
                 selector: "#name".into(),
+                target: None,
                 value: "Ada".into(),
                 clear_first: true,
             },
@@ -162,6 +165,7 @@ async fn drives_a_real_chromium_page() {
             &page_id,
             &InspectCommand {
                 selector: Some("#name".into()),
+                target: None,
                 include_html: false,
             },
         )
@@ -173,6 +177,7 @@ async fn drives_a_real_chromium_page() {
             &page_id,
             &UploadFilesCommand {
                 selector: "#resume".into(),
+                target: None,
                 paths: vec![upload.to_string_lossy().into_owned()],
             },
         )
@@ -202,5 +207,93 @@ async fn drives_a_real_chromium_page() {
         .unwrap();
     let listed = worker.list_pages(&ListPagesCommand).await.unwrap();
     assert!(matches!(&listed[0], types::Evidence::Pages { pages } if pages.len() == 1));
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<label for='email'>Email address</label><input id='email'><button aria-label='Continue' onclick=\"this.outerHTML='<button aria-label=Continue>Continue</button>'\">old</button><button aria-label='Duplicate'>one</button><button aria-label='Duplicate'>two</button>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let typed = worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    label: Some("Email address".into()),
+                    ..TargetSpec::default()
+                }),
+                value: "ada@example.test".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(typed
+        .iter()
+        .any(|item| matches!(item, Evidence::Resolution { .. })));
+
+    let continue_target = TargetSpec {
+        role: Some("button".into()),
+        accessible_name: Some("Continue".into()),
+        ..TargetSpec::default()
+    };
+    for _ in 0..2 {
+        worker
+            .click(
+                &page_id,
+                &ClickCommand {
+                    selector: String::new(),
+                    target: Some(continue_target.clone()),
+                    boundary: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let error = worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("button".into()),
+                    accessible_name: Some("Duplicate".into()),
+                    ..TargetSpec::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetAmbiguous);
     worker.close().await.unwrap();
 }

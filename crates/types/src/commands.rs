@@ -88,6 +88,7 @@ pub enum WaitUntil {
 #[serde(rename_all = "camelCase")]
 pub struct InspectCommand {
     pub selector: Option<String>,
+    pub target: Option<TargetSpec>,
     pub include_html: bool,
 }
 
@@ -95,6 +96,7 @@ pub struct InspectCommand {
 #[serde(rename_all = "camelCase")]
 pub struct ClickCommand {
     pub selector: String,
+    pub target: Option<TargetSpec>,
     pub boundary: bool,
     pub expected_url: Option<String>,
 }
@@ -103,6 +105,7 @@ pub struct ClickCommand {
 #[serde(rename_all = "camelCase")]
 pub struct TypeTextCommand {
     pub selector: String,
+    pub target: Option<TargetSpec>,
     pub value: String,
     pub clear_first: bool,
 }
@@ -111,6 +114,7 @@ pub struct TypeTextCommand {
 #[serde(rename_all = "camelCase")]
 pub struct UploadFilesCommand {
     pub selector: String,
+    pub target: Option<TargetSpec>,
     pub paths: Vec<String>,
 }
 
@@ -133,6 +137,7 @@ pub struct ClosePageCommand {
 #[serde(rename_all = "camelCase")]
 pub struct ClickAndWaitForPopupCommand {
     pub selector: String,
+    pub target: Option<TargetSpec>,
     pub timeout_ms: u64,
 }
 
@@ -140,6 +145,7 @@ pub struct ClickAndWaitForPopupCommand {
 #[serde(rename_all = "camelCase")]
 pub struct ClickAndWaitForDownloadCommand {
     pub selector: String,
+    pub target: Option<TargetSpec>,
     pub timeout_ms: u64,
 }
 

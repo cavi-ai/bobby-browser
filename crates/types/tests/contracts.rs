@@ -40,9 +40,19 @@ fn semantic_target_wait_and_screenshot_contracts_are_stable() {
             target: Box::new(target),
         },
     });
+    let click = PrimitiveCommand::Click(ClickCommand {
+        selector: String::new(),
+        target: Some(target_spec("button", "Continue")),
+        boundary: false,
+        expected_url: None,
+    });
 
     assert_eq!(wait.class(), CommandClass::Replayable);
     assert_eq!(screenshot.class(), CommandClass::Replayable);
+    assert_eq!(
+        serde_json::to_value(click).unwrap()["input"]["target"]["role"],
+        json!("button")
+    );
     assert_eq!(
         serde_json::to_value(wait).unwrap()["kind"],
         json!("waitFor")
@@ -51,6 +61,14 @@ fn semantic_target_wait_and_screenshot_contracts_are_stable() {
         serde_json::to_value(screenshot).unwrap()["kind"],
         json!("captureScreenshot")
     );
+}
+
+fn target_spec(role: &str, name: &str) -> TargetSpec {
+    TargetSpec {
+        role: Some(role.into()),
+        accessible_name: Some(name.into()),
+        ..TargetSpec::default()
+    }
 }
 
 #[test]
@@ -130,6 +148,7 @@ fn commands_expose_recovery_class() {
     assert_eq!(
         PrimitiveCommand::TypeText(TypeTextCommand {
             selector: "#name".into(),
+            target: None,
             value: "Ada".into(),
             clear_first: true,
         })
@@ -139,6 +158,7 @@ fn commands_expose_recovery_class() {
     assert_eq!(
         PrimitiveCommand::Click(ClickCommand {
             selector: "#submit".into(),
+            target: None,
             boundary: true,
             expected_url: None,
         })
@@ -153,6 +173,7 @@ fn workflow_io_commands_have_stable_json_and_recovery_classes() {
         (
             PrimitiveCommand::UploadFiles(UploadFilesCommand {
                 selector: "#resume".into(),
+                target: None,
                 paths: vec!["/uploads/resume.pdf".into()],
             }),
             "uploadFiles",
@@ -180,6 +201,7 @@ fn workflow_io_commands_have_stable_json_and_recovery_classes() {
         (
             PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
                 selector: "#popup".into(),
+                target: None,
                 timeout_ms: 5_000,
             }),
             "clickAndWaitForPopup",
@@ -188,6 +210,7 @@ fn workflow_io_commands_have_stable_json_and_recovery_classes() {
         (
             PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
                 selector: "#download".into(),
+                target: None,
                 timeout_ms: 5_000,
             }),
             "clickAndWaitForDownload",

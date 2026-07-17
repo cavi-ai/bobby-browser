@@ -168,6 +168,7 @@ impl RecoveryCoordinator {
                         &checkpoint.page_id,
                         &InspectCommand {
                             selector: Some(selector.clone()),
+                            target: None,
                             include_html: false,
                         },
                     )

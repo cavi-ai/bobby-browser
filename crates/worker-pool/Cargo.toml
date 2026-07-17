@@ -8,6 +8,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true
 config = { path = "../config" }
+dom-engine = { path = "../dom-engine" }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

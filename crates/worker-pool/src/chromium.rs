@@ -24,7 +24,10 @@ use types::{
     UploadFilesCommand, WorkerId,
 };
 
-use crate::{resolve_upload_paths, session_download_dir, BrowserWorker, WorkerFactory};
+use crate::{
+    resolve_upload_paths, session_download_dir, targeting::resolve_target, BrowserWorker,
+    WorkerFactory,
+};
 
 #[derive(Clone)]
 pub struct ChromiumWorkerFactory {
@@ -159,8 +162,15 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .unwrap_or_default();
-        let (text, html) = if let Some(selector) = &command.selector {
-            let element = page.find_element(selector).await.map_err(command_failed)?;
+        let (text, html, resolution) = if command.selector.is_some() || command.target.is_some() {
+            let resolved = resolve_target(
+                page_id,
+                page,
+                command.selector.as_deref().unwrap_or(""),
+                command.target.as_ref(),
+            )
+            .await?;
+            let element = resolved.element;
             let text = match element.string_property("value").await {
                 Ok(Some(value)) if !value.is_empty() => value,
                 _ => element
@@ -180,7 +190,7 @@ impl BrowserWorker for ChromiumWorker {
             } else {
                 None
             };
-            (text, html)
+            (text, html, Some(resolved.evidence))
         } else {
             let body = page.find_element("body").await.map_err(command_failed)?;
             let text = body
@@ -193,15 +203,19 @@ impl BrowserWorker for ChromiumWorker {
             } else {
                 None
             };
-            (text, html)
+            (text, html, None)
         };
-        Ok(vec![Evidence::Inspection {
+        let mut evidence = vec![Evidence::Inspection {
             selector: command.selector.clone(),
             url,
             title,
             text,
             html,
-        }])
+        }];
+        if let Some(resolution) = resolution {
+            evidence.push(resolution);
+        }
+        Ok(evidence)
     }
 
     async fn click(
@@ -211,16 +225,18 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
-        let element = page
-            .find_element(command.selector.as_str())
-            .await
-            .map_err(command_failed)?;
+        let resolved =
+            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
+        let element = resolved.element;
         let text = element.inner_text().await.ok().flatten();
         element.click().await.map_err(command_failed)?;
-        Ok(vec![Evidence::Element {
-            selector: command.selector.clone(),
-            text,
-        }])
+        Ok(vec![
+            Evidence::Element {
+                selector: command.selector.clone(),
+                text,
+            },
+            resolved.evidence,
+        ])
     }
 
     async fn type_text(
@@ -230,10 +246,9 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
-        let element = page
-            .find_element(command.selector.as_str())
-            .await
-            .map_err(command_failed)?;
+        let resolved =
+            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
+        let element = resolved.element;
         element.click().await.map_err(command_failed)?;
         if command.clear_first {
             element
@@ -248,10 +263,13 @@ impl BrowserWorker for ChromiumWorker {
             .type_str(command.value.as_str())
             .await
             .map_err(command_failed)?;
-        Ok(vec![Evidence::Element {
-            selector: command.selector.clone(),
-            text: Some(command.value.clone()),
-        }])
+        Ok(vec![
+            Evidence::Element {
+                selector: command.selector.clone(),
+                text: Some(command.value.clone()),
+            },
+            resolved.evidence,
+        ])
     }
 
     async fn upload_files(
@@ -263,10 +281,9 @@ impl BrowserWorker for ChromiumWorker {
         let paths = resolve_upload_paths(&self.upload_roots, &requested)?;
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
-        let element = page
-            .find_element(&command.selector)
-            .await
-            .map_err(command_failed)?;
+        let resolved =
+            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
+        let element = resolved.element;
         let path_strings = paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -280,10 +297,13 @@ impl BrowserWorker for ChromiumWorker {
         )
         .await
         .map_err(command_failed)?;
-        Ok(vec![Evidence::Upload {
-            selector: command.selector.clone(),
-            paths: path_strings,
-        }])
+        Ok(vec![
+            Evidence::Upload {
+                selector: command.selector.clone(),
+                paths: path_strings,
+            },
+            resolved.evidence,
+        ])
     }
 
     async fn open_page_command(
@@ -349,13 +369,9 @@ impl BrowserWorker for ChromiumWorker {
         let pages = self.pages.lock().await;
         let opener = pages.get(page_id).ok_or_else(page_missing)?;
         let opener_target = opener.target_id().clone();
-        opener
-            .find_element(&command.selector)
-            .await
-            .map_err(command_failed)?
-            .click()
-            .await
-            .map_err(command_failed)?;
+        let resolved =
+            resolve_target(page_id, opener, &command.selector, command.target.as_ref()).await?;
+        resolved.element.click().await.map_err(command_failed)?;
         let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let event = events.next().await.ok_or_else(|| {
@@ -390,12 +406,15 @@ impl BrowserWorker for ChromiumWorker {
         let popup_id = PageId::new();
         let page = page_evidence(popup_id.clone(), &popup).await?;
         self.pages.lock().await.insert(popup_id.clone(), popup);
-        Ok(vec![Evidence::Popup {
-            opener_page_id: page_id.clone(),
-            page_id: popup_id,
-            url: page.url,
-            title: page.title,
-        }])
+        Ok(vec![
+            Evidence::Popup {
+                opener_page_id: page_id.clone(),
+                page_id: popup_id,
+                url: page.url,
+                title: page.title,
+            },
+            resolved.evidence,
+        ])
     }
     async fn click_and_wait_for_download(
         &self,
@@ -426,11 +445,10 @@ impl BrowserWorker for ChromiumWorker {
             .event_listener::<EventDownloadProgress>()
             .await
             .map_err(command_failed)?;
-        let element = page
-            .find_element(&command.selector)
-            .await
-            .map_err(command_failed)?;
-        element
+        let resolved =
+            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
+        resolved
+            .element
             .call_js_fn("function() { this.click(); }", false)
             .await
             .map_err(command_failed)?;
@@ -475,12 +493,15 @@ impl BrowserWorker for ChromiumWorker {
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        Ok(vec![Evidence::Download {
-            filename: begin.suggested_filename.clone(),
-            path: path.to_string_lossy().into_owned(),
-            bytes: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)),
-        }])
+        Ok(vec![
+            Evidence::Download {
+                filename: begin.suggested_filename.clone(),
+                path: path.to_string_lossy().into_owned(),
+                bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+            },
+            resolved.evidence,
+        ])
     }
 
     async fn close(&self) -> Result<(), CommandError> {

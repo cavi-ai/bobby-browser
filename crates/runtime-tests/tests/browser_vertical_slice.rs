@@ -204,6 +204,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &mut command_ids,
         PrimitiveCommand::UploadFiles(UploadFilesCommand {
             selector: "#resume".into(),
+            target: None,
             paths: vec![resume.to_string_lossy().into_owned()],
         }),
     )
@@ -218,6 +219,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &mut command_ids,
         PrimitiveCommand::TypeText(TypeTextCommand {
             selector: "#name".into(),
+            target: None,
             value: "Ada".into(),
             clear_first: true,
         }),
@@ -231,6 +233,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &mut command_ids,
         PrimitiveCommand::Click(ClickCommand {
             selector: "#continue".into(),
+            target: None,
             boundary: false,
             expected_url: None,
         }),
@@ -249,6 +252,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
                 command_id,
                 PrimitiveCommand::Inspect(InspectCommand {
                     selector: Some("#company".into()),
+                    target: None,
                     include_html: false,
                 }),
             ))
@@ -269,6 +273,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &mut command_ids,
         PrimitiveCommand::TypeText(TypeTextCommand {
             selector: "#company".into(),
+            target: None,
             value: "Analytical Engines".into(),
             clear_first: true,
         }),
@@ -343,6 +348,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             deadline: Utc::now() + Duration::seconds(30),
             command: PrimitiveCommand::Click(ClickCommand {
                 selector: "#submit".into(),
+                target: None,
                 boundary: true,
                 expected_url: Some(expected_url.clone()),
             }),
@@ -359,6 +365,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &mut command_ids,
         PrimitiveCommand::Inspect(InspectCommand {
             selector: Some("#result".into()),
+            target: None,
             include_html: true,
         }),
     )
@@ -374,6 +381,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &page.id,
         PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
             selector: "#root-popup".into(),
+            target: None,
             timeout_ms: 5_000,
         }),
     )
@@ -393,6 +401,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &mut command_ids,
         PrimitiveCommand::Inspect(InspectCommand {
             selector: Some("#details".into()),
+            target: None,
             include_html: false,
         }),
     )
@@ -458,6 +467,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         &page.id,
         PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
             selector: "#download".into(),
+            target: None,
             timeout_ms: 5_000,
         }),
     )
