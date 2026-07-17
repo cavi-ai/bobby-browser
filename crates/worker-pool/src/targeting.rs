@@ -34,6 +34,16 @@ pub async fn resolve_target(
     selector: &str,
     target: Option<&TargetSpec>,
 ) -> Result<ResolvedTarget, CommandError> {
+    resolve_target_with_visibility(page_id, page, selector, target, true).await
+}
+
+pub async fn resolve_target_with_visibility(
+    page_id: &PageId,
+    page: &Page,
+    selector: &str,
+    target: Option<&TargetSpec>,
+    require_visible: bool,
+) -> Result<ResolvedTarget, CommandError> {
     let Some(target) = target else {
         let element = page.find_element(selector).await.map_err(cdp_error)?;
         return Ok(ResolvedTarget {
@@ -86,7 +96,11 @@ pub async fn resolve_target(
             },
         })
         .collect::<Vec<_>>();
-    match resolve_candidates(target, &candidates, &ResolutionPolicy::default())
+    let policy = ResolutionPolicy {
+        require_visible,
+        ..ResolutionPolicy::default()
+    };
+    match resolve_candidates(target, &candidates, &policy)
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?
     {
         ResolutionDecision::NotFound => Err(target_error(

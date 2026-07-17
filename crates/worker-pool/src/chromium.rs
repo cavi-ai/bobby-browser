@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig};
@@ -21,12 +22,13 @@ use types::{
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
     CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, ListPagesCommand,
     NavigateCommand, OpenPageCommand, PageEvidence, PageId, SessionId, TypeTextCommand,
-    UploadFilesCommand, WorkerId,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 
 use crate::{
-    resolve_upload_paths, session_download_dir, targeting::resolve_target, BrowserWorker,
-    WorkerFactory,
+    resolve_upload_paths, session_download_dir,
+    targeting::{resolve_target, resolve_target_with_visibility},
+    BrowserWorker, WorkerFactory,
 };
 
 #[derive(Clone)]
@@ -504,6 +506,45 @@ impl BrowserWorker for ChromiumWorker {
         ])
     }
 
+    async fn wait_for(
+        &self,
+        page_id: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(command.timeout_ms);
+        let mut observations = 0;
+        let mut quiet_since = None;
+        loop {
+            observations += 1;
+            let pages = self.pages.lock().await;
+            let page = pages.get(page_id).ok_or_else(page_missing)?;
+            let satisfied =
+                wait_condition_satisfied(page_id, page, &command.condition, &mut quiet_since)
+                    .await?;
+            drop(pages);
+            if satisfied {
+                return Ok(vec![Evidence::Wait {
+                    condition: command.condition.clone(),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    observations,
+                }]);
+            }
+            if Instant::now() >= deadline {
+                return Err(CommandError {
+                    code: ErrorCode::WaitConditionTimedOut,
+                    message: format!(
+                        "wait condition was not satisfied within {}ms",
+                        command.timeout_ms
+                    ),
+                    layer: ErrorLayer::Driver,
+                    retryable: false,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
         if let Some(mut browser) = self.browser.lock().await.take() {
@@ -526,6 +567,133 @@ impl BrowserWorker for ChromiumWorker {
             task.abort();
         }
         close_result
+    }
+}
+
+async fn wait_condition_satisfied(
+    page_id: &PageId,
+    page: &Page,
+    condition: &WaitCondition,
+    quiet_since: &mut Option<Instant>,
+) -> Result<bool, CommandError> {
+    match condition {
+        WaitCondition::Element { target, state } => {
+            let resolved =
+                resolve_target_with_visibility(page_id, page, "", Some(target), false).await;
+            let element = match resolved {
+                Ok(resolved) => Some(resolved.element),
+                Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => None,
+                Err(error) => return Err(error),
+            };
+            let Some(element) = element else {
+                return Ok(matches!(state, types::ElementState::Detached));
+            };
+            let visible = element
+                .call_js_fn("function() { const s=getComputedStyle(this),r=this.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0; }", false)
+                .await
+                .map_err(command_failed)?
+                .result
+                .value
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let enabled = !element
+                .property("disabled")
+                .await
+                .map_err(command_failed)?
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            Ok(match state {
+                types::ElementState::Attached => true,
+                types::ElementState::Detached => false,
+                types::ElementState::Visible => visible,
+                types::ElementState::Hidden => !visible,
+                types::ElementState::Enabled => enabled,
+                types::ElementState::Disabled => !enabled,
+            })
+        }
+        WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
+            let resolved = resolve_target(page_id, page, "", Some(target)).await;
+            let element = match resolved {
+                Ok(resolved) => resolved.element,
+                Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            let value = if matches!(condition, WaitCondition::Value { .. }) {
+                element
+                    .string_property("value")
+                    .await
+                    .map_err(command_failed)?
+                    .unwrap_or_default()
+            } else {
+                element
+                    .inner_text()
+                    .await
+                    .map_err(command_failed)?
+                    .unwrap_or_default()
+            };
+            text_matches(matcher, &value)
+        }
+        WaitCondition::Url { matcher } => {
+            let url = page
+                .url()
+                .await
+                .map_err(command_failed)?
+                .unwrap_or_default();
+            text_matches(matcher, &url)
+        }
+        WaitCondition::Document { ready } => {
+            let state: String = page
+                .evaluate("document.readyState")
+                .await
+                .map_err(command_failed)?
+                .into_value()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            Ok(match ready {
+                WaitUntil::Commit => true,
+                WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
+                    state == "interactive" || state == "complete"
+                }
+                WaitUntil::NetworkIdle => state == "complete",
+            })
+        }
+        WaitCondition::NetworkQuiet {
+            idle_ms,
+            max_in_flight,
+        } => {
+            let in_flight: usize = page
+                .evaluate(
+                    "performance.getEntriesByType('resource').filter(x => !x.responseEnd).length",
+                )
+                .await
+                .map_err(command_failed)?
+                .into_value()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            if in_flight <= *max_in_flight {
+                let since = quiet_since.get_or_insert_with(Instant::now);
+                Ok(since.elapsed() >= Duration::from_millis(*idle_ms))
+            } else {
+                *quiet_since = None;
+                Ok(false)
+            }
+        }
+    }
+}
+
+fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {
+    match matcher {
+        types::TextMatch::Exact(expected) => Ok(value == expected),
+        types::TextMatch::Contains(expected) => Ok(value.contains(expected)),
+        types::TextMatch::Regex(pattern) => {
+            if pattern.len() > 256 {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "wait regular expression exceeds configured limit",
+                ));
+            }
+            regex::Regex::new(pattern)
+                .map(|regex| regex.is_match(value))
+                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))
+        }
     }
 }
 
@@ -582,5 +750,24 @@ fn timeout_error(timeout_ms: u64) -> CommandError {
         message: format!("browser command exceeded {timeout_ms}ms"),
         layer: ErrorLayer::Driver,
         retryable: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text_matches;
+    use types::{ErrorCode, TextMatch};
+
+    #[test]
+    fn wait_text_matchers_are_bounded_and_deterministic() {
+        assert!(text_matches(&TextMatch::Exact("ready".into()), "ready").unwrap());
+        assert!(text_matches(&TextMatch::Contains("ead".into()), "ready").unwrap());
+        assert!(text_matches(&TextMatch::Regex("^rea.*$".into()), "ready").unwrap());
+        assert_eq!(
+            text_matches(&TextMatch::Regex("x".repeat(257)), "ready")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidRequest
+        );
     }
 }
