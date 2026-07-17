@@ -1296,9 +1296,11 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "page-runtime"
 version = "0.1.0"
 dependencies = [
+ "artifact-store",
  "async-trait",
  "checkpoint-store",
  "chrono",
+ "network-engine",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1811,9 +1813,11 @@ dependencies = [
 name = "sdk-core"
 version = "0.1.0"
 dependencies = [
+ "artifact-store",
  "checkpoint-store",
  "chrono",
  "config",
+ "network-engine",
  "page-runtime",
  "serde_json",
  "session-manager",

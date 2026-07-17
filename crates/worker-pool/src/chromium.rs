@@ -29,10 +29,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode,
-    SessionId, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
-    WorkerId,
+    ClickCommand, ClosePageCommand, CommandError, DownloadUrlCommand, ErrorCode, ErrorLayer,
+    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence,
+    PageId, ScreenshotMode, SessionId, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkerId,
 };
 
 use crate::{
@@ -524,6 +524,93 @@ impl BrowserWorker for ChromiumWorker {
             },
             resolved.evidence,
         ])
+    }
+
+    async fn download_url(
+        &self,
+        page_id: &PageId,
+        command: &DownloadUrlCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let timeout_ms = 30_000;
+        page.execute(
+            SetDownloadBehaviorParams::builder()
+                .behavior(SetDownloadBehaviorBehavior::Allow)
+                .download_path(self.download_dir.to_string_lossy())
+                .events_enabled(true)
+                .build()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
+        )
+        .await
+        .map_err(command_failed)?;
+        let mut begins = page
+            .event_listener::<EventDownloadWillBegin>()
+            .await
+            .map_err(command_failed)?;
+        let mut progress = page
+            .event_listener::<EventDownloadProgress>()
+            .await
+            .map_err(command_failed)?;
+        let url = serde_json::to_string(&command.url)
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(format!("(() => {{ const frame=document.createElement('iframe'); frame.name='__runtime_download'; frame.style.display='none'; const a=document.createElement('a'); a.href={url}; a.target=frame.name; a.style.display='none'; document.body.append(frame,a); a.click(); a.remove(); setTimeout(() => frame.remove(), 1000); }})()")))
+            .await
+            .map_err(|_| timeout_error(timeout_ms))?
+            .map_err(command_failed)?;
+        let begin = tokio::time::timeout(Duration::from_millis(timeout_ms), begins.next())
+            .await
+            .map_err(|_| timeout_error(timeout_ms))?
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "download event stream closed",
+                )
+            })?;
+        let completed = tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+            loop {
+                let event = progress.next().await.ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "download progress stream closed",
+                    )
+                })?;
+                if event.guid == begin.guid {
+                    match event.state {
+                        DownloadProgressState::Completed => return Ok::<_, CommandError>(event),
+                        DownloadProgressState::Canceled => {
+                            return Err(driver_error(
+                                ErrorCode::BrowserCommandFailed,
+                                "download was canceled",
+                            ))
+                        }
+                        DownloadProgressState::InProgress => {}
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| timeout_error(timeout_ms))??;
+        let path = completed
+            .file_path
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.download_dir.join(&begin.suggested_filename));
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        if bytes.len() as u64 > command.max_bytes {
+            return Err(driver_error(
+                ErrorCode::HttpResponseTooLarge,
+                "download exceeds command byte limit",
+            ));
+        }
+        Ok(vec![Evidence::Download {
+            filename: begin.suggested_filename.clone(),
+            path: path.to_string_lossy().into_owned(),
+            bytes: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+        }])
     }
 
     async fn wait_for(

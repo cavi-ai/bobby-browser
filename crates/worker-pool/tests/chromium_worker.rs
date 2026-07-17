@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, ElementState, ErrorCode, Evidence, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId,
-    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
-    WaitUntil,
+    ClickCommand, ClosePageCommand, DownloadUrlCommand, ElementState, ErrorCode, Evidence,
+    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode,
+    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -239,6 +239,20 @@ async fn correlates_popup_and_download_before_clicking() {
         .unwrap();
     println!("popup={popup:?}");
     assert!(matches!(&popup[0], types::Evidence::Popup { title, .. } if title == "Popup"));
+    let explicit_download = worker
+        .download_url(
+            &page_id,
+            &DownloadUrlCommand {
+                url: format!("{}/download", fixture.base_url()),
+                expected_content_type: Some("application/octet-stream".into()),
+                max_bytes: 1_024,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&explicit_download[0], types::Evidence::Download { filename, bytes, sha256, .. } if filename == "workflow-fixture.bin" && *bytes == 20 && sha256.len() == 64)
+    );
     let download = worker
         .click_and_wait_for_download(
             &page_id,

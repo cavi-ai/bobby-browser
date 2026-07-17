@@ -6,6 +6,35 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub browser: BrowserConfig,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub http: HttpConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpConfig {
+    pub allow_loopback: bool,
+    pub allow_private_network: bool,
+    pub max_redirects: usize,
+    pub max_header_bytes: usize,
+    pub max_body_bytes: usize,
+    pub max_download_bytes: usize,
+    pub request_timeout_ms: u64,
+    pub max_concurrent_requests: usize,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            allow_loopback: false,
+            allow_private_network: false,
+            max_redirects: 5,
+            max_header_bytes: 64 * 1024,
+            max_body_bytes: 8 * 1024 * 1024,
+            max_download_bytes: 64 * 1024 * 1024,
+            request_timeout_ms: 30_000,
+            max_concurrent_requests: 8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +84,22 @@ impl Default for AppConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
                 checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
             },
+            http: HttpConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[test]
+    fn http_defaults_deny_private_destinations_and_bound_concurrency() {
+        let http = AppConfig::default().http;
+        assert!(!http.allow_loopback);
+        assert!(!http.allow_private_network);
+        assert_eq!(http.max_concurrent_requests, 8);
+        assert!(http.max_redirects > 0);
+        assert!(http.request_timeout_ms > 0);
     }
 }

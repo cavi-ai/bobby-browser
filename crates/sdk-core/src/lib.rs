@@ -54,7 +54,31 @@ impl RuntimeService {
             .await
             .map_err(|error| RuntimeError::Internal(error.to_string()))?;
         let recovery = RecoveryCoordinator::with_workers(checkpoints.clone(), workers.clone());
-        let pages = PageRuntime::new_with_checkpoints(journal, workers.clone(), checkpoints);
+        let network = network_engine::NetworkPolicy {
+            allow_loopback: config.http.allow_loopback,
+            allow_private_network: config.http.allow_private_network,
+            max_redirects: config.http.max_redirects,
+            max_header_bytes: config.http.max_header_bytes,
+            max_body_bytes: config.http.max_body_bytes,
+            max_download_bytes: config.http.max_download_bytes,
+            request_timeout_ms: config.http.request_timeout_ms,
+            max_concurrent_requests: config.http.max_concurrent_requests,
+        };
+        let adaptive = page_runtime::AdaptivePageEngine::new(
+            network_engine::EligibilityPolicy::new(network.clone()),
+            network_engine::DirectHttpExecutor::new(network.clone()),
+            artifact_store::ArtifactStore::new(
+                &config.browser.artifacts_dir,
+                config
+                    .browser
+                    .max_artifact_bytes
+                    .max(network.max_download_bytes),
+                config.browser.max_screenshot_dimension,
+            ),
+            network,
+        );
+        let pages =
+            PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
         let sessions = SessionManager::new(workers);
         Ok(Self::with_recovery(sessions, pages, recovery))
     }
