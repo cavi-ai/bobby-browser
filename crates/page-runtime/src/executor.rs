@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use thiserror::Error;
 use types::{
-    CommandClass, CommandEnvelope, CommandError, CommandOutcome, CommandPhase, ErrorCode,
-    ErrorLayer, Evidence, InspectCommand, PrimitiveCommand,
+    CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
+    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand,
 };
-use workflow_journal::{JournalError, JournalRecord};
+use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
 use crate::PageRuntime;
 
@@ -15,6 +17,80 @@ pub enum ExecutorError {
 }
 
 impl PageRuntime {
+    pub async fn recover_command(&self, command_id: CommandId) -> CommandOutcome {
+        let Some(journal) = &self.journal else {
+            return CommandOutcome::Failed {
+                command_id,
+                error: internal_error("command journal is not configured"),
+            };
+        };
+        let scan = match journal.history(command_id.clone()).await {
+            Ok(scan) => scan,
+            Err(error) => {
+                return CommandOutcome::RetryableFailure {
+                    command_id,
+                    error: journal_error(error),
+                }
+            }
+        };
+        if let Some(outcome) = scan
+            .records
+            .iter()
+            .rev()
+            .find_map(|record| record.outcome.clone())
+        {
+            return outcome;
+        }
+        if let Some(prepared) = scan
+            .records
+            .iter()
+            .rev()
+            .find_map(|record| record.prepared_result.clone())
+        {
+            if let (Some(artifact_id), Some(staging_id), Some(sha256), Some(bytes)) = (
+                prepared.artifact_id.as_deref(),
+                prepared.artifact_staging_id.as_deref(),
+                prepared.artifact_sha256.as_deref(),
+                prepared.artifact_bytes,
+            ) {
+                let session_id = scan
+                    .records
+                    .iter()
+                    .find_map(|record| record.envelope.as_ref())
+                    .map(|envelope| envelope.session_id.clone());
+                if let Some(session_id) = session_id {
+                    if let Err(error) = self.adaptive.finalize_prepared_artifact(
+                        &session_id,
+                        artifact_id,
+                        staging_id,
+                        sha256,
+                        bytes,
+                    ) {
+                        return CommandOutcome::NeedsReconciliation {
+                            command_id,
+                            error,
+                            evidence: prepared.evidence,
+                        };
+                    }
+                }
+            }
+            return CommandOutcome::NeedsReconciliation {
+                command_id,
+                error: CommandError {
+                    code: ErrorCode::HttpEquivalenceUnproven,
+                    message: "durable prepared result requires deterministic finalization".into(),
+                    layer: ErrorLayer::Workflow,
+                    retryable: false,
+                },
+                evidence: prepared.evidence,
+            };
+        }
+        CommandOutcome::RetryableFailure {
+            command_id,
+            error: internal_error("no durable prepared result exists"),
+        }
+    }
+
     pub async fn execute(&self, envelope: CommandEnvelope) -> CommandOutcome {
         let command_id = envelope.command_id.clone();
         if let Err(error) = self.validate(&envelope).await {
@@ -37,7 +113,7 @@ impl PageRuntime {
             .append(record(
                 &envelope,
                 CommandPhase::Accepted,
-                Some(envelope.clone()),
+                Some(envelope.journal_safe()),
                 None,
             ))
             .await
@@ -66,44 +142,93 @@ impl PageRuntime {
             }
         };
         let page_id = envelope.page_id.as_ref().expect("validated page id");
-        let execution = match &envelope.command {
-            PrimitiveCommand::Navigate(command) => lease.worker().navigate(page_id, command).await,
-            PrimitiveCommand::Inspect(command) => lease.worker().inspect(page_id, command).await,
-            PrimitiveCommand::Click(command) => lease.worker().click(page_id, command).await,
-            PrimitiveCommand::TypeText(command) => lease.worker().type_text(page_id, command).await,
-            PrimitiveCommand::UploadFiles(command) => {
-                lease.worker().upload_files(page_id, command).await
-            }
-            PrimitiveCommand::OpenPage(command) => lease.worker().open_page_command(command).await,
-            PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await,
-            PrimitiveCommand::ClosePage(command) => {
-                lease.worker().close_page_command(command).await
-            }
-            PrimitiveCommand::ClickAndWaitForPopup(command) => {
-                lease
-                    .worker()
-                    .click_and_wait_for_popup(page_id, command)
-                    .await
-            }
-            PrimitiveCommand::ClickAndWaitForDownload(command) => {
-                lease
-                    .worker()
-                    .click_and_wait_for_download(page_id, command)
-                    .await
-            }
-            PrimitiveCommand::WaitFor(command) => lease.worker().wait_for(page_id, command).await,
-            PrimitiveCommand::CaptureScreenshot(command) => {
-                lease.worker().capture_screenshot(page_id, command).await
+        let page_state = match self.get(page_id).await {
+            Ok(page) => page,
+            Err(_) => {
+                return self
+                    .finish_failure(
+                        &envelope,
+                        classify_failure(
+                            &envelope,
+                            internal_error("page disappeared before dispatch"),
+                        ),
+                    )
+                    .await;
             }
         };
-        let evidence = match execution {
-            Ok(evidence) => evidence,
+        let mut execution = match self.adaptive.execute(&envelope, &lease, page_state).await {
+            Ok(execution) => execution,
             Err(error) => {
                 return self
                     .finish_failure(&envelope, classify_failure(&envelope, error))
                     .await;
             }
         };
+        if let Some(mut prepared) = execution.prepared_http.take() {
+            let artifact = prepared
+                .artifact
+                .as_ref()
+                .map(|pending| pending.record().clone());
+            let prepared_result = PreparedResult {
+                command_id: envelope.command_id.clone(),
+                attempt_id: envelope.attempt_id.clone(),
+                state_version: prepared.state_version,
+                state_delta: serde_json::Value::Null,
+                evidence: execution.evidence.clone(),
+                artifact_id: artifact.as_ref().map(|record| record.artifact_id.clone()),
+                artifact_sha256: artifact.as_ref().map(|record| record.sha256.clone()),
+                artifact_bytes: artifact.as_ref().map(|record| record.bytes),
+                artifact_staging_id: prepared
+                    .artifact
+                    .as_ref()
+                    .and_then(|pending| pending.staging_id().map(str::to_owned)),
+            };
+            let journal = Arc::clone(journal);
+            let prepared_record = prepared_record(&envelope, prepared_result);
+            let pending = prepared.artifact.take();
+            let durable_prepare = tokio::spawn(async move {
+                journal
+                    .append(prepared_record)
+                    .await
+                    .map_err(journal_error)?;
+                if let Some(pending) = pending {
+                    pending.commit().map_err(|error| {
+                        internal_error(format!("prepared artifact publication failed: {error}"))
+                    })?;
+                }
+                Ok::<(), CommandError>(())
+            });
+            match durable_prepare.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return prepared_failure(&envelope, error, execution.evidence);
+                }
+                Err(error) => {
+                    return prepared_failure(
+                        &envelope,
+                        internal_error(format!("prepared result task failed: {error}")),
+                        execution.evidence,
+                    );
+                }
+            }
+            if let Err(error) = lease
+                .worker()
+                .commit_http_state(
+                    envelope.page_id.as_ref().expect("validated page id"),
+                    prepared.state_version,
+                    prepared.state,
+                )
+                .await
+            {
+                return self
+                    .finish_failure(
+                        &envelope,
+                        prepared_failure(&envelope, error, execution.evidence.clone()),
+                    )
+                    .await;
+            }
+        }
+        let evidence = execution.evidence;
         match &envelope.command {
             PrimitiveCommand::OpenPage(_) => {
                 if let Some(Evidence::Page { page_id, url, .. }) = evidence.first() {
@@ -151,7 +276,7 @@ impl PageRuntime {
                         &envelope,
                         CommandPhase::Completed,
                         None,
-                        Some(outcome.clone()),
+                        Some(outcome.journal_safe()),
                     ))
                     .await
                 {
@@ -337,6 +462,25 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::DownloadUrl(_) => {
+                let download = evidence.iter().find_map(|item| match item {
+                    Evidence::Download { bytes, sha256, .. } => Some((*bytes, sha256)),
+                    _ => None,
+                });
+                let execution = evidence.iter().find_map(|item| match item {
+                    Evidence::ExecutionPath { bytes, sha256, .. } => Some((*bytes, sha256)),
+                    _ => None,
+                });
+                match (download, execution) {
+                    (
+                        Some((download_bytes, download_sha)),
+                        Some((Some(exec_bytes), Some(exec_sha))),
+                    ) if download_bytes == exec_bytes && download_sha == exec_sha => Ok(evidence),
+                    _ => Err(verification_error(
+                        "download lacks matching durable execution evidence",
+                    )),
+                }
+            }
             PrimitiveCommand::WaitFor(_) => {
                 if evidence
                     .iter()
@@ -375,7 +519,7 @@ impl PageRuntime {
                 envelope,
                 CommandPhase::Failed,
                 None,
-                Some(outcome.clone()),
+                Some(outcome.journal_safe()),
             ))
             .await
         {
@@ -386,7 +530,15 @@ impl PageRuntime {
 }
 
 fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandOutcome {
-    if envelope.command.class() == CommandClass::Boundary {
+    if matches!(
+        error.code,
+        ErrorCode::NetworkPolicyDenied | ErrorCode::PolicyDenied
+    ) {
+        CommandOutcome::PolicyDenied {
+            command_id: envelope.command_id.clone(),
+            error,
+        }
+    } else if requires_reconciliation(envelope) {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
@@ -405,6 +557,18 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
     }
 }
 
+fn prepared_failure(
+    envelope: &CommandEnvelope,
+    error: CommandError,
+    evidence: Vec<Evidence>,
+) -> CommandOutcome {
+    CommandOutcome::NeedsReconciliation {
+        command_id: envelope.command_id.clone(),
+        error,
+        evidence,
+    }
+}
+
 fn record(
     envelope: &CommandEnvelope,
     phase: CommandPhase,
@@ -418,6 +582,19 @@ fn record(
         phase,
         envelope: stored_envelope,
         outcome,
+        prepared_result: None,
+    }
+}
+
+fn prepared_record(envelope: &CommandEnvelope, prepared_result: PreparedResult) -> JournalRecord {
+    JournalRecord {
+        sequence: 0,
+        recorded_at: Utc::now(),
+        command_id: envelope.command_id.clone(),
+        phase: CommandPhase::ResultPrepared,
+        envelope: None,
+        outcome: None,
+        prepared_result: Some(prepared_result),
     }
 }
 
@@ -432,7 +609,7 @@ fn journal_failure(
         layer: ErrorLayer::Journal,
         retryable: true,
     };
-    if may_have_executed && envelope.command.class() == CommandClass::Boundary {
+    if may_have_executed && requires_reconciliation(envelope) {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error: command_error,
@@ -443,6 +620,20 @@ fn journal_failure(
             command_id: envelope.command_id.clone(),
             error: command_error,
         }
+    }
+}
+
+fn requires_reconciliation(envelope: &CommandEnvelope) -> bool {
+    envelope.command.class() == CommandClass::Boundary
+        || matches!(envelope.command, PrimitiveCommand::DownloadUrl(_))
+}
+
+fn journal_error(error: JournalError) -> CommandError {
+    CommandError {
+        code: ErrorCode::JournalFailed,
+        message: error.to_string(),
+        layer: ErrorLayer::Journal,
+        retryable: true,
     }
 }
 

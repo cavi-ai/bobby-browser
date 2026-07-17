@@ -139,6 +139,10 @@ async fn completes_dynamic_form_with_durable_evidence() {
     let resume = uploads_dir.join("resume.txt");
     std::fs::write(&resume, b"Ada Lovelace").unwrap();
     let config = AppConfig {
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
@@ -254,8 +258,11 @@ async fn completes_dynamic_form_with_durable_evidence() {
                 &page.id,
                 command_id,
                 PrimitiveCommand::Inspect(InspectCommand {
-                    selector: Some("#company".into()),
-                    target: None,
+                    selector: None,
+                    target: Some(types::TargetSpec {
+                        css: Some("#company".into()),
+                        ..types::TargetSpec::default()
+                    }),
                     include_html: false,
                 }),
             ))

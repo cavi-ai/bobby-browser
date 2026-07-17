@@ -19,12 +19,21 @@ pub struct CommandEnvelope {
 
 impl CommandEnvelope {
     pub const SCHEMA_VERSION: u16 = 1;
+
+    /// Returns an envelope suitable for durable journals and diagnostics.
+    /// The live envelope must remain in memory for execution.
+    pub fn journal_safe(&self) -> Self {
+        let mut safe = self.clone();
+        safe.command.sanitize_urls();
+        safe
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "input", rename_all = "camelCase")]
 pub enum PrimitiveCommand {
     Navigate(NavigateCommand),
+    DownloadUrl(DownloadUrlCommand),
     Inspect(InspectCommand),
     Click(ClickCommand),
     TypeText(TypeTextCommand),
@@ -39,6 +48,35 @@ pub enum PrimitiveCommand {
 }
 
 impl PrimitiveCommand {
+    fn sanitize_urls(&mut self) {
+        fn sanitize(value: &mut String) {
+            let Ok(mut url) = url::Url::parse(value) else {
+                *value = "[redacted-invalid-url]".into();
+                return;
+            };
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            *value = url.to_string();
+        }
+        match self {
+            Self::Navigate(command) => sanitize(&mut command.url),
+            Self::DownloadUrl(command) => sanitize(&mut command.url),
+            Self::OpenPage(command) => {
+                if let Some(url) = &mut command.url {
+                    sanitize(url);
+                }
+            }
+            Self::Click(command) => {
+                if let Some(url) = &mut command.expected_url {
+                    sanitize(url);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn class(&self) -> CommandClass {
         match self {
             Self::Navigate(_)
@@ -47,9 +85,10 @@ impl PrimitiveCommand {
             | Self::ListPages(_)
             | Self::WaitFor(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
-            Self::TypeText(_) | Self::UploadFiles(_) | Self::ClosePage(_) => {
-                CommandClass::Reconciliable
-            }
+            Self::DownloadUrl(_)
+            | Self::TypeText(_)
+            | Self::UploadFiles(_)
+            | Self::ClosePage(_) => CommandClass::Reconciliable,
             Self::ClickAndWaitForPopup(_) | Self::ClickAndWaitForDownload(_) => {
                 CommandClass::Boundary
             }
@@ -57,6 +96,14 @@ impl PrimitiveCommand {
             Self::Click(_) => CommandClass::Reconciliable,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadUrlCommand {
+    pub url: String,
+    pub expected_content_type: Option<String>,
+    pub max_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

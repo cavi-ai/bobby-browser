@@ -1,3 +1,4 @@
+mod adaptive;
 mod executor;
 mod recovery;
 
@@ -10,6 +11,7 @@ use types::{OpenPageRequest, PageId, PageMode, PageState, RuntimeError, SessionI
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
+pub use adaptive::{AdaptiveExecution, AdaptivePageEngine};
 pub use executor::ExecutorError;
 pub use recovery::{evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError};
 
@@ -19,6 +21,7 @@ pub struct PageRuntime {
     journal: Option<Arc<dyn CommandJournal>>,
     workers: Option<Arc<WorkerPool>>,
     checkpoints: Option<CheckpointStore>,
+    adaptive: AdaptivePageEngine,
 }
 
 impl PageRuntime {
@@ -28,6 +31,7 @@ impl PageRuntime {
             journal: Some(journal),
             workers: Some(workers),
             checkpoints: None,
+            adaptive: AdaptivePageEngine::browser_only(),
         }
     }
 
@@ -41,6 +45,22 @@ impl PageRuntime {
             journal: Some(journal),
             workers: Some(workers),
             checkpoints: Some(checkpoints),
+            adaptive: AdaptivePageEngine::browser_only(),
+        }
+    }
+
+    pub fn new_adaptive(
+        journal: Arc<dyn CommandJournal>,
+        workers: Arc<WorkerPool>,
+        checkpoints: Option<CheckpointStore>,
+        adaptive: AdaptivePageEngine,
+    ) -> Self {
+        Self {
+            inner: Arc::default(),
+            journal: Some(journal),
+            workers: Some(workers),
+            checkpoints,
+            adaptive,
         }
     }
 

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
@@ -7,23 +8,46 @@ use chrono::{Duration, Utc};
 use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
-    CommandOutcome, CommandPhase, ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand,
-    PageId, PrimitiveCommand, SessionId, TypeTextCommand, WaitUntil, WorkerId, WorkflowCheckpoint,
-    WorkflowId,
+    CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
+    ExecutionPath, InspectCommand, NavigateCommand, PageId, PrimitiveCommand, SessionId,
+    TargetSpec, TypeTextCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
-use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan};
+use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan, PreparedResult};
 
 #[derive(Clone, Copy)]
 enum DriverMode {
     Succeed,
     FailInspect,
     FailClick,
+    StateConflict,
+    CommitFail,
+    CommitPause,
 }
 
 struct RecordingJournal {
     events: Arc<Mutex<Vec<String>>>,
     fail_on: Option<CommandPhase>,
+    pause_on: Option<CommandPhase>,
+    paused: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+struct RecoveryJournal {
+    records: Vec<JournalRecord>,
+}
+
+#[async_trait]
+impl CommandJournal for RecoveryJournal {
+    async fn append(&self, _: JournalRecord) -> Result<(), JournalError> {
+        Ok(())
+    }
+    async fn history(&self, _: CommandId) -> Result<JournalScan, JournalError> {
+        Ok(JournalScan {
+            records: self.records.clone(),
+            torn_tail: false,
+        })
+    }
 }
 
 #[async_trait]
@@ -36,6 +60,10 @@ impl CommandJournal for RecordingJournal {
             .lock()
             .await
             .push(format!("journal:{:?}", record.phase).to_lowercase());
+        if self.pause_on == Some(record.phase) {
+            self.paused.notify_one();
+            self.resume.notified().await;
+        }
         Ok(())
     }
 
@@ -118,6 +146,202 @@ impl BrowserWorker for FakeWorker {
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
+    async fn http_state(
+        &self,
+        _: &PageId,
+    ) -> Result<network_engine::state::HttpStateSnapshot, CommandError> {
+        self.events.lock().await.push("http:state".into());
+        Ok(network_engine::state::HttpStateSnapshot {
+            version: 7,
+            current_url: self
+                .events
+                .lock()
+                .await
+                .iter()
+                .find_map(|event| event.strip_prefix("url:").map(str::to_owned))
+                .unwrap_or_else(|| "https://example.test/".into()),
+            cookies: Vec::new(),
+            cache_validators: Default::default(),
+            user_agent: "test".into(),
+            language: "en".into(),
+        })
+    }
+    async fn commit_http_state(
+        &self,
+        _: &PageId,
+        _: u64,
+        _: network_engine::state::ResponseStateDelta,
+    ) -> Result<(), CommandError> {
+        self.events.lock().await.push("http:commit".into());
+        if matches!(self.mode, DriverMode::CommitPause) {
+            std::future::pending::<()>().await;
+        }
+        if matches!(self.mode, DriverMode::CommitFail) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected state commit failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        if matches!(self.mode, DriverMode::StateConflict) {
+            Err(CommandError {
+                code: ErrorCode::HttpStateConflict,
+                message: "injected conflict".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+async fn adaptive_runtime(
+    mode: DriverMode,
+) -> (
+    page_runtime::PageRuntime,
+    SessionId,
+    PageId,
+    Arc<Mutex<Vec<String>>>,
+    tempfile::TempDir,
+) {
+    adaptive_runtime_with_failure(mode, None).await
+}
+
+async fn adaptive_runtime_with_failure(
+    mode: DriverMode,
+    fail_on: Option<CommandPhase>,
+) -> (
+    page_runtime::PageRuntime,
+    SessionId,
+    PageId,
+    Arc<Mutex<Vec<String>>>,
+    tempfile::TempDir,
+) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: true,
+        ..Default::default()
+    };
+    let adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        artifact_store::ArtifactStore::new(root.path(), network.max_download_bytes, 16_384),
+        network,
+    );
+    let runtime = page_runtime::PageRuntime::new_adaptive(journal, workers, None, adaptive);
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    (runtime, session, page.id, events, root)
+}
+
+async fn adaptive_runtime_paused(
+    phase: CommandPhase,
+) -> (
+    page_runtime::PageRuntime,
+    SessionId,
+    PageId,
+    Arc<Mutex<Vec<String>>>,
+    tempfile::TempDir,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let paused = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: Some(phase),
+        paused: paused.clone(),
+        resume: resume.clone(),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: true,
+        ..Default::default()
+    };
+    let adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        artifact_store::ArtifactStore::new(root.path(), network.max_download_bytes, 16_384),
+        network,
+    );
+    let runtime = page_runtime::PageRuntime::new_adaptive(journal, workers, None, adaptive);
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    (runtime, session, page.id, events, root, paused, resume)
+}
+
+async fn http_fixture(body: &'static str, content_type: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 2048];
+        let _ = socket.read(&mut request).await.unwrap();
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    format!("http://{address}/")
+}
+
+fn completed_evidence(outcome: CommandOutcome) -> Vec<Evidence> {
+    match outcome {
+        CommandOutcome::Completed { evidence, .. } => evidence,
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+}
+
+fn assert_one_lifecycle(events: &[String]) {
+    for phase in [
+        "accepted",
+        "prepared",
+        "executing",
+        "verifying",
+        "completed",
+    ] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == format!("journal:{phase}"))
+                .count(),
+            1
+        );
+    }
+}
+
+async fn assert_single_download_readable(root: &Path, session: &SessionId, expected: &[u8]) {
+    let mut entries = std::fs::read_dir(root.join(session.0.to_string())).unwrap();
+    let entry = entries.next().expect("one durable artifact").unwrap();
+    assert!(entries.next().is_none(), "expected exactly one artifact");
+    let artifact_id = entry.file_name().to_string_lossy().into_owned();
+    let store = artifact_store::ArtifactStore::new(root, 1024 * 1024, 16_384);
+    assert_eq!(store.get(session, &artifact_id).await.unwrap(), expected);
 }
 
 struct FakeFactory {
@@ -150,6 +374,9 @@ async fn runtime(
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
         fail_on,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
     });
     let workers = Arc::new(WorkerPool::new(
         8,
@@ -231,6 +458,9 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
         fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
     });
     let workers = Arc::new(WorkerPool::new(
         1,
@@ -344,4 +574,600 @@ async fn boundary_driver_failure_needs_reconciliation() {
         outcome,
         CommandOutcome::NeedsReconciliation { .. }
     ));
+}
+
+#[tokio::test]
+async fn eligible_inspect_uses_http_without_browser_dispatch() {
+    let url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::DirectHttp,
+            ..
+        }
+    )));
+    let events = events.lock().await;
+    assert!(!events.contains(&"browser:inspect".to_string()));
+    let prepared = events
+        .iter()
+        .position(|event| event == "journal:resultprepared")
+        .expect("direct inspection must durably prepare before state commit");
+    let committed = events
+        .iter()
+        .position(|event| event == "http:commit")
+        .expect("direct inspection must commit response state");
+    assert!(prepared < committed);
+    assert_one_lifecycle(&events);
+}
+
+#[tokio::test]
+async fn semantic_inspect_routes_directly_to_chromium() {
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand {
+                    selector: None,
+                    target: Some(TargetSpec {
+                        role: Some("button".into()),
+                        ..Default::default()
+                    }),
+                    include_html: false,
+                }),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::Chromium,
+            ..
+        }
+    )));
+    let events = events.lock().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.as_str() == "browser:inspect")
+            .count(),
+        1
+    );
+    assert!(!events.contains(&"http:state".to_string()));
+    assert_one_lifecycle(&events);
+}
+
+#[tokio::test]
+async fn unproven_replayable_inspect_falls_back_once() {
+    let url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand {
+                    selector: Some(".missing".into()),
+                    target: None,
+                    include_html: false,
+                }),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::ChromiumFallback,
+            ..
+        }
+    )));
+    let events = events.lock().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.as_str() == "browser:inspect")
+            .count(),
+        1
+    );
+    assert_one_lifecycle(&events);
+}
+
+#[tokio::test]
+async fn state_conflict_after_prepared_inspect_requires_reconciliation_without_replay() {
+    let url = http_fixture("<title>Candidate</title><p>candidate-only</p>", "text/html").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::StateConflict).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Inspection { text, .. } if text.contains("candidate-only"))))
+    );
+    let events = events.lock().await;
+    assert!(!events.contains(&"browser:inspect".to_string()));
+    assert!(events.contains(&"journal:resultprepared".to_string()));
+}
+
+#[tokio::test]
+async fn download_url_persists_then_returns_download_and_execution_evidence() {
+    let url = http_fixture("durable-download", "application/octet-stream").await;
+    let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::Succeed).await;
+    events.lock().await.push(format!("url:{url}"));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session.clone(),
+                page,
+                PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                    url,
+                    expected_content_type: Some("application/octet-stream".into()),
+                    max_bytes: 1024,
+                }),
+            ))
+            .await,
+    );
+    let (artifact_id, sha) = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Download { path, sha256, .. } => Some((path, sha256)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(root
+        .path()
+        .join(session.0.to_string())
+        .join(artifact_id)
+        .is_dir());
+    assert!(evidence.iter().any(|item| matches!(item, Evidence::ExecutionPath { path: ExecutionPath::DirectHttp, sha256: Some(execution_sha), .. } if execution_sha == sha)));
+    let events = events.lock().await;
+    assert!(!events.iter().any(|event| event.starts_with("browser:")));
+    let prepared = events
+        .iter()
+        .position(|event| event == "journal:resultprepared")
+        .unwrap();
+    let committed = events
+        .iter()
+        .position(|event| event == "http:commit")
+        .unwrap();
+    let completed = events
+        .iter()
+        .position(|event| event == "journal:completed")
+        .unwrap();
+    assert!(prepared < committed && committed < completed);
+    assert_one_lifecycle(&events);
+}
+
+#[tokio::test]
+async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatch() {
+    let url = http_fixture("not-the-expected-type", "text/plain").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    events.lock().await.push(format!("url:{url}"));
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: Some("application/octet-stream".into()),
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { error, .. } if error.code == ErrorCode::HttpEquivalenceUnproven)
+    );
+    let events = events.lock().await;
+    assert!(!events.iter().any(|event| event.starts_with("browser:")));
+    assert!(!events.contains(&"http:commit".to_string()));
+}
+
+#[tokio::test]
+async fn download_state_commit_failure_keeps_prepared_artifact_recoverable() {
+    let url = http_fixture("guarded-download", "application/octet-stream").await;
+    let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitFail).await;
+    events.lock().await.push(format!("url:{url}"));
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert_single_download_readable(root.path(), &session, b"guarded-download").await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Download { .. })))
+    );
+}
+
+#[tokio::test]
+async fn download_state_commit_cancellation_keeps_prepared_artifact_recoverable() {
+    let url = http_fixture("cancelled-download", "application/octet-stream").await;
+    let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitPause).await;
+    events.lock().await.push(format!("url:{url}"));
+    let runtime_for_task = runtime.clone();
+    let session_for_task = session.clone();
+    let handle = tokio::spawn(async move {
+        runtime_for_task
+            .execute(envelope(
+                session_for_task,
+                page,
+                PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                    url,
+                    expected_content_type: None,
+                    max_bytes: 1024,
+                }),
+            ))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if events.lock().await.contains(&"http:commit".to_string()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("state commit was not reached");
+    assert!(events.lock().await.contains(&"http:commit".to_string()));
+    handle.abort();
+    let _ = handle.await;
+    assert_single_download_readable(root.path(), &session, b"cancelled-download").await;
+}
+
+#[tokio::test]
+async fn prepared_result_journal_failure_prevents_state_commit_without_deleting_bytes() {
+    let url = http_fixture("prepared-failure", "application/octet-stream").await;
+    let (runtime, session, page, events, root) =
+        adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::ResultPrepared))
+            .await;
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert!(!events.lock().await.contains(&"http:commit".to_string()));
+    let directory = root.path().join(session.0.to_string());
+    assert!(!directory.exists() || std::fs::read_dir(directory).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn inspect_prepared_append_failure_is_never_replayable() {
+    let url = http_fixture("<title>Prepared</title><p>inspect-result</p>", "text/html").await;
+    let (runtime, session, page, events, _root) =
+        adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::ResultPrepared))
+            .await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Inspection { text, .. } if text.contains("inspect-result"))))
+    );
+    assert!(!events.lock().await.contains(&"http:commit".to_string()));
+}
+
+#[tokio::test]
+async fn completed_journal_failure_keeps_prepared_state_and_artifact_reconcilable() {
+    let url = http_fixture("completion-failure", "application/octet-stream").await;
+    let (runtime, session, page, events, root) =
+        adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::Completed)).await;
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert!(events.lock().await.contains(&"http:commit".to_string()));
+    assert_single_download_readable(root.path(), &session, b"completion-failure").await;
+}
+
+#[tokio::test]
+async fn recovery_never_replays_a_durable_prepared_download() {
+    let command_id = CommandId::new();
+    let attempt_id = AttemptId::new();
+    let evidence = vec![Evidence::Download {
+        filename: "x.bin".into(),
+        path: "abc".into(),
+        bytes: 1,
+        sha256: "abc".into(),
+    }];
+    let journal = Arc::new(RecoveryJournal {
+        records: vec![JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: CommandPhase::ResultPrepared,
+            envelope: None,
+            outcome: None,
+            prepared_result: Some(PreparedResult {
+                command_id: command_id.clone(),
+                attempt_id,
+                state_version: 1,
+                state_delta: serde_json::json!({}),
+                evidence: evidence.clone(),
+                artifact_id: Some("abc".into()),
+                artifact_sha256: Some("abc".into()),
+                artifact_bytes: Some(1),
+                artifact_staging_id: None,
+            }),
+        }],
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: Arc::new(Mutex::new(Vec::new())),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let outcome = runtime.recover_command(command_id).await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence: actual, .. } if actual == evidence)
+    );
+}
+
+#[tokio::test]
+async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = artifact_store::ArtifactStore::new(root.path(), 1024, 16_384);
+    let session = SessionId::new();
+    let page = PageId::new();
+    let pending = store
+        .put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"restart-finalize",
+            1024,
+        )
+        .await
+        .unwrap();
+    let artifact_id = pending.record().artifact_id.clone();
+    let sha256 = pending.record().sha256.clone();
+    let staging_id = pending.staging_id().unwrap().to_owned();
+    std::mem::forget(pending);
+
+    let command = envelope(
+        session.clone(),
+        page,
+        PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+            url: "https://example.test/recover.bin".into(),
+            expected_content_type: None,
+            max_bytes: 1024,
+        }),
+    );
+    let command_id = command.command_id.clone();
+    let prepared = PreparedResult {
+        command_id: command_id.clone(),
+        attempt_id: command.attempt_id.clone(),
+        state_version: 1,
+        state_delta: serde_json::Value::Null,
+        evidence: vec![Evidence::Download {
+            filename: "recover.bin".into(),
+            path: artifact_id.clone(),
+            bytes: 16,
+            sha256: sha256.clone(),
+        }],
+        artifact_id: Some(artifact_id.clone()),
+        artifact_sha256: Some(sha256),
+        artifact_bytes: Some(16),
+        artifact_staging_id: Some(staging_id),
+    };
+    let records = vec![
+        JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: CommandPhase::Accepted,
+            envelope: Some(command.journal_safe()),
+            outcome: None,
+            prepared_result: None,
+        },
+        JournalRecord {
+            sequence: 1,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: CommandPhase::ResultPrepared,
+            envelope: None,
+            outcome: None,
+            prepared_result: Some(prepared),
+        },
+    ];
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: Arc::new(Mutex::new(Vec::new())),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: true,
+        ..Default::default()
+    };
+    let adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        store.clone(),
+        network,
+    );
+    let runtime = page_runtime::PageRuntime::new_adaptive(
+        Arc::new(RecoveryJournal { records }),
+        workers,
+        None,
+        adaptive,
+    );
+
+    assert!(matches!(
+        runtime.recover_command(command_id).await,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert_eq!(
+        store.get(&session, &artifact_id).await.unwrap(),
+        b"restart-finalize"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_at_each_post_response_journal_await_preserves_durable_artifact() {
+    for phase in [
+        CommandPhase::ResultPrepared,
+        CommandPhase::Verifying,
+        CommandPhase::Completed,
+    ] {
+        let url = http_fixture("cancel-boundary", "application/octet-stream").await;
+        let (runtime, session, page, events, root, paused, resume) =
+            adaptive_runtime_paused(phase).await;
+        let task_session = session.clone();
+        let task = tokio::spawn(async move {
+            runtime
+                .execute(envelope(
+                    task_session,
+                    page,
+                    PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                        url,
+                        expected_content_type: None,
+                        max_bytes: 1024,
+                    }),
+                ))
+                .await
+        });
+        tokio::time::timeout(StdDuration::from_secs(1), paused.notified())
+            .await
+            .expect("journal boundary not reached");
+        let committed = events.lock().await.contains(&"http:commit".to_string());
+        assert_eq!(committed, phase != CommandPhase::ResultPrepared);
+        task.abort();
+        let _ = task.await;
+        if phase == CommandPhase::ResultPrepared {
+            resume.notify_one();
+            tokio::time::timeout(StdDuration::from_secs(1), async {
+                loop {
+                    let visible = std::fs::read_dir(root.path().join(session.0.to_string()))
+                        .ok()
+                        .and_then(|mut entries| entries.find_map(Result::ok))
+                        .map(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                        .unwrap_or(false);
+                    if visible {
+                        break;
+                    }
+                    tokio::time::sleep(StdDuration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("detached durable prepare did not publish artifact");
+            assert_single_download_readable(root.path(), &session, b"cancel-boundary").await;
+        } else {
+            assert_single_download_readable(root.path(), &session, b"cancel-boundary").await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn mutating_and_boundary_commands_never_call_http() {
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#safe".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    let events = events.lock().await;
+    assert!(!events.contains(&"http:state".to_string()));
+    assert_one_lifecycle(&events);
+}
+
+#[tokio::test]
+async fn terminal_policy_denial_never_calls_chromium() {
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, "file:///secret".into(), "interactive")
+        .await
+        .unwrap();
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::PolicyDenied { .. }));
+    let events = events.lock().await;
+    assert!(!events.iter().any(|event| event.starts_with("browser:")));
+    assert!(!events.contains(&"http:state".to_string()));
 }

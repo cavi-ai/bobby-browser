@@ -47,6 +47,10 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
     let root = tempfile::tempdir().unwrap();
     let artifacts_dir = root.path().join("artifacts");
     let config = AppConfig {
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
@@ -229,6 +233,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
         .expect("hashed screenshot evidence");
     assert!(artifacts_dir
         .join(session.id.0.to_string())
+        .join(artifact_id)
         .join(format!("{artifact_id}.png"))
         .is_file());
 }

@@ -8,7 +8,23 @@ use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-use types::{CommandEnvelope, CommandId, CommandOutcome, CommandPhase};
+use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase, Evidence};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedResult {
+    pub command_id: CommandId,
+    pub attempt_id: AttemptId,
+    pub state_version: u64,
+    pub state_delta: serde_json::Value,
+    pub evidence: Vec<Evidence>,
+    pub artifact_id: Option<String>,
+    pub artifact_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_staging_id: Option<String>,
+}
 
 #[async_trait]
 pub trait CommandJournal: Send + Sync {
@@ -25,6 +41,8 @@ pub struct JournalRecord {
     pub phase: CommandPhase,
     pub envelope: Option<CommandEnvelope>,
     pub outcome: Option<CommandOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_result: Option<PreparedResult>,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -13,6 +13,7 @@ fn record(command_id: &CommandId, phase: CommandPhase) -> JournalRecord {
         phase,
         envelope: None,
         outcome: None,
+        prepared_result: None,
     }
 }
 
