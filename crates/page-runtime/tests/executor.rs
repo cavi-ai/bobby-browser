@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
@@ -27,6 +28,9 @@ enum DriverMode {
 struct RecordingJournal {
     events: Arc<Mutex<Vec<String>>>,
     fail_on: Option<CommandPhase>,
+    pause_on: Option<CommandPhase>,
+    paused: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
 }
 
 struct RecoveryJournal {
@@ -56,6 +60,10 @@ impl CommandJournal for RecordingJournal {
             .lock()
             .await
             .push(format!("journal:{:?}", record.phase).to_lowercase());
+        if self.pause_on == Some(record.phase) {
+            self.paused.notify_one();
+            self.resume.notified().await;
+        }
         Ok(())
     }
 
@@ -215,6 +223,9 @@ async fn adaptive_runtime_with_failure(
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
         fail_on,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
     });
     let workers = Arc::new(WorkerPool::new(
         1,
@@ -238,6 +249,51 @@ async fn adaptive_runtime_with_failure(
     let session = SessionId::new();
     let page = runtime.open_browser(session.clone()).await.unwrap();
     (runtime, session, page.id, events, root)
+}
+
+async fn adaptive_runtime_paused(
+    phase: CommandPhase,
+) -> (
+    page_runtime::PageRuntime,
+    SessionId,
+    PageId,
+    Arc<Mutex<Vec<String>>>,
+    tempfile::TempDir,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let paused = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: Some(phase),
+        paused: paused.clone(),
+        resume: resume.clone(),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: true,
+        ..Default::default()
+    };
+    let adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        artifact_store::ArtifactStore::new(root.path(), network.max_download_bytes, 16_384),
+        network,
+    );
+    let runtime = page_runtime::PageRuntime::new_adaptive(journal, workers, None, adaptive);
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    (runtime, session, page.id, events, root, paused, resume)
 }
 
 async fn http_fixture(body: &'static str, content_type: &'static str) -> String {
@@ -309,6 +365,9 @@ async fn runtime(
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
         fail_on,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
     });
     let workers = Arc::new(WorkerPool::new(
         8,
@@ -390,6 +449,9 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
     let journal = Arc::new(RecordingJournal {
         events: events.clone(),
         fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
     });
     let workers = Arc::new(WorkerPool::new(
         1,
@@ -879,6 +941,54 @@ async fn recovery_never_replays_a_durable_prepared_download() {
     assert!(
         matches!(outcome, CommandOutcome::NeedsReconciliation { evidence: actual, .. } if actual == evidence)
     );
+}
+
+#[tokio::test]
+async fn cancellation_at_each_post_response_journal_await_cleans_guarded_artifact() {
+    for phase in [
+        CommandPhase::ResultPrepared,
+        CommandPhase::Verifying,
+        CommandPhase::Completed,
+    ] {
+        let url = http_fixture("cancel-boundary", "application/octet-stream").await;
+        let (runtime, session, page, events, root, paused, _resume) =
+            adaptive_runtime_paused(phase).await;
+        let task = tokio::spawn(async move {
+            runtime
+                .execute(envelope(
+                    session.clone(),
+                    page,
+                    PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                        url,
+                        expected_content_type: None,
+                        max_bytes: 1024,
+                    }),
+                ))
+                .await
+        });
+        tokio::time::timeout(StdDuration::from_secs(1), paused.notified())
+            .await
+            .expect("journal boundary not reached");
+        let committed = events.lock().await.contains(&"http:commit".to_string());
+        assert_eq!(committed, phase != CommandPhase::ResultPrepared);
+        task.abort();
+        let _ = task.await;
+        let session_dirs = std::fs::read_dir(root.path())
+            .map(|entries| {
+                entries
+                    .flat_map(|entry| {
+                        std::fs::read_dir(entry.unwrap().path())
+                            .into_iter()
+                            .flatten()
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(
+            session_dirs, 0,
+            "artifact leaked when cancelling at {phase:?}"
+        );
+    }
 }
 
 #[tokio::test]

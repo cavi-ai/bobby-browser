@@ -211,7 +211,9 @@ async fn runtime_download_failures_clean_real_artifact_store_and_redact_secret_j
         assert!(
             matches!(
                 outcome,
-                CommandOutcome::Failed { .. } | CommandOutcome::RetryableFailure { .. }
+                CommandOutcome::Failed { .. }
+                    | CommandOutcome::RetryableFailure { .. }
+                    | CommandOutcome::NeedsReconciliation { .. }
             ),
             "{route} returned unexpected outcome: {outcome:?}"
         );
