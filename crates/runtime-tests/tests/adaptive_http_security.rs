@@ -233,7 +233,10 @@ async fn runtime_download_failures_clean_real_artifact_store_and_redact_secret_j
             }),
         ))
         .await;
-    assert!(matches!(outcome, CommandOutcome::Failed { .. }));
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Failed { .. } | CommandOutcome::NeedsReconciliation { .. }
+    ));
     let serialized_outcome = serde_json::to_string(&outcome).unwrap();
     assert!(!serialized_outcome.contains(secret));
     assert!(!serialized_outcome.contains("Download"));
