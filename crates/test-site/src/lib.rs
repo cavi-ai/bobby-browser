@@ -114,3 +114,34 @@ pub async fn spawn() -> FixtureServer {
     });
     FixtureServer { address, task }
 }
+
+pub async fn spawn_frame_host(child_url: &str) -> FixtureServer {
+    let child_url = child_url.to_string();
+    let app = Router::new().route(
+        "/",
+        get(move || {
+            let child_url = child_url.clone();
+            async move {
+                Html(format!(
+                    r#"<!doctype html><title>Frame Host</title>
+                    <iframe name="outer" aria-label="Outer" srcdoc='<iframe name="fixture" aria-label="Cross" src="{child_url}"></iframe>'></iframe>
+                    <div id="host"></div>
+                    <script>
+                      const root = host.attachShadow({{mode:'open'}});
+                      root.innerHTML = `<button aria-label="Inside" onclick="document.title='shadow-clicked'">inside</button>`;
+                    </script>"#
+                ))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind frame host fixture listener");
+    let address = listener.local_addr().expect("read frame host address");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve frame host fixture");
+    });
+    FixtureServer { address, task }
+}

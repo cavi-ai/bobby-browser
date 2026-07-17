@@ -11,7 +11,6 @@ use chromiumoxide::cdp::browser_protocol::browser::{
     DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
-use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
 use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
 use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::page::ScreenshotParams;
@@ -31,7 +30,7 @@ use types::{
 
 use crate::{
     resolve_upload_paths, session_download_dir,
-    targeting::{resolve_target, resolve_target_with_visibility},
+    targeting::{resolve_target as resolve_browser_target, resolve_target_with_visibility},
     BrowserWorker, WorkerFactory,
 };
 
@@ -111,6 +110,20 @@ struct ChromiumWorker {
     handler_task: Mutex<Option<JoinHandle<()>>>,
 }
 
+impl ChromiumWorker {
+    async fn resolve_target(
+        &self,
+        page_id: &PageId,
+        page: &Page,
+        selector: &str,
+        target: Option<&types::TargetSpec>,
+    ) -> Result<crate::targeting::ResolvedTarget, CommandError> {
+        let mut browser = self.browser.lock().await;
+        let browser = browser.as_mut().ok_or_else(closed_error)?;
+        resolve_browser_target(page_id, page, selector, target, Some(browser)).await
+    }
+}
+
 #[async_trait]
 impl BrowserWorker for ChromiumWorker {
     fn worker_id(&self) -> WorkerId {
@@ -122,8 +135,8 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
-        let browser = self.browser.lock().await;
-        let browser = browser.as_ref().ok_or_else(closed_error)?;
+        let mut browser_guard = self.browser.lock().await;
+        let browser = browser_guard.as_mut().ok_or_else(closed_error)?;
         let page = browser
             .new_page("about:blank")
             .await
@@ -177,30 +190,20 @@ impl BrowserWorker for ChromiumWorker {
             .map_err(command_failed)?
             .unwrap_or_default();
         let (text, html, resolution) = if command.selector.is_some() || command.target.is_some() {
-            let resolved = resolve_target(
-                page_id,
-                page,
-                command.selector.as_deref().unwrap_or(""),
-                command.target.as_ref(),
-            )
-            .await?;
-            let element = resolved.element;
-            let text = match element.string_property("value").await {
+            let resolved = self
+                .resolve_target(
+                    page_id,
+                    page,
+                    command.selector.as_deref().unwrap_or(""),
+                    command.target.as_ref(),
+                )
+                .await?;
+            let text = match resolved.value(page).await {
                 Ok(Some(value)) if !value.is_empty() => value,
-                _ => element
-                    .inner_text()
-                    .await
-                    .map_err(command_failed)?
-                    .unwrap_or_default(),
+                _ => resolved.inner_text(page).await?.unwrap_or_default(),
             };
             let html = if command.include_html {
-                Some(
-                    element
-                        .outer_html()
-                        .await
-                        .map_err(command_failed)?
-                        .unwrap_or_default(),
-                )
+                Some(resolved.outer_html(page).await?.unwrap_or_default())
             } else {
                 None
             };
@@ -239,11 +242,11 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
-        let resolved =
-            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
-        let element = resolved.element;
-        let text = element.inner_text().await.ok().flatten();
-        element.click().await.map_err(command_failed)?;
+        let resolved = self
+            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .await?;
+        let text = resolved.inner_text(page).await.ok().flatten();
+        resolved.click(page).await?;
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -260,23 +263,12 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
-        let resolved =
-            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
-        let element = resolved.element;
-        element.click().await.map_err(command_failed)?;
-        if command.clear_first {
-            element
-                .call_js_fn(
-                    "function() { this.value = ''; this.dispatchEvent(new Event('input', { bubbles: true })); }",
-                    false,
-                )
-                .await
-                .map_err(command_failed)?;
-        }
-        element
-            .type_str(command.value.as_str())
-            .await
-            .map_err(command_failed)?;
+        let resolved = self
+            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .await?;
+        resolved
+            .type_text(page, &command.value, command.clear_first)
+            .await?;
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -295,22 +287,14 @@ impl BrowserWorker for ChromiumWorker {
         let paths = resolve_upload_paths(&self.upload_roots, &requested)?;
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
-        let resolved =
-            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
-        let element = resolved.element;
+        let resolved = self
+            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .await?;
         let path_strings = paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        page.execute(
-            SetFileInputFilesParams::builder()
-                .files(path_strings.clone())
-                .backend_node_id(element.backend_node_id)
-                .build()
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
-        )
-        .await
-        .map_err(command_failed)?;
+        resolved.set_files(page, path_strings.clone()).await?;
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
@@ -374,8 +358,8 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &ClickAndWaitForPopupCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let browser = self.browser.lock().await;
-        let browser = browser.as_ref().ok_or_else(closed_error)?;
+        let mut browser_guard = self.browser.lock().await;
+        let browser = browser_guard.as_mut().ok_or_else(closed_error)?;
         let mut events = browser
             .event_listener::<EventTargetCreated>()
             .await
@@ -383,9 +367,15 @@ impl BrowserWorker for ChromiumWorker {
         let pages = self.pages.lock().await;
         let opener = pages.get(page_id).ok_or_else(page_missing)?;
         let opener_target = opener.target_id().clone();
-        let resolved =
-            resolve_target(page_id, opener, &command.selector, command.target.as_ref()).await?;
-        resolved.element.click().await.map_err(command_failed)?;
+        let resolved = resolve_browser_target(
+            page_id,
+            opener,
+            &command.selector,
+            command.target.as_ref(),
+            Some(browser),
+        )
+        .await?;
+        resolved.click(opener).await?;
         let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let event = events.next().await.ok_or_else(|| {
@@ -459,13 +449,10 @@ impl BrowserWorker for ChromiumWorker {
             .event_listener::<EventDownloadProgress>()
             .await
             .map_err(command_failed)?;
-        let resolved =
-            resolve_target(page_id, page, &command.selector, command.target.as_ref()).await?;
-        resolved
-            .element
-            .call_js_fn("function() { this.click(); }", false)
-            .await
-            .map_err(command_failed)?;
+        let resolved = self
+            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .await?;
+        resolved.click_js(page).await?;
         let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), begins.next())
             .await
             .map_err(|_| timeout_error(command.timeout_ms))?
@@ -531,9 +518,14 @@ impl BrowserWorker for ChromiumWorker {
             observations += 1;
             let pages = self.pages.lock().await;
             let page = pages.get(page_id).ok_or_else(page_missing)?;
-            let satisfied =
-                wait_condition_satisfied(page_id, page, &command.condition, &mut quiet_since)
-                    .await?;
+            let satisfied = wait_condition_satisfied(
+                &self.browser,
+                page_id,
+                page,
+                &command.condition,
+                &mut quiet_since,
+            )
+            .await?;
             drop(pages);
             if satisfied {
                 return Ok(vec![Evidence::Wait {
@@ -587,12 +579,10 @@ impl BrowserWorker for ChromiumWorker {
                 None,
             ),
             ScreenshotMode::Element { target } => {
-                let resolved = resolve_target(page_id, page, "", Some(target)).await?;
-                let bytes = resolved
-                    .element
-                    .screenshot(CaptureScreenshotFormat::Png)
-                    .await
-                    .map_err(screenshot_error)?;
+                let resolved = self.resolve_target(page_id, page, "", Some(target)).await?;
+                let bytes = resolved.screenshot(page).await.map_err(|error| {
+                    driver_error(ErrorCode::ScreenshotCaptureFailed, error.message)
+                })?;
                 (bytes, Some(resolved.evidence))
             }
             ScreenshotMode::Clip {
@@ -677,6 +667,7 @@ impl BrowserWorker for ChromiumWorker {
 }
 
 async fn wait_condition_satisfied(
+    browser: &Mutex<Option<Browser>>,
     page_id: &PageId,
     page: &Page,
     condition: &WaitCondition,
@@ -684,30 +675,31 @@ async fn wait_condition_satisfied(
 ) -> Result<bool, CommandError> {
     match condition {
         WaitCondition::Element { target, state } => {
-            let resolved =
-                resolve_target_with_visibility(page_id, page, "", Some(target), false).await;
-            let element = match resolved {
-                Ok(resolved) => Some(resolved.element),
+            let mut browser = browser.lock().await;
+            let resolved = match browser.as_mut() {
+                Some(browser) => {
+                    resolve_target_with_visibility(
+                        page_id,
+                        page,
+                        "",
+                        Some(target),
+                        false,
+                        Some(browser),
+                    )
+                    .await
+                }
+                None => Err(closed_error()),
+            };
+            let resolved = match resolved {
+                Ok(resolved) => Some(resolved),
                 Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => None,
                 Err(error) => return Err(error),
             };
-            let Some(element) = element else {
+            let Some(resolved) = resolved else {
                 return Ok(matches!(state, types::ElementState::Detached));
             };
-            let visible = element
-                .call_js_fn("function() { const s=getComputedStyle(this),r=this.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0; }", false)
-                .await
-                .map_err(command_failed)?
-                .result
-                .value
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            let enabled = !element
-                .property("disabled")
-                .await
-                .map_err(command_failed)?
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
+            let visible = resolved.visible(page).await?;
+            let enabled = resolved.enabled(page).await?;
             Ok(match state {
                 types::ElementState::Attached => true,
                 types::ElementState::Detached => false,
@@ -718,24 +710,22 @@ async fn wait_condition_satisfied(
             })
         }
         WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
-            let resolved = resolve_target(page_id, page, "", Some(target)).await;
-            let element = match resolved {
-                Ok(resolved) => resolved.element,
+            let mut browser = browser.lock().await;
+            let resolved = match browser.as_mut() {
+                Some(browser) => {
+                    resolve_browser_target(page_id, page, "", Some(target), Some(browser)).await
+                }
+                None => Err(closed_error()),
+            };
+            let resolved = match resolved {
+                Ok(resolved) => resolved,
                 Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => return Ok(false),
                 Err(error) => return Err(error),
             };
             let value = if matches!(condition, WaitCondition::Value { .. }) {
-                element
-                    .string_property("value")
-                    .await
-                    .map_err(command_failed)?
-                    .unwrap_or_default()
+                resolved.value(page).await?.unwrap_or_default()
             } else {
-                element
-                    .inner_text()
-                    .await
-                    .map_err(command_failed)?
-                    .unwrap_or_default()
+                resolved.inner_text(page).await?.unwrap_or_default()
             };
             text_matches(matcher, &value)
         }
