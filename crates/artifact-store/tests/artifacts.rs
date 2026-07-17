@@ -170,11 +170,11 @@ async fn content_addressed_pending_bytes_are_invisible_until_commit() {
         .await
         .unwrap();
     let dropped_id = pending.record().artifact_id.clone();
-    assert!(root
+    assert!(!root
         .path()
         .join(session.0.to_string())
         .join(&dropped_id)
-        .is_dir());
+        .exists());
     assert_eq!(
         store.get(&session, &dropped_id).await.unwrap_err(),
         ArtifactError::NotFound
@@ -183,6 +183,12 @@ async fn content_addressed_pending_bytes_are_invisible_until_commit() {
     assert_eq!(
         store.get(&session, &dropped_id).await.unwrap_err(),
         ArtifactError::NotFound
+    );
+    assert_eq!(
+        std::fs::read_dir(root.path().join(session.0.to_string()))
+            .unwrap()
+            .count(),
+        0
     );
 
     let pending = store
@@ -270,5 +276,34 @@ async fn concurrent_identical_publications_converge_without_loser_deleting_winne
     assert_eq!(
         store.get(&session, &record.artifact_id).await.unwrap(),
         b"same-concurrent-bytes"
+    );
+}
+
+#[tokio::test]
+async fn durable_staging_id_can_be_finalized_after_process_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let pending = store
+        .put_pending(
+            &session,
+            &PageId::new(),
+            "application/octet-stream",
+            "bin",
+            b"recoverable-staging",
+            1024,
+        )
+        .await
+        .unwrap();
+    let artifact_id = pending.record().artifact_id.clone();
+    let staging_id = pending.staging_id().unwrap().to_owned();
+    std::mem::forget(pending);
+
+    store
+        .finalize_staged(&session, &artifact_id, &staging_id)
+        .unwrap();
+    assert_eq!(
+        store.get(&session, &artifact_id).await.unwrap(),
+        b"recoverable-staging"
     );
 }

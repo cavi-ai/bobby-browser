@@ -56,6 +56,22 @@ impl AdaptivePageEngine {
         }
     }
 
+    pub fn finalize_prepared_artifact(
+        &self,
+        session_id: &types::SessionId,
+        artifact_id: &str,
+        staging_id: &str,
+    ) -> Result<(), CommandError> {
+        let direct = self
+            .direct
+            .as_ref()
+            .ok_or_else(|| internal_artifact_error("adaptive artifact store is not configured"))?;
+        direct
+            .artifacts
+            .finalize_staged(session_id, artifact_id, staging_id)
+            .map_err(artifact_error)
+    }
+
     pub async fn execute(
         &self,
         envelope: &CommandEnvelope,
@@ -193,6 +209,15 @@ fn artifact_error(error: artifact_store::ArtifactError) -> CommandError {
     CommandError {
         code: ErrorCode::Internal,
         message: format!("download artifact persistence failed: {error}"),
+        layer: ErrorLayer::Page,
+        retryable: false,
+    }
+}
+
+fn internal_artifact_error(message: impl Into<String>) -> CommandError {
+    CommandError {
+        code: ErrorCode::Internal,
+        message: message.into(),
         layer: ErrorLayer::Page,
         retryable: false,
     }

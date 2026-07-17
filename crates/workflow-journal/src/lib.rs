@@ -20,6 +20,8 @@ pub struct PreparedResult {
     pub evidence: Vec<Evidence>,
     pub artifact_id: Option<String>,
     pub artifact_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_staging_id: Option<String>,
 }
 
 #[async_trait]

@@ -1302,7 +1302,6 @@ dependencies = [
  "chrono",
  "network-engine",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror",
  "tokio",
