@@ -725,6 +725,10 @@ impl BrowserWorker for ChromiumWorker {
                 "HTTP state version exhausted",
             )
         })?;
+        if delta.cookies.is_empty() {
+            finish_state_commit(&mut state, next_version, delta.cache_validators);
+            return Ok(());
+        }
         let cookies = delta
             .cookies
             .into_iter()
