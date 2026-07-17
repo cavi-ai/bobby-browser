@@ -51,6 +51,7 @@ impl PrimitiveCommand {
     fn sanitize_urls(&mut self) {
         fn sanitize(value: &mut String) {
             let Ok(mut url) = url::Url::parse(value) else {
+                *value = "[redacted-invalid-url]".into();
                 return;
             };
             let _ = url.set_username("");

@@ -217,7 +217,7 @@ impl PageRuntime {
                         &envelope,
                         CommandPhase::Completed,
                         None,
-                        Some(outcome.clone()),
+                        Some(outcome.journal_safe()),
                     ))
                     .await
                 {
@@ -465,7 +465,7 @@ impl PageRuntime {
                 envelope,
                 CommandPhase::Failed,
                 None,
-                Some(outcome.clone()),
+                Some(outcome.journal_safe()),
             ))
             .await
         {

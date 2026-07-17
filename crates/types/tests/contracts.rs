@@ -3,15 +3,73 @@ use serde_json::json;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandId, DownloadUrlCommand, ElementState, Evidence, ExecutionPath, ExecutionReason,
-    InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand, ScreenshotMode,
-    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
-    WaitForCommand, WaitUntil, WorkflowId,
+    CommandId, CommandOutcome, DownloadUrlCommand, ElementState, Evidence, ExecutionPath,
+    ExecutionReason, InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand,
+    ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
+}
+
+fn test_envelope(command: PrimitiveCommand) -> CommandEnvelope {
+    CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: Some(PageId::new()),
+        deadline: Utc::now() + chrono::Duration::minutes(1),
+        command,
+    }
+}
+
+#[test]
+fn journal_safe_replaces_malformed_url_instead_of_persisting_secrets() {
+    let envelope = test_envelope(PrimitiveCommand::Navigate(types::NavigateCommand {
+        url: "https://user:password@example.test/%zz?token=top-secret#fragment".into(),
+        wait_until: WaitUntil::Commit,
+        timeout_ms: 1000,
+    }));
+    let durable = serde_json::to_string(&envelope.journal_safe()).unwrap();
+    assert!(!durable.contains("password"));
+    assert!(!durable.contains("top-secret"));
+    assert!(!durable.contains("fragment"));
+}
+
+#[test]
+fn journal_safe_outcome_redacts_all_evidence_urls() {
+    let outcome = CommandOutcome::Completed {
+        command_id: CommandId::new(),
+        evidence: vec![
+            Evidence::Navigation {
+                url: "https://user:pass@example.test/page?token=secret#frag".into(),
+                title: "page".into(),
+            },
+            Evidence::ExecutionPath {
+                path: ExecutionPath::DirectHttp,
+                reason: ExecutionReason::EligibleStaticDocument,
+                state_version: 1,
+                elapsed_ms: 2,
+                bytes: Some(3),
+                sha256: Some("abc".into()),
+                final_url: Some("https://example.test/final?signed=secret".into()),
+                content_type: Some("text/html".into()),
+                status: Some(200),
+                redirect_chain: vec!["https://example.test/hop?key=secret".into()],
+            },
+        ],
+    };
+    let durable = serde_json::to_string(&outcome.journal_safe()).unwrap();
+    assert!(!durable.contains("user"));
+    assert!(!durable.contains("pass"));
+    assert!(!durable.contains("secret"));
+    assert!(!durable.contains("frag"));
+    assert!(durable.contains("text/html"));
+    assert!(durable.contains("\"status\":200"));
 }
 
 #[test]
@@ -38,6 +96,10 @@ fn adaptive_http_execution_path_evidence_is_stable_and_round_trips() {
         elapsed_ms: 12,
         bytes: Some(128),
         sha256: Some("abc".into()),
+        final_url: None,
+        content_type: None,
+        status: None,
+        redirect_chain: Vec::new(),
     };
 
     let value = serde_json::to_value(&evidence).unwrap();

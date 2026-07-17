@@ -138,6 +138,10 @@ impl AdaptivePageEngine {
                                     meta.elapsed_ms,
                                     Some(meta.bytes),
                                     Some(meta.sha256),
+                                    Some(meta.final_url),
+                                    Some(meta.content_type),
+                                    Some(meta.status),
+                                    meta.redirect_chain,
                                 ),
                             ],
                             used_browser: false,
@@ -180,6 +184,10 @@ impl AdaptivePageEngine {
                                     meta.elapsed_ms,
                                     Some(meta.bytes),
                                     Some(meta.sha256),
+                                    Some(meta.final_url),
+                                    Some(meta.content_type),
+                                    Some(meta.status),
+                                    meta.redirect_chain,
                                 ),
                             ],
                             used_browser: false,
@@ -233,6 +241,10 @@ fn execution_evidence(
     elapsed_ms: u64,
     bytes: Option<u64>,
     sha256: Option<String>,
+    final_url: Option<String>,
+    content_type: Option<String>,
+    status: Option<u16>,
+    redirect_chain: Vec<String>,
 ) -> Evidence {
     Evidence::ExecutionPath {
         path,
@@ -241,6 +253,10 @@ fn execution_evidence(
         elapsed_ms,
         bytes,
         sha256,
+        final_url,
+        content_type,
+        status,
+        redirect_chain,
     }
 }
 
@@ -295,6 +311,10 @@ async fn browser_execute(
         0,
         bytes,
         sha256,
+        None,
+        None,
+        None,
+        Vec::new(),
     ));
     Ok(AdaptiveExecution {
         evidence,

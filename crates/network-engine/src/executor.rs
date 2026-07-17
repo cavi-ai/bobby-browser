@@ -34,6 +34,7 @@ pub struct HttpMeta {
     pub bytes: u64,
     pub sha256: String,
     pub elapsed_ms: u64,
+    pub content_type: String,
 }
 
 pub enum HttpCandidate {
@@ -273,6 +274,7 @@ impl BoundedResponse {
             bytes: self.body.len() as u64,
             sha256: format!("{:x}", Sha256::digest(&self.body)),
             elapsed_ms: self.elapsed_ms,
+            content_type: content_type(&self.headers),
         }
     }
 }
