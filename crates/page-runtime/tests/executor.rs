@@ -20,6 +20,8 @@ enum DriverMode {
     FailInspect,
     FailClick,
     StateConflict,
+    CommitFail,
+    CommitPause,
 }
 
 struct RecordingJournal {
@@ -146,6 +148,17 @@ impl BrowserWorker for FakeWorker {
         _: network_engine::state::ResponseStateDelta,
     ) -> Result<(), CommandError> {
         self.events.lock().await.push("http:commit".into());
+        if matches!(self.mode, DriverMode::CommitPause) {
+            std::future::pending::<()>().await;
+        }
+        if matches!(self.mode, DriverMode::CommitFail) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected state commit failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
         if matches!(self.mode, DriverMode::StateConflict) {
             Err(CommandError {
                 code: ErrorCode::HttpStateConflict,
@@ -156,19 +169,6 @@ impl BrowserWorker for FakeWorker {
         } else {
             Ok(())
         }
-    }
-    async fn download_url(
-        &self,
-        _: &PageId,
-        _: &DownloadUrlCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.events.lock().await.push("browser:download_url".into());
-        Ok(vec![Evidence::Download {
-            filename: "fallback.bin".into(),
-            path: "/tmp/fallback.bin".into(),
-            bytes: 8,
-            sha256: "fallback-sha".into(),
-        }])
     }
 }
 
@@ -659,42 +659,86 @@ async fn download_url_persists_then_returns_download_and_execution_evidence() {
 }
 
 #[tokio::test]
-async fn adaptive_download_url_falls_back_to_chromium_exactly_once() {
+async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatch() {
     let url = http_fixture("not-the-expected-type", "text/plain").await;
     let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
     events.lock().await.push(format!("url:{url}"));
-    let evidence = completed_evidence(
-        runtime
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: Some("application/octet-stream".into()),
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Failed { error, .. } if error.code == ErrorCode::HttpEquivalenceUnproven)
+    );
+    let events = events.lock().await;
+    assert!(!events.iter().any(|event| event.starts_with("browser:")));
+    assert!(!events.contains(&"http:commit".to_string()));
+}
+
+#[tokio::test]
+async fn download_state_commit_failure_removes_pending_artifact_and_leaks_no_evidence() {
+    let url = http_fixture("guarded-download", "application/octet-stream").await;
+    let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitFail).await;
+    events.lock().await.push(format!("url:{url}"));
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Failed { .. }));
+    let session_dir = root.path().join(session.0.to_string());
+    assert!(!session_dir.exists() || std::fs::read_dir(session_dir).unwrap().next().is_none());
+    assert!(!format!("{outcome:?}").contains("Download"));
+}
+
+#[tokio::test]
+async fn download_state_commit_cancellation_removes_pending_artifact() {
+    let url = http_fixture("cancelled-download", "application/octet-stream").await;
+    let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitPause).await;
+    events.lock().await.push(format!("url:{url}"));
+    let runtime_for_task = runtime.clone();
+    let session_for_task = session.clone();
+    let handle = tokio::spawn(async move {
+        runtime_for_task
             .execute(envelope(
-                session,
+                session_for_task,
                 page,
                 PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
                     url,
-                    expected_content_type: Some("application/octet-stream".into()),
+                    expected_content_type: None,
                     max_bytes: 1024,
                 }),
             ))
-            .await,
-    );
-    assert!(evidence.iter().any(
-        |item| matches!(item, Evidence::Download { filename, .. } if filename == "fallback.bin")
-    ));
-    assert!(evidence.iter().any(|item| matches!(
-        item,
-        Evidence::ExecutionPath {
-            path: ExecutionPath::ChromiumFallback,
-            ..
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if events.lock().await.contains(&"http:commit".to_string()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-    )));
-    let events = events.lock().await;
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.as_str() == "browser:download_url")
-            .count(),
-        1
-    );
-    assert_one_lifecycle(&events);
+    })
+    .await
+    .expect("state commit was not reached");
+    assert!(events.lock().await.contains(&"http:commit".to_string()));
+    handle.abort();
+    let _ = handle.await;
+    let session_dir = root.path().join(session.0.to_string());
+    assert!(!session_dir.exists() || std::fs::read_dir(session_dir).unwrap().next().is_none());
 }
 
 #[tokio::test]

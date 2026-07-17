@@ -112,3 +112,52 @@ async fn generic_artifacts_are_private_validated_and_atomic() {
         "an oversized payload must leave no final or temporary files"
     );
 }
+
+#[tokio::test]
+async fn pending_artifact_drop_removes_published_directory_and_commit_disarms_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let page = PageId::new();
+
+    let pending = store
+        .put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"guarded",
+            1024,
+        )
+        .await
+        .unwrap();
+    let dropped_id = pending.record().artifact_id.clone();
+    assert!(root
+        .path()
+        .join(session.0.to_string())
+        .join(&dropped_id)
+        .is_dir());
+    drop(pending);
+    assert!(!root
+        .path()
+        .join(session.0.to_string())
+        .join(dropped_id)
+        .exists());
+
+    let pending = store
+        .put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"committed",
+            1024,
+        )
+        .await
+        .unwrap();
+    let record = pending.commit();
+    assert_eq!(
+        store.get(&session, &record.artifact_id).await.unwrap(),
+        b"committed"
+    );
+}
