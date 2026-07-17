@@ -1,10 +1,10 @@
 use chrono::Utc;
 use thiserror::Error;
 use types::{
-    CommandClass, CommandEnvelope, CommandError, CommandOutcome, CommandPhase, ErrorCode,
-    ErrorLayer, Evidence, InspectCommand, PrimitiveCommand,
+    CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
+    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand,
 };
-use workflow_journal::{JournalError, JournalRecord};
+use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
 use crate::PageRuntime;
 
@@ -15,6 +15,53 @@ pub enum ExecutorError {
 }
 
 impl PageRuntime {
+    pub async fn recover_command(&self, command_id: CommandId) -> CommandOutcome {
+        let Some(journal) = &self.journal else {
+            return CommandOutcome::Failed {
+                command_id,
+                error: internal_error("command journal is not configured"),
+            };
+        };
+        let scan = match journal.history(command_id.clone()).await {
+            Ok(scan) => scan,
+            Err(error) => {
+                return CommandOutcome::RetryableFailure {
+                    command_id,
+                    error: journal_error(error),
+                }
+            }
+        };
+        if let Some(outcome) = scan
+            .records
+            .iter()
+            .rev()
+            .find_map(|record| record.outcome.clone())
+        {
+            return outcome;
+        }
+        if let Some(prepared) = scan
+            .records
+            .iter()
+            .rev()
+            .find_map(|record| record.prepared_result.clone())
+        {
+            return CommandOutcome::NeedsReconciliation {
+                command_id,
+                error: CommandError {
+                    code: ErrorCode::HttpEquivalenceUnproven,
+                    message: "durable prepared result requires deterministic finalization".into(),
+                    layer: ErrorLayer::Workflow,
+                    retryable: false,
+                },
+                evidence: prepared.evidence,
+            };
+        }
+        CommandOutcome::RetryableFailure {
+            command_id,
+            error: internal_error("no durable prepared result exists"),
+        }
+    }
+
     pub async fn execute(&self, envelope: CommandEnvelope) -> CommandOutcome {
         let command_id = envelope.command_id.clone();
         if let Err(error) = self.validate(&envelope).await {
@@ -80,14 +127,49 @@ impl PageRuntime {
                     .await;
             }
         };
-        let evidence = match self.adaptive.execute(&envelope, &lease, page_state).await {
-            Ok(execution) => execution.evidence,
+        let mut execution = match self.adaptive.execute(&envelope, &lease, page_state).await {
+            Ok(execution) => execution,
             Err(error) => {
                 return self
                     .finish_failure(&envelope, classify_failure(&envelope, error))
                     .await;
             }
         };
+        let mut pending_artifact = None;
+        if let Some(prepared) = execution.prepared_download.take() {
+            let artifact = prepared.artifact.record().clone();
+            let prepared_result = PreparedResult {
+                command_id: envelope.command_id.clone(),
+                attempt_id: envelope.attempt_id.clone(),
+                state_version: prepared.state_version,
+                state_delta: serde_json::to_value(&prepared.state)
+                    .unwrap_or(serde_json::Value::Null),
+                evidence: execution.evidence.clone(),
+                artifact_id: Some(artifact.artifact_id),
+                artifact_sha256: Some(artifact.sha256),
+            };
+            if let Err(error) = journal
+                .append(prepared_record(&envelope, prepared_result))
+                .await
+            {
+                return journal_failure(&envelope, error, true);
+            }
+            if let Err(error) = lease
+                .worker()
+                .commit_http_state(
+                    envelope.page_id.as_ref().expect("validated page id"),
+                    prepared.state_version,
+                    prepared.state,
+                )
+                .await
+            {
+                return self
+                    .finish_failure(&envelope, classify_failure(&envelope, error))
+                    .await;
+            }
+            pending_artifact = Some(prepared.artifact);
+        }
+        let evidence = execution.evidence;
         match &envelope.command {
             PrimitiveCommand::OpenPage(_) => {
                 if let Some(Evidence::Page { page_id, url, .. }) = evidence.first() {
@@ -139,7 +221,12 @@ impl PageRuntime {
                     ))
                     .await
                 {
-                    Ok(()) => outcome,
+                    Ok(()) => {
+                        if let Some(pending) = pending_artifact.take() {
+                            pending.commit();
+                        }
+                        outcome
+                    }
                     Err(error) => journal_failure(&envelope, error, true),
                 }
             }
@@ -397,7 +484,7 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
             command_id: envelope.command_id.clone(),
             error,
         }
-    } else if envelope.command.class() == CommandClass::Boundary {
+    } else if envelope.command.class() != CommandClass::Replayable {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
@@ -429,6 +516,19 @@ fn record(
         phase,
         envelope: stored_envelope,
         outcome,
+        prepared_result: None,
+    }
+}
+
+fn prepared_record(envelope: &CommandEnvelope, prepared_result: PreparedResult) -> JournalRecord {
+    JournalRecord {
+        sequence: 0,
+        recorded_at: Utc::now(),
+        command_id: envelope.command_id.clone(),
+        phase: CommandPhase::ResultPrepared,
+        envelope: None,
+        outcome: None,
+        prepared_result: Some(prepared_result),
     }
 }
 
@@ -443,7 +543,7 @@ fn journal_failure(
         layer: ErrorLayer::Journal,
         retryable: true,
     };
-    if may_have_executed && envelope.command.class() == CommandClass::Boundary {
+    if may_have_executed && envelope.command.class() != CommandClass::Replayable {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error: command_error,
@@ -454,6 +554,15 @@ fn journal_failure(
             command_id: envelope.command_id.clone(),
             error: command_error,
         }
+    }
+}
+
+fn journal_error(error: JournalError) -> CommandError {
+    CommandError {
+        code: ErrorCode::JournalFailed,
+        message: error.to_string(),
+        layer: ErrorLayer::Journal,
+        retryable: true,
     }
 }
 
