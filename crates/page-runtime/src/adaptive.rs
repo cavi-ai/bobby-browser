@@ -85,14 +85,18 @@ impl AdaptivePageEngine {
                 };
                 match candidate {
                     HttpCandidate::FallbackRequired(fallback_reason) => {
-                        browser_execute(
-                            envelope,
-                            lease,
-                            ExecutionPath::ChromiumFallback,
-                            fallback_reason,
-                            version,
-                        )
-                        .await
+                        if matches!(envelope.command, PrimitiveCommand::Inspect(_)) {
+                            browser_execute(
+                                envelope,
+                                lease,
+                                ExecutionPath::ChromiumFallback,
+                                fallback_reason,
+                                version,
+                            )
+                            .await
+                        } else {
+                            Err(equivalence_unproven(fallback_reason))
+                        }
                     }
                     HttpCandidate::Inspection {
                         evidence,
@@ -138,27 +142,10 @@ impl AdaptivePageEngine {
                         state,
                         meta,
                     } => {
-                        if let Err(error) = lease
-                            .worker()
-                            .commit_http_state(page_id, version, state)
-                            .await
-                        {
-                            if error.code == ErrorCode::HttpStateConflict {
-                                return browser_execute(
-                                    envelope,
-                                    lease,
-                                    ExecutionPath::ChromiumFallback,
-                                    ExecutionReason::StateConflict,
-                                    version,
-                                )
-                                .await;
-                            }
-                            return Err(error);
-                        }
                         let extension = safe_extension(&filename);
-                        let record = direct
+                        let pending = direct
                             .artifacts
-                            .put(
+                            .put_pending(
                                 &envelope.session_id,
                                 page_id,
                                 &media_type,
@@ -168,6 +155,11 @@ impl AdaptivePageEngine {
                             )
                             .await
                             .map_err(artifact_error)?;
+                        lease
+                            .worker()
+                            .commit_http_state(page_id, version, state)
+                            .await?;
+                        let record = pending.commit();
                         Ok(AdaptiveExecution {
                             evidence: vec![
                                 Evidence::Download {
@@ -211,6 +203,15 @@ fn artifact_error(error: artifact_store::ArtifactError) -> CommandError {
         code: ErrorCode::Internal,
         message: format!("download artifact persistence failed: {error}"),
         layer: ErrorLayer::Page,
+        retryable: false,
+    }
+}
+
+fn equivalence_unproven(reason: ExecutionReason) -> CommandError {
+    CommandError {
+        code: ErrorCode::HttpEquivalenceUnproven,
+        message: format!("direct download equivalence was not proven: {reason:?}"),
+        layer: ErrorLayer::Network,
         retryable: false,
     }
 }
@@ -268,9 +269,7 @@ async fn browser_execute(
         PrimitiveCommand::CaptureScreenshot(command) => {
             lease.worker().capture_screenshot(page_id, command).await?
         }
-        PrimitiveCommand::DownloadUrl(command) => {
-            lease.worker().download_url(page_id, command).await?
-        }
+        PrimitiveCommand::DownloadUrl(_) => return Err(equivalence_unproven(reason)),
     };
     let (bytes, sha256) = evidence
         .iter()

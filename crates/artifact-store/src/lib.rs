@@ -28,6 +28,36 @@ pub struct ArtifactRecord {
     pub sha256: String,
 }
 
+#[derive(Debug)]
+pub struct PendingArtifact {
+    record: Option<ArtifactRecord>,
+    path: Option<PathBuf>,
+}
+
+impl PendingArtifact {
+    pub fn record(&self) -> &ArtifactRecord {
+        self.record.as_ref().expect("pending artifact is armed")
+    }
+
+    pub fn commit(mut self) -> ArtifactRecord {
+        self.path = None;
+        self.record.take().expect("pending artifact is armed")
+    }
+}
+
+impl Drop for PendingArtifact {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        if let Err(error) = std::fs::remove_dir_all(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(%error, "failed to clean pending artifact");
+            }
+        }
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ArtifactError {
     #[error("artifact was not found for this session")]
@@ -85,7 +115,30 @@ impl ArtifactStore {
         bytes: &[u8],
         max_bytes: usize,
     ) -> Result<ArtifactRecord, ArtifactError> {
-        self.put_with_before_publish(
+        Ok(self
+            .put_pending_with_before_publish(
+                session_id,
+                page_id,
+                media_type,
+                extension,
+                bytes,
+                max_bytes,
+                std::future::ready(()),
+            )
+            .await?
+            .commit())
+    }
+
+    pub async fn put_pending(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        media_type: &str,
+        extension: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<PendingArtifact, ArtifactError> {
+        self.put_pending_with_before_publish(
             session_id,
             page_id,
             media_type,
@@ -98,7 +151,7 @@ impl ArtifactStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn put_with_before_publish<F>(
+    async fn put_pending_with_before_publish<F>(
         &self,
         session_id: &SessionId,
         page_id: &PageId,
@@ -107,7 +160,7 @@ impl ArtifactStore {
         bytes: &[u8],
         max_bytes: usize,
         before_publish: F,
-    ) -> Result<ArtifactRecord, ArtifactError>
+    ) -> Result<PendingArtifact, ArtifactError>
     where
         F: Future<Output = ()>,
     {
@@ -153,14 +206,17 @@ impl ArtifactStore {
         std::fs::rename(staging.path(), &final_path).map_err(storage_error)?;
         staging.disarm();
 
-        Ok(ArtifactRecord {
-            artifact_id,
-            page_id: page_id.clone(),
-            media_type: media_type.to_owned(),
-            width: 0,
-            height: 0,
-            bytes: bytes.len() as u64,
-            sha256,
+        Ok(PendingArtifact {
+            record: Some(ArtifactRecord {
+                artifact_id,
+                page_id: page_id.clone(),
+                media_type: media_type.to_owned(),
+                width: 0,
+                height: 0,
+                bytes: bytes.len() as u64,
+                sha256,
+            }),
+            path: Some(final_path),
         })
     }
 
@@ -177,19 +233,21 @@ impl ArtifactStore {
         staged: std::sync::Arc<tokio::sync::Notify>,
         publish: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<ArtifactRecord, ArtifactError> {
-        self.put_with_before_publish(
-            session_id,
-            page_id,
-            media_type,
-            extension,
-            bytes,
-            max_bytes,
-            async move {
-                staged.notify_one();
-                publish.notified().await;
-            },
-        )
-        .await
+        Ok(self
+            .put_pending_with_before_publish(
+                session_id,
+                page_id,
+                media_type,
+                extension,
+                bytes,
+                max_bytes,
+                async move {
+                    staged.notify_one();
+                    publish.notified().await;
+                },
+            )
+            .await?
+            .commit())
     }
 
     pub async fn get(

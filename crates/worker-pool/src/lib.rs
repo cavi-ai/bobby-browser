@@ -10,9 +10,9 @@ use network_engine::state::{HttpStateSnapshot, ResponseStateDelta};
 use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, DownloadUrlCommand, Evidence, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, SessionId, TypeTextCommand,
-    UploadFilesCommand, WaitForCommand, WorkerId,
+    ClickCommand, ClosePageCommand, CommandError, Evidence, InspectCommand, ListPagesCommand,
+    NavigateCommand, OpenPageCommand, PageId, SessionId, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand, WorkerId,
 };
 
 pub use chromium::ChromiumWorkerFactory;
@@ -123,13 +123,6 @@ pub trait BrowserWorker: Send + Sync {
         &self,
         _page_id: &PageId,
         _command: &ClickAndWaitForDownloadCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn download_url(
-        &self,
-        _page_id: &PageId,
-        _command: &DownloadUrlCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
