@@ -1,9 +1,9 @@
 use chrono::{Duration, Utc};
-use interface_core::{AuthenticatedRuntime, AuthorityStore, CapabilityHandle, RuntimeInterface};
-use sdk_core::RuntimeService;
+use interface_core::{AuthorityStore, CapabilityHandle, RuntimeInterface};
+use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
-    InterfaceErrorCode, OpenPageRequest, PrincipalId, SessionId, WorkflowId,
+    IdempotencyKey, InterfaceErrorCode, OpenPageRequest, PrincipalId, SessionId, WorkflowId,
 };
 use uuid::uuid;
 
@@ -13,9 +13,7 @@ fn expiry() -> chrono::DateTime<Utc> {
     Utc::now() + Duration::minutes(5)
 }
 
-async fn authenticated(
-    runtime: RuntimeService,
-) -> (AuthenticatedRuntime<RuntimeService>, CapabilityHandle) {
+async fn authenticated(runtime: RuntimeService) -> (AuthenticatedRuntime, CapabilityHandle) {
     let authority = AuthorityStore::in_memory();
     let token = authority
         .issue(
@@ -36,8 +34,8 @@ async fn authenticated(
 }
 
 #[tokio::test]
-async fn runtime_service_implements_the_versioned_interface() {
-    assert_runtime_interface::<RuntimeService>();
+async fn authenticated_runtime_implements_the_versioned_interface() {
+    assert_runtime_interface::<AuthenticatedRuntime>();
     let (api, handle) = authenticated(RuntimeService::default()).await;
     let read_context = handle.context(expiry(), None);
 
@@ -99,4 +97,48 @@ async fn runtime_errors_are_mapped_without_dispatch_outcome_flattening() {
         | CommandOutcome::Failed { command_id, .. } => command_id,
     };
     assert_eq!(actual, command_id);
+}
+
+#[tokio::test]
+async fn authenticated_submit_replays_retained_outcome_and_conflicts_before_dispatch() {
+    let (api, handle) = authenticated(RuntimeService::default()).await;
+    let key = IdempotencyKey::try_from("sdk-retained-submit").unwrap();
+    let context = handle.context(expiry(), Some(key));
+    let request = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: expiry(),
+        command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+    };
+
+    let first = api.submit(context.clone(), request.clone()).await.unwrap();
+    let replay = api.submit(context.clone(), request).await.unwrap();
+    assert_eq!(
+        std::mem::discriminant(&first),
+        std::mem::discriminant(&replay)
+    );
+
+    let correlation_id = context.correlation_id.clone();
+    let conflict = api
+        .submit(
+            context,
+            CommandEnvelope {
+                schema_version: CommandEnvelope::SCHEMA_VERSION,
+                command_id: CommandId::new(),
+                workflow_id: WorkflowId::new(),
+                attempt_id: AttemptId::new(),
+                session_id: SessionId::new(),
+                page_id: None,
+                deadline: expiry(),
+                command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, InterfaceErrorCode::IdempotencyConflict);
+    assert_eq!(conflict.correlation_id, correlation_id);
 }

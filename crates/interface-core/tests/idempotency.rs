@@ -1,9 +1,16 @@
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use chrono::{Duration, Utc};
-use interface_core::{canonical_sha256, IdempotencyStore};
+use interface_core::{canonical_sha256, IdempotencyReservation, IdempotencyStore};
+use tokio::sync::Barrier;
 use types::{
     AttemptId, CommandError, CommandId, CommandOutcome, CorrelationId, ErrorCode, ErrorLayer,
-    IdempotencyKey, InterfaceErrorCode, InterfaceOperation, PrincipalId,
+    IdempotencyKey, InterfaceError, InterfaceErrorCode, InterfaceOperation, PrincipalId,
 };
+
 fn principal(value: &str) -> PrincipalId {
     PrincipalId::from_uuid(uuid::Uuid::parse_str(value).unwrap())
 }
@@ -28,229 +35,398 @@ fn command_error(retryable: bool) -> CommandError {
     }
 }
 
-#[test]
-fn committed_success_is_reused_only_for_matching_operation_and_digest() {
-    let store = IdempotencyStore::new(8, Duration::minutes(5));
+fn reconciliation(command_id: CommandId) -> CommandOutcome {
+    CommandOutcome::NeedsReconciliation {
+        command_id,
+        error: command_error(false),
+        evidence: Vec::new(),
+    }
+}
+
+async fn reserve(
+    store: &IdempotencyStore,
+    principal: PrincipalId,
+    key: IdempotencyKey,
+    digest: [u8; 32],
+    correlation_id: CorrelationId,
+) -> Result<IdempotencyReservation, InterfaceError> {
+    let now = Utc::now();
+    store
+        .reserve(
+            principal,
+            key,
+            InterfaceOperation::SubmitCommand,
+            digest,
+            now,
+            now + Duration::seconds(5),
+            correlation_id,
+        )
+        .await
+}
+
+struct DispatchCase {
+    store: IdempotencyStore,
+    principal: PrincipalId,
+    key: IdempotencyKey,
+    digest: [u8; 32],
+    correlation_id: CorrelationId,
+}
+
+async fn counted_dispatch(
+    case: DispatchCase,
+    calls: Arc<AtomicUsize>,
+    barrier: Arc<Barrier>,
+    outcome: CommandOutcome,
+) -> Result<CommandOutcome, InterfaceError> {
+    barrier.wait().await;
+    match reserve(
+        &case.store,
+        case.principal,
+        case.key,
+        case.digest,
+        case.correlation_id,
+    )
+    .await?
+    {
+        IdempotencyReservation::Replay(outcome) => Ok(outcome),
+        IdempotencyReservation::Acquired(permit) => {
+            calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            case.store
+                .finish(permit, outcome.clone(), Utc::now())
+                .await?;
+            Ok(outcome)
+        }
+    }
+}
+
+#[tokio::test]
+async fn committed_success_replays_and_conflicts_preserve_request_correlation() {
+    let store = IdempotencyStore::with_global_capacity(8, 16, Duration::minutes(5));
     let principal = principal("10000000-0000-0000-0000-000000000001");
     let key = key("same-request");
     let digest = canonical_sha256(&serde_json::json!({"value": 1})).unwrap();
     let command_id = CommandId::new();
-    let now = Utc::now();
+    let permit = match reserve(
+        &store,
+        principal.clone(),
+        key.clone(),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => panic!("first request must reserve"),
+    };
     store
-        .record_committed_outcome(
+        .finish(permit, completed(command_id.clone()), Utc::now())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        reserve(
+            &store,
             principal.clone(),
             key.clone(),
-            InterfaceOperation::SubmitCommand,
             digest,
-            completed(command_id.clone()),
-            now,
-        )
-        .unwrap();
-
-    let reused = store
-        .lookup_outcome(
-            &principal,
-            &key,
-            InterfaceOperation::SubmitCommand,
-            digest,
-            now,
             CorrelationId::new(),
         )
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        reused,
-        CommandOutcome::Completed { command_id: actual, .. } if actual == command_id
+        .await
+        .unwrap(),
+        IdempotencyReservation::Replay(CommandOutcome::Completed { command_id: actual, .. })
+            if actual == command_id
     ));
 
-    let mismatched_digest = canonical_sha256(&serde_json::json!({"value": 2})).unwrap();
-    let digest_error = store
-        .lookup_outcome(
-            &principal,
-            &key,
-            InterfaceOperation::SubmitCommand,
-            mismatched_digest,
-            now,
-            CorrelationId::new(),
-        )
-        .unwrap_err();
-    assert_eq!(digest_error.code, InterfaceErrorCode::IdempotencyConflict);
-    assert_eq!(
-        digest_error.message,
-        "idempotency key conflicts with a committed request"
-    );
-
-    let operation_error = store
-        .lookup_outcome(
-            &principal,
-            &key,
-            InterfaceOperation::OpenPage,
-            digest,
-            now,
-            CorrelationId::new(),
-        )
-        .unwrap_err();
-    assert_eq!(
-        operation_error.code,
-        InterfaceErrorCode::IdempotencyConflict
-    );
-
-    let replacement_error = store
-        .record_committed_outcome(
-            principal.clone(),
-            key.clone(),
-            InterfaceOperation::OpenPage,
-            mismatched_digest,
-            completed(CommandId::new()),
-            now,
-        )
-        .unwrap_err();
-    assert_eq!(
-        replacement_error.code,
-        InterfaceErrorCode::IdempotencyConflict
-    );
-    let original = store
-        .lookup_outcome(
-            &principal,
-            &key,
-            InterfaceOperation::SubmitCommand,
-            digest,
-            now,
-            CorrelationId::new(),
-        )
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        original,
-        CommandOutcome::Completed { command_id: actual, .. } if actual == command_id
-    ));
+    let correlation_id = CorrelationId::new();
+    let mismatch = reserve(
+        &store,
+        principal,
+        key,
+        canonical_sha256(&serde_json::json!({"value": 2})).unwrap(),
+        correlation_id.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mismatch.code, InterfaceErrorCode::IdempotencyConflict);
+    assert_eq!(mismatch.correlation_id, correlation_id);
 }
 
-#[test]
-fn non_success_and_uncertain_outcomes_are_never_cached() {
-    let store = IdempotencyStore::new(8, Duration::minutes(5));
+#[tokio::test]
+async fn uncertain_outcome_is_a_tombstone_while_explicitly_retryable_outcome_releases() {
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
     let principal = principal("10000000-0000-0000-0000-000000000001");
-    let now = Utc::now();
-    let outcomes = vec![
-        CommandOutcome::RetryableFailure {
-            command_id: CommandId::new(),
-            error: command_error(true),
-        },
-        CommandOutcome::NeedsReconciliation {
-            command_id: CommandId::new(),
-            error: command_error(false),
-            evidence: Vec::new(),
-        },
-        CommandOutcome::ResourceExhausted {
-            command_id: CommandId::new(),
-            error: command_error(true),
-            retry_after_ms: 100,
-        },
-        CommandOutcome::Restarted {
-            command_id: CommandId::new(),
-            prior_attempt_id: AttemptId::new(),
-            attempt_id: AttemptId::new(),
-            reason: "restart".into(),
-        },
-        CommandOutcome::Failed {
-            command_id: CommandId::new(),
-            error: command_error(false),
-        },
-        CommandOutcome::PolicyDenied {
-            command_id: CommandId::new(),
-            error: command_error(false),
-        },
-    ];
+    let uncertain_key = key("uncertain");
+    let uncertain_digest = canonical_sha256(&"uncertain").unwrap();
+    let command_id = CommandId::new();
+    let permit = match reserve(
+        &store,
+        principal.clone(),
+        uncertain_key.clone(),
+        uncertain_digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => unreachable!(),
+    };
+    store
+        .finish(permit, reconciliation(command_id.clone()), Utc::now())
+        .await
+        .unwrap();
+    assert!(matches!(
+        reserve(
+            &store,
+            principal.clone(),
+            uncertain_key,
+            uncertain_digest,
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap(),
+        IdempotencyReservation::Replay(CommandOutcome::NeedsReconciliation {
+            command_id: actual,
+            ..
+        }) if actual == command_id
+    ));
 
-    for (index, outcome) in outcomes.into_iter().enumerate() {
-        let key = key(&format!("not-committed-{index}"));
-        let digest = canonical_sha256(&index).unwrap();
+    let retryable_key = key("retryable");
+    let retryable_digest = canonical_sha256(&"retryable").unwrap();
+    let permit = match reserve(
+        &store,
+        principal.clone(),
+        retryable_key.clone(),
+        retryable_digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => unreachable!(),
+    };
+    store
+        .finish(
+            permit,
+            CommandOutcome::RetryableFailure {
+                command_id: CommandId::new(),
+                error: command_error(true),
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        reserve(
+            &store,
+            principal,
+            retryable_key,
+            retryable_digest,
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap(),
+        IdempotencyReservation::Acquired(_)
+    ));
+}
+
+#[tokio::test]
+async fn same_key_and_digest_concurrent_callers_dispatch_once() {
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let key = key("concurrent-same");
+    let digest = canonical_sha256(&"same").unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(2));
+    let command_id = CommandId::new();
+    let first = tokio::spawn(counted_dispatch(
+        DispatchCase {
+            store: store.clone(),
+            principal: principal.clone(),
+            key: key.clone(),
+            digest,
+            correlation_id: CorrelationId::new(),
+        },
+        calls.clone(),
+        barrier.clone(),
+        completed(command_id.clone()),
+    ));
+    let second = tokio::spawn(counted_dispatch(
+        DispatchCase {
+            store,
+            principal,
+            key,
+            digest,
+            correlation_id: CorrelationId::new(),
+        },
+        calls.clone(),
+        barrier,
+        completed(command_id),
+    ));
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn different_digest_concurrent_callers_conflict_before_second_dispatch() {
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let key = key("concurrent-conflict");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let barrier = Arc::new(Barrier::new(2));
+    let first = tokio::spawn(counted_dispatch(
+        DispatchCase {
+            store: store.clone(),
+            principal: principal.clone(),
+            key: key.clone(),
+            digest: canonical_sha256(&"first").unwrap(),
+            correlation_id: CorrelationId::new(),
+        },
+        calls.clone(),
+        barrier.clone(),
+        completed(CommandId::new()),
+    ));
+    let second = tokio::spawn(counted_dispatch(
+        DispatchCase {
+            store,
+            principal,
+            key,
+            digest: canonical_sha256(&"second").unwrap(),
+            correlation_id: CorrelationId::new(),
+        },
+        calls.clone(),
+        barrier,
+        completed(CommandId::new()),
+    ));
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(error) if error.code == InterfaceErrorCode::IdempotencyConflict))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn global_bound_refuses_safety_relevant_entries_and_reclaims_safe_or_expired_state() {
+    let store = IdempotencyStore::with_global_capacity(2, 2, Duration::milliseconds(20));
+    let first_principal = principal("10000000-0000-0000-0000-000000000001");
+    let second_principal = principal("20000000-0000-0000-0000-000000000002");
+    for (principal, key_value) in [(first_principal, "first"), (second_principal, "second")] {
+        let digest = canonical_sha256(&key_value).unwrap();
+        let permit = match reserve(
+            &store,
+            principal,
+            key(key_value),
+            digest,
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap()
+        {
+            IdempotencyReservation::Acquired(permit) => permit,
+            IdempotencyReservation::Replay(_) => unreachable!(),
+        };
         store
-            .record_committed_outcome(
-                principal.clone(),
-                key.clone(),
-                InterfaceOperation::SubmitCommand,
-                digest,
-                outcome,
-                now,
-            )
+            .finish(permit, reconciliation(CommandId::new()), Utc::now())
+            .await
             .unwrap();
-        assert!(store
-            .lookup_outcome(
-                &principal,
-                &key,
-                InterfaceOperation::SubmitCommand,
-                digest,
-                now,
-                CorrelationId::new(),
-            )
-            .unwrap()
-            .is_none());
     }
+
+    let correlation_id = CorrelationId::new();
+    let full = reserve(
+        &store,
+        principal("30000000-0000-0000-0000-000000000003"),
+        key("third"),
+        canonical_sha256(&"third").unwrap(),
+        correlation_id.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(full.code, InterfaceErrorCode::ResourceExhausted);
+    assert_eq!(full.correlation_id, correlation_id);
+
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(matches!(
+        reserve(
+            &store,
+            principal("30000000-0000-0000-0000-000000000003"),
+            key("third"),
+            canonical_sha256(&"third").unwrap(),
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap(),
+        IdempotencyReservation::Acquired(_)
+    ));
+}
+
+#[tokio::test]
+async fn per_principal_bound_refuses_safety_state_without_blocking_another_principal() {
+    let store = IdempotencyStore::with_global_capacity(1, 2, Duration::minutes(5));
+    let first_principal = principal("10000000-0000-0000-0000-000000000001");
+    let digest = canonical_sha256(&"first").unwrap();
+    let permit = match reserve(
+        &store,
+        first_principal.clone(),
+        key("first"),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => unreachable!(),
+    };
+    store
+        .finish(permit, reconciliation(CommandId::new()), Utc::now())
+        .await
+        .unwrap();
+
+    let same_principal = reserve(
+        &store,
+        first_principal,
+        key("second"),
+        canonical_sha256(&"second").unwrap(),
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(same_principal.code, InterfaceErrorCode::ResourceExhausted);
+    assert!(matches!(
+        reserve(
+            &store,
+            principal("20000000-0000-0000-0000-000000000002"),
+            key("other-principal"),
+            canonical_sha256(&"other").unwrap(),
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap(),
+        IdempotencyReservation::Acquired(_)
+    ));
 }
 
 #[test]
-fn storage_is_bounded_per_principal_and_expired_entries_are_not_reused() {
-    let store = IdempotencyStore::new(1, Duration::seconds(10));
-    let first = principal("10000000-0000-0000-0000-000000000001");
-    let second = principal("20000000-0000-0000-0000-000000000002");
-    let now = Utc::now();
-    let digest = canonical_sha256(&"request").unwrap();
+fn retryable_failed_helper_remains_explicit_for_future_outcomes() {
+    let outcome = CommandOutcome::Failed {
+        command_id: CommandId::new(),
+        error: command_error(true),
+    };
+    assert!(matches!(outcome, CommandOutcome::Failed { error, .. } if error.retryable));
 
-    for (principal, key_value) in [(&first, "first-a"), (&second, "second-a")] {
-        store
-            .record_committed_outcome(
-                principal.clone(),
-                key(key_value),
-                InterfaceOperation::SubmitCommand,
-                digest,
-                completed(CommandId::new()),
-                now,
-            )
-            .unwrap();
-    }
-    store
-        .record_committed_outcome(
-            first.clone(),
-            key("first-b"),
-            InterfaceOperation::SubmitCommand,
-            digest,
-            completed(CommandId::new()),
-            now,
-        )
-        .unwrap();
-
-    assert!(store
-        .lookup_outcome(
-            &first,
-            &key("first-a"),
-            InterfaceOperation::SubmitCommand,
-            digest,
-            now,
-            CorrelationId::new(),
-        )
-        .unwrap()
-        .is_none());
-    assert!(store
-        .lookup_outcome(
-            &second,
-            &key("second-a"),
-            InterfaceOperation::SubmitCommand,
-            digest,
-            now,
-            CorrelationId::new(),
-        )
-        .unwrap()
-        .is_some());
-    assert!(store
-        .lookup_outcome(
-            &first,
-            &key("first-b"),
-            InterfaceOperation::SubmitCommand,
-            digest,
-            now + Duration::seconds(10),
-            CorrelationId::new(),
-        )
-        .unwrap()
-        .is_none());
+    let restarted = CommandOutcome::Restarted {
+        command_id: CommandId::new(),
+        prior_attempt_id: AttemptId::new(),
+        attempt_id: AttemptId::new(),
+        reason: "restart".into(),
+    };
+    assert!(matches!(restarted, CommandOutcome::Restarted { .. }));
 }
