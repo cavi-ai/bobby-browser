@@ -276,6 +276,71 @@ pub async fn spawn() -> FixtureServer {
             }),
         )
         .route(
+            "/cookie-domain-public",
+            get(|| async {
+                let mut response = (
+                    axum::http::StatusCode::FOUND,
+                    [(header::LOCATION, "/cookie-echo")],
+                )
+                    .into_response();
+                response.headers_mut().insert(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static("bad=public; Domain=com; Path=/"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/cookie-domain-super",
+            get(|| async {
+                let mut response = (
+                    axum::http::StatusCode::FOUND,
+                    [(header::LOCATION, "/cookie-echo")],
+                )
+                    .into_response();
+                response.headers_mut().insert(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static("bad=super; Domain=0.0.1; Path=/"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/validator",
+            get(|headers: axum::http::HeaderMap| async move {
+                if headers
+                    .get(header::IF_NONE_MATCH)
+                    .and_then(|v| v.to_str().ok())
+                    == Some("\"fixture-v1\"")
+                {
+                    axum::http::StatusCode::NOT_MODIFIED.into_response()
+                } else {
+                    let mut response = Html("<title>Validator</title><p>fresh</p>").into_response();
+                    response
+                        .headers_mut()
+                        .insert(header::ETAG, HeaderValue::from_static("\"fixture-v1\""));
+                    response
+                }
+            }),
+        )
+        .route(
+            "/no-content",
+            get(|| async { axum::http::StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/download-colon",
+            get(|| async { download_named("C:secret.txt") }),
+        )
+        .route("/download-con", get(|| async { download_named("CON.txt") }))
+        .route(
+            "/download-lpt",
+            get(|| async { download_named("lPt9.log") }),
+        )
+        .route(
+            "/download-trailing",
+            get(|| async { download_named("report. ") }),
+        )
+        .route(
             "/popup",
             get(|| async { Html("<title>Popup</title><p id='details'>Details</p>") }),
         )

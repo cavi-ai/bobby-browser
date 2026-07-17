@@ -437,3 +437,86 @@ async fn interrupted_transfer_is_rejected_without_leaking_request_headers() {
     assert_eq!(error.code, types::ErrorCode::HttpTransferFailed);
     assert!(!error.message.contains("secret-token"));
 }
+
+#[tokio::test]
+async fn rejects_all_response_domain_cookies_before_redirect_forwarding() {
+    let site = spawn().await;
+    for route in ["cookie-domain-public", "cookie-domain-super"] {
+        let result = DirectHttpExecutor::new(policy())
+            .inspect(
+                &snapshot(format!("{}/{route}", site.base_url())),
+                &InspectCommand::default(),
+            )
+            .await;
+        assert_eq!(
+            expect_error(result).code,
+            types::ErrorCode::HttpEquivalenceUnproven,
+            "{route}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn canonical_cookie_identity_replaces_across_host_only_transition() {
+    let site = spawn().await;
+    let mut state = snapshot(format!("{}/cookie-echo", site.base_url()));
+    state.cookies = vec![
+        test_cookie("identity", "old", "127.0.0.1", true, false, None),
+        test_cookie("identity", "new", "127.0.0.1", false, false, None),
+    ];
+    let candidate = DirectHttpExecutor::new(policy())
+        .inspect(&state, &InspectCommand::default())
+        .await
+        .unwrap();
+    let HttpCandidate::Inspection {
+        evidence: Evidence::Inspection { text, .. },
+        ..
+    } = candidate
+    else {
+        panic!("inspection")
+    };
+    assert_eq!(text, "Cookies identity=new");
+}
+
+#[tokio::test]
+async fn cached_and_bodyless_inspections_never_return_empty_success() {
+    let site = spawn().await;
+    let url = format!("{}/validator", site.base_url());
+    let mut cached = snapshot(url.clone());
+    cached.cache_validators.insert(url, "\"fixture-v1\"".into());
+    for state in [cached, snapshot(format!("{}/no-content", site.base_url()))] {
+        let candidate = DirectHttpExecutor::new(policy())
+            .inspect(&state, &InspectCommand::default())
+            .await
+            .unwrap();
+        assert!(matches!(
+            candidate,
+            HttpCandidate::FallbackRequired(ExecutionReason::StateConflict)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn rejects_nonportable_download_device_and_drive_names() {
+    let site = spawn().await;
+    for route in [
+        "download-colon",
+        "download-con",
+        "download-lpt",
+        "download-trailing",
+    ] {
+        let command = DownloadUrlCommand {
+            url: format!("{}/{route}", site.base_url()),
+            expected_content_type: None,
+            max_bytes: 64,
+        };
+        let candidate = DirectHttpExecutor::new(policy())
+            .download(&snapshot(site.base_url()), &command)
+            .await
+            .unwrap();
+        let HttpCandidate::Download { filename, .. } = candidate else {
+            panic!("download")
+        };
+        assert_eq!(filename, "download.bin", "{route}");
+    }
+}
