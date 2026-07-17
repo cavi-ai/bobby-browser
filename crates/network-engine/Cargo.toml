@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+scraper.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

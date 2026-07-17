@@ -4,7 +4,7 @@ use tokio::net::lookup_host;
 use types::CommandError;
 use url::Url;
 
-use crate::eligibility::policy_error;
+use crate::eligibility::{policy_error, validate_http_url};
 
 #[derive(Debug, Clone)]
 pub struct NetworkPolicy {
@@ -35,8 +35,18 @@ impl Default for NetworkPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedDestination {
-    pub url: Url,
-    pub addresses: Vec<SocketAddr>,
+    url: Url,
+    addresses: Vec<SocketAddr>,
+}
+
+impl ValidatedDestination {
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
+    pub fn addresses(&self) -> &[SocketAddr] {
+        &self.addresses
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,13 +63,8 @@ impl DestinationPolicy {
         &self,
         input: &str,
     ) -> Result<ValidatedDestination, CommandError> {
+        validate_http_url(input)?;
         let url = Url::parse(input).map_err(|_| policy_error("URL is invalid"))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(policy_error("URL scheme is not permitted"));
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(policy_error("credentials in URLs are not permitted"));
-        }
         let host = url
             .host_str()
             .ok_or_else(|| policy_error("URL must include a host"))?;
@@ -80,6 +85,7 @@ impl DestinationPolicy {
         url: Url,
         addresses: Vec<SocketAddr>,
     ) -> Result<ValidatedDestination, CommandError> {
+        validate_http_url(url.as_str())?;
         if addresses.is_empty() {
             return Err(policy_error("destination resolved to no addresses"));
         }

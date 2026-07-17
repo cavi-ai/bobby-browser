@@ -96,3 +96,13 @@ fn rejects_unsafe_urls_and_download_limits() {
         );
     }
 }
+
+#[test]
+fn routes_empty_or_malformed_inspect_selectors_to_chromium() {
+    for selector in ["", "   ", "#", "div[", "a,,b"] {
+        assert_chromium(
+            inspect(Some(selector), false),
+            ExecutionReason::IneligibleCommand,
+        );
+    }
+}

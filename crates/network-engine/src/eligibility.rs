@@ -1,3 +1,4 @@
+use scraper::Selector;
 use types::{CommandClass, CommandError, ErrorCode, ErrorLayer, ExecutionReason, PrimitiveCommand};
 use url::Url;
 
@@ -25,6 +26,13 @@ impl EligibilityPolicy {
             PrimitiveCommand::Inspect(inspect) => {
                 if inspect.target.is_some() {
                     return EligibilityDecision::Chromium(ExecutionReason::SemanticTargetRequired);
+                }
+                if inspect
+                    .selector
+                    .as_deref()
+                    .is_some_and(|selector| Selector::parse(selector).is_err())
+                {
+                    return EligibilityDecision::Chromium(ExecutionReason::IneligibleCommand);
                 }
 
                 match validate_http_url(page_url) {
@@ -58,7 +66,7 @@ impl EligibilityPolicy {
     }
 }
 
-fn validate_http_url(input: &str) -> Result<(), CommandError> {
+pub(crate) fn validate_http_url(input: &str) -> Result<(), CommandError> {
     let url = Url::parse(input).map_err(|_| policy_error("URL is invalid"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(policy_error("URL scheme is not permitted"));
