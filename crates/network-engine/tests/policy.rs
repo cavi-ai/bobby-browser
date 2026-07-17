@@ -30,7 +30,12 @@ async fn denies_non_public_destinations_by_default() {
 
 #[tokio::test]
 async fn allows_public_literal_destinations() {
-    assert!(validate("93.184.216.34", NetworkPolicy::default()).await);
+    let validated = DestinationPolicy::new(NetworkPolicy::default())
+        .resolve_and_validate("http://93.184.216.34/")
+        .await
+        .unwrap();
+    assert_eq!(validated.url().as_str(), "http://93.184.216.34/");
+    assert_eq!(validated.addresses().len(), 1);
     assert!(validate("[2001:4860:4860::8888]", NetworkPolicy::default()).await);
 }
 
@@ -57,4 +62,20 @@ async fn rejects_a_url_if_any_resolved_address_is_denied() {
     );
 
     assert!(result.is_err());
+}
+
+#[test]
+fn resolved_validation_cannot_bypass_url_policy() {
+    let destination = DestinationPolicy::new(NetworkPolicy::default());
+    let addresses = vec!["93.184.216.34:443".parse().unwrap()];
+
+    assert!(destination
+        .validate_resolved("file:///etc/passwd".parse().unwrap(), addresses.clone())
+        .is_err());
+    assert!(destination
+        .validate_resolved(
+            "https://user:pass@example.test/".parse().unwrap(),
+            addresses,
+        )
+        .is_err());
 }
