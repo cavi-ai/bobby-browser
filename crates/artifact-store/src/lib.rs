@@ -152,9 +152,7 @@ impl ArtifactStore {
         .map_err(storage_error)?;
 
         before_publish.await;
-        tokio::fs::rename(staging.path(), &final_path)
-            .await
-            .map_err(storage_error)?;
+        std::fs::rename(staging.path(), &final_path).map_err(storage_error)?;
         staging.disarm();
 
         Ok(ArtifactRecord {
@@ -256,12 +254,10 @@ impl Drop for StagingGuard {
         let Some(path) = self.path.take() else {
             return;
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                let _ = tokio::fs::remove_dir_all(path).await;
-            });
-        } else {
-            let _ = std::fs::remove_dir_all(path);
+        if let Err(error) = std::fs::remove_dir_all(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(%error, "failed to clean artifact staging directory");
+            }
         }
     }
 }
@@ -345,13 +341,70 @@ mod tests {
         assert_eq!(std::fs::read_dir(&session_dir).unwrap().count(), 1);
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        assert!(std::fs::read_dir(&session_dir).unwrap().next().is_none());
+    }
 
-        for _ in 0..100 {
-            if std::fs::read_dir(&session_dir).unwrap().next().is_none() {
-                return;
+    #[tokio::test]
+    async fn publish_boundary_replaces_staging_with_one_committed_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(root.path(), 1024, 4096);
+        let session = SessionId::new();
+        let session_dir = store.session_dir(&session);
+        let page = PageId::new();
+        let staged = Arc::new(Notify::new());
+        let publish = Arc::new(Notify::new());
+
+        let task = tokio::spawn({
+            let store = store.clone();
+            let session = session.clone();
+            let staged = Arc::clone(&staged);
+            let publish = Arc::clone(&publish);
+            async move {
+                store
+                    .put_paused_before_publish(
+                        &session,
+                        &page,
+                        "application/octet-stream",
+                        "bin",
+                        b"complete-transfer",
+                        1024,
+                        staged,
+                        publish,
+                    )
+                    .await
             }
-            tokio::task::yield_now().await;
-        }
-        panic!("aborted publication left a visible artifact or staging residue");
+        });
+
+        staged.notified().await;
+        let staged_name = std::fs::read_dir(&session_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name();
+        assert!(staged_name.to_string_lossy().starts_with('.'));
+
+        publish.notify_one();
+        let record = task.await.unwrap().unwrap();
+        let entries = std::fs::read_dir(&session_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_name(), record.artifact_id.as_str());
+        assert!(entries[0].path().is_dir());
+    }
+
+    #[tokio::test]
+    async fn dropping_staging_guard_removes_directory_synchronously() {
+        let root = tempfile::tempdir().unwrap();
+        let staging_path = root.path().join(".artifact.tmp");
+        std::fs::create_dir(&staging_path).unwrap();
+        std::fs::write(staging_path.join("payload.bin"), b"partial").unwrap();
+
+        let guard = StagingGuard::new(staging_path.clone());
+        drop(guard);
+
+        assert!(!staging_path.exists());
     }
 }
