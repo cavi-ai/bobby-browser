@@ -10,6 +10,7 @@ chromiumoxide.workspace = true
 config = { path = "../config" }
 dom-engine = { path = "../dom-engine" }
 futures.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

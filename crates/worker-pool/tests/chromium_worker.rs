@@ -2,8 +2,9 @@ use config::BrowserConfig;
 use std::path::PathBuf;
 use types::{
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
-    ErrorCode, Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand,
-    PageId, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitUntil,
+    ElementState, ErrorCode, Evidence, InspectCommand, ListPagesCommand, NavigateCommand,
+    OpenPageCommand, PageId, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -295,5 +296,79 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::TargetAmbiguous);
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<div id=status hidden>booting</div><input aria-label=State value=booting><script>setTimeout(()=>{status.hidden=false;status.textContent='ready';document.querySelector('input').value='ready'},100)</script>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let status = TargetSpec {
+        css: Some("#status".into()),
+        ..TargetSpec::default()
+    };
+    for condition in [
+        WaitCondition::Element {
+            target: Box::new(status.clone()),
+            state: ElementState::Visible,
+        },
+        WaitCondition::Text {
+            target: Box::new(status),
+            matcher: TextMatch::Exact("ready".into()),
+        },
+        WaitCondition::Value {
+            target: Box::new(TargetSpec {
+                accessible_name: Some("State".into()),
+                ..TargetSpec::default()
+            }),
+            matcher: TextMatch::Contains("ready".into()),
+        },
+        WaitCondition::Url {
+            matcher: TextMatch::Contains("data:text/html".into()),
+        },
+        WaitCondition::Document {
+            ready: WaitUntil::Interactive,
+        },
+        WaitCondition::NetworkQuiet {
+            idle_ms: 50,
+            max_in_flight: 0,
+        },
+    ] {
+        let evidence = worker
+            .wait_for(
+                &page_id,
+                &WaitForCommand {
+                    condition,
+                    timeout_ms: 2_000,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(&evidence[0], Evidence::Wait { observations, .. } if *observations > 0));
+    }
     worker.close().await.unwrap();
 }

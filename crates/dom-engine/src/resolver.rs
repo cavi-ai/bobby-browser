@@ -10,6 +10,7 @@ pub struct ResolutionPolicy {
     pub uniqueness_margin: i32,
     pub max_candidates: usize,
     pub max_regex_len: usize,
+    pub require_visible: bool,
 }
 
 impl Default for ResolutionPolicy {
@@ -19,6 +20,7 @@ impl Default for ResolutionPolicy {
             uniqueness_margin: 1,
             max_candidates: 100,
             max_regex_len: 256,
+            require_visible: true,
         }
     }
 }
@@ -68,7 +70,9 @@ pub fn resolve_candidates(
     };
     let mut ranked = candidates
         .iter()
-        .filter(|candidate| candidate.state.attached && candidate.state.visible)
+        .filter(|candidate| {
+            candidate.state.attached && (!policy.require_visible || candidate.state.visible)
+        })
         .filter_map(|candidate| score(target, candidate, regex.as_ref()))
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
