@@ -82,6 +82,44 @@ pub enum Evidence {
         bytes: u64,
         sha256: String,
     },
+    Resolution {
+        target: Box<crate::TargetSpec>,
+        fingerprint: Box<TargetFingerprint>,
+        candidates: Vec<CandidateEvidence>,
+        best_match_authorized: bool,
+    },
+    Wait {
+        condition: crate::WaitCondition,
+        elapsed_ms: u64,
+        observations: u64,
+    },
+    Screenshot {
+        artifact_id: String,
+        media_type: String,
+        width: u32,
+        height: u32,
+        bytes: u64,
+        sha256: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateEvidence {
+    pub role: Option<String>,
+    pub name: Option<String>,
+    pub score: i32,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetFingerprint {
+    pub page_id: PageId,
+    pub frame: Option<String>,
+    pub role: Option<String>,
+    pub name: Option<String>,
+    pub stable_attributes: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -114,6 +152,13 @@ pub enum ErrorCode {
     ResourceExhausted,
     PolicyDenied,
     Internal,
+    TargetNotFound,
+    TargetAmbiguous,
+    FrameNotFound,
+    ShadowRootUnavailable,
+    TargetDetached,
+    WaitConditionTimedOut,
+    ScreenshotCaptureFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
