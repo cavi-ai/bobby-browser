@@ -33,6 +33,8 @@ pub enum ArtifactError {
     TooLarge,
     #[error("artifact is not a valid PNG")]
     InvalidPng,
+    #[error("artifact metadata is invalid")]
+    InvalidMetadata,
     #[error("artifact storage failed: {0}")]
     Storage(String),
 }
@@ -52,34 +54,88 @@ impl ArtifactStore {
         page_id: &PageId,
         bytes: &[u8],
     ) -> Result<ArtifactRecord, ArtifactError> {
-        if bytes.len() > self.max_bytes {
-            return Err(ArtifactError::TooLarge);
-        }
         let (width, height) = png_dimensions(bytes)?;
         if width > self.max_dimension || height > self.max_dimension {
             return Err(ArtifactError::TooLarge);
         }
+        let mut record = self
+            .put(
+                session_id,
+                page_id,
+                "image/png",
+                "png",
+                bytes,
+                self.max_bytes,
+            )
+            .await?;
+        record.width = width;
+        record.height = height;
+        Ok(record)
+    }
+
+    pub async fn put(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        media_type: &str,
+        extension: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<ArtifactRecord, ArtifactError> {
+        if bytes.len() > self.max_bytes.min(max_bytes) {
+            return Err(ArtifactError::TooLarge);
+        }
+        if media_type.is_empty() || media_type.len() > 255 || !valid_extension(extension) {
+            return Err(ArtifactError::InvalidMetadata);
+        }
+
         let artifact_id = Uuid::new_v4().to_string();
         let directory = self.session_dir(session_id);
+        let filename = format!("{artifact_id}.{extension}");
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let manifest = ArtifactManifest {
+            filename: filename.clone(),
+            media_type: media_type.to_owned(),
+            page_id: page_id.clone(),
+            bytes: bytes.len() as u64,
+            sha256: sha256.clone(),
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_error)?;
+
         tokio::fs::create_dir_all(&directory)
             .await
             .map_err(storage_error)?;
-        let final_path = directory.join(format!("{artifact_id}.png"));
-        let temporary_path = directory.join(format!(".{artifact_id}.tmp"));
-        tokio::fs::write(&temporary_path, bytes)
-            .await
-            .map_err(storage_error)?;
-        tokio::fs::rename(&temporary_path, &final_path)
-            .await
-            .map_err(storage_error)?;
+        let final_path = directory.join(&filename);
+        let manifest_path = directory.join(format!("{artifact_id}.json"));
+        let temporary_path = directory.join(format!(".{artifact_id}.{extension}.tmp"));
+        let temporary_manifest_path = directory.join(format!(".{artifact_id}.json.tmp"));
+
+        if let Err(error) = tokio::fs::write(&temporary_path, bytes).await {
+            return Err(storage_error(error));
+        }
+        if let Err(error) = tokio::fs::write(&temporary_manifest_path, manifest_bytes).await {
+            let _ = tokio::fs::remove_file(&temporary_path).await;
+            return Err(storage_error(error));
+        }
+        if let Err(error) = tokio::fs::rename(&temporary_path, &final_path).await {
+            let _ = tokio::fs::remove_file(&temporary_path).await;
+            let _ = tokio::fs::remove_file(&temporary_manifest_path).await;
+            return Err(storage_error(error));
+        }
+        if let Err(error) = tokio::fs::rename(&temporary_manifest_path, &manifest_path).await {
+            let _ = tokio::fs::remove_file(&final_path).await;
+            let _ = tokio::fs::remove_file(&temporary_manifest_path).await;
+            return Err(storage_error(error));
+        }
+
         Ok(ArtifactRecord {
             artifact_id,
             page_id: page_id.clone(),
-            media_type: "image/png".into(),
-            width,
-            height,
+            media_type: media_type.to_owned(),
+            width: 0,
+            height: 0,
             bytes: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(bytes)),
+            sha256,
         })
     }
 
@@ -89,20 +145,46 @@ impl ArtifactStore {
         artifact_id: &str,
     ) -> Result<Vec<u8>, ArtifactError> {
         let artifact_id = Uuid::parse_str(artifact_id).map_err(|_| ArtifactError::NotFound)?;
-        let path = self
-            .session_dir(session_id)
-            .join(format!("{artifact_id}.png"));
-        tokio::fs::read(path).await.map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ArtifactError::NotFound
-            } else {
-                storage_error(error)
-            }
-        })
+        let directory = self.session_dir(session_id);
+        let manifest_path = directory.join(format!("{artifact_id}.json"));
+        let manifest_bytes = tokio::fs::read(manifest_path).await.map_err(read_error)?;
+        let manifest: ArtifactManifest =
+            serde_json::from_slice(&manifest_bytes).map_err(|_| ArtifactError::NotFound)?;
+        let expected_prefix = format!("{artifact_id}.");
+        let extension = manifest
+            .filename
+            .strip_prefix(&expected_prefix)
+            .filter(|extension| valid_extension(extension))
+            .ok_or(ArtifactError::NotFound)?;
+        let path = directory.join(format!("{artifact_id}.{extension}"));
+        tokio::fs::read(path).await.map_err(read_error)
     }
 
     fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.root.join(session_id.0.to_string())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactManifest {
+    filename: String,
+    media_type: String,
+    page_id: PageId,
+    bytes: u64,
+    sha256: String,
+}
+
+fn valid_extension(extension: &str) -> bool {
+    !extension.is_empty()
+        && extension.len() <= 10
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn read_error(error: std::io::Error) -> ArtifactError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => ArtifactError::NotFound,
+        _ => storage_error(error),
     }
 }
 

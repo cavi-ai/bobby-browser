@@ -55,3 +55,59 @@ async fn rejects_oversized_or_invalid_png_payloads() {
         ArtifactError::InvalidPng
     );
 }
+
+#[tokio::test]
+async fn generic_artifacts_are_private_validated_and_atomic() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let other_session = SessionId::new();
+    let page = PageId::new();
+
+    let record = store
+        .put(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"download-v1",
+            1024,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(record.media_type, "application/octet-stream");
+    assert_eq!(
+        store.get(&session, &record.artifact_id).await.unwrap(),
+        b"download-v1"
+    );
+    assert!(store
+        .get(&other_session, &record.artifact_id)
+        .await
+        .is_err());
+    assert!(store
+        .put(&session, &page, "text/plain", "../txt", b"x", 10)
+        .await
+        .is_err());
+
+    let oversized_session = SessionId::new();
+    assert_eq!(
+        store
+            .put(
+                &oversized_session,
+                &page,
+                "application/octet-stream",
+                "bin",
+                b"too-large",
+                4,
+            )
+            .await
+            .unwrap_err(),
+        ArtifactError::TooLarge
+    );
+    let oversized_dir = root.path().join(oversized_session.0.to_string());
+    assert!(
+        !oversized_dir.exists() || std::fs::read_dir(oversized_dir).unwrap().next().is_none(),
+        "an oversized payload must leave no final or temporary files"
+    );
+}
