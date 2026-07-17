@@ -21,6 +21,8 @@ pub struct PreparedResult {
     pub artifact_id: Option<String>,
     pub artifact_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_staging_id: Option<String>,
 }
 

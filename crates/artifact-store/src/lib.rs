@@ -6,6 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use types::{PageId, SessionId};
 use uuid::Uuid;
 
@@ -224,13 +225,7 @@ impl ArtifactStore {
             .await
             .map_err(storage_error)?;
         if final_path.exists() {
-            let manifest_path = final_path.join(format!("{artifact_id}.json"));
-            let existing = std::fs::read(manifest_path).map_err(storage_error)?;
-            let existing: ArtifactManifest =
-                serde_json::from_slice(&existing).map_err(storage_error)?;
-            if existing.sha256 != sha256 || existing.bytes != bytes.len() as u64 {
-                return Err(ArtifactError::InvalidMetadata);
-            }
+            validate_directory(&final_path, &artifact_id, &sha256, bytes.len() as u64)?;
             return Ok(PendingArtifact {
                 record: Some(ArtifactRecord {
                     artifact_id,
@@ -251,15 +246,14 @@ impl ArtifactStore {
         std::fs::create_dir(&staging_path).map_err(storage_error)?;
         let mut staging = StagingGuard::new(staging_path);
 
-        tokio::fs::write(staging.path().join(&filename), bytes)
-            .await
-            .map_err(storage_error)?;
-        tokio::fs::write(
+        write_synced(staging.path().join(&filename), bytes).await?;
+        write_synced(
             staging.path().join(format!("{artifact_id}.json")),
-            manifest_bytes,
+            &manifest_bytes,
         )
-        .await
-        .map_err(storage_error)?;
+        .await?;
+        sync_directory(staging.path())?;
+        sync_directory(&session_directory)?;
 
         before_publish.await;
         let staged_path = staging.path().to_path_buf();
@@ -339,6 +333,8 @@ impl ArtifactStore {
         session_id: &SessionId,
         artifact_id: &str,
         staging_id: &str,
+        expected_sha256: &str,
+        expected_bytes: u64,
     ) -> Result<(), ArtifactError> {
         if !valid_artifact_id(artifact_id) || Uuid::parse_str(staging_id).is_err() {
             return Err(ArtifactError::NotFound);
@@ -347,9 +343,17 @@ impl ArtifactStore {
         let staging = session.join(format!(".{artifact_id}.{staging_id}.tmp"));
         let final_path = session.join(artifact_id);
         if final_path.is_dir() {
+            validate_directory(&final_path, artifact_id, expected_sha256, expected_bytes)?;
+            if staging.is_dir() {
+                std::fs::remove_dir_all(&staging).map_err(storage_error)?;
+                sync_directory(&session)?;
+            }
             return Ok(());
         }
         let manifest = read_manifest(&staging, artifact_id)?;
+        if manifest.sha256 != expected_sha256 || manifest.bytes != expected_bytes {
+            return Err(ArtifactError::InvalidMetadata);
+        }
         let record = ArtifactRecord {
             artifact_id: artifact_id.to_owned(),
             page_id: manifest.page_id,
@@ -392,21 +396,70 @@ fn publish_staging(
     final_path: &Path,
     record: &ArtifactRecord,
 ) -> Result<(), ArtifactError> {
+    validate_directory(staging, &record.artifact_id, &record.sha256, record.bytes)?;
     match std::fs::rename(staging, final_path) {
-        Ok(()) => Ok(()),
-        Err(_) if final_path.is_dir() => {
-            let existing = read_manifest(final_path, &record.artifact_id)?;
-            if existing.sha256 != record.sha256 || existing.bytes != record.bytes {
-                return Err(ArtifactError::InvalidMetadata);
+        Ok(()) => {
+            if let Some(parent) = final_path.parent() {
+                sync_directory(parent)?;
             }
+            Ok(())
+        }
+        Err(_) if final_path.is_dir() => {
+            validate_directory(
+                final_path,
+                &record.artifact_id,
+                &record.sha256,
+                record.bytes,
+            )?;
             match std::fs::remove_dir_all(staging) {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    if let Some(parent) = final_path.parent() {
+                        sync_directory(parent)?;
+                    }
+                    Ok(())
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(storage_error(error)),
             }
         }
         Err(error) => Err(storage_error(error)),
     }
+}
+
+fn validate_directory(
+    directory: &Path,
+    artifact_id: &str,
+    expected_sha256: &str,
+    expected_bytes: u64,
+) -> Result<(), ArtifactError> {
+    let manifest = read_manifest(directory, artifact_id)?;
+    if manifest.sha256 != expected_sha256 || manifest.bytes != expected_bytes {
+        return Err(ArtifactError::InvalidMetadata);
+    }
+    let extension = manifest
+        .filename
+        .strip_prefix(&format!("{artifact_id}."))
+        .filter(|extension| valid_extension(extension))
+        .ok_or(ArtifactError::InvalidMetadata)?;
+    let bytes =
+        std::fs::read(directory.join(format!("{artifact_id}.{extension}"))).map_err(read_error)?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if bytes.len() as u64 != expected_bytes || actual_sha256 != expected_sha256 {
+        return Err(ArtifactError::InvalidMetadata);
+    }
+    Ok(())
+}
+
+async fn write_synced(path: PathBuf, bytes: &[u8]) -> Result<(), ArtifactError> {
+    let mut file = tokio::fs::File::create(path).await.map_err(storage_error)?;
+    file.write_all(bytes).await.map_err(storage_error)?;
+    file.sync_all().await.map_err(storage_error)
+}
+
+fn sync_directory(path: &Path) -> Result<(), ArtifactError> {
+    std::fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(storage_error)
 }
 
 #[derive(Debug)]

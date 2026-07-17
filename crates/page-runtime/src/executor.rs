@@ -47,9 +47,11 @@ impl PageRuntime {
             .rev()
             .find_map(|record| record.prepared_result.clone())
         {
-            if let (Some(artifact_id), Some(staging_id)) = (
+            if let (Some(artifact_id), Some(staging_id), Some(sha256), Some(bytes)) = (
                 prepared.artifact_id.as_deref(),
                 prepared.artifact_staging_id.as_deref(),
+                prepared.artifact_sha256.as_deref(),
+                prepared.artifact_bytes,
             ) {
                 let session_id = scan
                     .records
@@ -61,6 +63,8 @@ impl PageRuntime {
                         &session_id,
                         artifact_id,
                         staging_id,
+                        sha256,
+                        bytes,
                     ) {
                         return CommandOutcome::NeedsReconciliation {
                             command_id,
@@ -173,6 +177,7 @@ impl PageRuntime {
                 evidence: execution.evidence.clone(),
                 artifact_id: artifact.as_ref().map(|record| record.artifact_id.clone()),
                 artifact_sha256: artifact.as_ref().map(|record| record.sha256.clone()),
+                artifact_bytes: artifact.as_ref().map(|record| record.bytes),
                 artifact_staging_id: prepared
                     .artifact
                     .as_ref()

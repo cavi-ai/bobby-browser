@@ -955,6 +955,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
                 evidence: evidence.clone(),
                 artifact_id: Some("abc".into()),
                 artifact_sha256: Some("abc".into()),
+                artifact_bytes: Some(1),
                 artifact_staging_id: None,
             }),
         }],
@@ -1018,6 +1019,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
         }],
         artifact_id: Some(artifact_id.clone()),
         artifact_sha256: Some(sha256),
+        artifact_bytes: Some(16),
         artifact_staging_id: Some(staging_id),
     };
     let records = vec![

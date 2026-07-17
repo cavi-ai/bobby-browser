@@ -61,6 +61,8 @@ impl AdaptivePageEngine {
         session_id: &types::SessionId,
         artifact_id: &str,
         staging_id: &str,
+        sha256: &str,
+        bytes: u64,
     ) -> Result<(), CommandError> {
         let direct = self
             .direct
@@ -68,7 +70,7 @@ impl AdaptivePageEngine {
             .ok_or_else(|| internal_artifact_error("adaptive artifact store is not configured"))?;
         direct
             .artifacts
-            .finalize_staged(session_id, artifact_id, staging_id)
+            .finalize_staged(session_id, artifact_id, staging_id, sha256, bytes)
             .map_err(artifact_error)
     }
 
