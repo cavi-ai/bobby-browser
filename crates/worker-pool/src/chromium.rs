@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,12 +11,14 @@ use chromiumoxide::cdp::browser_protocol::browser::{
     DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
+use chromiumoxide::cdp::browser_protocol::network::{CookieParam, CookieSameSite, TimeSinceEpoch};
 use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
 use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
 use futures::StreamExt;
+use network_engine::state::{HttpCookie, HttpStateSnapshot, ResponseStateDelta};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -93,6 +95,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             ),
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
+            http_state: Mutex::new(HttpBridgeState::default()),
             handler_task: Mutex::new(Some(handler_task)),
         }))
     }
@@ -107,7 +110,14 @@ struct ChromiumWorker {
     artifacts: ArtifactStore,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
+    http_state: Mutex<HttpBridgeState>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Default)]
+struct HttpBridgeState {
+    version: u64,
+    cache_validators: BTreeMap<String, String>,
 }
 
 impl ChromiumWorker {
@@ -647,6 +657,82 @@ impl BrowserWorker for ChromiumWorker {
         Ok(evidence)
     }
 
+    async fn http_state(&self, page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let current_url = page
+            .url()
+            .await
+            .map_err(command_failed)?
+            .unwrap_or_default();
+        let cookies = page
+            .get_cookies()
+            .await
+            .map_err(command_failed)?
+            .into_iter()
+            .map(|cookie| HttpCookie {
+                name: cookie.name,
+                value: cookie.value,
+                domain: cookie.domain,
+                path: cookie.path,
+                secure: cookie.secure,
+                http_only: cookie.http_only,
+                same_site: cookie.same_site.map(|value| value.as_ref().to_owned()),
+                expires_unix: (!cookie.session).then_some(cookie.expires),
+            })
+            .collect();
+        let user_agent = page
+            .evaluate("navigator.userAgent")
+            .await
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let language = page
+            .evaluate("navigator.language")
+            .await
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let state = self.http_state.lock().await;
+        Ok(HttpStateSnapshot {
+            version: state.version,
+            current_url,
+            cookies,
+            cache_validators: state.cache_validators.clone(),
+            user_agent,
+            language,
+        })
+    }
+
+    async fn commit_http_state(
+        &self,
+        page_id: &PageId,
+        expected_version: u64,
+        delta: ResponseStateDelta,
+    ) -> Result<(), CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        validate_state_delta(&delta)?;
+        let mut state = self.http_state.lock().await;
+        if state.version != expected_version {
+            return Err(http_state_conflict(expected_version, state.version));
+        }
+        let cookies = delta
+            .cookies
+            .into_iter()
+            .map(cookie_param)
+            .collect::<Result<Vec<_>, _>>()?;
+        page.set_cookies(cookies).await.map_err(command_failed)?;
+        state.cache_validators.extend(delta.cache_validators);
+        state.version = state.version.checked_add(1).ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "HTTP state version exhausted",
+            )
+        })?;
+        Ok(())
+    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
         if let Some(mut browser) = self.browser.lock().await.take() {
@@ -669,6 +755,50 @@ impl BrowserWorker for ChromiumWorker {
             task.abort();
         }
         close_result
+    }
+}
+
+fn validate_state_delta(delta: &ResponseStateDelta) -> Result<(), CommandError> {
+    for cookie in &delta.cookies {
+        if cookie.name.is_empty()
+            || cookie
+                .name
+                .bytes()
+                .any(|byte| byte <= 0x20 || byte >= 0x7f || b"()<>@,;:\\\"/[]?={}".contains(&byte))
+            || cookie.value.contains(['\r', '\n', '\0'])
+            || (!cookie.path.is_empty() && !cookie.path.starts_with('/'))
+        {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "invalid HTTP cookie",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn cookie_param(cookie: HttpCookie) -> Result<CookieParam, CommandError> {
+    let same_site = cookie
+        .same_site
+        .map(|value| value.parse::<CookieSameSite>())
+        .transpose()
+        .map_err(|_| driver_error(ErrorCode::InvalidRequest, "invalid cookie SameSite value"))?;
+    let mut param = CookieParam::new(cookie.name, cookie.value);
+    param.domain = (!cookie.domain.is_empty()).then_some(cookie.domain);
+    param.path = (!cookie.path.is_empty()).then_some(cookie.path);
+    param.secure = Some(cookie.secure);
+    param.http_only = Some(cookie.http_only);
+    param.same_site = same_site;
+    param.expires = cookie.expires_unix.map(TimeSinceEpoch::new);
+    Ok(param)
+}
+
+fn http_state_conflict(expected: u64, actual: u64) -> CommandError {
+    CommandError {
+        code: ErrorCode::HttpStateConflict,
+        message: format!("HTTP state version conflict: expected {expected}, current {actual}"),
+        layer: ErrorLayer::Driver,
+        retryable: false,
     }
 }
 

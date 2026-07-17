@@ -9,6 +9,7 @@ async-trait.workspace = true
 chromiumoxide.workspace = true
 config = { path = "../config" }
 dom-engine = { path = "../dom-engine" }
+network-engine = { path = "../network-engine" }
 futures.workspace = true
 regex.workspace = true
 serde.workspace = true
