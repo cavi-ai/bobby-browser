@@ -1716,6 +1716,7 @@ dependencies = [
  "page-runtime",
  "sdk-core",
  "serde_json",
+ "session-manager",
  "tempfile",
  "test-site",
  "tokio",
@@ -2115,6 +2116,7 @@ dependencies = [
  "axum",
  "brotli",
  "flate2",
+ "futures-util",
  "tokio",
 ]
 

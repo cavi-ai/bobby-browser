@@ -60,6 +60,10 @@ impl FixtureServer {
     pub fn peak_requests(&self) -> usize {
         self.peak_requests.load(Ordering::SeqCst)
     }
+
+    pub fn reset_peak_requests(&self) {
+        self.peak_requests.store(0, Ordering::SeqCst);
+    }
 }
 
 impl Drop for FixtureServer {
@@ -154,11 +158,17 @@ pub async fn spawn() -> FixtureServer {
         .route(
             "/interrupted",
             get(|| async {
-                let mut response = b"short".to_vec().into_response();
-                response
-                    .headers_mut()
-                    .insert(header::CONTENT_LENGTH, HeaderValue::from_static("100"));
-                response
+                let stream = futures_util::stream::iter([
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"short")),
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "controlled fixture interruption",
+                    )),
+                ]);
+                axum::response::Response::builder()
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(axum::body::Body::from_stream(stream))
+                    .expect("interrupted fixture response")
             }),
         )
         .route(
@@ -176,6 +186,23 @@ pub async fn spawn() -> FixtureServer {
                 response.headers_mut().insert(
                     header::CONTENT_DISPOSITION,
                     HeaderValue::from_static("attachment; filename=workflow-fixture.bin"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/download-secret-cookie",
+            get(|| async {
+                let mut response = b"secret-cookie-download".to_vec().into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static(
+                        "bad=super-secret-capability; Domain=com; Path=/; HttpOnly",
+                    ),
                 );
                 response
             }),
@@ -227,7 +254,7 @@ pub async fn spawn() -> FixtureServer {
                         peak.fetch_max(now, Ordering::SeqCst);
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         active.fetch_sub(1, Ordering::SeqCst);
-                        Html("<title>Slow</title><p>slow fixture</p>")
+                        Html("<title>Slow</title><p id='slow-proof'>slow fixture</p>")
                     }
                 }
             }),

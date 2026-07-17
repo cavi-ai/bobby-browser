@@ -1,14 +1,73 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use artifact_store::{ArtifactError, ArtifactStore};
+use checkpoint_store::CheckpointStore;
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, HttpConfig, ServerConfig, StorageConfig};
 use sdk_core::RuntimeService;
+use session_manager::SessionManager;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, CommandClass, CommandEnvelope, CommandId,
     CommandOutcome, CreateSessionRequest, DownloadUrlCommand, Evidence, ExecutionPath,
     InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision,
     TargetSpec, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
+use worker_pool::{ChromiumWorkerFactory, WorkerPool};
+use workflow_journal::JsonlJournal;
+
+async fn build_runtime(config: &AppConfig) -> (RuntimeService, Arc<WorkerPool>, ArtifactStore) {
+    let journal = Arc::new(
+        JsonlJournal::open(&config.storage.journal_path)
+            .await
+            .unwrap(),
+    );
+    let workers = Arc::new(WorkerPool::new(
+        config.browser.max_active,
+        Arc::new(ChromiumWorkerFactory::new(config.browser.clone())),
+    ));
+    let checkpoints = CheckpointStore::open(&config.storage.checkpoints_dir)
+        .await
+        .unwrap();
+    let recovery =
+        page_runtime::RecoveryCoordinator::with_workers(checkpoints.clone(), workers.clone());
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: config.http.allow_loopback,
+        allow_private_network: config.http.allow_private_network,
+        max_redirects: config.http.max_redirects,
+        max_header_bytes: config.http.max_header_bytes,
+        max_body_bytes: config.http.max_body_bytes,
+        max_download_bytes: config.http.max_download_bytes,
+        request_timeout_ms: config.http.request_timeout_ms,
+        max_concurrent_requests: config.http.max_concurrent_requests,
+    };
+    let artifacts = ArtifactStore::new(
+        &config.browser.artifacts_dir,
+        config
+            .browser
+            .max_artifact_bytes
+            .max(network.max_download_bytes),
+        config.browser.max_screenshot_dimension,
+    );
+    let adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        artifacts.clone(),
+        network,
+    );
+    let pages = page_runtime::PageRuntime::new_adaptive(
+        journal,
+        workers.clone(),
+        Some(checkpoints),
+        adaptive,
+    );
+    let sessions = SessionManager::new(workers.clone());
+    (
+        RuntimeService::with_recovery(sessions, pages, recovery),
+        workers,
+        artifacts,
+    )
+}
 
 fn envelope(
     session_id: &types::SessionId,
@@ -79,7 +138,7 @@ async fn adaptive_http() {
             )),
             profiles_dir: root.path().join("profiles"),
             headless: true,
-            max_active: 1,
+            max_active: 2,
             upload_roots: vec![root.path().join("uploads")],
             downloads_dir: root.path().join("downloads"),
             artifacts_dir: root.path().join("artifacts"),
@@ -96,7 +155,7 @@ async fn adaptive_http() {
             ..HttpConfig::default()
         },
     };
-    let runtime = RuntimeService::build(&config).await.unwrap();
+    let (runtime, workers, artifacts) = build_runtime(&config).await;
     let session = runtime
         .create_session(CreateSessionRequest {
             profile: "adaptive-http-live".into(),
@@ -107,6 +166,13 @@ async fn adaptive_http() {
     let page = runtime
         .open_page(OpenPageRequest {
             session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let stranger = runtime
+        .create_session(CreateSessionRequest {
+            profile: "adaptive-http-stranger".into(),
+            proxy: None,
         })
         .await
         .unwrap();
@@ -210,12 +276,13 @@ async fn adaptive_http() {
         sha256,
         "c0613f7c18f7f41e5720bb3d95b6f6411e8a8b2f3b08d1ad011760069f3949ed"
     );
-    assert!(root
-        .path()
-        .join("artifacts")
-        .join(session.id.0.to_string())
-        .join(&artifact_id)
-        .is_dir());
+    let persisted = artifacts.get(&session.id, &artifact_id).await.unwrap();
+    assert_eq!(persisted, b"workflow-download-v1");
+    assert_eq!(persisted.len(), 20);
+    assert_eq!(
+        artifacts.get(&stranger.id, &artifact_id).await.unwrap_err(),
+        ArtifactError::NotFound
+    );
 
     println!("live phase: browser-visible cookie and recovery");
     let cookie_url = format!("{}/cookie-echo", fixture.base_url());
@@ -269,10 +336,13 @@ async fn adaptive_http() {
         created_at: Utc::now(),
     };
     runtime.checkpoint(checkpoint, cookie).await.unwrap();
+    let pre_recovery_worker = workers.lease(session.id.clone()).await.unwrap().worker_id();
     assert!(matches!(
         runtime.recover(&workflow).await.unwrap(),
         RecoveryDecision::Resumed { .. }
     ));
+    let post_recovery_worker = workers.lease(session.id.clone()).await.unwrap().worker_id();
+    assert_ne!(pre_recovery_worker, post_recovery_worker);
     let recovered = submit(
         &runtime,
         &session.id,
@@ -303,6 +373,6 @@ async fn adaptive_http() {
     );
 
     println!(
-        "adaptive HTTP live proof: directHttp static+download+recovered, chromiumFallback dynamic, artifact={artifact_id}, sha256={sha256}"
+        "adaptive HTTP live proof: directHttp static+download+recovered, chromiumFallback dynamic, workers=({pre_recovery_worker:?},{post_recovery_worker:?}), artifact={artifact_id}, sha256={sha256}"
     );
 }
