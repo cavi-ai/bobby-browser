@@ -296,14 +296,86 @@ async fn durable_staging_id_can_be_finalized_after_process_recovery() {
         .await
         .unwrap();
     let artifact_id = pending.record().artifact_id.clone();
+    let sha256 = pending.record().sha256.clone();
+    let bytes = pending.record().bytes;
     let staging_id = pending.staging_id().unwrap().to_owned();
     std::mem::forget(pending);
 
     store
-        .finalize_staged(&session, &artifact_id, &staging_id)
+        .finalize_staged(&session, &artifact_id, &staging_id, &sha256, bytes)
         .unwrap();
     assert_eq!(
         store.get(&session, &artifact_id).await.unwrap(),
         b"recoverable-staging"
     );
+}
+
+#[tokio::test]
+async fn recovery_rejects_tampered_staging_and_cleans_converged_staging() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let page = PageId::new();
+    let pending = store
+        .put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"expected",
+            1024,
+        )
+        .await
+        .unwrap();
+    let artifact_id = pending.record().artifact_id.clone();
+    let sha256 = pending.record().sha256.clone();
+    let bytes = pending.record().bytes;
+    let staging_id = pending.staging_id().unwrap().to_owned();
+    let session_dir = root.path().join(session.0.to_string());
+    let staging_dir = std::fs::read_dir(&session_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let data_path = std::fs::read_dir(&staging_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "bin"))
+        .unwrap();
+    std::fs::write(data_path, b"tampered").unwrap();
+    std::mem::forget(pending);
+    assert_eq!(
+        store
+            .finalize_staged(&session, &artifact_id, &staging_id, &sha256, bytes)
+            .unwrap_err(),
+        ArtifactError::InvalidMetadata
+    );
+
+    let clean_pending = store
+        .put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"winner",
+            1024,
+        )
+        .await
+        .unwrap();
+    let clean_id = clean_pending.record().artifact_id.clone();
+    let clean_sha = clean_pending.record().sha256.clone();
+    let clean_bytes = clean_pending.record().bytes;
+    let clean_staging = clean_pending.staging_id().unwrap().to_owned();
+    std::mem::forget(clean_pending);
+    store
+        .put(&session, &page, "text/plain", "txt", b"winner", 1024)
+        .await
+        .unwrap();
+    store
+        .finalize_staged(&session, &clean_id, &clean_staging, &clean_sha, clean_bytes)
+        .unwrap();
+    assert!(!session_dir
+        .join(format!(".{clean_id}.{clean_staging}.tmp"))
+        .exists());
 }
