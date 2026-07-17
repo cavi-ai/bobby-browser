@@ -397,7 +397,14 @@ fn collect_state(
                 .expires_datetime()
                 .map(|expiry| expiry.unix_timestamp() as f64),
             priority: None,
-            source_scheme: Some(url.scheme().to_owned()),
+            source_scheme: Some(
+                if url.scheme() == "https" {
+                    "Secure"
+                } else {
+                    "NonSecure"
+                }
+                .to_owned(),
+            ),
             source_port: url.port_or_known_default().map(i64::from),
             partition_key: None,
         };
