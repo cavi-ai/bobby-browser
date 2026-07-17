@@ -141,6 +141,7 @@ impl BrowserWorker for ChromiumWorker {
             .new_page("about:blank")
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        drop(browser_guard);
         self.pages.lock().await.insert(page_id, page);
         Ok(())
     }
@@ -358,24 +359,29 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &ClickAndWaitForPopupCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        let opener = self
+            .pages
+            .lock()
+            .await
+            .get(page_id)
+            .cloned()
+            .ok_or_else(page_missing)?;
         let mut browser_guard = self.browser.lock().await;
         let browser = browser_guard.as_mut().ok_or_else(closed_error)?;
         let mut events = browser
             .event_listener::<EventTargetCreated>()
             .await
             .map_err(command_failed)?;
-        let pages = self.pages.lock().await;
-        let opener = pages.get(page_id).ok_or_else(page_missing)?;
         let opener_target = opener.target_id().clone();
         let resolved = resolve_browser_target(
             page_id,
-            opener,
+            &opener,
             &command.selector,
             command.target.as_ref(),
             Some(browser),
         )
         .await?;
-        resolved.click(opener).await?;
+        resolved.click(&opener).await?;
         let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let event = events.next().await.ok_or_else(|| {
@@ -390,7 +396,6 @@ impl BrowserWorker for ChromiumWorker {
         })
         .await
         .map_err(|_| timeout_error(command.timeout_ms))??;
-        drop(pages);
         let popup = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 if let Some(page) = browser
@@ -407,6 +412,7 @@ impl BrowserWorker for ChromiumWorker {
         })
         .await
         .map_err(|_| timeout_error(command.timeout_ms))??;
+        drop(browser_guard);
         let popup_id = PageId::new();
         let page = page_evidence(popup_id.clone(), &popup).await?;
         self.pages.lock().await.insert(popup_id.clone(), popup);
