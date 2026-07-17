@@ -484,7 +484,7 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
             command_id: envelope.command_id.clone(),
             error,
         }
-    } else if envelope.command.class() != CommandClass::Replayable {
+    } else if requires_reconciliation(envelope) {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
@@ -543,7 +543,7 @@ fn journal_failure(
         layer: ErrorLayer::Journal,
         retryable: true,
     };
-    if may_have_executed && envelope.command.class() != CommandClass::Replayable {
+    if may_have_executed && requires_reconciliation(envelope) {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error: command_error,
@@ -555,6 +555,11 @@ fn journal_failure(
             error: command_error,
         }
     }
+}
+
+fn requires_reconciliation(envelope: &CommandEnvelope) -> bool {
+    envelope.command.class() == CommandClass::Boundary
+        || matches!(envelope.command, PrimitiveCommand::DownloadUrl(_))
 }
 
 fn journal_error(error: JournalError) -> CommandError {
