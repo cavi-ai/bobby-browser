@@ -1,5 +1,6 @@
+use std::sync::Arc;
+
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
@@ -46,6 +47,29 @@ impl PageRuntime {
             .rev()
             .find_map(|record| record.prepared_result.clone())
         {
+            if let (Some(artifact_id), Some(staging_id)) = (
+                prepared.artifact_id.as_deref(),
+                prepared.artifact_staging_id.as_deref(),
+            ) {
+                let session_id = scan
+                    .records
+                    .iter()
+                    .find_map(|record| record.envelope.as_ref())
+                    .map(|envelope| envelope.session_id.clone());
+                if let Some(session_id) = session_id {
+                    if let Err(error) = self.adaptive.finalize_prepared_artifact(
+                        &session_id,
+                        artifact_id,
+                        staging_id,
+                    ) {
+                        return CommandOutcome::NeedsReconciliation {
+                            command_id,
+                            error,
+                            evidence: prepared.evidence,
+                        };
+                    }
+                }
+            }
             return CommandOutcome::NeedsReconciliation {
                 command_id,
                 error: CommandError {
@@ -145,22 +169,39 @@ impl PageRuntime {
                 command_id: envelope.command_id.clone(),
                 attempt_id: envelope.attempt_id.clone(),
                 state_version: prepared.state_version,
-                state_delta: state_commitment(&prepared.state),
+                state_delta: serde_json::Value::Null,
                 evidence: execution.evidence.clone(),
                 artifact_id: artifact.as_ref().map(|record| record.artifact_id.clone()),
                 artifact_sha256: artifact.as_ref().map(|record| record.sha256.clone()),
+                artifact_staging_id: prepared
+                    .artifact
+                    .as_ref()
+                    .and_then(|pending| pending.staging_id().map(str::to_owned)),
             };
-            if let Err(error) = journal
-                .append(prepared_record(&envelope, prepared_result))
-                .await
-            {
-                return prepared_failure(&envelope, journal_error(error), execution.evidence);
-            }
-            if let Some(pending) = prepared.artifact.take() {
-                if let Err(error) = pending.commit() {
+            let journal = Arc::clone(journal);
+            let prepared_record = prepared_record(&envelope, prepared_result);
+            let pending = prepared.artifact.take();
+            let durable_prepare = tokio::spawn(async move {
+                journal
+                    .append(prepared_record)
+                    .await
+                    .map_err(journal_error)?;
+                if let Some(pending) = pending {
+                    pending.commit().map_err(|error| {
+                        internal_error(format!("prepared artifact publication failed: {error}"))
+                    })?;
+                }
+                Ok::<(), CommandError>(())
+            });
+            match durable_prepare.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return prepared_failure(&envelope, error, execution.evidence);
+                }
+                Err(error) => {
                     return prepared_failure(
                         &envelope,
-                        internal_error(format!("prepared artifact publication failed: {error}")),
+                        internal_error(format!("prepared result task failed: {error}")),
                         execution.evidence,
                     );
                 }
@@ -521,11 +562,6 @@ fn prepared_failure(
         error,
         evidence,
     }
-}
-
-fn state_commitment(state: &network_engine::ResponseStateDelta) -> serde_json::Value {
-    let bytes = serde_json::to_vec(state).unwrap_or_default();
-    serde_json::json!({ "sha256": format!("{:x}", Sha256::digest(bytes)) })
 }
 
 fn record(

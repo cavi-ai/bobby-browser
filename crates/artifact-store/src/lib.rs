@@ -32,7 +32,8 @@ pub struct ArtifactRecord {
 pub struct PendingArtifact {
     record: Option<ArtifactRecord>,
     path: Option<PathBuf>,
-    publish_marker: Option<PathBuf>,
+    final_path: Option<PathBuf>,
+    staging_id: Option<String>,
 }
 
 impl PendingArtifact {
@@ -40,11 +41,15 @@ impl PendingArtifact {
         self.record.as_ref().expect("pending artifact is armed")
     }
 
+    pub fn staging_id(&self) -> Option<&str> {
+        self.staging_id.as_deref()
+    }
+
     pub fn commit(mut self) -> Result<ArtifactRecord, ArtifactError> {
-        if let Some(marker) = self.publish_marker.take() {
-            std::fs::write(marker, []).map_err(storage_error)?;
+        if let (Some(staging), Some(final_path)) = (&self.path, &self.final_path) {
+            publish_staging(staging, final_path, self.record())?;
+            self.path = None;
         }
-        self.path = None;
         Ok(self.record.take().expect("pending artifact is armed"))
     }
 }
@@ -237,10 +242,12 @@ impl ArtifactStore {
                     sha256,
                 }),
                 path: None,
-                publish_marker: Some(final_path.join(".published")),
+                final_path: None,
+                staging_id: None,
             });
         }
-        let staging_path = session_directory.join(format!(".{artifact_id}.{}.tmp", Uuid::new_v4()));
+        let staging_id = Uuid::new_v4().to_string();
+        let staging_path = session_directory.join(format!(".{artifact_id}.{staging_id}.tmp"));
         std::fs::create_dir(&staging_path).map_err(storage_error)?;
         let mut staging = StagingGuard::new(staging_path);
 
@@ -255,19 +262,8 @@ impl ArtifactStore {
         .map_err(storage_error)?;
 
         before_publish.await;
-        match std::fs::rename(staging.path(), &final_path) {
-            Ok(()) => staging.disarm(),
-            Err(_) if content_addressed && final_path.exists() => {
-                let manifest_path = final_path.join(format!("{artifact_id}.json"));
-                let existing = std::fs::read(manifest_path).map_err(storage_error)?;
-                let existing: ArtifactManifest =
-                    serde_json::from_slice(&existing).map_err(storage_error)?;
-                if existing.sha256 != sha256 || existing.bytes != bytes.len() as u64 {
-                    return Err(ArtifactError::InvalidMetadata);
-                }
-            }
-            Err(error) => return Err(storage_error(error)),
-        }
+        let staged_path = staging.path().to_path_buf();
+        staging.disarm();
 
         Ok(PendingArtifact {
             record: Some(ArtifactRecord {
@@ -279,8 +275,9 @@ impl ArtifactStore {
                 bytes: bytes.len() as u64,
                 sha256,
             }),
-            path: (!content_addressed).then_some(final_path),
-            publish_marker: Some(session_directory.join(&artifact_id).join(".published")),
+            path: Some(staged_path),
+            final_path: Some(final_path),
+            staging_id: Some(staging_id),
         })
     }
 
@@ -319,15 +316,10 @@ impl ArtifactStore {
         session_id: &SessionId,
         artifact_id: &str,
     ) -> Result<Vec<u8>, ArtifactError> {
-        if Uuid::parse_str(artifact_id).is_err()
-            && (artifact_id.len() != 64 || !artifact_id.bytes().all(|b| b.is_ascii_hexdigit()))
-        {
+        if !valid_artifact_id(artifact_id) {
             return Err(ArtifactError::NotFound);
         }
         let directory = self.session_dir(session_id).join(artifact_id);
-        if !directory.join(".published").is_file() {
-            return Err(ArtifactError::NotFound);
-        }
         let manifest_path = directory.join(format!("{artifact_id}.json"));
         let manifest_bytes = tokio::fs::read(manifest_path).await.map_err(read_error)?;
         let manifest: ArtifactManifest =
@@ -340,6 +332,34 @@ impl ArtifactStore {
             .ok_or(ArtifactError::NotFound)?;
         let path = directory.join(format!("{artifact_id}.{extension}"));
         tokio::fs::read(path).await.map_err(read_error)
+    }
+
+    pub fn finalize_staged(
+        &self,
+        session_id: &SessionId,
+        artifact_id: &str,
+        staging_id: &str,
+    ) -> Result<(), ArtifactError> {
+        if !valid_artifact_id(artifact_id) || Uuid::parse_str(staging_id).is_err() {
+            return Err(ArtifactError::NotFound);
+        }
+        let session = self.session_dir(session_id);
+        let staging = session.join(format!(".{artifact_id}.{staging_id}.tmp"));
+        let final_path = session.join(artifact_id);
+        if final_path.is_dir() {
+            return Ok(());
+        }
+        let manifest = read_manifest(&staging, artifact_id)?;
+        let record = ArtifactRecord {
+            artifact_id: artifact_id.to_owned(),
+            page_id: manifest.page_id,
+            media_type: manifest.media_type,
+            width: 0,
+            height: 0,
+            bytes: manifest.bytes,
+            sha256: manifest.sha256,
+        };
+        publish_staging(&staging, &final_path, &record)
     }
 
     fn session_dir(&self, session_id: &SessionId) -> PathBuf {
@@ -355,6 +375,38 @@ struct ArtifactManifest {
     page_id: PageId,
     bytes: u64,
     sha256: String,
+}
+
+fn valid_artifact_id(artifact_id: &str) -> bool {
+    Uuid::parse_str(artifact_id).is_ok()
+        || (artifact_id.len() == 64 && artifact_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn read_manifest(directory: &Path, artifact_id: &str) -> Result<ArtifactManifest, ArtifactError> {
+    let bytes = std::fs::read(directory.join(format!("{artifact_id}.json"))).map_err(read_error)?;
+    serde_json::from_slice(&bytes).map_err(|_| ArtifactError::InvalidMetadata)
+}
+
+fn publish_staging(
+    staging: &Path,
+    final_path: &Path,
+    record: &ArtifactRecord,
+) -> Result<(), ArtifactError> {
+    match std::fs::rename(staging, final_path) {
+        Ok(()) => Ok(()),
+        Err(_) if final_path.is_dir() => {
+            let existing = read_manifest(final_path, &record.artifact_id)?;
+            if existing.sha256 != record.sha256 || existing.bytes != record.bytes {
+                return Err(ArtifactError::InvalidMetadata);
+            }
+            match std::fs::remove_dir_all(staging) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(storage_error(error)),
+            }
+        }
+        Err(error) => Err(storage_error(error)),
+    }
 }
 
 #[derive(Debug)]

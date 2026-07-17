@@ -178,6 +178,15 @@ async fn real_runtime_sessions_isolate_direct_http_cookie_state() {
         !journal.contains("\"value\":\"yes\"") && !journal.contains("\"downloaded\":\"yes\""),
         "prepared HTTP state leaked a cookie value"
     );
+    let prepared_records: Vec<serde_json::Value> = journal
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|record: &serde_json::Value| record["phase"] == "resultPrepared")
+        .collect();
+    assert!(!prepared_records.is_empty());
+    assert!(prepared_records
+        .iter()
+        .all(|record| record["preparedResult"]["stateDelta"].is_null()));
     let owner_echo = completed(
         &runtime,
         &owner,

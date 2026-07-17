@@ -344,21 +344,6 @@ async fn assert_single_download_readable(root: &Path, session: &SessionId, expec
     assert_eq!(store.get(session, &artifact_id).await.unwrap(), expected);
 }
 
-async fn assert_single_download_hidden(root: &Path, session: &SessionId) {
-    let mut entries = std::fs::read_dir(root.join(session.0.to_string())).unwrap();
-    let entry = entries.next().expect("one staged artifact").unwrap();
-    assert!(
-        entries.next().is_none(),
-        "expected exactly one staged artifact"
-    );
-    let artifact_id = entry.file_name().to_string_lossy().into_owned();
-    let store = artifact_store::ArtifactStore::new(root, 1024 * 1024, 16_384);
-    assert_eq!(
-        store.get(session, &artifact_id).await.unwrap_err(),
-        artifact_store::ArtifactError::NotFound
-    );
-}
-
 struct FakeFactory {
     events: Arc<Mutex<Vec<String>>>,
     mode: DriverMode,
@@ -891,7 +876,8 @@ async fn prepared_result_journal_failure_prevents_state_commit_without_deleting_
         CommandOutcome::NeedsReconciliation { .. }
     ));
     assert!(!events.lock().await.contains(&"http:commit".to_string()));
-    assert_single_download_hidden(root.path(), &session).await;
+    let directory = root.path().join(session.0.to_string());
+    assert!(!directory.exists() || std::fs::read_dir(directory).unwrap().next().is_none());
 }
 
 #[tokio::test]
@@ -969,6 +955,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
                 evidence: evidence.clone(),
                 artifact_id: Some("abc".into()),
                 artifact_sha256: Some("abc".into()),
+                artifact_staging_id: None,
             }),
         }],
     });
@@ -987,6 +974,107 @@ async fn recovery_never_replays_a_durable_prepared_download() {
 }
 
 #[tokio::test]
+async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = artifact_store::ArtifactStore::new(root.path(), 1024, 16_384);
+    let session = SessionId::new();
+    let page = PageId::new();
+    let pending = store
+        .put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"restart-finalize",
+            1024,
+        )
+        .await
+        .unwrap();
+    let artifact_id = pending.record().artifact_id.clone();
+    let sha256 = pending.record().sha256.clone();
+    let staging_id = pending.staging_id().unwrap().to_owned();
+    std::mem::forget(pending);
+
+    let command = envelope(
+        session.clone(),
+        page,
+        PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+            url: "https://example.test/recover.bin".into(),
+            expected_content_type: None,
+            max_bytes: 1024,
+        }),
+    );
+    let command_id = command.command_id.clone();
+    let prepared = PreparedResult {
+        command_id: command_id.clone(),
+        attempt_id: command.attempt_id.clone(),
+        state_version: 1,
+        state_delta: serde_json::Value::Null,
+        evidence: vec![Evidence::Download {
+            filename: "recover.bin".into(),
+            path: artifact_id.clone(),
+            bytes: 16,
+            sha256: sha256.clone(),
+        }],
+        artifact_id: Some(artifact_id.clone()),
+        artifact_sha256: Some(sha256),
+        artifact_staging_id: Some(staging_id),
+    };
+    let records = vec![
+        JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: CommandPhase::Accepted,
+            envelope: Some(command.journal_safe()),
+            outcome: None,
+            prepared_result: None,
+        },
+        JournalRecord {
+            sequence: 1,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: CommandPhase::ResultPrepared,
+            envelope: None,
+            outcome: None,
+            prepared_result: Some(prepared),
+        },
+    ];
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: Arc::new(Mutex::new(Vec::new())),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: true,
+        ..Default::default()
+    };
+    let adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        store.clone(),
+        network,
+    );
+    let runtime = page_runtime::PageRuntime::new_adaptive(
+        Arc::new(RecoveryJournal { records }),
+        workers,
+        None,
+        adaptive,
+    );
+
+    assert!(matches!(
+        runtime.recover_command(command_id).await,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert_eq!(
+        store.get(&session, &artifact_id).await.unwrap(),
+        b"restart-finalize"
+    );
+}
+
+#[tokio::test]
 async fn cancellation_at_each_post_response_journal_await_preserves_durable_artifact() {
     for phase in [
         CommandPhase::ResultPrepared,
@@ -994,7 +1082,7 @@ async fn cancellation_at_each_post_response_journal_await_preserves_durable_arti
         CommandPhase::Completed,
     ] {
         let url = http_fixture("cancel-boundary", "application/octet-stream").await;
-        let (runtime, session, page, events, root, paused, _resume) =
+        let (runtime, session, page, events, root, paused, resume) =
             adaptive_runtime_paused(phase).await;
         let task_session = session.clone();
         let task = tokio::spawn(async move {
@@ -1018,7 +1106,23 @@ async fn cancellation_at_each_post_response_journal_await_preserves_durable_arti
         task.abort();
         let _ = task.await;
         if phase == CommandPhase::ResultPrepared {
-            assert_single_download_hidden(root.path(), &session).await;
+            resume.notify_one();
+            tokio::time::timeout(StdDuration::from_secs(1), async {
+                loop {
+                    let visible = std::fs::read_dir(root.path().join(session.0.to_string()))
+                        .ok()
+                        .and_then(|mut entries| entries.find_map(Result::ok))
+                        .map(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                        .unwrap_or(false);
+                    if visible {
+                        break;
+                    }
+                    tokio::time::sleep(StdDuration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("detached durable prepare did not publish artifact");
+            assert_single_download_readable(root.path(), &session, b"cancel-boundary").await;
         } else {
             assert_single_download_readable(root.path(), &session, b"cancel-boundary").await;
         }
