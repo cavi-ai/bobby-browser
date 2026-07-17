@@ -136,9 +136,7 @@ impl ArtifactStore {
             .map_err(storage_error)?;
         let staging_path = session_directory.join(format!(".{artifact_id}.tmp"));
         let final_path = session_directory.join(&artifact_id);
-        tokio::fs::create_dir(&staging_path)
-            .await
-            .map_err(storage_error)?;
+        std::fs::create_dir(&staging_path).map_err(storage_error)?;
         let mut staging = StagingGuard::new(staging_path);
 
         tokio::fs::write(staging.path().join(&filename), bytes)
