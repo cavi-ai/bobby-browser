@@ -246,6 +246,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
     let page = runtime.open_browser(session.clone()).await.unwrap();
     let boundary = PrimitiveCommand::Click(ClickCommand {
         selector: "#submit".into(),
+        target: None,
         boundary: true,
         expected_url: None,
     });
@@ -297,6 +298,7 @@ async fn boundary_prepare_failure_is_safe_to_retry() {
             page,
             PrimitiveCommand::Click(ClickCommand {
                 selector: "#submit".into(),
+                target: None,
                 boundary: true,
                 expected_url: None,
             }),
@@ -332,6 +334,7 @@ async fn boundary_driver_failure_needs_reconciliation() {
             page,
             PrimitiveCommand::Click(ClickCommand {
                 selector: "#submit".into(),
+                target: None,
                 boundary: true,
                 expected_url: None,
             }),
