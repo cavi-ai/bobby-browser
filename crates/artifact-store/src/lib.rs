@@ -32,6 +32,7 @@ pub struct ArtifactRecord {
 pub struct PendingArtifact {
     record: Option<ArtifactRecord>,
     path: Option<PathBuf>,
+    publish_marker: Option<PathBuf>,
 }
 
 impl PendingArtifact {
@@ -39,9 +40,12 @@ impl PendingArtifact {
         self.record.as_ref().expect("pending artifact is armed")
     }
 
-    pub fn commit(mut self) -> ArtifactRecord {
+    pub fn commit(mut self) -> Result<ArtifactRecord, ArtifactError> {
+        if let Some(marker) = self.publish_marker.take() {
+            std::fs::write(marker, []).map_err(storage_error)?;
+        }
         self.path = None;
-        self.record.take().expect("pending artifact is armed")
+        Ok(self.record.take().expect("pending artifact is armed"))
     }
 }
 
@@ -103,7 +107,7 @@ impl ArtifactStore {
                 std::future::ready(()),
             )
             .await?
-            .commit();
+            .commit()?;
         record.width = width;
         record.height = height;
         Ok(record)
@@ -118,19 +122,18 @@ impl ArtifactStore {
         bytes: &[u8],
         max_bytes: usize,
     ) -> Result<ArtifactRecord, ArtifactError> {
-        Ok(self
-            .put_pending_with_before_publish(
-                session_id,
-                page_id,
-                media_type,
-                extension,
-                bytes,
-                max_bytes,
-                true,
-                std::future::ready(()),
-            )
-            .await?
-            .commit())
+        self.put_pending_with_before_publish(
+            session_id,
+            page_id,
+            media_type,
+            extension,
+            bytes,
+            max_bytes,
+            true,
+            std::future::ready(()),
+        )
+        .await?
+        .commit()
     }
 
     pub async fn put_pending(
@@ -220,12 +223,7 @@ impl ArtifactStore {
             let existing = std::fs::read(manifest_path).map_err(storage_error)?;
             let existing: ArtifactManifest =
                 serde_json::from_slice(&existing).map_err(storage_error)?;
-            if existing.media_type != media_type
-                || existing.filename != filename
-                || existing.sha256 != sha256
-                || existing.bytes != bytes.len() as u64
-                || existing.page_id != *page_id
-            {
+            if existing.sha256 != sha256 || existing.bytes != bytes.len() as u64 {
                 return Err(ArtifactError::InvalidMetadata);
             }
             return Ok(PendingArtifact {
@@ -239,6 +237,7 @@ impl ArtifactStore {
                     sha256,
                 }),
                 path: None,
+                publish_marker: Some(final_path.join(".published")),
             });
         }
         let staging_path = session_directory.join(format!(".{artifact_id}.{}.tmp", Uuid::new_v4()));
@@ -263,12 +262,7 @@ impl ArtifactStore {
                 let existing = std::fs::read(manifest_path).map_err(storage_error)?;
                 let existing: ArtifactManifest =
                     serde_json::from_slice(&existing).map_err(storage_error)?;
-                if existing.media_type != media_type
-                    || existing.filename != filename
-                    || existing.sha256 != sha256
-                    || existing.bytes != bytes.len() as u64
-                    || existing.page_id != *page_id
-                {
+                if existing.sha256 != sha256 || existing.bytes != bytes.len() as u64 {
                     return Err(ArtifactError::InvalidMetadata);
                 }
             }
@@ -277,7 +271,7 @@ impl ArtifactStore {
 
         Ok(PendingArtifact {
             record: Some(ArtifactRecord {
-                artifact_id,
+                artifact_id: artifact_id.clone(),
                 page_id: page_id.clone(),
                 media_type: media_type.to_owned(),
                 width: 0,
@@ -286,6 +280,7 @@ impl ArtifactStore {
                 sha256,
             }),
             path: (!content_addressed).then_some(final_path),
+            publish_marker: Some(session_directory.join(&artifact_id).join(".published")),
         })
     }
 
@@ -302,22 +297,21 @@ impl ArtifactStore {
         staged: std::sync::Arc<tokio::sync::Notify>,
         publish: std::sync::Arc<tokio::sync::Notify>,
     ) -> Result<ArtifactRecord, ArtifactError> {
-        Ok(self
-            .put_pending_with_before_publish(
-                session_id,
-                page_id,
-                media_type,
-                extension,
-                bytes,
-                max_bytes,
-                false,
-                async move {
-                    staged.notify_one();
-                    publish.notified().await;
-                },
-            )
-            .await?
-            .commit())
+        self.put_pending_with_before_publish(
+            session_id,
+            page_id,
+            media_type,
+            extension,
+            bytes,
+            max_bytes,
+            false,
+            async move {
+                staged.notify_one();
+                publish.notified().await;
+            },
+        )
+        .await?
+        .commit()
     }
 
     pub async fn get(
@@ -331,6 +325,9 @@ impl ArtifactStore {
             return Err(ArtifactError::NotFound);
         }
         let directory = self.session_dir(session_id).join(artifact_id);
+        if !directory.join(".published").is_file() {
+            return Err(ArtifactError::NotFound);
+        }
         let manifest_path = directory.join(format!("{artifact_id}.json"));
         let manifest_bytes = tokio::fs::read(manifest_path).await.map_err(read_error)?;
         let manifest: ArtifactManifest =

@@ -1,4 +1,5 @@
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
@@ -136,13 +137,15 @@ impl PageRuntime {
             }
         };
         if let Some(mut prepared) = execution.prepared_http.take() {
-            let artifact = prepared.artifact.take().map(|pending| pending.commit());
+            let artifact = prepared
+                .artifact
+                .as_ref()
+                .map(|pending| pending.record().clone());
             let prepared_result = PreparedResult {
                 command_id: envelope.command_id.clone(),
                 attempt_id: envelope.attempt_id.clone(),
                 state_version: prepared.state_version,
-                state_delta: serde_json::to_value(&prepared.state)
-                    .unwrap_or(serde_json::Value::Null),
+                state_delta: state_commitment(&prepared.state),
                 evidence: execution.evidence.clone(),
                 artifact_id: artifact.as_ref().map(|record| record.artifact_id.clone()),
                 artifact_sha256: artifact.as_ref().map(|record| record.sha256.clone()),
@@ -152,6 +155,15 @@ impl PageRuntime {
                 .await
             {
                 return prepared_failure(&envelope, journal_error(error), execution.evidence);
+            }
+            if let Some(pending) = prepared.artifact.take() {
+                if let Err(error) = pending.commit() {
+                    return prepared_failure(
+                        &envelope,
+                        internal_error(format!("prepared artifact publication failed: {error}")),
+                        execution.evidence,
+                    );
+                }
             }
             if let Err(error) = lease
                 .worker()
@@ -509,6 +521,11 @@ fn prepared_failure(
         error,
         evidence,
     }
+}
+
+fn state_commitment(state: &network_engine::ResponseStateDelta) -> serde_json::Value {
+    let bytes = serde_json::to_vec(state).unwrap_or_default();
+    serde_json::json!({ "sha256": format!("{:x}", Sha256::digest(bytes)) })
 }
 
 fn record(

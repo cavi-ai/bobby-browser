@@ -152,7 +152,7 @@ async fn repeated_generic_bytes_converge_on_one_content_addressed_artifact() {
 }
 
 #[tokio::test]
-async fn content_addressed_pending_drop_never_deletes_published_bytes() {
+async fn content_addressed_pending_bytes_are_invisible_until_commit() {
     let root = tempfile::tempdir().unwrap();
     let store = ArtifactStore::new(root.path(), 1024, 4096);
     let session = SessionId::new();
@@ -175,8 +175,15 @@ async fn content_addressed_pending_drop_never_deletes_published_bytes() {
         .join(session.0.to_string())
         .join(&dropped_id)
         .is_dir());
+    assert_eq!(
+        store.get(&session, &dropped_id).await.unwrap_err(),
+        ArtifactError::NotFound
+    );
     drop(pending);
-    assert_eq!(store.get(&session, &dropped_id).await.unwrap(), b"guarded");
+    assert_eq!(
+        store.get(&session, &dropped_id).await.unwrap_err(),
+        ArtifactError::NotFound
+    );
 
     let pending = store
         .put_pending(
@@ -189,10 +196,44 @@ async fn content_addressed_pending_drop_never_deletes_published_bytes() {
         )
         .await
         .unwrap();
-    let record = pending.commit();
+    let record = pending.commit().unwrap();
     assert_eq!(
         store.get(&session, &record.artifact_id).await.unwrap(),
         b"committed"
+    );
+}
+
+#[tokio::test]
+async fn identical_bytes_converge_across_pages_and_response_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let first = store
+        .put(
+            &session,
+            &PageId::new(),
+            "application/octet-stream",
+            "bin",
+            b"shared-bytes",
+            1024,
+        )
+        .await
+        .unwrap();
+    let second = store
+        .put(
+            &session,
+            &PageId::new(),
+            "text/plain",
+            "txt",
+            b"shared-bytes",
+            1024,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.artifact_id, second.artifact_id);
+    assert_eq!(
+        store.get(&session, &second.artifact_id).await.unwrap(),
+        b"shared-bytes"
     );
 }
 
@@ -224,7 +265,7 @@ async fn concurrent_identical_publications_converge_without_loser_deleting_winne
     let first = first.unwrap();
     let second = second.unwrap();
     assert_eq!(first.record().artifact_id, second.record().artifact_id);
-    let record = second.commit();
+    let record = second.commit().unwrap();
     drop(first);
     assert_eq!(
         store.get(&session, &record.artifact_id).await.unwrap(),

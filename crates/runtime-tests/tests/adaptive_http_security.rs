@@ -171,6 +171,13 @@ async fn real_runtime_sessions_isolate_direct_http_cookie_state() {
         }),
     )
     .await;
+    let journal = tokio::fs::read_to_string(root.path().join("commands.jsonl"))
+        .await
+        .unwrap();
+    assert!(
+        !journal.contains("\"value\":\"yes\"") && !journal.contains("\"downloaded\":\"yes\""),
+        "prepared HTTP state leaked a cookie value"
+    );
     let owner_echo = completed(
         &runtime,
         &owner,

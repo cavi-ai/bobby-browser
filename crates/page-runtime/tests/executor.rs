@@ -344,6 +344,21 @@ async fn assert_single_download_readable(root: &Path, session: &SessionId, expec
     assert_eq!(store.get(session, &artifact_id).await.unwrap(), expected);
 }
 
+async fn assert_single_download_hidden(root: &Path, session: &SessionId) {
+    let mut entries = std::fs::read_dir(root.join(session.0.to_string())).unwrap();
+    let entry = entries.next().expect("one staged artifact").unwrap();
+    assert!(
+        entries.next().is_none(),
+        "expected exactly one staged artifact"
+    );
+    let artifact_id = entry.file_name().to_string_lossy().into_owned();
+    let store = artifact_store::ArtifactStore::new(root, 1024 * 1024, 16_384);
+    assert_eq!(
+        store.get(session, &artifact_id).await.unwrap_err(),
+        artifact_store::ArtifactError::NotFound
+    );
+}
+
 struct FakeFactory {
     events: Arc<Mutex<Vec<String>>>,
     mode: DriverMode,
@@ -876,7 +891,7 @@ async fn prepared_result_journal_failure_prevents_state_commit_without_deleting_
         CommandOutcome::NeedsReconciliation { .. }
     ));
     assert!(!events.lock().await.contains(&"http:commit".to_string()));
-    assert_single_download_readable(root.path(), &session, b"prepared-failure").await;
+    assert_single_download_hidden(root.path(), &session).await;
 }
 
 #[tokio::test]
@@ -1002,7 +1017,11 @@ async fn cancellation_at_each_post_response_journal_await_preserves_durable_arti
         assert_eq!(committed, phase != CommandPhase::ResultPrepared);
         task.abort();
         let _ = task.await;
-        assert_single_download_readable(root.path(), &session, b"cancel-boundary").await;
+        if phase == CommandPhase::ResultPrepared {
+            assert_single_download_hidden(root.path(), &session).await;
+        } else {
+            assert_single_download_readable(root.path(), &session, b"cancel-boundary").await;
+        }
     }
 }
 
