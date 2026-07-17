@@ -18,6 +18,7 @@ fn cookie(name: &str, value: &str) -> HttpCookie {
         name: name.into(),
         value: value.into(),
         domain: String::new(),
+        host_only: true,
         path: "/".into(),
         secure: false,
         http_only: false,

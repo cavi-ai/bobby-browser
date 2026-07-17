@@ -896,10 +896,12 @@ fn snapshot_cookie(cookie: Cookie) -> Result<HttpCookie, CommandError> {
             "cookie expiry cannot be represented",
         ));
     }
+    let host_only = !cookie.domain.starts_with('.');
     Ok(HttpCookie {
         name: cookie.name,
         value: cookie.value,
         domain: cookie.domain,
+        host_only,
         path: cookie.path,
         secure: cookie.secure,
         http_only: cookie.http_only,
@@ -923,7 +925,7 @@ fn cookie_param(cookie: HttpCookie, current_url: &str) -> Result<CookieParam, Co
         .map_err(|_| driver_error(ErrorCode::InvalidRequest, "invalid cookie SameSite value"))?;
     let mut param = CookieParam::new(cookie.name, cookie.value);
     param.url = Some(current_url.to_owned());
-    param.domain = (!cookie.domain.is_empty()).then_some(cookie.domain);
+    param.domain = (!cookie.host_only && !cookie.domain.is_empty()).then_some(cookie.domain);
     param.path = (!cookie.path.is_empty()).then_some(cookie.path);
     param.secure = Some(cookie.secure);
     param.http_only = Some(cookie.http_only);

@@ -5,6 +5,7 @@ pub struct HttpCookie {
     pub name: String,
     pub value: String,
     pub domain: String,
+    pub host_only: bool,
     pub path: String,
     pub secure: bool,
     pub http_only: bool,

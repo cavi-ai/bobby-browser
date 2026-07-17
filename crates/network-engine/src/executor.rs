@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cookie::Cookie;
@@ -7,6 +8,8 @@ use futures_util::StreamExt;
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Client, StatusCode};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
+use tokio::time::timeout;
 use types::{
     CommandError, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence, ExecutionReason,
     InspectCommand,
@@ -17,9 +20,11 @@ use crate::document::inspect_document;
 use crate::state::{HttpCookie, HttpStateSnapshot, ResponseStateDelta};
 use crate::{DestinationPolicy, NetworkPolicy};
 
+#[derive(Clone)]
 pub struct DirectHttpExecutor {
     network: NetworkPolicy,
     destinations: DestinationPolicy,
+    permits: Arc<Semaphore>,
 }
 
 pub struct HttpMeta {
@@ -61,11 +66,32 @@ impl DirectHttpExecutor {
     pub fn new(network: NetworkPolicy) -> Self {
         Self {
             destinations: DestinationPolicy::new(network.clone()),
+            permits: Arc::new(Semaphore::new(network.max_concurrent_requests)),
             network,
         }
     }
 
     pub async fn inspect(
+        &self,
+        snapshot: &HttpStateSnapshot,
+        command: &InspectCommand,
+    ) -> Result<HttpCandidate, CommandError> {
+        timeout(
+            Duration::from_millis(self.network.request_timeout_ms),
+            async {
+                let _permit = self
+                    .permits
+                    .acquire()
+                    .await
+                    .map_err(|_| transfer_error("HTTP executor is unavailable"))?;
+                self.inspect_permitted(snapshot, command).await
+            },
+        )
+        .await
+        .map_err(|_| deadline_error())?
+    }
+
+    async fn inspect_permitted(
         &self,
         snapshot: &HttpStateSnapshot,
         command: &InspectCommand,
@@ -97,6 +123,26 @@ impl DirectHttpExecutor {
     }
 
     pub async fn download(
+        &self,
+        snapshot: &HttpStateSnapshot,
+        command: &DownloadUrlCommand,
+    ) -> Result<HttpCandidate, CommandError> {
+        timeout(
+            Duration::from_millis(self.network.request_timeout_ms),
+            async {
+                let _permit = self
+                    .permits
+                    .acquire()
+                    .await
+                    .map_err(|_| transfer_error("HTTP executor is unavailable"))?;
+                self.download_permitted(snapshot, command).await
+            },
+        )
+        .await
+        .map_err(|_| deadline_error())?
+    }
+
+    async fn download_permitted(
         &self,
         snapshot: &HttpStateSnapshot,
         command: &DownloadUrlCommand,
@@ -152,7 +198,6 @@ impl DirectHttpExecutor {
                 .ok_or_else(|| policy_error("destination resolved to no addresses"))?;
             let client = Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_millis(self.network.request_timeout_ms))
                 .resolve(host, chosen)
                 .build()
                 .map_err(|_| transfer_error("HTTP client initialization failed"))?;
@@ -160,7 +205,7 @@ impl DirectHttpExecutor {
                 .get(url.clone())
                 .header(header::USER_AGENT, &snapshot.user_agent)
                 .header(header::ACCEPT_LANGUAGE, &snapshot.language);
-            let cookies = cookie_header(snapshot, &state, &url);
+            let cookies = cookie_header(snapshot, &state, &url)?;
             if !cookies.is_empty() {
                 request = request.header(header::COOKIE, cookies);
             }
@@ -172,7 +217,7 @@ impl DirectHttpExecutor {
                 .await
                 .map_err(|_| transfer_error("HTTP request failed"))?;
             bound_headers(response.headers(), self.network.max_header_bytes)?;
-            collect_state(response.headers(), &url, &mut state);
+            collect_state(response.headers(), &url, &mut state)?;
             if response.status().is_redirection() {
                 if hop == self.network.max_redirects {
                     return Err(transfer_error("redirect limit exceeded"));
@@ -238,47 +283,138 @@ fn bound_headers(headers: &HeaderMap, limit: usize) -> Result<(), CommandError> 
     }
 }
 
-fn cookie_header(snapshot: &HttpStateSnapshot, state: &ResponseStateDelta, url: &Url) -> String {
+fn cookie_header(
+    snapshot: &HttpStateSnapshot,
+    state: &ResponseStateDelta,
+    url: &Url,
+) -> Result<String, CommandError> {
     let host = url.host_str().unwrap_or_default();
-    snapshot
-        .cookies
-        .iter()
-        .chain(state.cookies.iter())
-        .filter(|cookie| {
-            host == cookie.domain.trim_start_matches('.')
-                || host.ends_with(&format!(".{}", cookie.domain.trim_start_matches('.')))
-        })
-        .filter(|cookie| {
-            url.path().starts_with(&cookie.path) && (!cookie.secure || url.scheme() == "https")
-        })
-        .map(|cookie| format!("{}={}", cookie.name, cookie.value))
-        .collect::<Vec<_>>()
-        .join("; ")
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| transfer_error("system clock is invalid"))?
+        .as_secs_f64();
+    let top_level = Url::parse(&snapshot.current_url)
+        .map_err(|_| policy_error("cookie top-level site is invalid"))?;
+    let mut jar = BTreeMap::new();
+    for cookie in snapshot.cookies.iter().chain(state.cookies.iter()) {
+        if cookie
+            .expires_unix
+            .is_some_and(|expiry| !expiry.is_finite())
+        {
+            return Err(policy_error("cookie expiry cannot be evaluated safely"));
+        }
+        let partition = cookie
+            .partition_key
+            .as_ref()
+            .map(|key| (key.top_level_site.clone(), key.has_cross_site_ancestor));
+        jar.insert(
+            (
+                cookie.name.clone(),
+                cookie.domain.to_ascii_lowercase(),
+                cookie.host_only,
+                cookie.path.clone(),
+                partition,
+            ),
+            cookie,
+        );
+    }
+    let mut sent = Vec::new();
+    for cookie in jar.into_values() {
+        if cookie.expires_unix.is_some_and(|expiry| expiry <= now)
+            || (cookie.secure && url.scheme() != "https")
+        {
+            continue;
+        }
+        let domain = cookie.domain.trim_start_matches('.');
+        let domain_matches = if cookie.host_only {
+            host.eq_ignore_ascii_case(domain)
+        } else {
+            host.eq_ignore_ascii_case(domain)
+                || host
+                    .to_ascii_lowercase()
+                    .ends_with(&format!(".{}", domain.to_ascii_lowercase()))
+        };
+        let request_path = url.path();
+        let path_matches = request_path == cookie.path
+            || (request_path.starts_with(&cookie.path)
+                && (cookie.path.ends_with('/')
+                    || request_path.as_bytes().get(cookie.path.len()) == Some(&b'/')));
+        if !domain_matches || !path_matches {
+            continue;
+        }
+        if let Some(partition) = &cookie.partition_key {
+            let site = Url::parse(&partition.top_level_site)
+                .map_err(|_| policy_error("cookie partition cannot be evaluated safely"))?;
+            if partition.has_cross_site_ancestor
+                || site.scheme() != top_level.scheme()
+                || site.host_str() != top_level.host_str()
+            {
+                continue;
+            }
+        }
+        sent.push(format!("{}={}", cookie.name, cookie.value));
+    }
+    Ok(sent.join("; "))
 }
 
-fn collect_state(headers: &HeaderMap, url: &Url, state: &mut ResponseStateDelta) {
+fn collect_state(
+    headers: &HeaderMap,
+    url: &Url,
+    state: &mut ResponseStateDelta,
+) -> Result<(), CommandError> {
     for value in headers.get_all(header::SET_COOKIE) {
         let Ok(raw) = value.to_str() else { continue };
         let Ok(cookie) = Cookie::parse(raw.to_owned()) else {
             continue;
         };
-        state.cookies.push(HttpCookie {
+        if cookie.partitioned() == Some(true) {
+            return Err(policy_error(
+                "partitioned response cookie cannot be represented safely",
+            ));
+        }
+        let response_host = url.host_str().unwrap_or_default();
+        if let Some(domain) = cookie.domain() {
+            let domain = domain.trim_start_matches('.');
+            if !response_host.eq_ignore_ascii_case(domain)
+                && !response_host
+                    .to_ascii_lowercase()
+                    .ends_with(&format!(".{}", domain.to_ascii_lowercase()))
+            {
+                return Err(policy_error(
+                    "response cookie domain is outside the response host",
+                ));
+            }
+        }
+        let response_cookie = HttpCookie {
             name: cookie.name().to_owned(),
             value: cookie.value().to_owned(),
             domain: cookie
                 .domain()
                 .unwrap_or_else(|| url.host_str().unwrap_or_default())
                 .to_owned(),
+            host_only: cookie.domain().is_none(),
             path: cookie.path().unwrap_or("/").to_owned(),
             secure: cookie.secure().unwrap_or(false),
             http_only: cookie.http_only().unwrap_or(false),
             same_site: cookie.same_site().map(|v| format!("{v:?}")),
-            expires_unix: None,
+            expires_unix: cookie
+                .expires_datetime()
+                .map(|expiry| expiry.unix_timestamp() as f64),
             priority: None,
             source_scheme: Some(url.scheme().to_owned()),
             source_port: url.port_or_known_default().map(i64::from),
             partition_key: None,
+        };
+        state.cookies.retain(|existing| {
+            existing.name != response_cookie.name
+                || !existing
+                    .domain
+                    .eq_ignore_ascii_case(&response_cookie.domain)
+                || existing.host_only != response_cookie.host_only
+                || existing.path != response_cookie.path
+                || !same_partition(existing, &response_cookie)
         });
+        state.cookies.push(response_cookie);
     }
     let mut validators = BTreeMap::new();
     if let Some(value) = headers.get(header::ETAG).and_then(|v| v.to_str().ok()) {
@@ -291,6 +427,18 @@ fn collect_state(headers: &HeaderMap, url: &Url, state: &mut ResponseStateDelta)
         validators.insert(url.to_string(), value.to_owned());
     }
     state.cache_validators.extend(validators);
+    Ok(())
+}
+
+fn same_partition(left: &HttpCookie, right: &HttpCookie) -> bool {
+    match (&left.partition_key, &right.partition_key) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.top_level_site == right.top_level_site
+                && left.has_cross_site_ancestor == right.has_cross_site_ancestor
+        }
+        _ => false,
+    }
 }
 
 fn content_type(headers: &HeaderMap) -> String {
@@ -320,23 +468,72 @@ fn decode_text(bytes: &[u8], headers: &HeaderMap) -> Option<String> {
 }
 
 fn filename(headers: &HeaderMap, url: &Url) -> String {
-    headers
+    let supplied = headers
         .get(header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| {
-            v.split(';').find_map(|part| {
-                part.trim()
-                    .strip_prefix("filename=")
-                    .map(|name| name.trim_matches('"').to_owned())
-            })
+            let parts = v.split(';').map(str::trim).collect::<Vec<_>>();
+            parts
+                .iter()
+                .find_map(|part| {
+                    part.strip_prefix("filename*=UTF-8''")
+                        .and_then(percent_decode)
+                })
+                .or_else(|| {
+                    parts.iter().find_map(|part| {
+                        part.trim()
+                            .strip_prefix("filename=")
+                            .map(|name| name.trim_matches('"').to_owned())
+                    })
+                })
         })
         .or_else(|| {
             url.path_segments()
                 .and_then(|mut parts| parts.next_back())
                 .filter(|part| !part.is_empty())
                 .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "download".to_owned())
+        });
+    supplied
+        .and_then(sanitize_filename)
+        .unwrap_or_else(|| "download.bin".to_owned())
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.as_bytes().iter().copied();
+    while let Some(byte) = chars.next() {
+        if byte == b'%' {
+            let hi = chars.next()?;
+            let lo = chars.next()?;
+            let hex = |b: u8| match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            };
+            bytes.push(hex(hi)? * 16 + hex(lo)?);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn sanitize_filename(name: String) -> Option<String> {
+    if name.is_empty()
+        || name.len() > 255
+        || name == "."
+        || name == ".."
+        || name.starts_with('/')
+        || name.starts_with('\\')
+        || name.contains('/')
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+    {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 fn error(code: ErrorCode, message: impl Into<String>, retryable: bool) -> CommandError {
@@ -352,6 +549,13 @@ fn policy_error(message: impl Into<String>) -> CommandError {
 }
 fn transfer_error(message: impl Into<String>) -> CommandError {
     error(ErrorCode::HttpTransferFailed, message, true)
+}
+fn deadline_error() -> CommandError {
+    error(
+        ErrorCode::DeadlineExceeded,
+        "HTTP operation deadline exceeded",
+        true,
+    )
 }
 fn too_large(limit: usize) -> CommandError {
     error(

@@ -49,11 +49,16 @@ const INDEX: &str = r#"<!doctype html>
 pub struct FixtureServer {
     address: SocketAddr,
     task: JoinHandle<()>,
+    peak_requests: Arc<AtomicUsize>,
 }
 
 impl FixtureServer {
     pub fn base_url(&self) -> String {
         format!("http://{}", self.address)
+    }
+
+    pub fn peak_requests(&self) -> usize {
+        self.peak_requests.load(Ordering::SeqCst)
     }
 }
 
@@ -65,6 +70,8 @@ impl Drop for FixtureServer {
 
 pub async fn spawn() -> FixtureServer {
     let drift_requests = Arc::new(AtomicUsize::new(0));
+    let active_requests = Arc::new(AtomicUsize::new(0));
+    let peak_requests = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/healthz", get(|| async { "ok" }))
@@ -104,6 +111,10 @@ pub async fn spawn() -> FixtureServer {
             }),
         )
         .route("/gzip", get(|| async { compressed_response("gzip") }))
+        .route(
+            "/gzip-bomb",
+            get(|| async { compressed_response_body("gzip", &vec![b'x'; 4096]) }),
+        )
         .route("/brotli", get(|| async { compressed_response("br") }))
         .route(
             "/latin1",
@@ -164,6 +175,107 @@ pub async fn spawn() -> FixtureServer {
             }),
         )
         .route(
+            "/download-traversal",
+            get(|| async { download_named("../../etc/passwd") }),
+        )
+        .route(
+            "/download-control",
+            get(|| async {
+                let mut response = b"control".to_vec().into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+                response.headers_mut().insert(
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment; filename*=UTF-8''bad%07name.txt"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/download-star",
+            get(|| async {
+                let mut response = b"star".to_vec().into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+                response.headers_mut().insert(
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment; filename*=UTF-8''caf%C3%A9.txt"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/slow",
+            get({
+                let active = active_requests.clone();
+                let peak = peak_requests.clone();
+                move || {
+                    let active = active.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Html("<title>Slow</title><p>slow fixture</p>")
+                    }
+                }
+            }),
+        )
+        .route(
+            "/slow-redirect",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                (axum::http::StatusCode::FOUND, [(header::LOCATION, "/slow")])
+            }),
+        )
+        .route(
+            "/cookie-echo",
+            get(|headers: axum::http::HeaderMap| async move {
+                Html(format!(
+                    "<title>Cookies</title><p>{}</p>",
+                    headers
+                        .get(header::COOKIE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("none")
+                ))
+            }),
+        )
+        .route(
+            "/cookie-start",
+            get(|| async {
+                let mut response = (
+                    axum::http::StatusCode::FOUND,
+                    [(header::LOCATION, "/cookie-replace")],
+                )
+                    .into_response();
+                response.headers_mut().insert(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static("session=old; Path=/"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/cookie-replace",
+            get(|| async {
+                let mut response = (
+                    axum::http::StatusCode::FOUND,
+                    [(header::LOCATION, "/cookie-echo")],
+                )
+                    .into_response();
+                response.headers_mut().insert(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static("session=new; Path=/"),
+                );
+                response
+            }),
+        )
+        .route(
             "/popup",
             get(|| async { Html("<title>Popup</title><p id='details'>Details</p>") }),
         )
@@ -193,11 +305,19 @@ pub async fn spawn() -> FixtureServer {
             .await
             .expect("serve deterministic fixture");
     });
-    FixtureServer { address, task }
+    FixtureServer {
+        address,
+        task,
+        peak_requests,
+    }
 }
 
 fn compressed_response(encoding: &str) -> axum::response::Response {
     let input = b"<!doctype html><title>Compressed</title><p>compressed fixture</p>";
+    compressed_response_body(encoding, input)
+}
+
+fn compressed_response_body(encoding: &str, input: &[u8]) -> axum::response::Response {
     let bytes = if encoding == "gzip" {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(input).expect("compress gzip fixture");
@@ -218,6 +338,20 @@ fn compressed_response(encoding: &str) -> axum::response::Response {
     response.headers_mut().insert(
         header::CONTENT_ENCODING,
         HeaderValue::from_str(encoding).expect("fixture encoding"),
+    );
+    response
+}
+
+fn download_named(filename: &'static str) -> axum::response::Response {
+    let mut response = b"named".to_vec().into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .expect("fixture filename"),
     );
     response
 }
@@ -253,5 +387,9 @@ pub async fn spawn_frame_host(child_url: &str) -> FixtureServer {
             .await
             .expect("serve frame host fixture");
     });
-    FixtureServer { address, task }
+    FixtureServer {
+        address,
+        task,
+        peak_requests: Arc::new(AtomicUsize::new(0)),
+    }
 }
