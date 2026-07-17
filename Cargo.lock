@@ -193,15 +193,23 @@ name = "broker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "artifact-store",
  "async-trait",
  "axum",
  "chrono",
  "config",
+ "interface-core",
  "sdk-core",
+ "serde",
  "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
  "tokio",
  "tower",
  "types",
+ "url",
+ "uuid",
 ]
 
 [[package]]

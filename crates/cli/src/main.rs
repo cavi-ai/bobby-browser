@@ -13,7 +13,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| "serve".to_string());
 
     match cmd.as_str() {
-        "serve" => broker::serve(AppConfig::default()).await?,
+        "serve" => {
+            let startup = broker::StartupCredential::from_env()?;
+            broker::serve(AppConfig::default(), startup).await?
+        }
         "doctor" => println!("ok"),
         other => {
             eprintln!("unknown command: {other}");
