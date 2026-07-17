@@ -31,6 +31,7 @@ async fn stores_hashed_session_private_artifacts_atomically() {
     assert!(root
         .path()
         .join(owner.0.to_string())
+        .join(&record.artifact_id)
         .join(format!("{}.png", record.artifact_id))
         .is_file());
 }
