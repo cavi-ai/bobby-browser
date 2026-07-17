@@ -65,6 +65,13 @@ impl ResolvedTarget {
     }
 
     pub async fn click_js(&self, page: &Page) -> Result<(), CommandError> {
+        if let Some(element) = &self.native {
+            element
+                .call_js_fn("function() { this.click(); }", false)
+                .await
+                .map_err(cdp_error)?;
+            return Ok(());
+        }
         self.eval::<bool>(page, "el.click(); return true").await?;
         Ok(())
     }
