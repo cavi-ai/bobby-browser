@@ -23,6 +23,10 @@ fn cookie(name: &str, value: &str) -> HttpCookie {
         http_only: false,
         same_site: None,
         expires_unix: None,
+        priority: None,
+        source_scheme: None,
+        source_port: None,
+        partition_key: None,
     }
 }
 
@@ -83,6 +87,32 @@ async fn synchronizes_versioned_http_state() {
         .any(|cookie| { cookie.name == "session" && cookie.value == "alpha" && cookie.http_only }));
     assert!(!snapshot.user_agent.is_empty());
 
+    let mut unrelated = cookie("unrelated", "blocked");
+    unrelated.domain = "example.invalid".into();
+    let mut nonfinite = cookie("nonfinite", "blocked");
+    nonfinite.expires_unix = Some(f64::NAN);
+    let mut invalid_expiry = cookie("invalid-expiry", "blocked");
+    invalid_expiry.expires_unix = Some(-1.0);
+    let mut secure_over_http = cookie("secure", "blocked");
+    secure_over_http.secure = true;
+    for rejected in [unrelated, nonfinite, invalid_expiry, secure_over_http] {
+        let error = worker
+            .commit_http_state(
+                &page_id,
+                snapshot.version,
+                ResponseStateDelta {
+                    cookies: vec![rejected],
+                    cache_validators: BTreeMap::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        let unchanged = worker.http_state(&page_id).await.unwrap();
+        assert_eq!(unchanged.version, snapshot.version);
+        assert_eq!(unchanged.cookies.len(), snapshot.cookies.len());
+    }
+
     worker
         .commit_http_state(
             &page_id,
@@ -112,6 +142,34 @@ async fn synchronizes_versioned_http_state() {
         .await
         .unwrap_err();
     assert_eq!(conflict.code, ErrorCode::HttpStateConflict);
+
+    for sequence in 0..16 {
+        let before = worker.http_state(&page_id).await.unwrap();
+        let name = format!("coherent-{sequence}");
+        let expected_name = name.clone();
+        let (observed, committed) = tokio::join!(
+            worker.http_state(&page_id),
+            worker.commit_http_state(
+                &page_id,
+                before.version,
+                ResponseStateDelta {
+                    cookies: vec![cookie(&name, "set")],
+                    cache_validators: BTreeMap::new(),
+                },
+            )
+        );
+        committed.unwrap();
+        let observed = observed.unwrap();
+        let contains_commit = observed
+            .cookies
+            .iter()
+            .any(|cookie| cookie.name == expected_name);
+        assert!(
+            (observed.version == before.version && !contains_commit)
+                || (observed.version == before.version + 1 && contains_commit),
+            "snapshot mixed cookie state and version"
+        );
+    }
     worker.close().await.unwrap();
     fixture.abort();
 }

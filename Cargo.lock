@@ -2207,6 +2207,7 @@ dependencies = [
  "config",
  "dom-engine",
  "futures",
+ "network-engine",
  "regex",
  "serde",
  "serde_json",
@@ -2217,6 +2218,7 @@ dependencies = [
  "tokio",
  "tracing 0.1.44",
  "types",
+ "url",
 ]
 
 [[package]]
