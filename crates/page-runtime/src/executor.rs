@@ -135,9 +135,8 @@ impl PageRuntime {
                     .await;
             }
         };
-        let mut pending_artifact = None;
-        if let Some(prepared) = execution.prepared_download.take() {
-            let artifact = prepared.artifact.record().clone();
+        if let Some(mut prepared) = execution.prepared_http.take() {
+            let artifact = prepared.artifact.take().map(|pending| pending.commit());
             let prepared_result = PreparedResult {
                 command_id: envelope.command_id.clone(),
                 attempt_id: envelope.attempt_id.clone(),
@@ -145,14 +144,14 @@ impl PageRuntime {
                 state_delta: serde_json::to_value(&prepared.state)
                     .unwrap_or(serde_json::Value::Null),
                 evidence: execution.evidence.clone(),
-                artifact_id: Some(artifact.artifact_id),
-                artifact_sha256: Some(artifact.sha256),
+                artifact_id: artifact.as_ref().map(|record| record.artifact_id.clone()),
+                artifact_sha256: artifact.as_ref().map(|record| record.sha256.clone()),
             };
             if let Err(error) = journal
                 .append(prepared_record(&envelope, prepared_result))
                 .await
             {
-                return journal_failure(&envelope, error, true);
+                return prepared_failure(&envelope, journal_error(error), execution.evidence);
             }
             if let Err(error) = lease
                 .worker()
@@ -164,10 +163,12 @@ impl PageRuntime {
                 .await
             {
                 return self
-                    .finish_failure(&envelope, classify_failure(&envelope, error))
+                    .finish_failure(
+                        &envelope,
+                        prepared_failure(&envelope, error, execution.evidence.clone()),
+                    )
                     .await;
             }
-            pending_artifact = Some(prepared.artifact);
         }
         let evidence = execution.evidence;
         match &envelope.command {
@@ -221,12 +222,7 @@ impl PageRuntime {
                     ))
                     .await
                 {
-                    Ok(()) => {
-                        if let Some(pending) = pending_artifact.take() {
-                            pending.commit();
-                        }
-                        outcome
-                    }
+                    Ok(()) => outcome,
                     Err(error) => journal_failure(&envelope, error, true),
                 }
             }
@@ -500,6 +496,18 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
             command_id: envelope.command_id.clone(),
             error,
         }
+    }
+}
+
+fn prepared_failure(
+    envelope: &CommandEnvelope,
+    error: CommandError,
+    evidence: Vec<Evidence>,
+) -> CommandOutcome {
+    CommandOutcome::NeedsReconciliation {
+        command_id: envelope.command_id.clone(),
+        error,
+        evidence,
     }
 }
 

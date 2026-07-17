@@ -335,6 +335,15 @@ fn assert_one_lifecycle(events: &[String]) {
     }
 }
 
+async fn assert_single_download_readable(root: &Path, session: &SessionId, expected: &[u8]) {
+    let mut entries = std::fs::read_dir(root.join(session.0.to_string())).unwrap();
+    let entry = entries.next().expect("one durable artifact").unwrap();
+    assert!(entries.next().is_none(), "expected exactly one artifact");
+    let artifact_id = entry.file_name().to_string_lossy().into_owned();
+    let store = artifact_store::ArtifactStore::new(root, 1024 * 1024, 16_384);
+    assert_eq!(store.get(session, &artifact_id).await.unwrap(), expected);
+}
+
 struct FakeFactory {
     events: Arc<Mutex<Vec<String>>>,
     mode: DriverMode,
@@ -594,6 +603,15 @@ async fn eligible_inspect_uses_http_without_browser_dispatch() {
     )));
     let events = events.lock().await;
     assert!(!events.contains(&"browser:inspect".to_string()));
+    let prepared = events
+        .iter()
+        .position(|event| event == "journal:resultprepared")
+        .expect("direct inspection must durably prepare before state commit");
+    let committed = events
+        .iter()
+        .position(|event| event == "http:commit")
+        .expect("direct inspection must commit response state");
+    assert!(prepared < committed);
     assert_one_lifecycle(&events);
 }
 
@@ -676,7 +694,7 @@ async fn unproven_replayable_inspect_falls_back_once() {
 }
 
 #[tokio::test]
-async fn state_conflict_falls_back_without_committing_candidate_evidence() {
+async fn state_conflict_after_prepared_inspect_requires_reconciliation_without_replay() {
     let url = http_fixture("<title>Candidate</title><p>candidate-only</p>", "text/html").await;
     let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::StateConflict).await;
     runtime
@@ -684,34 +702,20 @@ async fn state_conflict_falls_back_without_committing_candidate_evidence() {
         .await
         .unwrap();
     events.lock().await.push(format!("url:{url}"));
-    let evidence = completed_evidence(
-        runtime
-            .execute(envelope(
-                session,
-                page,
-                PrimitiveCommand::Inspect(InspectCommand::default()),
-            ))
-            .await,
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Inspection { text, .. } if text.contains("candidate-only"))))
     );
-    assert!(!evidence.iter().any(
-        |item| matches!(item, Evidence::Inspection { text, .. } if text.contains("candidate-only"))
-    ));
-    assert!(evidence.iter().any(|item| matches!(
-        item,
-        Evidence::ExecutionPath {
-            path: ExecutionPath::ChromiumFallback,
-            ..
-        }
-    )));
     let events = events.lock().await;
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.as_str() == "browser:inspect")
-            .count(),
-        1
-    );
-    assert_one_lifecycle(&events);
+    assert!(!events.contains(&"browser:inspect".to_string()));
+    assert!(events.contains(&"journal:resultprepared".to_string()));
 }
 
 #[tokio::test]
@@ -788,7 +792,7 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
 }
 
 #[tokio::test]
-async fn download_state_commit_failure_removes_pending_artifact_and_leaks_no_evidence() {
+async fn download_state_commit_failure_keeps_prepared_artifact_recoverable() {
     let url = http_fixture("guarded-download", "application/octet-stream").await;
     let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitFail).await;
     events.lock().await.push(format!("url:{url}"));
@@ -807,13 +811,15 @@ async fn download_state_commit_failure_removes_pending_artifact_and_leaks_no_evi
         outcome,
         CommandOutcome::NeedsReconciliation { .. }
     ));
-    let session_dir = root.path().join(session.0.to_string());
-    assert!(!session_dir.exists() || std::fs::read_dir(session_dir).unwrap().next().is_none());
-    assert!(!format!("{outcome:?}").contains("Download"));
+    assert_single_download_readable(root.path(), &session, b"guarded-download").await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Download { .. })))
+    );
 }
 
 #[tokio::test]
-async fn download_state_commit_cancellation_removes_pending_artifact() {
+async fn download_state_commit_cancellation_keeps_prepared_artifact_recoverable() {
     let url = http_fixture("cancelled-download", "application/octet-stream").await;
     let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitPause).await;
     events.lock().await.push(format!("url:{url}"));
@@ -845,12 +851,11 @@ async fn download_state_commit_cancellation_removes_pending_artifact() {
     assert!(events.lock().await.contains(&"http:commit".to_string()));
     handle.abort();
     let _ = handle.await;
-    let session_dir = root.path().join(session.0.to_string());
-    assert!(!session_dir.exists() || std::fs::read_dir(session_dir).unwrap().next().is_none());
+    assert_single_download_readable(root.path(), &session, b"cancelled-download").await;
 }
 
 #[tokio::test]
-async fn prepared_result_journal_failure_prevents_state_commit_and_cleans_artifact() {
+async fn prepared_result_journal_failure_prevents_state_commit_without_deleting_bytes() {
     let url = http_fixture("prepared-failure", "application/octet-stream").await;
     let (runtime, session, page, events, root) =
         adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::ResultPrepared))
@@ -871,12 +876,36 @@ async fn prepared_result_journal_failure_prevents_state_commit_and_cleans_artifa
         CommandOutcome::NeedsReconciliation { .. }
     ));
     assert!(!events.lock().await.contains(&"http:commit".to_string()));
-    let dir = root.path().join(session.0.to_string());
-    assert!(!dir.exists() || std::fs::read_dir(dir).unwrap().next().is_none());
+    assert_single_download_readable(root.path(), &session, b"prepared-failure").await;
 }
 
 #[tokio::test]
-async fn completed_journal_failure_keeps_prepared_state_reconcilable_and_cleans_artifact() {
+async fn inspect_prepared_append_failure_is_never_replayable() {
+    let url = http_fixture("<title>Prepared</title><p>inspect-result</p>", "text/html").await;
+    let (runtime, session, page, events, _root) =
+        adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::ResultPrepared))
+            .await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Inspection { text, .. } if text.contains("inspect-result"))))
+    );
+    assert!(!events.lock().await.contains(&"http:commit".to_string()));
+}
+
+#[tokio::test]
+async fn completed_journal_failure_keeps_prepared_state_and_artifact_reconcilable() {
     let url = http_fixture("completion-failure", "application/octet-stream").await;
     let (runtime, session, page, events, root) =
         adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::Completed)).await;
@@ -896,8 +925,7 @@ async fn completed_journal_failure_keeps_prepared_state_reconcilable_and_cleans_
         CommandOutcome::NeedsReconciliation { .. }
     ));
     assert!(events.lock().await.contains(&"http:commit".to_string()));
-    let dir = root.path().join(session.0.to_string());
-    assert!(!dir.exists() || std::fs::read_dir(dir).unwrap().next().is_none());
+    assert_single_download_readable(root.path(), &session, b"completion-failure").await;
 }
 
 #[tokio::test]
@@ -944,7 +972,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
 }
 
 #[tokio::test]
-async fn cancellation_at_each_post_response_journal_await_cleans_guarded_artifact() {
+async fn cancellation_at_each_post_response_journal_await_preserves_durable_artifact() {
     for phase in [
         CommandPhase::ResultPrepared,
         CommandPhase::Verifying,
@@ -953,10 +981,11 @@ async fn cancellation_at_each_post_response_journal_await_cleans_guarded_artifac
         let url = http_fixture("cancel-boundary", "application/octet-stream").await;
         let (runtime, session, page, events, root, paused, _resume) =
             adaptive_runtime_paused(phase).await;
+        let task_session = session.clone();
         let task = tokio::spawn(async move {
             runtime
                 .execute(envelope(
-                    session.clone(),
+                    task_session,
                     page,
                     PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
                         url,
@@ -973,21 +1002,7 @@ async fn cancellation_at_each_post_response_journal_await_cleans_guarded_artifac
         assert_eq!(committed, phase != CommandPhase::ResultPrepared);
         task.abort();
         let _ = task.await;
-        let session_dirs = std::fs::read_dir(root.path())
-            .map(|entries| {
-                entries
-                    .flat_map(|entry| {
-                        std::fs::read_dir(entry.unwrap().path())
-                            .into_iter()
-                            .flatten()
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        assert_eq!(
-            session_dirs, 0,
-            "artifact leaked when cancelling at {phase:?}"
-        );
+        assert_single_download_readable(root.path(), &session, b"cancel-boundary").await;
     }
 }
 
