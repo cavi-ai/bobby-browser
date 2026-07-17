@@ -66,25 +66,42 @@ impl AuthorityStore {
         capabilities: impl IntoIterator<Item = Capability>,
         expires_at: DateTime<Utc>,
     ) -> Result<IssuedToken, InterfaceError> {
+        let mut token_bytes = [0_u8; 32];
+        getrandom::fill(&mut token_bytes).map_err(|_| authentication_error())?;
+        let bearer = URL_SAFE_NO_PAD.encode(token_bytes);
+        self.enroll_hash(
+            sha256(bearer.as_bytes()),
+            principal_id,
+            capabilities,
+            expires_at,
+        )
+        .await?;
+        Ok(IssuedToken { bearer })
+    }
+
+    pub async fn enroll_hash(
+        &self,
+        token_hash: [u8; 32],
+        principal_id: PrincipalId,
+        capabilities: impl IntoIterator<Item = Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<CapabilityHandle, InterfaceError> {
         let now = Utc::now();
         let mut records = self.records.write().await;
         records.retain(|record| record.expires_at > now && !record.revoked.load(Ordering::Acquire));
         if records.len() >= self.capacity {
             return Err(resource_exhausted_error());
         }
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes).map_err(|_| authentication_error())?;
-        let token_hash = sha256(token_bytes);
-        records.push(AuthorityRecord {
+        let record = AuthorityRecord {
             token_hash,
             principal_id,
             capabilities: CapabilitySet::new(capabilities),
             expires_at,
             revoked: Arc::new(AtomicBool::new(false)),
-        });
-        Ok(IssuedToken {
-            bearer: URL_SAFE_NO_PAD.encode(token_bytes),
-        })
+        };
+        let handle = capability_handle(&record);
+        records.push(record);
+        Ok(handle)
     }
 
     pub async fn verify(&self, bearer: &str) -> Result<CapabilityHandle, InterfaceError> {
@@ -99,13 +116,13 @@ impl Authority for AuthorityStore {
         bearer: &str,
         now: DateTime<Utc>,
     ) -> Result<CapabilityHandle, InterfaceError> {
-        let mut token_bytes = [0_u8; 32];
-        let decoded = URL_SAFE_NO_PAD.decode(bearer.as_bytes()).ok();
-        let structurally_valid = decoded.as_ref().is_some_and(|value| value.len() == 32);
-        if let Some(value) = decoded.filter(|value| value.len() == 32) {
-            token_bytes.copy_from_slice(&value);
-        }
-        let candidate_hash = sha256(token_bytes);
+        const MAX_AUTHENTICATION_INPUT_BYTES: usize = 4096;
+        let input_within_bound = bearer.len() <= MAX_AUTHENTICATION_INPUT_BYTES;
+        let candidate_hash = if input_within_bound {
+            sha256(bearer.as_bytes())
+        } else {
+            sha256(&[])
+        };
         let records = self.records.read().await;
         let mut matched = None;
         for record in records.iter() {
@@ -117,16 +134,11 @@ impl Authority for AuthorityStore {
         let Some(record) = matched else {
             return Err(authentication_error());
         };
-        if !structurally_valid || record.revoked.load(Ordering::Acquire) || record.expires_at <= now
+        if !input_within_bound || record.revoked.load(Ordering::Acquire) || record.expires_at <= now
         {
             return Err(authentication_error());
         }
-        Ok(CapabilityHandle {
-            principal_id: record.principal_id.clone(),
-            capabilities: record.capabilities.clone(),
-            expires_at: record.expires_at,
-            revoked: record.revoked.clone(),
-        })
+        Ok(capability_handle(record))
     }
 
     async fn revoke(&self, principal: &PrincipalId) -> Result<(), InterfaceError> {
@@ -204,7 +216,16 @@ impl fmt::Debug for CapabilityHandle {
     }
 }
 
-fn sha256(bytes: [u8; 32]) -> [u8; 32] {
+fn capability_handle(record: &AuthorityRecord) -> CapabilityHandle {
+    CapabilityHandle {
+        principal_id: record.principal_id.clone(),
+        capabilities: record.capabilities.clone(),
+        expires_at: record.expires_at,
+        revoked: record.revoked.clone(),
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 

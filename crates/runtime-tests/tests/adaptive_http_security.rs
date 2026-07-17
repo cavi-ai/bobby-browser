@@ -52,6 +52,7 @@ fn config(root: &tempfile::TempDir, max_download_bytes: usize) -> AppConfig {
             max_download_bytes,
             ..HttpConfig::default()
         },
+        interface: config::InterfaceConfig::default(),
     }
 }
 

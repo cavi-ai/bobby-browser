@@ -164,6 +164,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             journal_path: journal_path.clone(),
             checkpoints_dir: root.path().join("checkpoints"),
         },
+        interface: config::InterfaceConfig::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
     let first_session = runtime

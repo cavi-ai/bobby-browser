@@ -198,12 +198,12 @@ dependencies = [
  "axum",
  "chrono",
  "config",
+ "futures-util",
  "interface-core",
  "sdk-core",
  "serde",
  "serde_json",
  "sha2",
- "subtle",
  "tempfile",
  "tokio",
  "tower",
@@ -424,6 +424,7 @@ name = "config"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

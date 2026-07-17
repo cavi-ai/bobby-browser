@@ -91,10 +91,19 @@ async fn event_gap_and_query_bounds_survive_the_authenticated_route() {
         .await
         .unwrap();
     assert_eq!(gap.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        gap.headers()["x-correlation-id"],
+        "10000000-0000-0000-0000-000000000021"
+    );
     let body = to_bytes(gap.into_body(), 16 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["reason"], "historyLost");
-    assert_eq!(json["earliestAvailable"], 2);
+    assert_eq!(json["error"]["code"], "invalidRequest");
+    assert_eq!(
+        json["error"]["correlationId"],
+        "10000000-0000-0000-0000-000000000021"
+    );
+    assert_eq!(json["gap"]["reason"], "historyLost");
+    assert_eq!(json["gap"]["earliestAvailable"], 2);
 
     for query in [
         "/v1/events?after=1&limit=3",
