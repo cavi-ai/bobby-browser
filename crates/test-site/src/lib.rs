@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -68,6 +69,86 @@ pub async fn spawn() -> FixtureServer {
         .route("/", get(|| async { Html(INDEX) }))
         .route("/healthz", get(|| async { "ok" }))
         .route(
+            "/static",
+            get(|| async {
+                let mut response = Html(
+                    "<!doctype html><title>Static Fixture</title><p id='message'>café fixture</p>",
+                )
+                .into_response();
+                response.headers_mut().append(
+                    header::SET_COOKIE,
+                    HeaderValue::from_static("fixture=fresh; Path=/; HttpOnly"),
+                );
+                response
+                    .headers_mut()
+                    .insert(header::ETAG, HeaderValue::from_static("\"fixture-v1\""));
+                response
+            }),
+        )
+        .route(
+            "/redirect-static",
+            get(|| async {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(header::LOCATION, "/static")],
+                )
+            }),
+        )
+        .route(
+            "/redirect-private",
+            get(|| async {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(header::LOCATION, "http://10.0.0.1/private")],
+                )
+            }),
+        )
+        .route("/gzip", get(|| async { compressed_response("gzip") }))
+        .route("/brotli", get(|| async { compressed_response("br") }))
+        .route(
+            "/latin1",
+            get(|| async {
+                let mut response = b"<!doctype html><title>Latin</title><p>caf\xe9 fixture</p>"
+                    .to_vec()
+                    .into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=iso-8859-1"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/js-shell",
+            get(|| async { Html("<!doctype html><div id='app'></div><script>render()</script>") }),
+        )
+        .route(
+            "/misleading",
+            get(|| async {
+                let mut response =
+                    Html("<title>Actually HTML</title><p>not trustworthy</p>").into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/oversized",
+            get(|| async { Html("<p>012345678901234567890123456789</p>") }),
+        )
+        .route(
+            "/interrupted",
+            get(|| async {
+                let mut response = b"short".to_vec().into_response();
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from_static("100"));
+                response
+            }),
+        )
+        .route(
             "/download",
             get(|| async {
                 let mut response = b"workflow-download-v1".to_vec().into_response();
@@ -113,6 +194,32 @@ pub async fn spawn() -> FixtureServer {
             .expect("serve deterministic fixture");
     });
     FixtureServer { address, task }
+}
+
+fn compressed_response(encoding: &str) -> axum::response::Response {
+    let input = b"<!doctype html><title>Compressed</title><p>compressed fixture</p>";
+    let bytes = if encoding == "gzip" {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(input).expect("compress gzip fixture");
+        encoder.finish().expect("finish gzip fixture")
+    } else {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut bytes, 4096, 5, 22);
+            encoder.write_all(input).expect("compress brotli fixture");
+        }
+        bytes
+    };
+    let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_ENCODING,
+        HeaderValue::from_str(encoding).expect("fixture encoding"),
+    );
+    response
 }
 
 pub async fn spawn_frame_host(child_url: &str) -> FixtureServer {
