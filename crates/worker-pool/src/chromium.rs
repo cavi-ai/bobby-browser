@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig};
 use chromiumoxide::cdp::browser_protocol::browser::{
@@ -11,7 +12,9 @@ use chromiumoxide::cdp::browser_protocol::browser::{
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
 use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
+use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
 use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
+use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
 use futures::StreamExt;
@@ -19,10 +22,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
-    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
-    CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, ListPagesCommand,
-    NavigateCommand, OpenPageCommand, PageEvidence, PageId, SessionId, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
+    ClickCommand, ClosePageCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand,
+    ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode,
+    SessionId, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
+    WorkerId,
 };
 
 use crate::{
@@ -82,6 +86,12 @@ impl WorkerFactory for ChromiumWorkerFactory {
             profile_dir,
             upload_roots: self.config.upload_roots.clone(),
             download_dir,
+            session_id: session_id.clone(),
+            artifacts: ArtifactStore::new(
+                self.config.artifacts_dir.clone(),
+                self.config.max_artifact_bytes,
+                self.config.max_screenshot_dimension,
+            ),
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
             handler_task: Mutex::new(Some(handler_task)),
@@ -94,6 +104,8 @@ struct ChromiumWorker {
     profile_dir: PathBuf,
     upload_roots: Vec<PathBuf>,
     download_dir: PathBuf,
+    session_id: SessionId,
+    artifacts: ArtifactStore,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
@@ -545,6 +557,100 @@ impl BrowserWorker for ChromiumWorker {
         }
     }
 
+    async fn capture_screenshot(
+        &self,
+        page_id: &PageId,
+        command: &CaptureScreenshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let (bytes, resolution) = match &command.mode {
+            ScreenshotMode::Viewport => (
+                page.screenshot(
+                    ScreenshotParams::builder()
+                        .format(CaptureScreenshotFormat::Png)
+                        .build(),
+                )
+                .await
+                .map_err(screenshot_error)?,
+                None,
+            ),
+            ScreenshotMode::FullPage => (
+                page.screenshot(
+                    ScreenshotParams::builder()
+                        .format(CaptureScreenshotFormat::Png)
+                        .full_page(true)
+                        .build(),
+                )
+                .await
+                .map_err(screenshot_error)?,
+                None,
+            ),
+            ScreenshotMode::Element { target } => {
+                let resolved = resolve_target(page_id, page, "", Some(target)).await?;
+                let bytes = resolved
+                    .element
+                    .screenshot(CaptureScreenshotFormat::Png)
+                    .await
+                    .map_err(screenshot_error)?;
+                (bytes, Some(resolved.evidence))
+            }
+            ScreenshotMode::Clip {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || !width.is_finite()
+                    || !height.is_finite()
+                    || *width <= 0.0
+                    || *height <= 0.0
+                {
+                    return Err(driver_error(
+                        ErrorCode::InvalidRequest,
+                        "screenshot clip must have finite positive dimensions",
+                    ));
+                }
+                (
+                    page.screenshot(
+                        ScreenshotParams::builder()
+                            .format(CaptureScreenshotFormat::Png)
+                            .clip(Viewport {
+                                x: *x,
+                                y: *y,
+                                width: *width,
+                                height: *height,
+                                scale: 1.0,
+                            })
+                            .build(),
+                    )
+                    .await
+                    .map_err(screenshot_error)?,
+                    None,
+                )
+            }
+        };
+        let record = self
+            .artifacts
+            .put_png(&self.session_id, page_id, &bytes)
+            .await
+            .map_err(|error| driver_error(ErrorCode::ScreenshotCaptureFailed, error))?;
+        let mut evidence = vec![Evidence::Screenshot {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            width: record.width,
+            height: record.height,
+            bytes: record.bytes,
+            sha256: record.sha256,
+        }];
+        if let Some(resolution) = resolution {
+            evidence.push(resolution);
+        }
+        Ok(evidence)
+    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
         if let Some(mut browser) = self.browser.lock().await.take() {
@@ -715,6 +821,10 @@ async fn page_evidence(page_id: PageId, page: &Page) -> Result<PageEvidence, Com
 
 fn command_failed(error: chromiumoxide::error::CdpError) -> CommandError {
     driver_error(ErrorCode::BrowserCommandFailed, error)
+}
+
+fn screenshot_error(error: chromiumoxide::error::CdpError) -> CommandError {
+    driver_error(ErrorCode::ScreenshotCaptureFailed, error)
 }
 
 fn driver_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandError {

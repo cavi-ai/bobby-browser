@@ -1,10 +1,11 @@
 use config::BrowserConfig;
 use std::path::PathBuf;
 use types::{
-    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
-    ElementState, ErrorCode, Evidence, InspectCommand, ListPagesCommand, NavigateCommand,
-    OpenPageCommand, PageId, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitUntil,
+    CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
+    ClickCommand, ClosePageCommand, ElementState, ErrorCode, Evidence, InspectCommand,
+    ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId,
+    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -42,6 +43,9 @@ async fn correlates_popup_and_download_before_clicking() {
         max_active: 1,
         upload_roots: vec![root.path().to_path_buf()],
         downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -134,6 +138,9 @@ async fn drives_a_real_chromium_page() {
         max_active: 8,
         upload_roots: vec![profiles.path().to_path_buf()],
         downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -224,6 +231,9 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         max_active: 1,
         upload_roots: vec![root.path().to_path_buf()],
         downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -312,6 +322,9 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
         max_active: 1,
         upload_roots: vec![root.path().to_path_buf()],
         downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -369,6 +382,85 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
             .await
             .unwrap();
         assert!(matches!(&evidence[0], Evidence::Wait { observations, .. } if *observations > 0));
+    }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
+    let root = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+    });
+    let worker = factory.launch(&session_id).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<main style='height:1200px'><button aria-label=Capture>proof</button></main>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let modes = [
+        ScreenshotMode::Viewport,
+        ScreenshotMode::FullPage,
+        ScreenshotMode::Element {
+            target: Box::new(TargetSpec {
+                role: Some("button".into()),
+                accessible_name: Some("Capture".into()),
+                ..TargetSpec::default()
+            }),
+        },
+        ScreenshotMode::Clip {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+    ];
+    for mode in modes {
+        let evidence = worker
+            .capture_screenshot(&page_id, &CaptureScreenshotCommand { mode })
+            .await
+            .unwrap();
+        let artifact_id = match &evidence[0] {
+            Evidence::Screenshot {
+                artifact_id,
+                width,
+                height,
+                bytes,
+                sha256,
+                ..
+            } => {
+                assert!(*width > 0 && *height > 0 && *bytes > 0);
+                assert_eq!(sha256.len(), 64);
+                artifact_id
+            }
+            other => panic!("unexpected evidence: {other:?}"),
+        };
+        assert!(root
+            .path()
+            .join("artifacts")
+            .join(session_id.0.to_string())
+            .join(format!("{artifact_id}.png"))
+            .is_file());
     }
     worker.close().await.unwrap();
 }

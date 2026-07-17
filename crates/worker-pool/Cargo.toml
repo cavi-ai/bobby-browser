@@ -19,6 +19,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 types = { path = "../types" }
+artifact-store = { path = "../artifact-store" }
 
 [dev-dependencies]
 test-site = { path = "../test-site" }

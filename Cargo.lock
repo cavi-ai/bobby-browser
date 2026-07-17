@@ -33,10 +33,13 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing 0.1.44",
  "types",
+ "uuid",
 ]
 
 [[package]]
@@ -1896,11 +1899,13 @@ name = "worker-pool"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "artifact-store",
  "async-trait",
  "chromiumoxide",
  "config",
  "dom-engine",
  "futures",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

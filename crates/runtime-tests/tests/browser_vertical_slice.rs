@@ -152,6 +152,9 @@ async fn completes_dynamic_form_with_durable_evidence() {
             max_active: 8,
             upload_roots: vec![uploads_dir],
             downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
         },
         storage: StorageConfig {
             journal_path: journal_path.clone(),
