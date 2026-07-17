@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use network_engine::state::{HttpStateSnapshot, ResponseStateDelta};
 use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
@@ -137,6 +138,17 @@ pub trait BrowserWorker: Send + Sync {
         _page_id: &PageId,
         _command: &CaptureScreenshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn http_state(&self, _page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn commit_http_state(
+        &self,
+        _page_id: &PageId,
+        _expected_version: u64,
+        _delta: ResponseStateDelta,
+    ) -> Result<(), CommandError> {
         Err(unsupported_error())
     }
     async fn close(&self) -> Result<(), CommandError>;
