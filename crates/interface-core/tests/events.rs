@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use interface_core::{Event, EventGapReason, EventStore};
+use interface_core::{Event, EventGapReason, EventStore, MAX_EVENT_PAYLOAD_BYTES};
 use serde_json::json;
 use tokio::time::timeout;
 use types::EventCursor;
@@ -150,4 +150,27 @@ async fn sensitive_keys_are_detected_before_key_truncation() {
             .unwrap(),
         "[REDACTED]"
     );
+}
+
+#[tokio::test]
+async fn branching_payload_has_one_exact_aggregate_byte_budget_after_sanitizing() {
+    let events = EventStore::new(2);
+    let branch = (0..64)
+        .map(|index| {
+            json!({
+                format!("field-{index}"): "x".repeat(4096),
+                format!("authorization-{index}"): "Bearer branching-secret"
+            })
+        })
+        .collect::<Vec<_>>();
+    events
+        .append(Event::new("branching", json!({ "branches": branch })))
+        .await;
+
+    let batch = events.read_after(EventCursor::ZERO, 1).await.unwrap();
+    let serialized = serde_json::to_vec(&batch.events[0].payload).unwrap();
+    assert!(serialized.len() <= MAX_EVENT_PAYLOAD_BYTES);
+    let retained = String::from_utf8(serialized).unwrap();
+    assert!(!retained.contains("branching-secret"));
+    assert!(!retained.contains("Bearer"));
 }

@@ -1,7 +1,8 @@
 use chrono::{Duration, Utc};
 use interface_core::{
     canonical_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyPermit,
-    IdempotencyReservation, IdempotencyStore, RuntimeInterface,
+    IdempotencyReservation, IdempotencyStore, RuntimeInterface, SessionOwnershipAuthority,
+    SessionOwnershipRegistry,
 };
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use types::{
@@ -192,6 +193,38 @@ async fn runtime_errors_are_mapped_without_dispatch_outcome_flattening() {
         | CommandOutcome::Failed { command_id, .. } => command_id,
     };
     assert_eq!(actual, command_id);
+}
+
+#[tokio::test]
+async fn authenticated_session_creation_populates_the_trusted_ownership_authority() {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000009")),
+            [Capability::SessionWrite],
+            expiry(),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let handle = authority.verify(&token).await.unwrap();
+    let context = handle.context(expiry(), None);
+    let principal = context.principal_id.clone();
+    let (ownership, recorder) = SessionOwnershipRegistry::bounded(8);
+    let api =
+        AuthenticatedRuntime::with_session_ownership(RuntimeService::default(), handle, recorder);
+
+    let session = api
+        .create_session(
+            context,
+            CreateSessionRequest {
+                profile: "owned-session".into(),
+                proxy: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(ownership.owns_session(&principal, &session.id));
 }
 
 #[tokio::test]

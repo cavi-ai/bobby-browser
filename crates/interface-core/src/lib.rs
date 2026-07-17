@@ -2,6 +2,7 @@ mod artifacts;
 mod auth;
 mod events;
 mod idempotency;
+mod session_ownership;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -11,11 +12,20 @@ use types::{
     RecoveryDecision, RequestContext, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
 };
 
-pub use artifacts::{ArtifactContent, ArtifactReader, ArtifactReference};
+pub use artifacts::{
+    ArtifactContent, ArtifactOwnershipLimits, ArtifactReader, ArtifactReaderInitError,
+    ArtifactReference,
+};
 pub use auth::{Authority, AuthorityStore, CapabilityHandle, IssuedToken};
-pub use events::{Event, EventBatch, EventGap, EventGapReason, EventStore};
+pub use events::{
+    Event, EventBatch, EventGap, EventGapReason, EventStore, MAX_EVENT_PAYLOAD_BYTES,
+};
 pub use idempotency::{
     canonical_sha256, IdempotencyPermit, IdempotencyReservation, IdempotencyStore,
+};
+pub use session_ownership::{
+    SessionOwnershipAuthority, SessionOwnershipRecordError, SessionOwnershipRecorder,
+    SessionOwnershipRegistry,
 };
 
 pub type InterfaceResult<T> = Result<T, InterfaceError>;
