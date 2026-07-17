@@ -67,7 +67,11 @@ Every completed adaptive command includes `ExecutionPath` evidence. Operators ca
 distinguish `directHttp`, `chromium`, and `chromiumFallback`, along with the reason,
 state version, elapsed time, byte count, and hash where applicable. The following
 commands are the correctness and capacity proof; health and smoke checks remain
-preliminary signals only:
+preliminary signals only. Capacity correctness is based on completion count, the
+fixture-observed concurrency peak, and execution-path evidence. Performance is
+reported separately from warmed sequential wall-clock samples for direct runtime
+inspection versus Chromium navigation plus forced inspection; median ordering is
+measurement evidence, not a correctness assertion.
 
 ```bash
 cargo test -p runtime-tests --test adaptive_http_security -- --nocapture

@@ -7,4 +7,5 @@ edition.workspace = true
 axum.workspace = true
 brotli = "8"
 flate2 = "1"
+futures-util.workspace = true
 tokio.workspace = true
