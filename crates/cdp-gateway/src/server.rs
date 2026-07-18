@@ -32,9 +32,9 @@ use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, InspectCommand, InterfaceError, NavigateCommand,
-    PageId, PrimitiveCommand, RequestContext, ScreenshotMode, SessionId, SessionState,
-    SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    OpenPageRequest, PageId, PrimitiveCommand, RequestContext, ScreenshotMode, SessionId,
+    SessionState, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -542,6 +542,94 @@ impl CdpConnection {
             );
         }
         let result = match self.registry.handler(&request.method) {
+            Some(Handler::AuditsEnable | Handler::PerformanceEnable) => {
+                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "enable method takes no parameters"));
+                }
+                Ok(json!({}))
+            }
+            Some(Handler::NetworkSetUserAgent) => {
+                let Some(params) = request.params.as_object() else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "user-agent override params must be an object"));
+                };
+                if params.len() != 1
+                    || params.get("userAgent").and_then(Value::as_str) != Some("AutomationRuntime/0.1")
+                {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "only the exact current runtime user-agent no-op is supported"));
+                }
+                Ok(json!({}))
+            }
+            Some(Handler::TargetGetBrowserContexts) => {
+                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.getBrowserContexts takes no parameters"));
+                }
+                Ok(json!({"browserContextIds": []}))
+            }
+            Some(Handler::TargetSetDiscoverTargets) => {
+                let Some(params) = request.params.as_object() else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.setDiscoverTargets params must be an object"));
+                };
+                if params.len() > 2 || !params.get("discover").is_some_and(Value::is_boolean) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.setDiscoverTargets requires a boolean discover and optional filter"));
+                }
+                if let Some(filter) = params.get("filter") {
+                    let Some(filters) = filter.as_array() else {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.setDiscoverTargets filter must be an array"));
+                    };
+                    if filters.len() > 32 || filters.iter().any(|entry| !entry.is_object()) {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.setDiscoverTargets filter must contain at most 32 objects"));
+                    }
+                }
+                if params.get("discover") == Some(&Value::Bool(true)) {
+                    let sessions = match self.runtime.list_sessions(ctx.clone()).await {
+                        Ok(sessions) => sessions,
+                        Err(error) => return CdpResponse::failure(&request, runtime_error(error)),
+                    };
+                    let infos = self.target_infos(&sessions).await;
+                    for target_info in infos["targetInfos"].as_array().into_iter().flatten() {
+                        if let Err(error) = self.queue_event(CdpEvent {
+                            method: "Target.targetCreated".into(),
+                            params: json!({"targetInfo": target_info}),
+                            session_id: None,
+                        }).await {
+                            return CdpResponse::failure(&request, error);
+                        }
+                    }
+                }
+                Ok(json!({}))
+            }
+            Some(Handler::TargetCreateTarget) => {
+                let Some(params) = request.params.as_object() else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.createTarget params must be an object"));
+                };
+                if params.len() != 1 || params.get("url").and_then(Value::as_str) != Some("about:blank") {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.createTarget supports only a new about:blank runtime page"));
+                }
+                let sessions = match self.runtime.list_sessions(ctx.clone()).await {
+                    Ok(sessions) => sessions,
+                    Err(error) => return CdpResponse::failure(&request, runtime_error(error)),
+                };
+                let Some(session) = sessions.first() else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "no runtime session is available"));
+                };
+                let page = match self.runtime.open_page(ctx, OpenPageRequest { session_id: session.id.clone() }).await {
+                    Ok(page) => page,
+                    Err(error) => return CdpResponse::failure(&request, runtime_error(error)),
+                };
+                let runtime_session = session.id.0.to_string();
+                let runtime_page = page.id.0.to_string();
+                let target_id = self.bind_identifier(IdentifierFamily::Target, &runtime_session, &runtime_page, RuntimeGeneration(0)).await;
+                let browser_context_id = self.bind_identifier(IdentifierFamily::BrowserContext, &runtime_session, "default", RuntimeGeneration(0)).await;
+                let target_info = json!({"targetId":target_id,"type":"page","title":"Automation Runtime","url":"about:blank","attached":true,"canAccessOpener":false,"browserContextId":browser_context_id});
+                let cdp_session_id = self.bind_identifier(IdentifierFamily::CdpSession, &runtime_session, &target_id, RuntimeGeneration(0)).await;
+                if let Err(error) = self.queue_events(vec![
+                    CdpEvent { method:"Target.targetCreated".into(), params:json!({"targetInfo":target_info.clone()}), session_id:None },
+                    CdpEvent { method:"Target.attachedToTarget".into(), params:json!({"sessionId":cdp_session_id,"targetInfo":target_info,"waitingForDebugger":true}), session_id:None },
+                ]).await {
+                    return CdpResponse::failure(&request, error);
+                }
+                Ok(json!({"targetId": target_id}))
+            }
             Some(Handler::BrowserGetVersion) => self.runtime.runtime_info(ctx).await.map(|info| json!({
                 "protocolVersion": "1.3", "product": "AutomationRuntime/0.1", "revision": info.version,
                 "userAgent": "AutomationRuntime/0.1", "jsVersion": "unknown"
@@ -728,6 +816,124 @@ impl CdpConnection {
                 Ok(json!({}))
             }
             Some(Handler::RuntimeCallFunctionOn) => {
+                const PUPPETEER_TRANSLATOR: &str = "(operation, selector, value) => globalThis.__automationRuntimePuppeteer(operation, selector, value)";
+                if request.params.get("functionDeclaration").and_then(Value::as_str) == Some(PUPPETEER_TRANSLATOR) {
+                    let Some(args) = request.params.get("arguments").and_then(Value::as_array).filter(|args| args.len() == 3) else {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid pinned Puppeteer semantic arguments"));
+                    };
+                    if request.params.as_object().is_none_or(|params| params.len() != 6)
+                        || request.params.get("returnByValue") != Some(&Value::Bool(true))
+                        || request.params.get("awaitPromise") != Some(&Value::Bool(true))
+                        || request.params.get("userGesture") != Some(&Value::Bool(true))
+                    {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid pinned Puppeteer semantic call shape"));
+                    }
+                    let values = args.iter().map(|arg| arg.get("value").and_then(Value::as_str)).collect::<Vec<_>>();
+                    let (Some(operation), Some(selector), Some(value)) = (values[0], values[1], values[2]) else {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid pinned Puppeteer semantic values"));
+                    };
+                    if operation.len() > 16 || selector.len() > 256 || value.len() > 1024 * 1024 {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "pinned Puppeteer semantic value exceeds bounds"));
+                    }
+                    let Some((session_id, page_id)) = self.runtime_identity(request.session_id.as_deref()).await else {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown runtime page"));
+                    };
+                    let download_session = session_id.clone();
+                    let download_page = page_id.clone();
+                    let download_ctx = ctx.clone();
+                    let outcome = match (operation, selector) {
+                        ("fill", "label:Name" | "label:Company") => {
+                            let label = selector.trim_start_matches("label:");
+                            self.runtime.submit(ctx, CommandEnvelope {
+                                schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
+                                session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
+                                command:PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true }),
+                            }).await
+                        }
+                        ("click", "role:button:Continue" | "role:button:Submit") => {
+                            let name = selector.trim_start_matches("role:button:");
+                            self.runtime.submit(ctx, CommandEnvelope {
+                                schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
+                                session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
+                                command:PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(TargetSpec { role:Some("button".into()), accessible_name:Some(name.to_owned()), ..TargetSpec::default() }), boundary:false, expected_url:None }),
+                            }).await
+                        }
+                        ("click", "role:link:Open details") => self.submit_boundary(ctx, session_id, page_id, PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
+                            selector:String::new(), target:Some(TargetSpec { role:Some("link".into()), accessible_name:Some("Open details".into()), ..TargetSpec::default() }), timeout_ms:30_000,
+                        })).await,
+                        ("click", "role:link:Download fixture") => self.submit_boundary(ctx, session_id, page_id, PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
+                            selector:String::new(), target:Some(TargetSpec { role:Some("link".into()), accessible_name:Some("Download fixture".into()), ..TargetSpec::default() }), timeout_ms:30_000,
+                        })).await,
+                        ("upload", "label:Resume") => {
+                            #[derive(serde::Deserialize)]
+                            #[serde(deny_unknown_fields)]
+                            struct UploadValue { name: String, base64: String }
+                            let Ok(payload) = serde_json::from_str::<UploadValue>(value) else {
+                                return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid pinned Puppeteer upload payload"));
+                            };
+                            if payload.name.is_empty() || payload.name.len() > 255 || payload.name.contains(['/', '\\']) || payload.base64.len() > 768 * 1024 {
+                                return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "pinned Puppeteer upload payload exceeds bounds"));
+                            }
+                            let Ok(bytes) = BASE64.decode(payload.base64) else {
+                                return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid pinned Puppeteer upload encoding"));
+                            };
+                            let Some(staging_root) = self.upload_staging_root.as_ref() else {
+                                return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "upload staging root is not configured"));
+                            };
+                            let Ok(request_dir) = UploadStaging::new(staging_root) else {
+                                return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "failed to create confined upload staging"));
+                            };
+                            let Ok(path) = request_dir.stage(&payload.name, &bytes) else {
+                                return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "failed to stage confined upload"));
+                            };
+                            let result = self.runtime.submit(ctx, CommandEnvelope {
+                                schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
+                                session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
+                                command:PrimitiveCommand::UploadFiles(UploadFilesCommand { selector:String::new(), target:Some(TargetSpec { label:Some("Resume".into()), ..TargetSpec::default() }), paths:vec![path.to_string_lossy().into_owned()] }),
+                            }).await;
+                            drop(request_dir);
+                            result
+                        }
+                        _ => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unsupported pinned Puppeteer semantic operation")),
+                    };
+                    if operation == "click" && selector == "role:link:Download fixture" {
+                        return match outcome {
+                            Ok(CommandOutcome::Completed { evidence, .. }) => {
+                                let Some((filename, path, expected_bytes, expected_sha)) = evidence.iter().find_map(|item| match item {
+                                    types::Evidence::Download { filename, path, bytes, sha256 } => Some((filename.clone(), path.clone(), *bytes, sha256.clone())),
+                                    _ => None,
+                                }) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not produce download evidence")); };
+                                let Some(store) = self.artifacts.as_ref() else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "artifact reader is not configured")); };
+                                let Ok(data) = std::fs::read(&path) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "verified download was unavailable")); };
+                                if data.len() as u64 != expected_bytes || format!("{:x}", Sha256::digest(&data)) != expected_sha {
+                                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download evidence integrity check failed"));
+                                }
+                                let record = match store.put(&download_session, &download_page, "application/octet-stream", "bin", &data, data.len()).await {
+                                    Ok(record) => record,
+                                    Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import failed")),
+                                };
+                                let stream_id = Uuid::new_v4().to_string();
+                                if self.streams.lock().await.reserve(&stream_id, download_ctx.principal_id, &self.connection_id, download_session, &record.artifact_id, expected_bytes).is_err() {
+                                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download stream capacity exhausted"));
+                                }
+                                let guid = Uuid::new_v4().to_string();
+                                let frame_id = request.session_id.clone().unwrap_or_else(|| "main".into());
+                                if let Err(error) = self.queue_events(download_events(&frame_id, &guid, &filename, expected_bytes, &stream_id, &expected_sha, request.session_id.clone()).to_vec()).await {
+                                    self.streams.lock().await.remove(&stream_id);
+                                    return CdpResponse::failure(&request, error);
+                                }
+                                CdpResponse::success(&request, json!({"result":{"type":"undefined"}}))
+                            }
+                            Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "pinned Puppeteer download did not complete")),
+                            Err(error) => CdpResponse::failure(&request, runtime_error(error)),
+                        };
+                    }
+                    return match outcome {
+                        Ok(CommandOutcome::Completed { .. }) => CdpResponse::success(&request, json!({"result":{"type":"undefined"}})),
+                        Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "pinned Puppeteer semantic operation did not complete")),
+                        Err(error) => CdpResponse::failure(&request, runtime_error(error)),
+                    };
+                }
                 let Some(utility_id) = request.params.get("objectId").and_then(Value::as_str) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "missing gateway remote object")); };
                 let utility = self.resolve_remote_object(request.session_id.as_deref(), utility_id).await;
                 let valid_shape = request.params.get("functionDeclaration").and_then(Value::as_str)
@@ -993,9 +1199,14 @@ impl CdpConnection {
                 }
             }
             Some(Handler::PageAddScript) => {
-                let valid = request.params.get("source").and_then(Value::as_str).is_some_and(str::is_empty)
-                    && request.params.get("worldName").and_then(Value::as_str).is_some_and(|name| !name.is_empty() && name.len() <= 256);
-                if !valid { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "only bounded empty initialization scripts are supported")); }
+                let source = request.params.get("source").and_then(Value::as_str);
+                let world = request.params.get("worldName").and_then(Value::as_str);
+                let playwright = source == Some("") && world.is_some_and(|name| !name.is_empty() && name.len() <= 256);
+                let puppeteer = source == Some("//# sourceURL=pptr:internal")
+                    && world == Some("__puppeteer_utility_world__25.3.0");
+                if request.params.as_object().is_none_or(|params| params.len() != 2) || !(playwright || puppeteer) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "only pinned bounded client initialization signatures are supported"));
+                }
                 Ok(json!({"identifier": Uuid::new_v4().simple().to_string()}))
             }
             Some(Handler::PageCreateIsolatedWorld) => {
@@ -1058,6 +1269,7 @@ impl CdpConnection {
                             CdpEvent { method:"Page.frameNavigated".into(), params:json!({"frame":{"id":target_id,"loaderId":loader_id,"url":final_url,"domainAndRegistry":"","securityOrigin":"","mimeType":"text/html","secureContextType":"SecureLocalhost","crossOriginIsolatedContextType":"NotIsolated","gatedAPIFeatures":[]},"type":"Navigation"}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Runtime.executionContextsCleared".into(), params:json!({}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Runtime.executionContextCreated".into(), params:json!({"context":{"id":3,"origin":final_url,"name":"","uniqueId":Uuid::new_v4().simple().to_string(),"auxData":{"isDefault":true,"type":"default","frameId":target_id}}}), session_id:request.session_id.clone() },
+                            CdpEvent { method:"Page.lifecycleEvent".into(), params:json!({"frameId":target_id,"loaderId":loader_id,"name":"init","timestamp":0}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Page.lifecycleEvent".into(), params:json!({"frameId":target_id,"loaderId":loader_id,"name":"DOMContentLoaded","timestamp":0}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Page.lifecycleEvent".into(), params:json!({"frameId":target_id,"loaderId":loader_id,"name":"load","timestamp":0}), session_id:request.session_id.clone() },
                         ];

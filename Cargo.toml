@@ -20,6 +20,7 @@ members = [
   "crates/mcp-gateway",
   "crates/test-site",
   "crates/runtime-tests",
+  "crates/interface-conformance",
 ]
 resolver = "2"
 

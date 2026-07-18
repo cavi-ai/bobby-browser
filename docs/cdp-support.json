@@ -2,6 +2,48 @@
   "schemaRevision": "1",
   "methods": [
     {
+      "name": "Audits.enable",
+      "requiredCapability": "page:read",
+      "parameterSchemaRevision": "cdp-1.3",
+      "translationFunction": "configure_gateway_audit_events",
+      "scenarios": ["puppeteer-connect"]
+    },
+    {
+      "name": "Performance.enable",
+      "requiredCapability": "page:read",
+      "parameterSchemaRevision": "cdp-1.3",
+      "translationFunction": "configure_gateway_performance_metrics",
+      "scenarios": ["puppeteer-connect"]
+    },
+    {
+      "name": "Network.setUserAgentOverride",
+      "requiredCapability": "browser:mutate",
+      "parameterSchemaRevision": "puppeteer-25.3.0-exact-current-user-agent-noop",
+      "translationFunction": "validate_exact_current_user_agent_noop",
+      "scenarios": ["puppeteer-connect"]
+    },
+    {
+      "name": "Target.getBrowserContexts",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "cdp-1.3",
+      "translationFunction": "list_runtime_browser_contexts",
+      "scenarios": ["puppeteer-connect"]
+    },
+    {
+      "name": "Target.setDiscoverTargets",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "puppeteer-25.3.0-target-discovery",
+      "translationFunction": "configure_gateway_target_discovery",
+      "scenarios": ["puppeteer-connect"]
+    },
+    {
+      "name": "Target.createTarget",
+      "requiredCapability": "page:write",
+      "parameterSchemaRevision": "puppeteer-25.3.0-about-blank-target",
+      "translationFunction": "open_runtime_page",
+      "scenarios": ["puppeteer-connect"]
+    },
+    {
       "name": "Browser.getVersion",
       "requiredCapability": "session:read",
       "parameterSchemaRevision": "cdp-1.3",
@@ -46,9 +88,9 @@
     {
       "name": "Page.addScriptToEvaluateOnNewDocument",
       "requiredCapability": "javascript:evaluate",
-      "parameterSchemaRevision": "cdp-1.3",
+      "parameterSchemaRevision": "playwright-1.61.1-puppeteer-25.3.0-pinned-init",
       "translationFunction": "validate_empty_init_script_compatibility",
-      "scenarios": ["playwright-connect-over-cdp"]
+      "scenarios": ["playwright-connect-over-cdp", "puppeteer-connect"]
     },
     {
       "name": "Page.createIsolatedWorld",
@@ -171,6 +213,13 @@
     }
   ],
   "events": [
+    {
+      "name": "Target.targetCreated",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "cdp-1.3",
+      "translationFunction": "runtime_target_discovered",
+      "scenarios": ["puppeteer-connect"]
+    },
     {
       "name": "Browser.downloadWillBegin",
       "requiredCapability": "file:download",

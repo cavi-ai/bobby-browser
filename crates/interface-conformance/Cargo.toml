@@ -1,0 +1,18 @@
+[package]
+name = "interface-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+sdk-core = { path = "../sdk-core" }
+interface-core = { path = "../interface-core" }
+types = { path = "../types" }
+mcp-gateway = { path = "../mcp-gateway" }
+chrono.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
