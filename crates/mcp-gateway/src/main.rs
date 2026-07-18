@@ -34,25 +34,35 @@ async fn run() -> anyhow::Result<()> {
         anyhow::bail!("startup credential expired during runtime construction");
     }
     let artifact_records = config.interface.max_event_retention;
-    let artifact_bytes = u64::try_from(config.browser.max_artifact_bytes)?
+    let artifact_max_bytes = config
+        .browser
+        .max_artifact_bytes
+        .max(config.http.max_download_bytes);
+    let artifact_bytes = u64::try_from(artifact_max_bytes)?
         .checked_mul(u64::try_from(artifact_records)?)
         .ok_or_else(|| anyhow::anyhow!("artifact ownership byte bound overflow"))?;
     let (ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
     let artifact_store = ArtifactStore::new(
         config.browser.artifacts_dir.clone(),
-        config.browser.max_artifact_bytes,
+        artifact_max_bytes,
         config.browser.max_screenshot_dimension,
     );
     let artifact_reader = ArtifactReader::new(
-        artifact_store,
+        artifact_store.clone(),
         ownership,
-        config.browser.max_artifact_bytes,
+        artifact_max_bytes,
         ArtifactOwnershipLimits {
             max_records: artifact_records,
             max_bytes: artifact_bytes,
         },
     )?;
-    let resources = ArtifactResources::new(artifact_reader, artifact_records);
+    let resources = ArtifactResources::production(
+        artifact_reader,
+        artifact_store,
+        config.browser.downloads_dir.clone(),
+        config.http.max_download_bytes,
+        artifact_records,
+    );
     let authenticated = Arc::new(AuthenticatedRuntime::with_session_ownership(
         runtime,
         handle.clone(),

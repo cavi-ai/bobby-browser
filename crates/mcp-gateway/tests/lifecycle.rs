@@ -150,6 +150,7 @@ async fn initialize_rejects_non_object_and_oversized_capabilities_without_advanc
         json!("invalid"),
         json!([]),
         json!({"experimental":{"x":"x".repeat(20 * 1024)}}),
+        json!({"experimental":{"scalar":true}}),
     ] {
         let server = fixture_server(vec![Capability::SessionRead]).await;
         let rejected = server
@@ -181,6 +182,37 @@ async fn initialize_rejects_non_object_and_oversized_capabilities_without_advanc
             .unwrap();
         assert!(accepted.get("result").is_some(), "{accepted}");
     }
+}
+
+#[tokio::test]
+async fn initialize_accepts_official_2025_11_25_client_capabilities_and_extensions() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(
+            json!(70),
+            "initialize",
+            json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{
+                    "roots":{"listChanged":true},
+                    "sampling":{"context":{},"tools":{}},
+                    "elicitation":{"form":{},"url":{}},
+                    "tasks":{
+                        "list":{},"cancel":{},
+                        "requests":{
+                            "sampling":{"createMessage":{}},
+                            "elicitation":{"create":{}}
+                        }
+                    },
+                    "experimental":{"com.example/feature":{"enabled":true}},
+                    "com.example/custom":{"version":1}
+                },
+                "clientInfo":{"name":"official-client","version":"1"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(response.get("result").is_some(), "{response}");
 }
 
 #[tokio::test]
