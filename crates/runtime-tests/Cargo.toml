@@ -6,8 +6,12 @@ edition.workspace = true
 [dependencies]
 artifact-store = { path = "../artifact-store" }
 checkpoint-store = { path = "../checkpoint-store" }
+cdp-gateway = { path = "../cdp-gateway" }
 chrono.workspace = true
 config = { path = "../config" }
+interface-conformance = { path = "../interface-conformance" }
+interface-core = { path = "../interface-core" }
+mcp-gateway = { path = "../mcp-gateway" }
 network-engine = { path = "../network-engine" }
 sdk-core = { path = "../sdk-core" }
 session-manager = { path = "../session-manager" }
@@ -17,5 +21,6 @@ tempfile.workspace = true
 test-site = { path = "../test-site" }
 tokio.workspace = true
 types = { path = "../types" }
+uuid.workspace = true
 workflow-journal = { path = "../workflow-journal" }
 worker-pool = { path = "../worker-pool" }

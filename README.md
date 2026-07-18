@@ -1,12 +1,130 @@
 # Automation Runtime
 
-A browser automation runtime with three control surfaces:
+A browser automation runtime with five authenticated control surfaces:
 
-- Native SDK
-- MCP server
-- CDP compatibility layer
+- Rust SDK
+- TypeScript SDK over HTTP
+- MCP over stdio
+- Playwright over authenticated CDP
+- Puppeteer over authenticated CDP
 
-This scaffold implements the first thin vertical slice:
+All adapters use the same capability, idempotency, evidence, checkpoint, and
+event contracts. Authentication and authorization fail closed; credentials are
+never accepted in URLs or query strings.
+
+## Authentication bootstrap
+
+The runtime enrolls a SHA-256 digest of a high-entropy bearer credential at
+startup. Supply the plaintext credential only through a protected process input
+or secret manager, then send it as `Authorization: Bearer <token>`. Never put a
+token in a URL, command argument, config committed to source control, or log.
+The examples below deliberately use the non-secret placeholder
+`$AUTOMATION_RUNTIME_TOKEN`.
+
+Tokens bind one principal to an explicit capability set and expiry. Revocation
+and expiry are checked again at dispatch, including long-lived MCP and CDP
+connections. Typical least-privilege capabilities include `session:read`,
+`session:write`, `page:read`, `page:write`, `browser:mutate`, `file:upload`,
+`file:download`, `artifact:read`, `artifact:capture`, `recovery:read`, and
+`recovery:write`. JavaScript evaluation requires its own capability.
+
+## Rust quick start
+
+```rust,no_run
+use chrono::{Duration, Utc};
+use interface_core::AuthorityStore;
+use types::{Capability, PrincipalId};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let authority = AuthorityStore::in_memory();
+let issued = authority.issue(
+    PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+    [Capability::SessionRead, Capability::SessionWrite],
+    Utc::now() + Duration::minutes(5),
+).await?;
+let handle = authority.verify(&issued.expose_once()).await?;
+let context = handle.context(Utc::now() + Duration::seconds(30), None);
+# let _ = context;
+# Ok(()) }
+```
+
+## TypeScript quick start
+
+```ts
+import { BrowserRuntimeClient } from "@bobby-browser/sdk";
+
+const client = new BrowserRuntimeClient({
+  baseUrl: "http://127.0.0.1:7777",
+  bearerToken: process.env.AUTOMATION_RUNTIME_TOKEN!,
+});
+const info = await client.runtimeInfo();
+```
+
+The HTTP API requires `Authorization`, the current `X-Interface-Version`, and a
+bounded correlation identifier. Mutating requests additionally require an
+idempotency key. Duplicate or conflicting security-sensitive headers are
+rejected; bodies are limited to 1 MiB by default.
+
+## MCP stdio
+
+Launch `mcp-gateway` with the credential delivered through its protected
+startup channel. Configure an MCP client to run the binary directly; stdout is
+reserved exclusively for newline-delimited JSON-RPC and diagnostics go to
+stderr. The supported protocol version is `2025-11-25`; frames are limited to
+1 MiB, tool input to 256 KiB, and event reads to 256 records. Initialize before
+calling tools. Cancellation, EOF, expiry, and revocation close or reject work
+without leaking credentials.
+
+```json
+{
+  "mcpServers": {
+    "automation-runtime": {
+      "command": "mcp-gateway",
+      "env": { "AUTOMATION_RUNTIME_TOKEN": "${AUTOMATION_RUNTIME_TOKEN}" }
+    }
+  }
+}
+```
+
+## Authenticated CDP
+
+Discovery is available at `/json/version` and `/json/list`; WebSockets use
+`/devtools/browser/:id` and `/devtools/page/:id`. Every discovery request and
+WebSocket upgrade must include `Authorization: Bearer <token>`. Connect with
+Playwright `1.61.1` via `chromium.connectOverCDP(endpoint, { headers })`, or
+Puppeteer `25.3.0` via `puppeteer.connect({ browserWSEndpoint, headers })`.
+Connections are limited to 128 in-flight messages, 1024 queued events, and
+1 MiB frames. Runtime identifiers are connection-scoped and worker-generation
+aware.
+
+The compiled allowlist, client coverage, and explicitly unsupported domains are
+published in [`docs/cdp-support.json`](docs/cdp-support.json). Raw CDP
+forwarding is intentionally unsupported. Features absent from that manifest,
+arbitrary browser process control, unbounded streams, URL credentials, remote
+filesystem paths, and implicit replay of uncertain boundary commands are not
+supported.
+
+## Events and recovery
+
+Persist the last processed event cursor. Reconnect with that cursor to resume
+exactly. If retention has advanced, the adapter returns an `EventGap` with
+`historyLost` and `earliestAvailable`; restart from that cursor only after
+re-reading durable session/checkpoint state. `invalidCursor` and `invalidLimit`
+are caller errors. Never guess across a gap.
+
+Replayable work may retry only through runtime policy. Reconciliable work is
+inspected against checkpoint invariants. Any loss at accepted, prepared,
+executing, verifying, or result-prepared boundaries that cannot prove the
+outcome remains `NeedsReconciliation`; it is never silently replayed.
+
+## Capacity and performance proof
+
+Release gates exercise 64 authenticated clients, eight active workflows, 32
+warm/resumable sessions, slow event consumers, and concurrent artifact reads.
+Equivalent-work measurements use at least seven warmed samples per adapter and
+report median/IQR for adapter overhead separately from browser time. Raw JSONL,
+heap profiles, and CPU profiles belong under `benchmarks/raw/` and are ignored.
+The concise summary printed by the performance gate is the reproducible record.
 
 - broker startup
 - in-memory session/page state
