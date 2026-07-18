@@ -4,6 +4,7 @@ use interface_conformance::{
 };
 use interface_core::RuntimeInterface;
 use sha2::{Digest, Sha256};
+use std::time::{Duration, Instant};
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
@@ -14,14 +15,12 @@ use types::{
 
 #[tokio::test]
 async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
+    emit_performance_phase("boot");
     let harness = ChromeRuntimeHarness::start().await;
+    emit_performance_phase("harness-ready");
     let runtime = harness.runtime.clone();
     let context = || harness.context();
-    let mut observed = Vec::new();
-    let mut event_ordering = Vec::new();
-    observed.push("runtime.info");
     runtime.runtime_info(context()).await.unwrap();
-    observed.push("session.create");
     let session = runtime
         .create_session(
             context(),
@@ -32,7 +31,6 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         )
         .await
         .unwrap();
-    observed.push("page.open");
     let page = runtime
         .open_page(
             context(),
@@ -42,6 +40,54 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         )
         .await
         .unwrap();
+    let samples = performance_samples();
+    if let Some(samples) = samples {
+        emit_performance_phase("warmup-start");
+        run_rust_sample(&harness, &session.id, &page.id).await;
+        emit_performance_phase("warmup-end");
+        emit_performance_event(
+            serde_json::json!({"event":"measurement-start","adapter":"rust-sdk","samples":samples,"rootPid":std::process::id()}),
+        );
+        let mut measured = Vec::with_capacity(samples);
+        for index in 0..samples {
+            emit_performance_phase(&format!("sample-{index}-start"));
+            let started = Instant::now();
+            let operation = run_rust_sample(&harness, &session.id, &page.id).await;
+            let wall = started.elapsed();
+            let sample = serde_json::json!({
+                "adapterWallMs": duration_ms(wall),
+                "operationMs": duration_ms(operation),
+                "adapterOverheadMs": duration_ms(wall) - duration_ms(operation),
+            });
+            emit_performance_event(
+                serde_json::json!({"event":"sample","adapter":"rust-sdk","index":index,"sample":sample,"rootPid":std::process::id()}),
+            );
+            emit_performance_phase(&format!("sample-{index}-end"));
+            measured.push(sample);
+        }
+        emit_performance_event(
+            serde_json::json!({"event":"client-disconnected","adapter":"rust-sdk","samples":measured,"rootPid":std::process::id()}),
+        );
+        wait_for_rss_acknowledgement();
+    } else {
+        run_rust_sample(&harness, &session.id, &page.id).await;
+    }
+}
+
+async fn run_rust_sample(
+    harness: &ChromeRuntimeHarness,
+    session_id: &types::SessionId,
+    page_id: &types::PageId,
+) -> Duration {
+    let runtime = harness.runtime.clone();
+    let context = || harness.context();
+    let mut observed = Vec::new();
+    let mut event_ordering = Vec::new();
+    let operation_started = Instant::now();
+    observed.push("runtime.info");
+    runtime.runtime_info(context()).await.unwrap();
+    observed.push("session.create");
+    observed.push("page.open");
     let workflow = WorkflowId::new();
     let attempt = AttemptId::new();
     let envelope = |id: CommandId, command: PrimitiveCommand| CommandEnvelope {
@@ -49,8 +95,8 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         command_id: id,
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
-        session_id: session.id.clone(),
-        page_id: Some(page.id.clone()),
+        session_id: session_id.clone(),
+        page_id: Some(page_id.clone()),
         deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
         command,
     };
@@ -122,8 +168,8 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
-        session_id: session.id.clone(),
-        page_id: page.id.clone(),
+        session_id: session_id.clone(),
+        page_id: page_id.clone(),
         restart_url: url.clone(),
         current_url: url.clone(),
         cursor: Some(inspect_id),
@@ -188,8 +234,8 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
-        session_id: session.id.clone(),
-        page_id: page.id.clone(),
+        session_id: session_id.clone(),
+        page_id: page_id.clone(),
         restart_url: url.clone(),
         current_url: url.clone(),
         cursor: Some(inspect_id),
@@ -261,7 +307,7 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         harness.config.browser.max_artifact_bytes,
         harness.config.browser.max_screenshot_dimension,
     );
-    let shot_bytes = store.get(&session.id, &shot.0).await.unwrap();
+    let shot_bytes = store.get(session_id, &shot.0).await.unwrap();
     assert_eq!(shot_bytes.len() as u64, shot.1);
     assert_eq!(format!("{:x}", Sha256::digest(&shot_bytes)), shot.2);
     observed.push("checkpoint.save");
@@ -300,6 +346,7 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         .await
         .unwrap_err();
     assert_eq!(denied.required_capability, Some(Capability::SessionRead));
+    let operation_elapsed = operation_started.elapsed();
     let download = completed(&boundary)
         .iter()
         .find_map(|item| {
@@ -356,6 +403,65 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
     emit_equality_proof(&proof);
     validate_canonical_proof(proof).unwrap();
     assert_eq!(observed, CANONICAL_STEPS);
+    operation_elapsed
+}
+
+fn performance_samples() -> Option<usize> {
+    let raw = std::env::var("CONFORMANCE_PERFORMANCE_SAMPLES").ok()?;
+    let samples = raw.parse::<usize>().expect("performance sample count");
+    assert!(
+        samples >= 7,
+        "performance gate requires at least seven samples"
+    );
+    Some(samples)
+}
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+fn emit_performance_event(value: serde_json::Value) {
+    let Ok(directory) = std::env::var("CONFORMANCE_PERFORMANCE_CONTROL_DIR") else {
+        return;
+    };
+    std::fs::create_dir_all(&directory).unwrap();
+    let filename = match value["event"].as_str().unwrap() {
+        "measurement-start" => "ready.json".to_owned(),
+        "client-disconnected" => "disconnected.json".to_owned(),
+        "sample" => format!("sample-{}.json", value["index"].as_u64().unwrap()),
+        event => panic!("unknown performance event {event}"),
+    };
+    let destination = std::path::Path::new(&directory).join(filename);
+    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec(&value).unwrap()).unwrap();
+    std::fs::rename(temporary, destination).unwrap();
+}
+fn emit_performance_phase(phase: &str) {
+    let Ok(directory) = std::env::var("CONFORMANCE_PERFORMANCE_CONTROL_DIR") else {
+        return;
+    };
+    std::fs::create_dir_all(&directory).unwrap();
+    let destination = std::path::Path::new(&directory).join(format!("phase-{phase}.json"));
+    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+    let value = serde_json::json!({"event":"phase","phase":phase,"rootPid":std::process::id()});
+    std::fs::write(&temporary, serde_json::to_vec(&value).unwrap()).unwrap();
+    std::fs::rename(temporary, destination).unwrap();
+}
+fn wait_for_rss_acknowledgement() {
+    if std::env::var("CONFORMANCE_PERFORMANCE_WAIT_FOR_RSS").as_deref() != Ok("1") {
+        return;
+    }
+    let directory = std::env::var("CONFORMANCE_PERFORMANCE_CONTROL_DIR")
+        .expect("performance control directory");
+    let acknowledgement = std::path::Path::new(&directory).join("ack.json");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&acknowledgement)
+            .is_ok_and(|value| value.contains("rss-sampled"))
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("RSS acknowledgement timed out");
 }
 
 fn completed(outcome: &CommandOutcome) -> &Vec<Evidence> {

@@ -900,9 +900,11 @@ impl CdpConnection {
                 }
             }
             Some(Handler::AutomationEventsRead) => {
-                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.eventsRead takes no parameters")); }
-                self.record_interface_event("events.read", json!({"cursor":0,"limit":64})).await;
-                match self.interface_events.read_after(types::EventCursor::ZERO,64).await {
+                let Some(params)=request.params.as_object() else { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.eventsRead requires object parameters")); };
+                let cursor=params.get("cursor").and_then(Value::as_u64).unwrap_or(0);
+                if params.keys().any(|key| key!="cursor") { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.eventsRead accepts only cursor")); }
+                self.record_interface_event("events.read", json!({"cursor":cursor,"limit":64})).await;
+                match self.interface_events.read_after(types::EventCursor(cursor),64).await {
                     Ok(batch)=>Ok(serde_json::to_value(batch).unwrap_or(Value::Null)),
                     Err(_)=>return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"browser interface event history gap")),
                 }

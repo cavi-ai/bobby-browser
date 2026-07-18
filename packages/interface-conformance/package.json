@@ -7,7 +7,9 @@
     "build": "tsc -p tsconfig.json",
     "test:playwright": "pnpm run build && node --test dist/test/playwright.test.js",
     "test:puppeteer": "pnpm run build && node --test dist/test/puppeteer.test.js",
-    "test": "pnpm run build && node dist/src/matrix.js"
+    "test": "pnpm run build && node --test dist/test/negative.test.js dist/test/performance-methodology.test.js && node dist/src/matrix.js",
+    "test:performance": "pnpm run build && node --test dist/test/performance.test.js",
+    "test:release": "pnpm run build && node --test dist/test/negative.test.js dist/test/performance-methodology.test.js && pnpm run test:performance"
   },
   "devDependencies": {
     "@bobby-browser/sdk": "workspace:*",

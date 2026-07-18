@@ -9,7 +9,10 @@ use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::AuthenticatedRuntime;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
@@ -54,33 +57,70 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         ),
     );
     initialize(&server).await;
-    let mut id = 10;
-    let mut observed = Vec::new();
-    let mut event_ordering = Vec::new();
-    observed.push("runtime.info");
-    tool(&server, &mut id, "runtime_info", json!({})).await;
-    observed.push("session.create");
+    let mut setup_id = 2;
     let session = tool(
         &server,
-        &mut id,
+        &mut setup_id,
         "session_create",
         json!({"profile":"mcp-conformance","proxy":null}),
     )
     .await;
     let session_id = session["id"].as_str().unwrap().to_owned();
-    observed.push("page.open");
     let page = tool(
         &server,
-        &mut id,
+        &mut setup_id,
         "page_open",
         json!({"sessionId":session_id}),
     )
     .await;
     let page_id = page["id"].as_str().unwrap().to_owned();
-    let workflow = WorkflowId::new();
-    let attempt = AttemptId::new();
     let sid = types::SessionId(uuid::Uuid::parse_str(&session_id).unwrap());
     let pid = types::PageId(uuid::Uuid::parse_str(&page_id).unwrap());
+    if let Some(samples) = performance_samples() {
+        run_mcp_sample(&harness, &server, &sid, &pid).await;
+        emit_performance_event(
+            json!({"event":"measurement-start","adapter":"mcp","samples":samples,"rootPid":std::process::id()}),
+        );
+        let mut measured = Vec::with_capacity(samples);
+        for index in 0..samples {
+            let started = Instant::now();
+            let operation = run_mcp_sample(&harness, &server, &sid, &pid).await;
+            let wall = started.elapsed();
+            let sample = json!({
+                "adapterWallMs": duration_ms(wall),
+                "operationMs": duration_ms(operation),
+                "adapterOverheadMs": duration_ms(wall) - duration_ms(operation),
+            });
+            emit_performance_event(
+                json!({"event":"sample","adapter":"mcp","index":index,"sample":sample,"rootPid":std::process::id()}),
+            );
+            measured.push(sample);
+        }
+        emit_performance_event(
+            json!({"event":"client-disconnected","adapter":"mcp","samples":measured,"rootPid":std::process::id()}),
+        );
+        wait_for_rss_acknowledgement();
+    } else {
+        run_mcp_sample(&harness, &server, &sid, &pid).await;
+    }
+}
+
+async fn run_mcp_sample(
+    harness: &ChromeRuntimeHarness,
+    server: &Server,
+    sid: &types::SessionId,
+    pid: &types::PageId,
+) -> Duration {
+    let mut id = 10;
+    let mut observed = Vec::new();
+    let mut event_ordering = Vec::new();
+    let operation_started = Instant::now();
+    observed.push("runtime.info");
+    tool(server, &mut id, "runtime_info", json!({})).await;
+    observed.push("session.create");
+    observed.push("page.open");
+    let workflow = WorkflowId::new();
+    let attempt = AttemptId::new();
     let env = |command_id, command| CommandEnvelope {
         schema_version: 1,
         command_id,
@@ -93,7 +133,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     };
     observed.push("command.navigate");
     command(
-        &server,
+        server,
         &mut id,
         &env(
             CommandId::new(),
@@ -111,7 +151,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     std::fs::write(&fixture, fixture_bytes).unwrap();
     observed.push("command.upload");
     command(
-        &server,
+        server,
         &mut id,
         &env(
             CommandId::new(),
@@ -126,7 +166,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     event_ordering.push("upload.completed".to_owned());
     let inspect_id = CommandId::new();
     let inspection = command(
-        &server,
+        server,
         &mut id,
         &env(
             inspect_id.clone(),
@@ -174,7 +214,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         created_at: chrono::Utc::now(),
     };
     tool(
-        &server,
+        server,
         &mut id,
         "checkpoint_save",
         json!({"checkpoint":popup_checkpoint,"evidence":inspect_evidence}),
@@ -182,7 +222,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     .await;
     event_ordering.push("checkpoint.saved".to_owned());
     command(
-        &server,
+        server,
         &mut id,
         &env(
             popup_id,
@@ -197,7 +237,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     event_ordering.push("boundary.completed".to_owned());
     let inspect_id = CommandId::new();
     let inspection = command(
-        &server,
+        server,
         &mut id,
         &env(
             inspect_id.clone(),
@@ -244,7 +284,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         created_at: chrono::Utc::now(),
     };
     let saved_checkpoint = tool(
-        &server,
+        server,
         &mut id,
         "checkpoint_save",
         json!({"checkpoint":checkpoint,"evidence":inspect_evidence}),
@@ -253,7 +293,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     event_ordering.push("checkpoint.saved".to_owned());
     let boundary: CommandOutcome = serde_json::from_value(
         command(
-            &server,
+            server,
             &mut id,
             &env(
                 boundary_id,
@@ -272,7 +312,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     observed.push("artifact.verify");
     let screenshot: CommandOutcome = serde_json::from_value(
         command(
-            &server,
+            server,
             &mut id,
             &env(
                 CommandId::new(),
@@ -314,7 +354,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     assert!(read["result"]["contents"][0]["blob"].is_string());
     observed.push("checkpoint.save");
     tool(
-        &server,
+        server,
         &mut id,
         "checkpoint_save",
         json!({"checkpoint":checkpoint,"evidence":checkpoint.evidence}),
@@ -322,7 +362,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     .await;
     observed.push("recovery.inspect");
     let recovery = tool(
-        &server,
+        server,
         &mut id,
         "workflow_recover",
         json!({"workflowId":workflow}),
@@ -338,7 +378,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     event_ordering.push("recovery.inspected".to_owned());
     observed.push("events.read");
     let events = tool(
-        &server,
+        server,
         &mut id,
         "events_read",
         json!({"cursor":0,"limit":16}),
@@ -370,6 +410,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         .await
         .unwrap();
     assert_eq!(denial["error"]["code"], -32601);
+    let operation_elapsed = operation_started.elapsed();
     let download = completed(&boundary)
         .iter()
         .find_map(|e| {
@@ -424,6 +465,54 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     emit_equality_proof(&proof);
     validate_canonical_proof(proof).unwrap();
     assert_eq!(observed, CANONICAL_STEPS);
+    operation_elapsed
+}
+
+fn performance_samples() -> Option<usize> {
+    let raw = std::env::var("CONFORMANCE_PERFORMANCE_SAMPLES").ok()?;
+    let samples = raw.parse::<usize>().expect("performance sample count");
+    assert!(
+        samples >= 7,
+        "performance gate requires at least seven samples"
+    );
+    Some(samples)
+}
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+fn emit_performance_event(value: Value) {
+    let Ok(directory) = std::env::var("CONFORMANCE_PERFORMANCE_CONTROL_DIR") else {
+        return;
+    };
+    std::fs::create_dir_all(&directory).unwrap();
+    let filename = match value["event"].as_str().unwrap() {
+        "measurement-start" => "ready.json".to_owned(),
+        "client-disconnected" => "disconnected.json".to_owned(),
+        "sample" => format!("sample-{}.json", value["index"].as_u64().unwrap()),
+        event => panic!("unknown performance event {event}"),
+    };
+    let destination = std::path::Path::new(&directory).join(filename);
+    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec(&value).unwrap()).unwrap();
+    std::fs::rename(temporary, destination).unwrap();
+}
+fn wait_for_rss_acknowledgement() {
+    if std::env::var("CONFORMANCE_PERFORMANCE_WAIT_FOR_RSS").as_deref() != Ok("1") {
+        return;
+    }
+    let directory = std::env::var("CONFORMANCE_PERFORMANCE_CONTROL_DIR")
+        .expect("performance control directory");
+    let acknowledgement = std::path::Path::new(&directory).join("ack.json");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if std::fs::read_to_string(&acknowledgement)
+            .is_ok_and(|value| value.contains("rss-sampled"))
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("RSS acknowledgement timed out");
 }
 
 async fn initialize(server: &Server) {

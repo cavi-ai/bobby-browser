@@ -8,6 +8,7 @@ import { test } from "node:test";
 import puppeteer from "puppeteer-core";
 import { puppeteerDriver } from "../src/puppeteer.js";
 import { auditProtocolInventory, equalityProof, runCanonicalScenario } from "../src/scenario.js";
+import { instrumentAsyncMethods, requestedPerformanceSamples, runPersistentPerformance } from "./performance-support.js";
 
 test("Puppeteer completes the canonical conformance workflow", { timeout: 120_000 }, async (t) => {
   const child = spawn(process.env.CARGO ?? "cargo", ["run", "-q", "-p", "cdp-gateway", "--example", "conformance_gateway"], {
@@ -39,7 +40,8 @@ test("Puppeteer completes the canonical conformance workflow", { timeout: 120_00
     headers: { Authorization: `Bearer ${boot.token}` },
     defaultViewport: null,
   });
-  t.after(() => browser.disconnect());
+  let disconnected = false;
+  t.after(() => { if (!disconnected) browser.disconnect(); });
   const pages = await browser.pages();
   const page = pages[0] ?? await browser.newPage();
   const dir = await mkdtemp(join(tmpdir(), "interface-conformance-puppeteer-"));
@@ -47,13 +49,27 @@ test("Puppeteer completes the canonical conformance workflow", { timeout: 120_00
   const fixture = join(dir, "resume.txt");
   await writeFile(fixture, "bounded fixture\n");
   const driver = puppeteerDriver(page, boot.endpoint, boot.token, boot.deniedToken);
-  const proof = await runCanonicalScenario(driver, boot.site, fixture);
   const manifest = JSON.parse(await readFile(new URL("../../../../docs/cdp-support.json", import.meta.url), "utf8"));
-  auditProtocolInventory(await driver.protocolInventory(), "puppeteer", manifest);
-  assert.equal(proof.outcomeStatus, "completed");
-  assert.equal(proof.authorization.denied.status, 403);
-  assert.deepEqual(proof.evidence.map(item => item.kind), ["navigation", "upload", "screenshot", "download"]);
-  if (process.env.CONFORMANCE_PROOF_DIR) await writeFile(join(process.env.CONFORMANCE_PROOF_DIR, "puppeteer.json"), JSON.stringify(equalityProof(proof)));
+  const execute = async (measured = driver) => {
+    const proof = await runCanonicalScenario(measured, boot.site, fixture);
+    assert.equal(proof.outcomeStatus, "completed");
+    assert.equal(proof.authorization.denied.status, 403);
+    assert.deepEqual(proof.evidence.map(item => item.kind), ["navigation", "upload", "screenshot", "download"]);
+    return proof;
+  };
+  const samples = requestedPerformanceSamples();
+  if (samples !== undefined) {
+    await runPersistentPerformance({
+      adapter: "puppeteer",
+      samples,
+      run: async timer => { await execute(instrumentAsyncMethods(driver, timer)); },
+      disconnect: async () => { browser.disconnect(); disconnected = true; },
+    });
+  } else {
+    const proof = await execute();
+    auditProtocolInventory(await driver.protocolInventory(), "puppeteer", manifest);
+    if (process.env.CONFORMANCE_PROOF_DIR) await writeFile(join(process.env.CONFORMANCE_PROOF_DIR, "puppeteer.json"), JSON.stringify(equalityProof(proof)));
+  }
 });
 
 async function readLine(stream: NodeJS.ReadableStream): Promise<string> {

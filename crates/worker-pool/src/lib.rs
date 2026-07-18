@@ -198,14 +198,12 @@ struct PoolInner {
 
 struct WorkerEntry {
     worker: OnceCell<Arc<dyn BrowserWorker>>,
-    permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl WorkerEntry {
     fn new() -> Self {
         Self {
             worker: OnceCell::new(),
-            permit: Mutex::new(None),
         }
     }
 }
@@ -213,6 +211,7 @@ impl WorkerEntry {
 #[derive(Clone)]
 pub struct WorkerLease {
     worker: Arc<dyn BrowserWorker>,
+    _active_permit: Arc<OwnedSemaphorePermit>,
 }
 
 impl WorkerLease {
@@ -242,6 +241,19 @@ impl WorkerPool {
     }
 
     pub async fn lease(&self, session_id: SessionId) -> Result<WorkerLease, CommandError> {
+        // Worker identity and profile remain warm across calls, while the fair
+        // semaphore bounds only operations that are actively using a worker.
+        // Owned permits are cancellation-safe and return automatically when a
+        // command finishes, errors, or its task is aborted.
+        let active_permit = self
+            .inner
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                resource_error("worker pool is shutting down; no new leases are available")
+            })?;
         let entry = {
             let mut entries = self.inner.entries.lock().await;
             entries
@@ -251,17 +263,11 @@ impl WorkerPool {
         };
 
         let factory = self.inner.factory.clone();
-        let permits = self.inner.permits.clone();
-        let entry_for_init = entry.clone();
         let session_for_init = session_id.clone();
         let result = entry
             .worker
             .get_or_try_init(|| async move {
-                let permit = permits.acquire_owned().await.map_err(|_| {
-                    resource_error("worker pool is shutting down; no new leases are available")
-                })?;
                 let worker = factory.launch(&session_for_init).await?;
-                *entry_for_init.permit.lock().await = Some(permit);
                 Ok(worker)
             })
             .await;
@@ -269,6 +275,7 @@ impl WorkerPool {
         match result {
             Ok(worker) => Ok(WorkerLease {
                 worker: worker.clone(),
+                _active_permit: Arc::new(active_permit),
             }),
             Err(error) => {
                 let mut entries = self.inner.entries.lock().await;
@@ -289,7 +296,6 @@ impl WorkerPool {
             if let Some(worker) = entry.worker.get() {
                 worker.close().await?;
             }
-            entry.permit.lock().await.take();
         }
         Ok(())
     }
@@ -299,7 +305,6 @@ impl WorkerPool {
         let Some(entry) = entry else {
             return Ok(());
         };
-        entry.permit.lock().await.take();
         if let Some(worker) = entry.worker.get() {
             worker.terminate().await?;
         }

@@ -20,6 +20,7 @@ async function semantic(page: Page, operation: string, selector: string, value =
 }
 
 export function puppeteerDriver(page: Page, endpoint: string, token: string, deniedToken: string): ScenarioDriver {
+  let eventCursor = 0;
   return {
     navigate: async (url) => { await page.goto(url); const bytes = Buffer.from(url); return evidence("navigation", bytes); },
     completeForm: async () => {
@@ -86,7 +87,11 @@ export function puppeteerDriver(page: Page, endpoint: string, token: string, den
     },
     checkpoint: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.checkpointSave"),
     recover: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.recoveryInspect"),
-    readEvents: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.eventsRead"),
+    readEvents: async () => {
+      const batch = await ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.eventsRead", { cursor: eventCursor });
+      eventCursor = batch.latestAvailable;
+      return batch;
+    },
     protocolInventory: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.protocolInventory"),
   };
 }
