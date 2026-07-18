@@ -183,6 +183,25 @@ fn manifest_and_handlers_are_bijective_and_have_no_wildcards() {
         progress.parameter_schema_revision,
         "playwright-1.61.1-download-stream"
     );
+    for method in [
+        "Emulation.setFocusEmulationEnabled",
+        "Emulation.setEmulatedMedia",
+    ] {
+        assert_eq!(
+            registry.method(method).unwrap().capability(),
+            Some(Capability::BrowserMutate)
+        );
+    }
+    for event in ["Browser.downloadWillBegin", "Browser.downloadProgress"] {
+        assert_eq!(
+            registry
+                .events()
+                .find(|entry| entry.name == event)
+                .unwrap()
+                .capability(),
+            Some(Capability::FileDownload)
+        );
+    }
 }
 
 #[tokio::test]
