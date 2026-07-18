@@ -1795,9 +1795,13 @@ name = "runtime-tests"
 version = "0.1.0"
 dependencies = [
  "artifact-store",
+ "cdp-gateway",
  "checkpoint-store",
  "chrono",
  "config",
+ "interface-conformance",
+ "interface-core",
+ "mcp-gateway",
  "network-engine",
  "page-runtime",
  "sdk-core",
@@ -1807,6 +1811,7 @@ dependencies = [
  "test-site",
  "tokio",
  "types",
+ "uuid",
  "worker-pool",
  "workflow-journal",
 ]
