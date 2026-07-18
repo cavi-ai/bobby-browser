@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use config::AppConfig;
-use page_runtime::PageRuntime;
+use page_runtime::{ExecutionPhaseObserver, PageRuntime};
 use page_runtime::{RecoveryCoordinator, RecoveryError};
 use session_manager::SessionManager;
 use types::{
@@ -56,6 +56,21 @@ impl RuntimeService {
     }
 
     pub async fn build(config: &AppConfig) -> Result<Self, RuntimeError> {
+        Self::build_inner(config, None).await
+    }
+
+    #[doc(hidden)]
+    pub async fn build_with_execution_phase_observer(
+        config: &AppConfig,
+        observer: Arc<dyn ExecutionPhaseObserver>,
+    ) -> Result<Self, RuntimeError> {
+        Self::build_inner(config, Some(observer)).await
+    }
+
+    async fn build_inner(
+        config: &AppConfig,
+        observer: Option<Arc<dyn ExecutionPhaseObserver>>,
+    ) -> Result<Self, RuntimeError> {
         let journal = Arc::new(
             JsonlJournal::open(&config.storage.journal_path)
                 .await
@@ -90,8 +105,11 @@ impl RuntimeService {
             ),
             network,
         );
-        let pages =
+        let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
+        if let Some(observer) = observer {
+            pages = pages.with_execution_phase_observer(observer);
+        }
         let sessions = SessionManager::new(workers);
         Ok(Self::with_recovery(sessions, pages, recovery))
     }

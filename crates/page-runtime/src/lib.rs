@@ -5,15 +5,22 @@ mod recovery;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
 use tokio::sync::RwLock;
-use types::{OpenPageRequest, PageId, PageMode, PageState, RuntimeError, SessionId};
+use types::{CommandPhase, OpenPageRequest, PageId, PageMode, PageState, RuntimeError, SessionId};
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
 pub use adaptive::{AdaptiveExecution, AdaptivePageEngine};
 pub use executor::ExecutorError;
 pub use recovery::{evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError};
+
+#[doc(hidden)]
+#[async_trait]
+pub trait ExecutionPhaseObserver: Send + Sync {
+    async fn durable_phase_reached(&self, phase: CommandPhase);
+}
 
 #[derive(Clone, Default)]
 pub struct PageRuntime {
@@ -22,6 +29,7 @@ pub struct PageRuntime {
     workers: Option<Arc<WorkerPool>>,
     checkpoints: Option<CheckpointStore>,
     adaptive: AdaptivePageEngine,
+    phase_observer: Option<Arc<dyn ExecutionPhaseObserver>>,
 }
 
 impl PageRuntime {
@@ -32,6 +40,7 @@ impl PageRuntime {
             workers: Some(workers),
             checkpoints: None,
             adaptive: AdaptivePageEngine::browser_only(),
+            phase_observer: None,
         }
     }
 
@@ -46,6 +55,7 @@ impl PageRuntime {
             workers: Some(workers),
             checkpoints: Some(checkpoints),
             adaptive: AdaptivePageEngine::browser_only(),
+            phase_observer: None,
         }
     }
 
@@ -61,6 +71,22 @@ impl PageRuntime {
             workers: Some(workers),
             checkpoints,
             adaptive,
+            phase_observer: None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_execution_phase_observer(
+        mut self,
+        observer: Arc<dyn ExecutionPhaseObserver>,
+    ) -> Self {
+        self.phase_observer = Some(observer);
+        self
+    }
+
+    pub(crate) async fn observe_durable_phase(&self, phase: CommandPhase) {
+        if let Some(observer) = &self.phase_observer {
+            observer.durable_phase_reached(phase).await;
         }
     }
 

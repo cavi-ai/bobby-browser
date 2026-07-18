@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 artifact-store = { path = "../artifact-store" }
+async-trait.workspace = true
 checkpoint-store = { path = "../checkpoint-store" }
 chrono.workspace = true
 network-engine = { path = "../network-engine" }
@@ -16,5 +17,4 @@ worker-pool = { path = "../worker-pool" }
 workflow-journal = { path = "../workflow-journal" }
 
 [dev-dependencies]
-async-trait.workspace = true
 tempfile.workspace = true

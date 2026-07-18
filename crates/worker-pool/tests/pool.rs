@@ -109,13 +109,28 @@ async fn reuses_one_dedicated_worker_per_session() {
 }
 
 #[tokio::test]
-async fn ninth_session_waits_until_capacity_is_released() {
+async fn thirty_two_warm_workers_preserve_identity_while_only_eight_leases_are_active() {
     let pool = WorkerPool::new(8, Arc::new(FakeFactory::default()));
     let mut sessions = Vec::new();
-    for _ in 0..8 {
+    let mut identities = Vec::new();
+    for _ in 0..32 {
         let session = SessionId::new();
-        pool.lease(session.clone()).await.unwrap();
+        let lease = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            pool.lease(session.clone()),
+        )
+        .await
+        .expect("warm session creation must not retain an active-work permit")
+        .unwrap();
+        identities.push(lease.worker_id());
+        drop(lease);
         sessions.push(session);
+    }
+    assert_eq!(pool.active_workers().await, 32);
+
+    let mut active = Vec::new();
+    for session in sessions.iter().take(8) {
+        active.push(pool.lease(session.clone()).await.unwrap());
     }
     let ninth = SessionId::new();
     let pending_pool = pool.clone();
@@ -130,11 +145,34 @@ async fn ninth_session_waits_until_capacity_is_released() {
         .is_err()
     );
 
-    pool.release_session(&sessions[0]).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+    drop(active.remove(0));
+    let ninth = tokio::time::timeout(std::time::Duration::from_secs(1), task)
         .await
         .unwrap()
         .unwrap();
+    drop(ninth);
+
+    let resumed = pool.lease(sessions[0].clone()).await.unwrap();
+    assert_eq!(resumed.worker_id(), identities[0]);
+}
+
+#[tokio::test]
+async fn cancelling_a_waiting_lease_does_not_leak_capacity() {
+    let pool = WorkerPool::new(1, Arc::new(FakeFactory::default()));
+    let held = pool.lease(SessionId::new()).await.unwrap();
+    let pending_pool = pool.clone();
+    let pending = tokio::spawn(async move { pending_pool.lease(SessionId::new()).await });
+    tokio::task::yield_now().await;
+    pending.abort();
+    let _ = pending.await;
+    drop(held);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        pool.lease(SessionId::new()),
+    )
+    .await
+    .expect("cancelled waiter leaked the active-work permit")
+    .unwrap();
 }
 
 #[tokio::test]
@@ -174,6 +212,7 @@ async fn invalidate_terminates_and_replaces_worker_without_changing_profile() {
     pool.invalidate_session(&session).await.unwrap();
     assert_eq!(factory.terminations.load(Ordering::SeqCst), 1);
     assert_eq!(pool.active_workers().await, 0);
+    drop(first);
 
     let replacement = pool.lease(session.clone()).await.unwrap();
     assert_ne!(replacement.worker_id(), first_id);

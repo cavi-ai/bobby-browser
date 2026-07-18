@@ -1,59 +1,151 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { type PerformanceEvent, type PerformanceSample } from "./performance-support.js";
 
 const adapters = ["rust-sdk", "typescript-sdk", "mcp", "playwright", "puppeteer"] as const;
+const selectedAdapters = process.env.CONFORMANCE_PERFORMANCE_ADAPTERS
+  ? adapters.filter(adapter => process.env.CONFORMANCE_PERFORMANCE_ADAPTERS!.split(",").includes(adapter))
+  : adapters;
 const samples = 7;
+const maxSettledGrowthKiB = 256 * 1024;
+const maxPeakGrowthKiB = 512 * 1024;
 
-type Sample = { elapsedMs: number; peakRssKiB: number };
+type AdapterResult = {
+  samples: PerformanceSample[];
+  rssBeforeKiB: number;
+  rssPeakKiB: number;
+  rssAfterDisconnectKiB: number;
+};
 
 function statistics(values: number[]) {
   const ordered = [...values].sort((a, b) => a - b);
-  return { median: ordered[Math.floor(ordered.length / 2)]!, iqr: ordered[Math.floor(ordered.length * 3 / 4)]! - ordered[Math.floor(ordered.length / 4)]! };
+  return {
+    median: ordered[Math.floor(ordered.length / 2)]!,
+    iqr: ordered[Math.floor(ordered.length * 3 / 4)]! - ordered[Math.floor(ordered.length / 4)]!,
+  };
 }
 
-async function run(adapter: typeof adapters[number]): Promise<Sample> {
-  const started = performance.now();
-  const env = { ...process.env };
+async function runPersistentAdapter(adapter: typeof adapters[number]): Promise<AdapterResult> {
+  const controlDirectory = await mkdtemp(join(tmpdir(), `interface-performance-${adapter}-`));
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CONFORMANCE_PERFORMANCE_SAMPLES: String(samples),
+    CONFORMANCE_PERFORMANCE_WAIT_FOR_RSS: "1",
+    CONFORMANCE_PERFORMANCE_CONTROL_DIR: controlDirectory,
+  };
   delete env.NODE_TEST_CONTEXT;
-  const child = spawn(process.execPath, ["--test", `dist/test/${adapter}.test.js`], {
-    cwd: new URL("../..", import.meta.url), stdio: ["ignore", "pipe", "pipe"], env,
+  // Run the adapter test module directly. Nesting it under another `node --test`
+  // process buffers its stdout until completion, which deadlocks the explicit
+  // RSS marker/ack handshake.
+  const child = spawn(process.execPath, [`dist/test/${adapter}.test.js`], {
+    cwd: new URL("../..", import.meta.url), stdio: ["pipe", "pipe", "pipe"], env,
   });
-  let output = "", peakRssKiB = 0;
+  const childExit = once(child, "exit") as Promise<[number | null, NodeJS.Signals | null]>;
+  assert(child.pid, `${adapter} benchmark child did not start`);
+  let output = "";
+  let rssBeforeKiB = 0, rssPeakKiB = 0, rssAfterDisconnectKiB = 0;
+  let measured: PerformanceSample[] | undefined;
+  let sampler: NodeJS.Timeout | undefined;
+  let sampleChain = Promise.resolve();
+  const samplePeak = () => {
+    sampleChain = sampleChain.then(async () => {
+      rssPeakKiB = Math.max(rssPeakKiB, await processTreeRssKiB(child.pid!));
+    });
+  };
   child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
-  child.stdout.on("data", chunk => { output = (output + String(chunk)).slice(-32_768); });
-  child.stderr.on("data", chunk => { output = (output + String(chunk)).slice(-32_768); });
-  const sampler = setInterval(() => {
-    const ps = spawn("ps", ["-o", "rss=", "-p", String(child.pid)], { stdio: ["ignore", "pipe", "ignore"] });
-    let rss = ""; ps.stdout.setEncoding("utf8"); ps.stdout.on("data", chunk => { rss += String(chunk); });
-    ps.on("close", () => { peakRssKiB = Math.max(peakRssKiB, Number.parseInt(rss.trim(), 10) || 0); });
-  }, 50);
-  const [code] = await once(child, "exit") as [number | null, NodeJS.Signals | null];
-  clearInterval(sampler);
+  child.stdout.on("data", chunk => {
+    output = (output + String(chunk)).slice(-65_536);
+  });
+  child.stderr.on("data", chunk => { output = (output + String(chunk)).slice(-65_536); });
+  const ready = await waitForEvent(join(controlDirectory, "ready.json"), child, output) as Extract<PerformanceEvent, { event: "measurement-start" }>;
+  assert.equal(ready.adapter, adapter); assert.equal(ready.samples, samples); assert(ready.rootPid > 0);
+  rssBeforeKiB = await processTreeRssKiB(child.pid!);
+  assert(rssBeforeKiB > 0, `${adapter} process tree was not alive before measurement`);
+  rssPeakKiB = rssBeforeKiB; sampler = setInterval(samplePeak, 50);
+  const disconnected = await waitForEvent(join(controlDirectory, "disconnected.json"), child, output) as Extract<PerformanceEvent, { event: "client-disconnected" }>;
+  assert.equal(disconnected.adapter, adapter); assert.equal(disconnected.samples.length, samples);
+  if (sampler) clearInterval(sampler);
+  await sampleChain;
+  rssPeakKiB = Math.max(rssPeakKiB, await processTreeRssKiB(child.pid!));
+  measured = disconnected.samples;
+  rssAfterDisconnectKiB = await processTreeRssKiB(child.pid!);
+  assert(rssAfterDisconnectKiB > 0, `${adapter} daemon/browser tree exited before post-disconnect RSS`);
+  const ack = join(controlDirectory, "ack.json"); const ackTmp = `${ack}.${process.pid}.tmp`;
+  await writeFile(ackTmp, JSON.stringify({ event: "rss-sampled", rootPid: child.pid })); await rename(ackTmp, ack);
+  const [code] = await childExit;
+  await rm(controlDirectory, { recursive: true, force: true });
   assert.equal(code, 0, output);
-  assert.match(output, /pass|passed/i);
-  await new Promise(resolve => setTimeout(resolve, 25));
-  assert.equal(child.exitCode, 0, `${adapter} did not disconnect cleanly`);
-  return { elapsedMs: performance.now() - started, peakRssKiB };
+  return { samples: measured, rssBeforeKiB, rssPeakKiB, rssAfterDisconnectKiB };
 }
 
-test("five actual adapters complete seven warmed equivalent real-browser workflows", { timeout: 1_800_000 }, async () => {
-  const measured = new Map<typeof adapters[number], Sample[]>();
-  for (const adapter of adapters) {
-    await run(adapter); // discarded warmup: compile caches, browser install, and fixture startup
-    const values: Sample[] = [];
-    for (let index = 0; index < samples; index++) values.push(await run(adapter));
-    measured.set(adapter, values);
+async function waitForEvent(path: string, child: ReturnType<typeof spawn>, output: string): Promise<PerformanceEvent> {
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    try { return JSON.parse(await readFile(path, "utf8")) as PerformanceEvent; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    assert.equal(child.exitCode, null, `benchmark child exited before ${path}: ${output}`);
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
-  const rust = statistics(measured.get("rust-sdk")!.map(sample => sample.elapsedMs));
-  const browserBaselineMs = rust.median;
-  for (const adapter of adapters) {
-    const values = measured.get(adapter)!;
-    const total = statistics(values.map(sample => sample.elapsedMs));
-    const overhead = statistics(values.map(sample => Math.max(0, sample.elapsedMs - browserBaselineMs)));
-    const memory = statistics(values.map(sample => sample.peakRssKiB));
-    console.log(`interface-performance adapter=${adapter} warmed_samples=${samples} browser_median_ms=${total.median.toFixed(2)} browser_iqr_ms=${total.iqr.toFixed(2)} adapter_only_median_ms=${overhead.median.toFixed(2)} adapter_only_iqr_ms=${overhead.iqr.toFixed(2)} peak_rss_median_kib=${memory.median} disconnected_rss_kib=0`);
-    assert(values.every(sample => sample.peakRssKiB < 2 * 1024 * 1024), `${adapter} exceeded the 2 GiB RSS bound`);
+  child.kill("SIGTERM"); assert.fail(`timed out waiting for ${path}: ${output}`);
+}
+
+test("five actual adapters use one warmed persistent fixture for seven paired samples", { timeout: 1_800_000 }, async () => {
+  assert(selectedAdapters.length > 0, "no recognized performance adapters selected");
+  for (const adapter of selectedAdapters) {
+    const result = await runPersistentAdapter(adapter);
+    for (const sample of result.samples) {
+      assert(sample.operationMs > 0, `${adapter} did not instrument actual operation time`);
+      assert(sample.adapterWallMs >= sample.operationMs, `${adapter} operation timing escaped its adapter wall boundary`);
+      assert(Math.abs(sample.adapterOverheadMs - (sample.adapterWallMs - sample.operationMs)) < 0.001,
+        `${adapter} overhead was not the paired per-sample delta`);
+    }
+    const operation = statistics(result.samples.map(sample => sample.operationMs));
+    const wall = statistics(result.samples.map(sample => sample.adapterWallMs));
+    const overhead = statistics(result.samples.map(sample => sample.adapterOverheadMs));
+    const rssGrowthKiB = result.rssAfterDisconnectKiB - result.rssBeforeKiB;
+    const rssPeakGrowthKiB = result.rssPeakKiB - result.rssBeforeKiB;
+    assert(rssGrowthKiB <= maxSettledGrowthKiB, `${adapter} retained ${rssGrowthKiB} KiB after client disconnect`);
+    assert(rssPeakGrowthKiB <= maxPeakGrowthKiB, `${adapter} grew ${rssPeakGrowthKiB} KiB at peak`);
+    console.log(
+      `interface-performance adapter=${adapter} warmed_samples=${samples}` +
+      ` operation_median_ms=${operation.median.toFixed(2)} operation_iqr_ms=${operation.iqr.toFixed(2)}` +
+      ` adapter_wall_median_ms=${wall.median.toFixed(2)} adapter_wall_iqr_ms=${wall.iqr.toFixed(2)}` +
+      ` adapter_overhead_median_ms=${overhead.median.toFixed(2)} adapter_overhead_iqr_ms=${overhead.iqr.toFixed(2)}` +
+      ` rss_before_kib=${result.rssBeforeKiB} rss_peak_kib=${result.rssPeakKiB}` +
+      ` rss_after_disconnect_kib=${result.rssAfterDisconnectKiB} rss_growth_kib=${rssGrowthKiB}`,
+    );
   }
 });
+
+async function processTreeRssKiB(rootPid: number): Promise<number> {
+  const ps = spawn("ps", ["-axo", "pid=,ppid=,rss="], { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "";
+  ps.stdout.setEncoding("utf8"); ps.stderr.setEncoding("utf8");
+  ps.stdout.on("data", chunk => { stdout += String(chunk); });
+  ps.stderr.on("data", chunk => { stderr += String(chunk); });
+  const [code] = await once(ps, "exit") as [number | null, NodeJS.Signals | null];
+  assert.equal(code, 0, stderr);
+  const rows = stdout.split("\n").map(line => line.trim().split(/\s+/).map(Number)).filter(row => row.length === 3 && row.every(Number.isFinite));
+  const children = new Map<number, number[]>();
+  const rss = new Map<number, number>();
+  for (const [pid, ppid, resident] of rows as [number, number, number][]) {
+    rss.set(pid, resident);
+    const entries = children.get(ppid) ?? [];
+    entries.push(pid); children.set(ppid, entries);
+  }
+  const pending = [rootPid];
+  const seen = new Set<number>();
+  let total = 0;
+  while (pending.length) {
+    const pid = pending.pop()!;
+    if (seen.has(pid)) continue;
+    seen.add(pid); total += rss.get(pid) ?? 0;
+    pending.push(...(children.get(pid) ?? []));
+  }
+  return total;
+}

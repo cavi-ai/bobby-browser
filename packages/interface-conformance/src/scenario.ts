@@ -11,7 +11,7 @@ export const CANONICAL_ALLOWED = ["page:write", "file:upload", "artifact:capture
 export const CANONICAL_EVENT_ORDER = ["navigation.completed", "upload.completed", "checkpoint.saved", "boundary.completed", "checkpoint.saved", "boundary.completed", "screenshot.verified", "recovery.inspected", "events.read"] as const;
 export type CheckpointObservation = { checkpointId: string; workflowId: string; boundaryCommandId: string; boundary: "boundary" };
 export type RecoveryObservation = { status: string; checkpointId: string; workflowId: string; boundaryCommandId: string; boundary: "boundary"; replayed: boolean };
-export type EventObservation = { events: Array<{ cursor: number; kind: string; payload: unknown }> };
+export type EventObservation = { events: Array<{ cursor: number; kind: string; payload: unknown }>; latestAvailable?: number };
 export type ProtocolInventory = { methods: string[]; events: string[] };
 
 export interface ScenarioDriver {
@@ -64,9 +64,12 @@ export async function runCanonicalScenario(
   if (recovery.checkpointId !== checkpoint.checkpointId || recovery.boundary !== checkpoint.boundary)
     throw new Error("recovery checkpoint lineage differs from the persisted checkpoint");
   const eventBatch = await driver.readEvents();
-  const eventOrdering = eventBatch.events.map(event => event.kind);
-  const checkpointEvents = eventBatch.events.filter(event => event.kind === "checkpoint.saved").map(event => event.payload as Record<string, unknown>);
-  const boundaryEvents = eventBatch.events.filter(event => event.kind === "boundary.completed").map(event => event.payload as Record<string, unknown>);
+  // Persistent benchmark fixtures intentionally accumulate earlier runs. The
+  // proof for this invocation is the most recent complete canonical suffix.
+  const currentEvents = eventBatch.events.slice(-CANONICAL_EVENT_ORDER.length);
+  const eventOrdering = currentEvents.map(event => event.kind);
+  const checkpointEvents = currentEvents.filter(event => event.kind === "checkpoint.saved").map(event => event.payload as Record<string, unknown>);
+  const boundaryEvents = currentEvents.filter(event => event.kind === "boundary.completed").map(event => event.payload as Record<string, unknown>);
   for (const [index, reserved] of [popupCheckpoint, checkpoint].entries()) {
     if (reserved.boundaryCommandId !== boundaryEvents[index]?.commandId || reserved.workflowId !== boundaryEvents[index]?.workflowId)
       throw new Error("boundary outcome did not consume the reserved checkpoint identity");

@@ -33,6 +33,15 @@ struct RecordingJournal {
     resume: Arc<tokio::sync::Notify>,
 }
 
+struct RecordingPhaseObserver(Arc<Mutex<Vec<CommandPhase>>>);
+
+#[async_trait]
+impl page_runtime::ExecutionPhaseObserver for RecordingPhaseObserver {
+    async fn durable_phase_reached(&self, phase: CommandPhase) {
+        self.0.lock().await.push(phase);
+    }
+}
+
 struct RecoveryJournal {
     records: Vec<JournalRecord>,
 }
@@ -437,6 +446,33 @@ async fn prepares_durably_before_touching_browser() {
             "journal:completed",
         ]
     );
+}
+
+#[tokio::test]
+async fn production_phase_observer_fires_only_after_each_durable_lifecycle_append() {
+    let (runtime, session, page, events) = runtime(DriverMode::Succeed, None).await;
+    let phases = Arc::new(Mutex::new(Vec::new()));
+    let runtime =
+        runtime.with_execution_phase_observer(Arc::new(RecordingPhaseObserver(phases.clone())));
+
+    let outcome = runtime.execute(envelope(session, page, navigate())).await;
+
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    assert_eq!(
+        *phases.lock().await,
+        [
+            CommandPhase::Accepted,
+            CommandPhase::Prepared,
+            CommandPhase::Executing,
+            CommandPhase::Verifying,
+        ]
+    );
+    let events = events.lock().await;
+    for phase in ["accepted", "prepared", "executing", "verifying"] {
+        assert!(events
+            .iter()
+            .any(|event| event == &format!("journal:{phase}")));
+    }
 }
 
 #[tokio::test]

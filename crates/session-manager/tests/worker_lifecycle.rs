@@ -91,3 +91,37 @@ async fn session_owns_worker_from_creation_through_delete() {
     assert_eq!(pool.active_workers().await, 0);
     assert!(closed.load(Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn thirty_two_warm_sessions_remain_addressable_with_eight_active_slots() {
+    let pool = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(LifecycleFactory {
+            closed: Arc::new(AtomicBool::new(false)),
+        }),
+    ));
+    let manager = SessionManager::new(pool.clone());
+    let mut created = Vec::new();
+    for index in 0..32 {
+        created.push(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                manager.create(CreateSessionRequest {
+                    profile: format!("warm-{index}"),
+                    proxy: None,
+                }),
+            )
+            .await
+            .expect("warm session creation retained an active-work permit")
+            .unwrap(),
+        );
+    }
+    assert_eq!(manager.list().await.len(), 32);
+    assert_eq!(pool.active_workers().await, 32);
+    for session in created {
+        assert_eq!(
+            manager.get(&session.id).await.unwrap().profile,
+            session.profile
+        );
+    }
+}

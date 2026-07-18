@@ -5,6 +5,7 @@ import type { ScenarioDriver } from "./scenario.js";
 
 export function playwrightDriver(page: Page, endpoint: string, token: string, deniedToken: string): ScenarioDriver {
   let automation: Promise<CDPSession> | undefined;
+  let eventCursor = 0;
   const automationCdp = () => automation ??= (async () => {
     const browser=page.context().browser(); if(!browser) throw new Error("browser is unavailable"); return browser.newBrowserCDPSession();
   })();
@@ -73,7 +74,11 @@ export function playwrightDriver(page: Page, endpoint: string, token: string, de
     },
     checkpoint: async () => (await automationCdp() as unknown as RawSession).send("Automation.checkpointSave"),
     recover: async () => (await automationCdp() as unknown as RawSession).send("Automation.recoveryInspect"),
-    readEvents: async () => (await automationCdp() as unknown as RawSession).send("Automation.eventsRead"),
+    readEvents: async () => {
+      const batch = await (await automationCdp() as unknown as RawSession).send("Automation.eventsRead", { cursor: eventCursor });
+      eventCursor = batch.latestAvailable;
+      return batch;
+    },
     protocolInventory: async () => (await automationCdp() as unknown as RawSession).send("Automation.protocolInventory"),
   };
 }

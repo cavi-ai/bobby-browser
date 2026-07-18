@@ -126,12 +126,6 @@ report median/IQR for adapter overhead separately from browser time. Raw JSONL,
 heap profiles, and CPU profiles belong under `benchmarks/raw/` and are ignored.
 The concise summary printed by the performance gate is the reproducible record.
 
-- broker startup
-- in-memory session/page state
-- typed domain models
-- minimal HTTP health endpoint
-- MCP/CDP placeholders
-
 ## Run
 
 ```bash
@@ -142,13 +136,6 @@ Then open:
 
 - `http://127.0.0.1:7777/healthz`
 - `http://127.0.0.1:7777/runtime`
-
-## Next steps
-
-1. Replace placeholders with real engine implementations.
-2. Add MCP stdio and Streamable HTTP.
-3. Add CDP discovery and WebSocket routing.
-4. Introduce V8-backed `js-engine`.
 
 ## Quality gates
 
