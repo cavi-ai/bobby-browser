@@ -117,7 +117,10 @@ impl Server {
             if *lifecycle != Lifecycle::AwaitingInitialize {
                 return id.map(|id| error(id, INVALID_REQUEST, "Invalid Request", None));
             }
-            if !params.get("capabilities").is_some_and(Value::is_object) {
+            if !params
+                .get("capabilities")
+                .is_some_and(bounded_client_capabilities_value)
+            {
                 return id.map(|id| error(id, INVALID_PARAMS, "Invalid params", None));
             }
             let parsed = serde_json::from_value::<InitializeParams>(params);
@@ -232,7 +235,6 @@ impl Server {
         match method {
             "ping" if empty_object(&params) => self.authenticated_empty(id, json!({})),
             "ping" => error(id, INVALID_PARAMS, "Invalid params", None),
-            "methods/list" => self.list_methods(id, params),
             "tools/list" => self.list_tools(id, params),
             "tools/call" => self.call_tool(id, params).await,
             "resources/list" => self.list_resources(id, params).await,
@@ -269,28 +271,6 @@ impl Server {
 
     fn request_context(&self) -> types::RequestContext {
         self.handle.context(Utc::now() + Duration::minutes(1), None)
-    }
-
-    fn list_methods(&self, id: Value, params: Value) -> Value {
-        let context = self.request_context();
-        if let Err(interface_error) = self.authorization.validate(&context) {
-            return interface_error_response(id, interface_error);
-        }
-        if !valid_initial_list_params(&params) {
-            return error(id, INVALID_PARAMS, "Invalid params", None);
-        }
-        let mut methods = vec!["methods/list", "ping", "tools/call", "tools/list"];
-        if context
-            .capabilities
-            .contains(types::Capability::ArtifactRead)
-        {
-            methods.extend([
-                "resources/list",
-                "resources/read",
-                "resources/templates/list",
-            ]);
-        }
-        success(id, json!({"methods":methods}))
     }
 
     pub async fn serve<R, W>(&self, input: R, output: W) -> io::Result<()>
@@ -588,7 +568,7 @@ impl Server {
                 let registration_context = context.clone();
                 match self.runtime.submit(context, envelope.clone()).await {
                     Ok(outcome) => {
-                        if let Err(error) = self
+                        let admission = self
                             .resources
                             .register_outcome(
                                 &self.handle,
@@ -596,12 +576,10 @@ impl Server {
                                 &envelope,
                                 &outcome,
                             )
-                            .await
-                        {
-                            return interface_error_response(id, error);
-                        }
+                            .await;
                         match to_json(outcome) {
-                            Ok(value) => {
+                            Ok(mut value) => {
+                                admission.apply_to_mcp_value(&mut value, &envelope.command_id);
                                 self.events
                                     .append(interface_core::Event::new(
                                         "command.outcome",
@@ -699,7 +677,8 @@ impl Server {
         }
     }
 
-    async fn tool_success(&self, id: Value, value: Value) -> Value {
+    async fn tool_success(&self, id: Value, mut value: Value) -> Value {
+        crate::resources::redact_mcp_download_paths(&mut value);
         let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
         let trusted = self
             .resources
@@ -749,47 +728,195 @@ struct InitializeParams {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct ClientCapabilities {
     #[serde(default)]
-    experimental: Option<BTreeMap<String, Value>>,
+    experimental: Option<BTreeMap<String, serde_json::Map<String, Value>>>,
     #[serde(default)]
     roots: Option<RootsCapability>,
     #[serde(default)]
-    sampling: Option<EmptyCapability>,
+    sampling: Option<SamplingCapability>,
     #[serde(default)]
-    elicitation: Option<EmptyCapability>,
+    elicitation: Option<ElicitationCapability>,
+    #[serde(default)]
+    tasks: Option<TasksCapability>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RootsCapability {
     #[serde(default)]
     list_changed: bool,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmptyCapability {}
+struct CapabilityMarker {
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct SamplingCapability {
+    #[serde(default)]
+    context: Option<CapabilityMarker>,
+    #[serde(default)]
+    tools: Option<CapabilityMarker>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct ElicitationCapability {
+    #[serde(default)]
+    form: Option<CapabilityMarker>,
+    #[serde(default)]
+    url: Option<CapabilityMarker>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct TasksCapability {
+    #[serde(default)]
+    list: Option<CapabilityMarker>,
+    #[serde(default)]
+    cancel: Option<CapabilityMarker>,
+    #[serde(default)]
+    requests: Option<TaskRequestsCapability>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct TaskRequestsCapability {
+    #[serde(default)]
+    sampling: Option<SamplingTaskCapability>,
+    #[serde(default)]
+    elicitation: Option<ElicitationTaskCapability>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SamplingTaskCapability {
+    #[serde(default)]
+    create_message: Option<CapabilityMarker>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct ElicitationTaskCapability {
+    #[serde(default)]
+    create: Option<CapabilityMarker>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
 
 fn bounded_client_capabilities(capabilities: &ClientCapabilities) -> bool {
-    let _known = (
-        capabilities.roots.as_ref().map(|roots| roots.list_changed),
-        capabilities.sampling.is_some(),
-        capabilities.elicitation.is_some(),
-    );
-    let Some(experimental) = &capabilities.experimental else {
-        return true;
+    let mut observed =
+        capabilities.experimental.as_ref().map_or(0, BTreeMap::len) + capabilities.extensions.len();
+    if let Some(roots) = &capabilities.roots {
+        let _ = roots.list_changed;
+        observed += roots.extensions.len();
+    }
+    if let Some(sampling) = &capabilities.sampling {
+        observed += marker_size(sampling.context.as_ref())
+            + marker_size(sampling.tools.as_ref())
+            + sampling.extensions.len();
+    }
+    if let Some(elicitation) = &capabilities.elicitation {
+        observed += marker_size(elicitation.form.as_ref())
+            + marker_size(elicitation.url.as_ref())
+            + elicitation.extensions.len();
+    }
+    if let Some(tasks) = &capabilities.tasks {
+        observed += marker_size(tasks.list.as_ref())
+            + marker_size(tasks.cancel.as_ref())
+            + tasks.extensions.len();
+        if let Some(requests) = &tasks.requests {
+            observed += requests.extensions.len();
+            if let Some(sampling) = &requests.sampling {
+                observed +=
+                    marker_size(sampling.create_message.as_ref()) + sampling.extensions.len();
+            }
+            if let Some(elicitation) = &requests.elicitation {
+                observed += marker_size(elicitation.create.as_ref()) + elicitation.extensions.len();
+            }
+        }
+    }
+    observed <= 256
+}
+
+fn marker_size(marker: Option<&CapabilityMarker>) -> usize {
+    marker.map_or(0, |marker| marker.extensions.len())
+}
+
+fn bounded_client_capabilities_value(value: &Value) -> bool {
+    let Some(capabilities) = value.as_object() else {
+        return false;
     };
-    if experimental.len() > 32
-        || serde_json::to_vec(experimental).map_or(true, |bytes| bytes.len() > 16 * 1024)
+    if capabilities.len() > 32
+        || serde_json::to_vec(value).map_or(true, |bytes| bytes.len() > 16 * 1024)
+        || capabilities.values().any(|value| !value.is_object())
+    {
+        return false;
+    }
+    if capabilities
+        .get("experimental")
+        .and_then(Value::as_object)
+        .is_some_and(|experimental| experimental.values().any(|value| !value.is_object()))
+    {
+        return false;
+    }
+    if !valid_marker_fields(capabilities.get("sampling"), &["context", "tools"])
+        || !valid_marker_fields(capabilities.get("elicitation"), &["form", "url"])
+        || !valid_tasks_capability(capabilities.get("tasks"))
     {
         return false;
     }
     let mut nodes = 0usize;
-    experimental.iter().all(|(key, value)| {
-        !key.is_empty() && key.len() <= 128 && bounded_json_value(value, 0, &mut nodes)
-    })
+    bounded_json_value(value, 0, &mut nodes)
+}
+
+fn valid_marker_fields(value: Option<&Value>, fields: &[&str]) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    fields
+        .iter()
+        .all(|field| object.get(*field).is_none_or(Value::is_object))
+}
+
+fn valid_tasks_capability(value: Option<&Value>) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let Some(tasks) = value.as_object() else {
+        return false;
+    };
+    if ["list", "cancel"]
+        .iter()
+        .any(|field| tasks.get(*field).is_some_and(|value| !value.is_object()))
+    {
+        return false;
+    }
+    let Some(requests) = tasks.get("requests") else {
+        return true;
+    };
+    let Some(requests) = requests.as_object() else {
+        return false;
+    };
+    valid_marker_fields(requests.get("sampling"), &["createMessage"])
+        && valid_marker_fields(requests.get("elicitation"), &["create"])
 }
 
 fn bounded_json_value(value: &Value, depth: usize, nodes: &mut usize) -> bool {
@@ -998,6 +1125,11 @@ fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
                     }
                 }
                 collect_artifact_ids(value, found);
+            }
+        }
+        Value::String(value) => {
+            if let Some(artifact_id) = value.strip_prefix("artifact://") {
+                found.insert(artifact_id.to_owned());
             }
         }
         _ => {}

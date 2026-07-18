@@ -333,7 +333,7 @@ fn evidence_variants() -> Vec<Value> {
             "resolution",
             json!({
                 "target":{"$ref":"#/$defs/TargetSpec"},
-                "fingerprint":object(json!({"pageId":id(),"frame":nullable(string(0,MAX_STRING_BYTES)),"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"stableAttributes":{"type":"object","maxProperties":64,"additionalProperties":string(0,MAX_STRING_BYTES)}}), &["pageId","frame","role","name","stableAttributes"]),
+                "fingerprint":object(json!({"pageId":id(),"frame":nullable(string(0,MAX_STRING_BYTES)),"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"stableAttributes":{"type":"object","maxProperties":64,"propertyNames":{"maxLength":128},"additionalProperties":string(0,MAX_STRING_BYTES)}}), &["pageId","frame","role","name","stableAttributes"]),
                 "candidates":array(object(json!({"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"score":{"type":"integer","minimum":-1000000,"maximum":1000000},"reasons":array(string(0,MAX_STRING_BYTES),64)}), &["role","name","score","reasons"]),64),
                 "best_match_authorized":{"type":"boolean"}
             }),
@@ -534,6 +534,13 @@ fn validate_object(root: &Value, schema: &Value, values: &Map<String, Value>) ->
         return false;
     }
     let properties = schema.get("properties").and_then(Value::as_object);
+    if schema.get("propertyNames").is_some_and(|property_names| {
+        values
+            .keys()
+            .any(|key| !validate(root, property_names, &Value::String(key.clone())))
+    }) {
+        return false;
+    }
     if schema
         .get("required")
         .and_then(Value::as_array)

@@ -183,7 +183,6 @@ async fn revocation_after_initialize_denies_every_enumeration_and_dispatch_bound
     authority.revoke(&principal).await.unwrap();
 
     for (id, method, params) in [
-        (30, "methods/list", json!({})),
         (31, "tools/list", json!({})),
         (
             32,
@@ -234,6 +233,16 @@ async fn expiry_after_initialize_denies_tool_enumeration() {
         "authenticationFailed"
     );
     assert!(!response.to_string().contains("runtime_info"));
+}
+
+#[tokio::test]
+async fn unrequested_methods_list_extension_is_not_exposed() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(45, "methods/list", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(response["error"]["code"], -32601, "{response}");
 }
 
 #[tokio::test]
@@ -293,6 +302,39 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     let rejected = server.handle_message(request(51, "tools/call", json!({
         "name":"command_execute","arguments":{"envelope":envelope_value,"idempotencyKey":"nested-extra"}
     }))).await.unwrap();
+    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    assert_eq!(runtime.submit_dispatch_count(), 0);
+
+    let long_attribute = "a".repeat(129);
+    let bounded_envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: PrimitiveCommand::TypeText(types::TypeTextCommand {
+            selector: "#name".to_owned(),
+            target: Some(types::TargetSpec {
+                attributes: [(long_attribute, "value".to_owned())].into_iter().collect(),
+                ..Default::default()
+            }),
+            value: "Ada".to_owned(),
+            clear_first: true,
+        }),
+    };
+    let rejected = server
+        .handle_message(request(
+            53,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":bounded_envelope,"idempotencyKey":"long-property-name"}
+            }),
+        ))
+        .await
+        .unwrap();
     assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
     assert_eq!(runtime.submit_dispatch_count(), 0);
 

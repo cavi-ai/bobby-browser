@@ -16,10 +16,12 @@ use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use session_manager::SessionManager;
+use sha2::{Digest, Sha256};
 use types::{
-    AttemptId, Capability, CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError,
-    CommandId, ErrorLayer, Evidence, InspectCommand, NavigateCommand, PageId, PrimitiveCommand,
-    PrincipalId, SessionId, TypeTextCommand, WorkerId, WorkflowId,
+    AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickCommand,
+    CommandEnvelope, CommandError, CommandId, ErrorLayer, Evidence, InspectCommand,
+    NavigateCommand, PageId, PrimitiveCommand, PrincipalId, SessionId, TypeTextCommand, WorkerId,
+    WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -29,12 +31,15 @@ const ONE_PIXEL_PNG: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
     0, 0, 31, 21, 196, 137,
 ];
+const DOWNLOAD_BYTES: &[u8] = b"private fixture download";
 
 struct ScreenshotWorker {
     id: WorkerId,
     profile: PathBuf,
     session_id: SessionId,
     artifacts: ArtifactStore,
+    download_path: PathBuf,
+    screenshot_count: usize,
 }
 
 #[async_trait]
@@ -73,23 +78,34 @@ impl BrowserWorker for ScreenshotWorker {
         page_id: &PageId,
         _: &CaptureScreenshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let record = self
-            .artifacts
-            .put_png(&self.session_id, page_id, ONE_PIXEL_PNG)
-            .await
-            .map_err(|_| CommandError {
-                code: types::ErrorCode::BrowserCommandFailed,
-                message: "fixture artifact write failed".to_owned(),
-                layer: ErrorLayer::Driver,
-                retryable: false,
-            })?;
-        Ok(vec![Evidence::Screenshot {
-            artifact_id: record.artifact_id,
-            media_type: record.media_type,
-            width: record.width,
-            height: record.height,
-            bytes: record.bytes,
-            sha256: record.sha256,
+        let mut evidence = Vec::new();
+        for _ in 0..self.screenshot_count {
+            let record = self
+                .artifacts
+                .put_png(&self.session_id, page_id, ONE_PIXEL_PNG)
+                .await
+                .map_err(|_| fixture_error("fixture artifact write failed"))?;
+            evidence.push(Evidence::Screenshot {
+                artifact_id: record.artifact_id,
+                media_type: record.media_type,
+                width: record.width,
+                height: record.height,
+                bytes: record.bytes,
+                sha256: record.sha256,
+            });
+        }
+        Ok(evidence)
+    }
+    async fn click_and_wait_for_download(
+        &self,
+        _: &PageId,
+        _: &ClickAndWaitForDownloadCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Download {
+            filename: "fixture.txt".to_owned(),
+            path: self.download_path.to_string_lossy().into_owned(),
+            bytes: DOWNLOAD_BYTES.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(DOWNLOAD_BYTES)),
         }])
     }
     async fn close(&self) -> Result<(), CommandError> {
@@ -100,21 +116,40 @@ impl BrowserWorker for ScreenshotWorker {
 struct ScreenshotFactory {
     profile: PathBuf,
     artifacts: ArtifactStore,
+    downloads: PathBuf,
+    screenshot_count: usize,
 }
 
 #[async_trait]
 impl WorkerFactory for ScreenshotFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        let download_dir = self.downloads.join(session_id.0.to_string());
+        tokio::fs::create_dir_all(&download_dir)
+            .await
+            .map_err(|_| fixture_error("fixture download directory failed"))?;
+        let download_path = download_dir.join("fixture.txt");
+        tokio::fs::write(&download_path, DOWNLOAD_BYTES)
+            .await
+            .map_err(|_| fixture_error("fixture download write failed"))?;
         Ok(Arc::new(ScreenshotWorker {
             id: WorkerId::new(),
             profile: self.profile.clone(),
             session_id: session_id.clone(),
             artifacts: self.artifacts.clone(),
+            download_path,
+            screenshot_count: self.screenshot_count,
         }))
     }
 }
 
 async fn fixture() -> (Server, tempfile::TempDir) {
+    fixture_with(1, 8).await
+}
+
+async fn fixture_with(
+    screenshot_count: usize,
+    catalog_entries: usize,
+) -> (Server, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let artifacts = ArtifactStore::new(root.path().join("artifacts"), 4096, 4096);
     let journal = Arc::new(
@@ -127,6 +162,8 @@ async fn fixture() -> (Server, tempfile::TempDir) {
         Arc::new(ScreenshotFactory {
             profile: root.path().join("profile"),
             artifacts: artifacts.clone(),
+            downloads: root.path().join("downloads"),
+            screenshot_count,
         }),
     ));
     let runtime = RuntimeService::new(
@@ -152,7 +189,7 @@ async fn fixture() -> (Server, tempfile::TempDir) {
     let handle = authority.verify(&token.expose_once()).await.unwrap();
     let (ownership, recorder) = SessionOwnershipRegistry::bounded(4);
     let reader = ArtifactReader::new(
-        artifacts,
+        artifacts.clone(),
         ownership,
         4096,
         ArtifactOwnershipLimits {
@@ -167,10 +204,25 @@ async fn fixture() -> (Server, tempfile::TempDir) {
     let server = Server::production(
         authenticated,
         EventStore::new(8),
-        ArtifactResources::new(reader, 8),
+        ArtifactResources::production(
+            reader,
+            artifacts,
+            root.path().join("downloads"),
+            4096,
+            catalog_entries,
+        ),
     );
     initialize(&server).await;
     (server, root)
+}
+
+fn fixture_error(message: &str) -> CommandError {
+    CommandError {
+        code: types::ErrorCode::BrowserCommandFailed,
+        message: message.to_owned(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    }
 }
 
 async fn initialize(server: &Server) {
@@ -195,7 +247,7 @@ fn request(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
 }
 
-async fn capture(server: &Server) -> String {
+async fn create_session_page(server: &Server) -> (SessionId, PageId) {
     let session = server
         .handle_message(request(
             2,
@@ -220,6 +272,11 @@ async fn capture(server: &Server) -> String {
         .unwrap();
     let page_id: PageId =
         serde_json::from_value(page["result"]["structuredContent"]["id"].clone()).unwrap();
+    (session_id, page_id)
+}
+
+async fn execute_screenshot(server: &Server) -> Value {
+    let (session_id, page_id) = create_session_page(server).await;
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
@@ -232,7 +289,7 @@ async fn capture(server: &Server) -> String {
             mode: types::ScreenshotMode::Viewport,
         }),
     };
-    let captured = server
+    server
         .handle_message(request(
             4,
             "tools/call",
@@ -241,7 +298,11 @@ async fn capture(server: &Server) -> String {
             }),
         ))
         .await
-        .unwrap();
+        .unwrap()
+}
+
+async fn capture(server: &Server) -> String {
+    let captured = execute_screenshot(server).await;
     let link = captured["result"]["content"]
         .as_array()
         .unwrap()
@@ -299,4 +360,71 @@ async fn resource_uris_reject_paths_queries_fragments_and_authority_changes() {
             .unwrap();
         assert_eq!(response["error"]["code"], -32602, "{response}");
     }
+}
+
+#[tokio::test]
+async fn download_paths_are_replaced_by_authenticated_resources_and_never_exposed() {
+    let (server, root) = fixture().await;
+    let (session_id, page_id) = create_session_page(&server).await;
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id,
+        page_id: Some(page_id),
+        deadline: Utc::now() + Duration::seconds(30),
+        command: PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
+            selector: "#download".to_owned(),
+            target: None,
+            timeout_ms: 1_000,
+        }),
+    };
+    let response = server
+        .handle_message(request(
+            30,
+            "tools/call",
+            json!({"name":"command_execute","arguments":{"envelope":envelope}}),
+        ))
+        .await
+        .unwrap();
+    let serialized = response.to_string();
+    assert!(
+        !serialized.contains(&root.path().to_string_lossy().into_owned()),
+        "{response}"
+    );
+    let path = response["result"]["structuredContent"]["evidence"][0]["path"]
+        .as_str()
+        .expect("download path replacement");
+    assert!(path.starts_with("artifact://"), "{response}");
+    assert!(response["result"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["type"] == "resource_link" && item["uri"] == path));
+    let read = server
+        .handle_message(request(31, "resources/read", json!({"uri":path})))
+        .await
+        .unwrap();
+    assert_eq!(
+        read["result"]["contents"][0]["mimeType"],
+        "application/octet-stream"
+    );
+}
+
+#[tokio::test]
+async fn artifact_admission_failure_after_completed_command_never_becomes_retryable_error() {
+    let (server, _root) = fixture_with(2, 1).await;
+    let response = execute_screenshot(&server).await;
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["status"],
+        "completed"
+    );
+    let diagnostic = &response["result"]["structuredContent"]["artifactRegistration"];
+    assert_eq!(diagnostic["status"], "partial", "{response}");
+    assert_eq!(diagnostic["reconciliationRequired"], true);
+    assert!(diagnostic["commandId"].is_string());
+    assert_eq!(diagnostic["retryable"], false);
 }
