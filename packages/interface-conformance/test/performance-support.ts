@@ -4,8 +4,8 @@ import { join } from "node:path";
 
 export type PerformanceSample = {
   adapterWallMs: number;
-  operationMs: number;
-  adapterOverheadMs: number;
+  adapterOperationMs: number;
+  harnessEnvelopeOverheadMs: number;
 };
 
 export type PerformanceEvent =
@@ -50,8 +50,8 @@ export async function runPersistentPerformance(options: {
     const adapterWallMs = performance.now() - started;
     const sample = {
       adapterWallMs,
-      operationMs: timer.elapsedMs,
-      adapterOverheadMs: adapterWallMs - timer.elapsedMs,
+      adapterOperationMs: timer.elapsedMs,
+      harnessEnvelopeOverheadMs: adapterWallMs - timer.elapsedMs,
     };
     samples.push(sample);
     await emit({ event: "sample", adapter: options.adapter, index, sample, rootPid: process.pid }, `sample-${index}.json`);

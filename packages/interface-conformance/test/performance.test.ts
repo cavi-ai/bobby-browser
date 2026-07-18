@@ -99,25 +99,25 @@ test("five actual adapters use one warmed persistent fixture for seven paired sa
   for (const adapter of selectedAdapters) {
     const result = await runPersistentAdapter(adapter);
     for (const sample of result.samples) {
-      assert(sample.operationMs > 0, `${adapter} did not instrument actual operation time`);
-      assert(sample.adapterWallMs >= sample.operationMs, `${adapter} operation timing escaped its adapter wall boundary`);
-      assert(Math.abs(sample.adapterOverheadMs - (sample.adapterWallMs - sample.operationMs)) < 0.001,
-        `${adapter} overhead was not the paired per-sample delta`);
+      assert(sample.adapterOperationMs > 0, `${adapter} did not instrument adapter operation time`);
+      assert(sample.adapterWallMs >= sample.adapterOperationMs, `${adapter} operation timing escaped its adapter wall boundary`);
+      assert(Math.abs(sample.harnessEnvelopeOverheadMs - (sample.adapterWallMs - sample.adapterOperationMs)) < 0.001,
+        `${adapter} harness envelope overhead was not the paired per-sample delta`);
     }
-    const operation = statistics(result.samples.map(sample => sample.operationMs));
+    const operation = statistics(result.samples.map(sample => sample.adapterOperationMs));
     const wall = statistics(result.samples.map(sample => sample.adapterWallMs));
-    const overhead = statistics(result.samples.map(sample => sample.adapterOverheadMs));
+    const overhead = statistics(result.samples.map(sample => sample.harnessEnvelopeOverheadMs));
     const rssGrowthKiB = result.rssAfterDisconnectKiB - result.rssBeforeKiB;
     const rssPeakGrowthKiB = result.rssPeakKiB - result.rssBeforeKiB;
     assert(rssGrowthKiB <= maxSettledGrowthKiB, `${adapter} retained ${rssGrowthKiB} KiB after client disconnect`);
     assert(rssPeakGrowthKiB <= maxPeakGrowthKiB, `${adapter} grew ${rssPeakGrowthKiB} KiB at peak`);
     console.log(
       `interface-performance adapter=${adapter} warmed_samples=${samples}` +
-      ` operation_median_ms=${operation.median.toFixed(2)} operation_iqr_ms=${operation.iqr.toFixed(2)}` +
+      ` adapter_operation_median_ms=${operation.median.toFixed(2)} adapter_operation_iqr_ms=${operation.iqr.toFixed(2)}` +
       ` adapter_wall_median_ms=${wall.median.toFixed(2)} adapter_wall_iqr_ms=${wall.iqr.toFixed(2)}` +
-      ` adapter_overhead_median_ms=${overhead.median.toFixed(2)} adapter_overhead_iqr_ms=${overhead.iqr.toFixed(2)}` +
+      ` harness_envelope_overhead_median_ms=${overhead.median.toFixed(2)} harness_envelope_overhead_iqr_ms=${overhead.iqr.toFixed(2)}` +
       ` rss_before_kib=${result.rssBeforeKiB} rss_peak_kib=${result.rssPeakKiB}` +
-      ` rss_after_disconnect_kib=${result.rssAfterDisconnectKiB} rss_growth_kib=${rssGrowthKiB}`,
+      ` process_tree_rss_after_transport_close_kib=${result.rssAfterDisconnectKiB} process_tree_rss_retained_kib=${rssGrowthKiB}`,
     );
   }
 });

@@ -9,7 +9,7 @@
     "test:puppeteer": "pnpm run build && node --test dist/test/puppeteer.test.js",
     "test": "pnpm run build && node --test dist/test/negative.test.js dist/test/performance-methodology.test.js && node dist/src/matrix.js",
     "test:performance": "pnpm run build && node --test dist/test/performance.test.js",
-    "test:release": "pnpm run build && node --test dist/test/negative.test.js dist/test/performance-methodology.test.js && pnpm run test:performance"
+    "test:release": "cargo test -p runtime-tests --test interface_security --test interface_capacity --test interface_recovery --test interface_performance && cargo test -p runtime-tests --test interface_security real_security_release_matrix_executes_every_production_boundary -- --ignored --exact --nocapture && cargo test -p runtime-tests --test interface_recovery installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal -- --ignored --exact --nocapture && pnpm run test && pnpm run test:performance"
   },
   "devDependencies": {
     "@bobby-browser/sdk": "workspace:*",

@@ -119,12 +119,18 @@ outcome remains `NeedsReconciliation`; it is never silently replayed.
 
 ## Capacity and performance proof
 
-Release gates exercise 64 authenticated clients, eight active workflows, 32
-warm/resumable sessions, slow event consumers, and concurrent artifact reads.
-Equivalent-work measurements use at least seven warmed samples per adapter and
-report median/IQR for adapter overhead separately from browser time. Raw JSONL,
-heap profiles, and CPU profiles belong under `benchmarks/raw/` and are ignored.
-The concise summary printed by the performance gate is the reproducible record.
+Release gates exercise 64 authenticated persistent connections; overflow fails
+immediately with typed HTTP `429 ResourceExhausted` and `Retry-After: 1`. They
+also prove FIFO admission for eight active workflows across 32 warm/resumable
+sessions, slow event consumers, and an `ArtifactReader` maximum of eight
+concurrent reads whose overload is typed retryable with a 25 ms retry delay.
+Equivalent-work measurements use one discarded warmup followed by seven paired
+samples on a persistent fixture for each adapter. They report adapter-operation
+time, adapter wall time, their harness-envelope delta, and process-tree
+RSS before/at peak/after the adapter closes its real transport. Raw JSONL, heap
+profiles, and CPU profiles belong under `benchmarks/raw/` and are ignored. Run
+`pnpm --filter @bobby-browser/interface-conformance test:release`; the concise
+summary printed by that release gate is the reproducible record.
 
 ## Run
 

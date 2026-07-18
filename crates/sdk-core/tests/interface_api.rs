@@ -362,6 +362,76 @@ async fn authenticated_session_creation_populates_the_trusted_ownership_authorit
 }
 
 #[tokio::test]
+async fn session_owned_runtime_hides_and_rejects_another_principals_session() {
+    let authority = AuthorityStore::in_memory();
+    let capabilities = [
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+    ];
+    let owner_token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010")),
+            capabilities,
+            expiry(),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let other_token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000011")),
+            capabilities,
+            expiry(),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let owner_handle = authority.verify(&owner_token).await.unwrap();
+    let other_handle = authority.verify(&other_token).await.unwrap();
+    let owner_context = owner_handle.context(expiry(), None);
+    let other_context = other_handle.context(expiry(), None);
+    let (runtime, _, _) = runtime_with_workers(false);
+    let (ownership, recorder) = SessionOwnershipRegistry::bounded(4);
+    let owner = AuthenticatedRuntime::with_session_ownership(
+        runtime.clone(),
+        owner_handle,
+        recorder.clone(),
+    );
+    let other = AuthenticatedRuntime::with_session_ownership(runtime, other_handle, recorder);
+    let session = owner
+        .create_session(
+            owner_context,
+            CreateSessionRequest {
+                profile: "owner".into(),
+                proxy: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(ownership.owns_session(
+        &PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010")),
+        &session.id
+    ));
+
+    assert!(other
+        .list_sessions(other_context.clone())
+        .await
+        .unwrap()
+        .is_empty());
+    let denial = other
+        .open_page(
+            other_context,
+            OpenPageRequest {
+                session_id: session.id,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(denial.code, InterfaceErrorCode::NotFound);
+}
+
+#[tokio::test]
 async fn full_ownership_registry_refuses_before_runtime_session_dispatch() {
     let runtime = RuntimeService::default();
     let runtime_probe = runtime.clone();

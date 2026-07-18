@@ -42,23 +42,19 @@ async fn listener_admits_only_the_configured_number_of_live_connections() {
     let second_response = response_headers(&mut second).await;
     assert!(second_response.starts_with(b"HTTP/1.1 200"));
 
-    let mut queued_in_kernel = TcpStream::connect(address).await.unwrap();
-    request(&mut queued_in_kernel).await;
-    let mut byte = [0_u8; 1];
-    assert!(
-        tokio::time::timeout(Duration::from_millis(150), queued_in_kernel.read(&mut byte))
-            .await
-            .is_err(),
-        "the next connection was accepted while the first remained live"
-    );
+    let mut rejected = TcpStream::connect(address).await.unwrap();
+    request(&mut rejected).await;
+    let rejected_response = response_headers(&mut rejected).await;
+    assert!(rejected_response.starts_with(b"HTTP/1.1 429"));
+    assert!(rejected_response
+        .windows(b"retry-after: 1".len())
+        .any(|window| window.eq_ignore_ascii_case(b"retry-after: 1")));
 
     drop(first);
-    let admitted_response = tokio::time::timeout(
-        Duration::from_secs(2),
-        response_headers(&mut queued_in_kernel),
-    )
-    .await
-    .expect("queued connection should proceed after a permit is released");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut retried = TcpStream::connect(address).await.unwrap();
+    request(&mut retried).await;
+    let admitted_response = response_headers(&mut retried).await;
     assert!(admitted_response.starts_with(b"HTTP/1.1 200"));
 
     drop(second);

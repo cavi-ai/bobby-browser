@@ -1,8 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use artifact_store::{ArtifactRecord, ArtifactStore};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use types::{
     Capability, ErrorLayer, InterfaceError, InterfaceErrorCode, PageId, PrincipalId,
     RequestContext, SessionId,
@@ -15,6 +19,7 @@ const OWNERSHIP_DIRECTORY: &str = ".interface-artifact-ownership";
 const OWNERSHIP_LOCK_FILE: &str = ".quota.lock";
 const MAX_OWNERSHIP_BYTES: u64 = 64 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_CONCURRENT_ARTIFACT_READS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -69,6 +74,7 @@ pub trait ArtifactBoundaryTestObserver: Send + Sync {
     fn after_ownership_temporary_created(&self) -> ArtifactPersistenceTestAction {
         ArtifactPersistenceTestAction::Continue
     }
+    fn before_artifact_read(&self) {}
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -85,6 +91,9 @@ pub struct ArtifactReader {
     ownership_limits: ArtifactOwnershipLimits,
     ownership_usage: Arc<Mutex<OwnershipUsage>>,
     test_observer: Option<Arc<dyn ArtifactBoundaryTestObserver>>,
+    read_permits: Arc<Semaphore>,
+    active_reads: Arc<AtomicUsize>,
+    peak_reads: Arc<AtomicUsize>,
 }
 
 impl ArtifactReader {
@@ -145,6 +154,9 @@ impl ArtifactReader {
             ownership_limits,
             ownership_usage: Arc::new(Mutex::new(usage)),
             test_observer,
+            read_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_ARTIFACT_READS)),
+            active_reads: Arc::new(AtomicUsize::new(0)),
+            peak_reads: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -225,13 +237,31 @@ impl ArtifactReader {
         if !authenticated_for(handle, ctx, Capability::ArtifactRead) {
             return Err(artifact_denied(ctx));
         }
+        let _permit = self
+            .read_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| artifact_overloaded(ctx))?;
+        let active = self.active_reads.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_reads.fetch_max(active, Ordering::SeqCst);
+        struct ActiveGuard(Arc<AtomicUsize>);
+        impl Drop for ActiveGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _active = ActiveGuard(self.active_reads.clone());
 
         let root = self.store.configured_root().to_path_buf();
         let principal_id = ctx.principal_id.clone();
         let session_id = session_id.clone();
         let reference = reference.clone();
         let max_read_bytes = self.max_read_bytes;
+        let test_observer = self.test_observer.clone();
         let result = tokio::task::spawn_blocking(move || {
+            if let Some(observer) = test_observer.as_deref() {
+                observer.before_artifact_read();
+            }
             let ownership = read_ownership(&root, reference.reference_id)?;
             if ownership.principal_id != principal_id
                 || ownership.session_id != session_id
@@ -262,6 +292,11 @@ impl ArtifactReader {
             Ok(Ok(content)) => Ok(content),
             Ok(Err(_)) | Err(_) => Err(artifact_denied(ctx)),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn peak_concurrent_reads_for_tests(&self) -> usize {
+        self.peak_reads.load(Ordering::SeqCst)
     }
 }
 
@@ -319,6 +354,20 @@ fn artifact_denied(ctx: &RequestContext) -> InterfaceError {
         command_id: None,
         retryable: false,
         retry_after_ms: None,
+        reconciliation_required: false,
+        required_capability: None,
+    }
+}
+
+fn artifact_overloaded(ctx: &RequestContext) -> InterfaceError {
+    InterfaceError {
+        code: InterfaceErrorCode::ResourceExhausted,
+        layer: ErrorLayer::Interface,
+        message: "artifact read capacity exhausted".into(),
+        correlation_id: ctx.correlation_id.clone(),
+        command_id: None,
+        retryable: true,
+        retry_after_ms: Some(25),
         reconciliation_required: false,
         required_capability: None,
     }

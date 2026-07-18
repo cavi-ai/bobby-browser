@@ -1,11 +1,11 @@
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, future::IntoFuture, sync::Arc};
 
 use artifact_store::ArtifactStore;
 use axum::{
     body::{to_bytes, Body, Bytes},
     http::{Request, StatusCode},
 };
-use broker::{router, AppState};
+use broker::{router, AppState, ArtifactCatalog};
 use cdp_gateway::{
     parse_frame, CdpConnection, CdpErrorCode, CdpEvent, CdpGateway, CdpRequest, MethodRegistry,
     MAX_FRAME_BYTES as MAX_CDP_FRAME_BYTES, MAX_QUEUED_EVENTS,
@@ -13,7 +13,8 @@ use cdp_gateway::{
 use chrono::{Duration, SecondsFormat, Utc};
 use config::InterfaceConfig;
 use futures_util::stream;
-use interface_conformance::live::ChromeRuntimeHarness;
+use futures_util::{SinkExt, StreamExt};
+use interface_conformance::live::{all_capabilities, ChromeRuntimeHarness};
 use interface_core::{
     canonical_sha256, ArtifactOwnershipLimits, ArtifactReader, Authority, AuthorityStore, Event,
     EventGapReason, EventStore, IdempotencyReservation, IdempotencyStore, RuntimeInterface,
@@ -25,12 +26,18 @@ use mcp_gateway::{
 };
 use sdk_core::AuthenticatedRuntime;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+};
 use tower::ServiceExt;
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CommandEnvelope, CommandId, CommandOutcome,
     CorrelationId, CreateSessionRequest, Evidence, IdempotencyKey, InspectCommand,
-    InterfaceErrorCode, InterfaceOperation, InterfaceVersion, NavigateCommand, OpenPageRequest,
-    PageId, PrimitiveCommand, PrincipalId, ScreenshotMode, SessionId, WaitUntil, WorkflowId,
+    InterfaceErrorCode, InterfaceOperation, InterfaceVersion, NavigateCommand, PageId,
+    PrimitiveCommand, PrincipalId, ScreenshotMode, SessionId, WaitUntil, WorkflowId,
     CURRENT_INTERFACE_VERSION,
 };
 
@@ -225,6 +232,25 @@ fn completed(outcome: CommandOutcome) -> Result<Vec<Evidence>, String> {
     }
 }
 
+fn require_canary_absent<const N: usize>(surfaces: [(&str, Vec<u8>); N]) -> SecurityResult {
+    for (surface, bytes) in surfaces {
+        require!(
+            !bytes
+                .windows(SECRET.len())
+                .any(|window| window == SECRET.as_bytes()),
+            "credential leaked through {surface}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn canary_detector_rejects_a_surface_that_contains_the_credential() {
+    let error = require_canary_absent([("adapter", format!("error: {SECRET}").into_bytes())])
+        .expect_err("credential-bearing adapter output must fail the release gate");
+    assert!(error.contains("adapter"));
+}
+
 async fn initialize_mcp(server: &McpServer) {
     server
         .handle_message(
@@ -239,72 +265,189 @@ async fn initialize_mcp(server: &McpServer) {
         .await;
 }
 
+async fn mcp_transport_call<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    message: Value,
+) -> Result<Value, String> {
+    let id = message.get("id").cloned();
+    writer
+        .write_all(format!("{message}\n").as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    writer.flush().await.map_err(|e| e.to_string())?;
+    if id.is_none() {
+        return Ok(Value::Null);
+    }
+    loop {
+        let mut line = String::new();
+        require!(
+            reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| e.to_string())?
+                > 0,
+            "MCP transport closed"
+        );
+        let response: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+        if response.get("id") == id.as_ref() {
+            return Ok(response);
+        }
+    }
+}
+
+async fn mcp_foreign_session_checks(
+    server: McpServer,
+    session: SessionId,
+    page: PageId,
+) -> Result<(Value, Value, Value), String> {
+    tokio::task::LocalSet::new().run_until(async move {
+        let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let task = tokio::task::spawn_local(async move { server.serve(server_read, server_write).await });
+        let (client_read, mut writer) = tokio::io::split(client_io);
+        let mut reader = BufReader::new(client_read);
+        mcp_transport_call(&mut reader, &mut writer, json!({"jsonrpc":"2.0","id":50,"method":"initialize","params":{"protocolVersion":MCP_PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":"isolation","version":"1"}}})).await?;
+        mcp_transport_call(&mut reader, &mut writer, json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})).await?;
+        let list = mcp_transport_call(&mut reader, &mut writer, json!({"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"session_list","arguments":{}}})).await?;
+        let open = mcp_transport_call(&mut reader, &mut writer, json!({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"page_open","arguments":{"sessionId":session}}})).await?;
+        let submit = mcp_transport_call(&mut reader, &mut writer, json!({"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"command_execute","arguments":{"envelope":envelope(&session, &page, PrimitiveCommand::Inspect(InspectCommand::default()))}}})).await?;
+        task.abort();
+        let _ = task.await;
+        Ok((list, open, submit))
+    }).await
+}
+
+async fn broker_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: String,
+    token: &str,
+    body: Option<Value>,
+) -> Result<reqwest::Response, String> {
+    let mut request = client
+        .request(method, url)
+        .bearer_auth(token)
+        .header("x-interface-version", CURRENT_INTERFACE_VERSION)
+        .header("x-correlation-id", uuid::Uuid::new_v4().to_string())
+        .header(
+            "x-deadline",
+            (Utc::now() + Duration::minutes(2)).to_rfc3339(),
+        );
+    if let Some(body) = body {
+        request = request
+            .header("content-type", "application/json")
+            .body(body.to_string());
+    }
+    request.send().await.map_err(|error| error.to_string())
+}
+
 async fn canary_leakage(harness: &ChromeRuntimeHarness) -> SecurityResult {
-    let runtime = harness.runtime.clone();
-    let session = runtime
-        .create_session(
-            harness.context(),
-            CreateSessionRequest {
-                profile: "security-canary".into(),
-                proxy: None,
-            },
+    let canary_principal = PrincipalId::from_uuid(uuid::Uuid::new_v4());
+    harness
+        .authority
+        .enroll_hash(
+            Sha256::digest(SECRET.as_bytes()).into(),
+            canary_principal,
+            all_capabilities(),
+            Utc::now() + Duration::minutes(5),
         )
         .await
         .map_err(|error| format!("{error:?}"))?;
-    let page = runtime
-        .open_page(
-            harness.context(),
-            OpenPageRequest {
-                session_id: session.id.clone(),
-            },
-        )
+    let canary_handle = harness
+        .authority
+        .verify(SECRET)
         .await
         .map_err(|error| format!("{error:?}"))?;
-    completed(
-        runtime
-            .submit(
-                harness.context(),
-                envelope(
-                    &session.id,
-                    &page.id,
-                    PrimitiveCommand::Navigate(NavigateCommand {
-                        url: harness.site_url(),
-                        wait_until: WaitUntil::DomContentLoaded,
-                        timeout_ms: 15_000,
-                    }),
-                ),
-            )
-            .await
-            .map_err(|error| format!("{error:?}"))?,
-    )?;
-    let dom = completed(
-        runtime
-            .submit(
-                harness.context(),
-                envelope(
-                    &session.id,
-                    &page.id,
-                    PrimitiveCommand::Inspect(InspectCommand::default()),
-                ),
-            )
-            .await
-            .map_err(|error| format!("{error:?}"))?,
-    )?;
-    let shot = completed(
-        runtime
-            .submit(
-                harness.context(),
-                envelope(
-                    &session.id,
-                    &page.id,
-                    PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
-                        mode: ScreenshotMode::Viewport,
-                    }),
-                ),
-            )
-            .await
-            .map_err(|error| format!("{error:?}"))?,
-    )?;
+    let runtime = Arc::new(AuthenticatedRuntime::new(
+        harness.service.clone(),
+        canary_handle.clone(),
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let service = harness.service.clone();
+    let broker_app = router(AppState::new(
+        harness.authority.clone(),
+        move |handle| {
+            Arc::new(AuthenticatedRuntime::new(service.clone(), handle))
+                as Arc<dyn RuntimeInterface>
+        },
+        InterfaceConfig::default(),
+    ));
+    let broker = tokio::spawn(axum::serve(listener, broker_app).into_future());
+    let client = reqwest::Client::new();
+    let mut http_surfaces = Vec::new();
+    let response = broker_request(
+        &client,
+        reqwest::Method::POST,
+        format!("http://{address}/v1/sessions"),
+        SECRET,
+        Some(json!({"profile":"security-canary","proxy":null})),
+    )
+    .await?;
+    http_surfaces.extend_from_slice(format!("{:?}", response.headers()).as_bytes());
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    http_surfaces.extend_from_slice(&bytes);
+    let session: types::SessionState = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let response = broker_request(
+        &client,
+        reqwest::Method::POST,
+        format!("http://{address}/v1/pages"),
+        SECRET,
+        Some(json!({"session_id":session.id})),
+    )
+    .await?;
+    http_surfaces.extend_from_slice(format!("{:?}", response.headers()).as_bytes());
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    http_surfaces.extend_from_slice(&bytes);
+    let page: types::PageState = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let mut dom = Vec::new();
+    let mut shot = Vec::new();
+    for (index, command) in [
+        PrimitiveCommand::Navigate(NavigateCommand {
+            url: harness.site_url(),
+            wait_until: WaitUntil::DomContentLoaded,
+            timeout_ms: 15_000,
+        }),
+        PrimitiveCommand::Inspect(InspectCommand::default()),
+        PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+            mode: ScreenshotMode::Viewport,
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = broker_request(
+            &client,
+            reqwest::Method::POST,
+            format!("http://{address}/v1/commands"),
+            SECRET,
+            Some(serde_json::to_value(envelope(&session.id, &page.id, command)).unwrap()),
+        )
+        .await?;
+        http_surfaces.extend_from_slice(format!("{:?}", response.headers()).as_bytes());
+        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+        http_surfaces.extend_from_slice(&bytes);
+        let evidence = completed(serde_json::from_slice(&bytes).map_err(|e| e.to_string())?)?;
+        if index == 1 {
+            dom = evidence;
+        } else if index == 2 {
+            shot = evidence;
+        }
+    }
+    let response = broker_request(
+        &client,
+        reqwest::Method::GET,
+        format!("http://{address}/v1/events?after=0&limit=16"),
+        SECRET,
+        None,
+    )
+    .await?;
+    http_surfaces.extend_from_slice(format!("{:?}", response.headers()).as_bytes());
+    http_surfaces.extend_from_slice(&response.bytes().await.map_err(|e| e.to_string())?);
     let artifact_id = shot
         .iter()
         .find_map(|item| match item {
@@ -321,64 +464,145 @@ async fn canary_leakage(harness: &ChromeRuntimeHarness) -> SecurityResult {
     .await
     .map_err(|error| error.to_string())?;
 
-    let response = runtime_app(harness, InterfaceConfig::default())
-        .oneshot(authorized(
-            "GET",
-            &format!("/v1/runtime?canary={}", harness.token),
-            &harness.token,
-            Body::empty(),
-        ))
-        .await
-        .map_err(|error| error.to_string())?;
-    let headers = format!("{:?}", response.headers()).into_bytes();
-    let body = to_bytes(response.into_body(), 16 * 1024)
-        .await
-        .map_err(|error| error.to_string())?
-        .to_vec();
+    broker.abort();
 
-    let mcp = McpServer::new(runtime.clone());
-    initialize_mcp(&mcp).await;
-    let input = format!(
-        "{{bad {}}}\n{{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"unknown-{}\",\"params\":{{}}}}\n",
-        harness.token, harness.token
+    let mcp_handle = harness
+        .authority
+        .verify(SECRET)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let mcp = McpServer::new(Arc::new(AuthenticatedRuntime::new(
+        harness.service.clone(),
+        mcp_handle,
+    )));
+    let mcp_site_url = harness.site_url();
+    let stdout: Vec<u8> = tokio::task::LocalSet::new().run_until(async move {
+      let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+      let (server_read, server_write) = tokio::io::split(server_io);
+      let mcp_task = tokio::task::spawn_local(async move { mcp.serve(server_read, server_write).await });
+      let (client_read, mut client_write) = tokio::io::split(client_io);
+      let mut client_read = BufReader::new(client_read);
+      let mut stdout = Vec::new();
+    let initialized = mcp_transport_call(&mut client_read, &mut client_write,
+        json!({"jsonrpc":"2.0","id":30,"method":"initialize","params":{"protocolVersion":MCP_PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":"canary","version":"1"}}})).await?;
+    stdout.extend_from_slice(format!("{initialized}\n").as_bytes());
+    mcp_transport_call(
+        &mut client_read,
+        &mut client_write,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+    )
+    .await?;
+    let mcp_create = mcp_transport_call(&mut client_read, &mut client_write,
+        json!({"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"session_create","arguments":{"profile":"mcp-canary","proxy":null}}})).await?;
+    stdout.extend_from_slice(format!("{mcp_create}\n").as_bytes());
+    let mcp_session = mcp_create["result"]["structuredContent"]["id"].clone();
+    require!(
+        mcp_session.is_string(),
+        "MCP session creation failed: {mcp_create}"
     );
-    let mut stdout = Vec::new();
-    mcp.serve(input.as_bytes(), &mut stdout)
+    let open = mcp_transport_call(&mut client_read, &mut client_write, json!({"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"page_open","arguments":{"sessionId":mcp_session}}})).await?;
+    stdout.extend_from_slice(format!("{open}\n").as_bytes());
+    let mcp_page = open["result"]["structuredContent"]["id"].clone();
+    require!(mcp_page.is_string(), "MCP page open failed: {open}");
+    for (id, command) in [
+        (
+            33,
+            PrimitiveCommand::Navigate(NavigateCommand {
+                url: mcp_site_url,
+                wait_until: WaitUntil::DomContentLoaded,
+                timeout_ms: 15_000,
+            }),
+        ),
+        (34, PrimitiveCommand::Inspect(InspectCommand::default())),
+        (
+            35,
+            PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            }),
+        ),
+    ] {
+        let value = mcp_transport_call(&mut client_read, &mut client_write, json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"command_execute","arguments":{"envelope":envelope(&serde_json::from_value(mcp_session.clone()).unwrap(), &serde_json::from_value(mcp_page.clone()).unwrap(), command)}}})).await?;
+        stdout.extend_from_slice(format!("{value}\n").as_bytes());
+    }
+    let events = mcp_transport_call(&mut client_read, &mut client_write, json!({"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"events_read","arguments":{"cursor":0,"limit":16}}})).await?;
+        stdout.extend_from_slice(format!("{events}\n").as_bytes());
+        drop(client_write);
+        mcp_task.abort();
+        let _ = mcp_task.await;
+    Ok::<_, String>(stdout)
+    }).await?;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|error| error.to_string())?;
-
-    let cdp = CdpConnection::new(harness.handle.clone(), runtime, MethodRegistry::compiled());
-    let cdp_error = cdp
-        .dispatch(CdpRequest::new(
-            7,
-            format!("unknown.{}", harness.token),
-            json!({}),
-        ))
-        .await;
-    let cdp_events = cdp.drain_events().await;
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    let gateway = Arc::new(CdpGateway::new(
+        harness.authority.clone(),
+        runtime,
+        MethodRegistry::compiled(),
+        format!("ws://{address}"),
+    ));
+    let websocket_url = gateway
+        .version(Some(SECRET))
+        .await
+        .map_err(|error| format!("{error:?}"))?
+        .web_socket_debugger_url;
+    let cdp_server = tokio::spawn(axum::serve(listener, gateway.router()).into_future());
+    let mut request = websocket_url
+        .into_client_request()
+        .map_err(|error| error.to_string())?;
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {SECRET}").parse().unwrap());
+    let (mut socket, _) = connect_async(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut cdp_diagnostics = Vec::new();
+    for request in [
+        json!({"id":40,"method":"Browser.getVersion","params":{}}),
+        json!({"id":41,"method":"Target.setDiscoverTargets","params":{"discover":true}}),
+        json!({"id":42,"method":"Target.getTargets","params":{}}),
+        json!({"id":43,"method":"Target.createTarget","params":{"url":"about:blank"}}),
+    ] {
+        let id = request["id"].clone();
+        socket
+            .send(Message::Text(request.to_string().into()))
+            .await
+            .map_err(|e| e.to_string())?;
+        loop {
+            let text = socket
+                .next()
+                .await
+                .ok_or_else(|| "CDP adapter closed without response".to_owned())?
+                .map_err(|e| e.to_string())?
+                .into_text()
+                .map_err(|e| e.to_string())?
+                .to_string();
+            cdp_diagnostics.extend_from_slice(text.as_bytes());
+            let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            if value.get("id") == Some(&id) {
+                break;
+            }
+        }
+    }
+    socket
+        .close(None)
+        .await
+        .map_err(|error| error.to_string())?;
+    cdp_server.abort();
     let journal = tokio::fs::read(&harness.config.storage.journal_path)
         .await
         .map_err(|error| error.to_string())?;
 
     let surfaces = [
-        ("URL/body/error", body),
-        ("headers", headers),
+        ("HTTP headers/bodies/errors", http_surfaces),
         ("journal", journal),
         ("screenshot", screenshot),
         ("DOM evidence", serde_json::to_vec(&dom).unwrap()),
         ("MCP stdout", stdout),
-        ("CDP diagnostics", serde_json::to_vec(&cdp_error).unwrap()),
-        ("CDP events", serde_json::to_vec(&cdp_events).unwrap()),
+        ("CDP responses/events/diagnostics", cdp_diagnostics),
     ];
-    for (surface, bytes) in surfaces {
-        require!(
-            !bytes
-                .windows(harness.token.len())
-                .any(|window| window == harness.token.as_bytes()),
-            "credential leaked through {surface}"
-        );
-    }
-    Ok(())
+    require_canary_absent(surfaces)
 }
 
 async fn http_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
@@ -517,15 +741,22 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
         [
             Capability::SessionRead,
             Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
             Capability::ArtifactRead,
             Capability::ArtifactCapture,
         ],
         Utc::now() + Duration::minutes(5),
     )
     .await?;
-    let (_, _, other_handle) = identity(
+    let (_, other_token, other_handle) = identity(
         &harness.authority,
-        [Capability::SessionRead, Capability::ArtifactRead],
+        [
+            Capability::SessionRead,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::ArtifactRead,
+        ],
         Utc::now() + Duration::minutes(5),
     )
     .await?;
@@ -535,7 +766,7 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
     let owner = AuthenticatedRuntime::with_session_ownership(
         harness.service.clone(),
         owner_handle.clone(),
-        recorder,
+        recorder.clone(),
     );
     let session = owner
         .create_session(
@@ -543,6 +774,15 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
             CreateSessionRequest {
                 profile: "principal-owner".into(),
                 proxy: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    let owner_page = owner
+        .open_page(
+            owner_ctx.clone(),
+            types::OpenPageRequest {
+                session_id: session.id.clone(),
             },
         )
         .await
@@ -555,6 +795,143 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
         !session_ownership.owns_session(&other_ctx.principal_id, &session.id),
         "session crossed principal boundary"
     );
+
+    // Exercise the same foreign session through each production adapter. The
+    // adapters must neither enumerate it nor dispatch an operation against it.
+    let service = harness.service.clone();
+    let adapter_recorder = recorder.clone();
+    let app = router(AppState::new(
+        harness.authority.clone(),
+        move |handle| {
+            Arc::new(AuthenticatedRuntime::with_session_ownership(
+                service.clone(),
+                handle,
+                adapter_recorder.clone(),
+            )) as Arc<dyn RuntimeInterface>
+        },
+        InterfaceConfig::default(),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let broker_server = tokio::spawn(axum::serve(listener, app).into_future());
+    let client = reqwest::Client::new();
+    let response = broker_request(
+        &client,
+        reqwest::Method::GET,
+        format!("http://{address}/v1/sessions"),
+        &other_token,
+        None,
+    )
+    .await?;
+    let listed: Vec<types::SessionState> =
+        serde_json::from_slice(&response.bytes().await.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    require!(listed.is_empty(), "broker enumerated foreign session");
+    let response = broker_request(
+        &client,
+        reqwest::Method::POST,
+        format!("http://{address}/v1/pages"),
+        &other_token,
+        Some(json!({"session_id":session.id})),
+    )
+    .await?;
+    require!(
+        response.status() == StatusCode::NOT_FOUND,
+        "broker admitted foreign session: {}",
+        response.status()
+    );
+    let response = broker_request(
+        &client,
+        reqwest::Method::POST,
+        format!("http://{address}/v1/commands"),
+        &other_token,
+        Some(
+            serde_json::to_value(envelope(
+                &session.id,
+                &owner_page.id,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .unwrap(),
+        ),
+    )
+    .await?;
+    require!(
+        response.status() == StatusCode::NOT_FOUND,
+        "broker submitted against foreign session: {}",
+        response.status()
+    );
+    broker_server.abort();
+
+    let other_runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
+        harness.service.clone(),
+        other_handle.clone(),
+        recorder.clone(),
+    ));
+    let mcp = McpServer::new(other_runtime.clone());
+    let (mcp_list, mcp_denial, mcp_submit) =
+        mcp_foreign_session_checks(mcp, session.id.clone(), owner_page.id.clone()).await?;
+    require!(
+        mcp_list["result"]["structuredContent"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "MCP enumerated foreign session: {mcp_list}"
+    );
+    require!(
+        mcp_denial["error"]["data"]["interfaceError"]["code"] == "notFound",
+        "MCP admitted foreign session: {mcp_denial}"
+    );
+    require!(
+        mcp_submit["error"]["data"]["interfaceError"]["code"] == "notFound",
+        "MCP submitted against foreign session: {mcp_submit}"
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let gateway = Arc::new(CdpGateway::new(
+        harness.authority.clone(),
+        other_runtime,
+        MethodRegistry::compiled(),
+        format!("ws://{address}"),
+    ));
+    let websocket_url = gateway
+        .version(Some(&other_token))
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .web_socket_debugger_url;
+    let cdp_server = tokio::spawn(axum::serve(listener, gateway.router()).into_future());
+    let mut request = websocket_url
+        .into_client_request()
+        .map_err(|e| e.to_string())?;
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {other_token}").parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.map_err(|e| e.to_string())?;
+    socket
+        .send(Message::Text(
+            json!({"id":23,"method":"Target.createTarget","params":{"url":"about:blank"}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .map_err(|e| e.to_string())?;
+    let cdp_denial = socket
+        .next()
+        .await
+        .ok_or_else(|| "CDP adapter omitted denial".to_owned())?
+        .map_err(|e| e.to_string())?
+        .into_text()
+        .map_err(|e| e.to_string())?;
+    require!(
+        serde_json::from_str::<Value>(&cdp_denial).map_err(|e| e.to_string())?["error"].is_object(),
+        "CDP admitted foreign session: {cdp_denial}"
+    );
+    socket.close(None).await.map_err(|e| e.to_string())?;
+    cdp_server.abort();
 
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
     let store = ArtifactStore::new(root.path(), 4096, 4096);
@@ -595,6 +972,54 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
         denial.code == InterfaceErrorCode::ArtifactDenied,
         "artifact crossed principal boundary"
     );
+
+    let catalog = ArtifactCatalog::new(reader.clone(), 4);
+    catalog
+        .register_trusted(session.id.clone(), reference.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let service = harness.service.clone();
+    let artifact_recorder = recorder.clone();
+    let app = router(
+        AppState::new(
+            harness.authority.clone(),
+            move |handle| {
+                Arc::new(AuthenticatedRuntime::with_session_ownership(
+                    service.clone(),
+                    handle,
+                    artifact_recorder.clone(),
+                )) as Arc<dyn RuntimeInterface>
+            },
+            InterfaceConfig::default(),
+        )
+        .with_boundaries(EventStore::new(16), catalog),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let response = broker_request(
+        &reqwest::Client::new(),
+        reqwest::Method::GET,
+        format!("http://{address}/v1/artifacts/{}", reference.artifact_id()),
+        &other_token,
+        None,
+    )
+    .await?;
+    require!(
+        response.status() == StatusCode::NOT_FOUND,
+        "broker exposed foreign artifact: {}",
+        response.status()
+    );
+    let denial_body: Value =
+        serde_json::from_slice(&response.bytes().await.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    require!(
+        denial_body["error"]["code"] == "artifactDenied",
+        "broker returned untyped artifact denial: {denial_body}"
+    );
+    server.abort();
     Ok(())
 }
 

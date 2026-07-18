@@ -80,6 +80,23 @@ impl AuthenticatedRuntime {
     pub fn capability_handle(&self) -> CapabilityHandle {
         self.authorization.capability_handle()
     }
+
+    fn require_owned_session(
+        &self,
+        ctx: &RequestContext,
+        session: &types::SessionId,
+    ) -> InterfaceResult<()> {
+        if self.session_ownership.as_ref().is_some_and(|ownership| {
+            !ownership.owns_authenticated_session(&ctx.principal_id, session)
+        }) {
+            return Err(error_with(
+                ctx,
+                InterfaceErrorCode::NotFound,
+                "runtime resource was not found",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -93,7 +110,16 @@ impl RuntimeInterface for AuthenticatedRuntime {
     async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::ReadSession)?;
-        Ok(self.inner.list_sessions().await)
+        let sessions = self.inner.list_sessions().await;
+        Ok(match &self.session_ownership {
+            Some(ownership) => sessions
+                .into_iter()
+                .filter(|session| {
+                    ownership.owns_authenticated_session(&ctx.principal_id, &session.id)
+                })
+                .collect(),
+            None => sessions,
+        })
     }
 
     async fn create_session(
@@ -144,6 +170,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<PageState> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::OpenPage)?;
+        self.require_owned_session(&ctx, &req.session_id)?;
         self.inner
             .open_page(req)
             .await
@@ -157,6 +184,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<CommandOutcome> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::SubmitCommand)?;
+        self.require_owned_session(&ctx, &envelope.session_id)?;
         let Some(key) = ctx.idempotency_key.clone() else {
             return Ok(self.inner.submit(envelope).await);
         };

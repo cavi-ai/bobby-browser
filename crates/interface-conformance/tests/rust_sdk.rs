@@ -7,10 +7,10 @@ use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
-    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, CreateSessionRequest, Evidence, InspectCommand, NavigateCommand,
-    OpenPageRequest, PrimitiveCommand, ScreenshotMode, UploadFilesCommand, WaitUntil,
-    WorkflowCheckpoint, WorkflowId,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClosePageCommand, CommandClass,
+    CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence, InspectCommand,
+    NavigateCommand, OpenPageRequest, PrimitiveCommand, ScreenshotMode, UploadFilesCommand,
+    WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 #[tokio::test]
@@ -56,8 +56,8 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
             let wall = started.elapsed();
             let sample = serde_json::json!({
                 "adapterWallMs": duration_ms(wall),
-                "operationMs": duration_ms(operation),
-                "adapterOverheadMs": duration_ms(wall) - duration_ms(operation),
+                "adapterOperationMs": duration_ms(operation),
+                "harnessEnvelopeOverheadMs": duration_ms(wall) - duration_ms(operation),
             });
             emit_performance_event(
                 serde_json::json!({"event":"sample","adapter":"rust-sdk","index":index,"sample":sample,"rootPid":std::process::id()}),
@@ -65,6 +65,20 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
             emit_performance_phase(&format!("sample-{index}-end"));
             measured.push(sample);
         }
+        let cleanup = CommandEnvelope {
+            schema_version: 1,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+            command: PrimitiveCommand::ClosePage(ClosePageCommand {
+                page_id: page.id.clone(),
+            }),
+        };
+        completed(&runtime.submit(context(), cleanup).await.unwrap());
+        drop(runtime);
         emit_performance_event(
             serde_json::json!({"event":"client-disconnected","adapter":"rust-sdk","samples":measured,"rootPid":std::process::id()}),
         );
