@@ -342,6 +342,39 @@ async fn broker_request(
     request.send().await.map_err(|error| error.to_string())
 }
 
+async fn cdp_wire_request(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<(Value, Vec<Value>), String> {
+    socket
+        .send(Message::Text(
+            json!({"id":id,"method":method,"params":params})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut events = Vec::new();
+    loop {
+        let text = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .map_err(|_| format!("CDP {method} response timed out"))?
+            .ok_or_else(|| format!("CDP {method} transport closed"))?
+            .map_err(|error| error.to_string())?
+            .into_text()
+            .map_err(|error| error.to_string())?;
+        let value: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+        if value.get("id") == Some(&json!(id)) {
+            return Ok((value, events));
+        }
+        events.push(value);
+    }
+}
+
 async fn canary_leakage(harness: &ChromeRuntimeHarness) -> SecurityResult {
     let canary_principal = PrincipalId::from_uuid(uuid::Uuid::new_v4());
     harness
@@ -736,7 +769,7 @@ async fn cdp_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
 }
 
 async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
-    let (_, _, owner_handle) = identity(
+    let (_, owner_token, owner_handle) = identity(
         &harness.authority,
         [
             Capability::SessionRead,
@@ -887,51 +920,162 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
         "MCP submitted against foreign session: {mcp_submit}"
     );
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let owner_runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
+        harness.service.clone(),
+        owner_handle.clone(),
+        recorder.clone(),
+    ));
+    let owner_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| e.to_string())?;
-    let address = listener.local_addr().map_err(|e| e.to_string())?;
-    let gateway = Arc::new(CdpGateway::new(
+    let owner_address = owner_listener.local_addr().map_err(|e| e.to_string())?;
+    let owner_gateway = Arc::new(CdpGateway::new(
+        harness.authority.clone(),
+        owner_runtime,
+        MethodRegistry::compiled(),
+        format!("ws://{owner_address}"),
+    ));
+    let owner_websocket = owner_gateway
+        .version(Some(&owner_token))
+        .await
+        .map_err(|e| format!("{e:?}"))?
+        .web_socket_debugger_url;
+    let owner_server =
+        tokio::spawn(axum::serve(owner_listener, owner_gateway.router()).into_future());
+    let mut owner_request = owner_websocket
+        .into_client_request()
+        .map_err(|e| e.to_string())?;
+    owner_request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {owner_token}").parse().unwrap(),
+    );
+    let (mut owner_socket, _) = connect_async(owner_request)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (owner_targets, _) =
+        cdp_wire_request(&mut owner_socket, 20, "Target.getTargets", json!({})).await?;
+    let owner_target = owner_targets["result"]["targetInfos"]
+        .as_array()
+        .and_then(|targets| targets.first())
+        .and_then(|target| target["targetId"].as_str())
+        .ok_or_else(|| format!("owner target missing: {owner_targets}"))?
+        .to_owned();
+    let (_, mut attach_events) = cdp_wire_request(
+        &mut owner_socket,
+        21,
+        "Target.setAutoAttach",
+        json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true}),
+    )
+    .await?;
+    if !attach_events
+        .iter()
+        .any(|event| event["method"] == "Target.attachedToTarget")
+    {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), owner_socket.next())
+            .await
+            .map_err(|_| "owner attached event timed out".to_owned())?
+            .ok_or_else(|| "owner CDP transport closed".to_owned())?
+            .map_err(|e| e.to_string())?
+            .into_text()
+            .map_err(|e| e.to_string())?;
+        attach_events.push(serde_json::from_str(&event).map_err(|e| e.to_string())?);
+    }
+    let owner_cdp_session = attach_events
+        .iter()
+        .find(|event| event["method"] == "Target.attachedToTarget")
+        .and_then(|event| event["params"]["sessionId"].as_str())
+        .ok_or_else(|| format!("owner CDP session missing: {attach_events:?}"))?
+        .to_owned();
+    let (created, _) = cdp_wire_request(
+        &mut owner_socket,
+        22,
+        "Target.createTarget",
+        json!({"url":"about:blank"}),
+    )
+    .await?;
+    require!(
+        created["result"]["targetId"].is_string(),
+        "owner target creation failed: {created}"
+    );
+
+    let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let other_address = other_listener.local_addr().map_err(|e| e.to_string())?;
+    let other_gateway = Arc::new(CdpGateway::new(
         harness.authority.clone(),
         other_runtime,
         MethodRegistry::compiled(),
-        format!("ws://{address}"),
+        format!("ws://{other_address}"),
     ));
-    let websocket_url = gateway
+    let other_websocket = other_gateway
         .version(Some(&other_token))
         .await
         .map_err(|e| format!("{e:?}"))?
         .web_socket_debugger_url;
-    let cdp_server = tokio::spawn(axum::serve(listener, gateway.router()).into_future());
-    let mut request = websocket_url
+    let other_server =
+        tokio::spawn(axum::serve(other_listener, other_gateway.router()).into_future());
+    let discovery_response = reqwest::Client::new()
+        .get(format!("http://{other_address}/json/list"))
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let discovery: Value = serde_json::from_slice(
+        &discovery_response
+            .bytes()
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    require!(
+        !discovery.to_string().contains(&owner_target),
+        "CDP discovery disclosed owner target: {discovery}"
+    );
+    let mut other_request = other_websocket
         .into_client_request()
         .map_err(|e| e.to_string())?;
-    request.headers_mut().insert(
+    other_request.headers_mut().insert(
         "authorization",
         format!("Bearer {other_token}").parse().unwrap(),
     );
-    let (mut socket, _) = connect_async(request).await.map_err(|e| e.to_string())?;
-    socket
-        .send(Message::Text(
-            json!({"id":23,"method":"Target.createTarget","params":{"url":"about:blank"}})
-                .to_string()
-                .into(),
-        ))
+    let (mut other_socket, _) = connect_async(other_request)
         .await
         .map_err(|e| e.to_string())?;
-    let cdp_denial = socket
-        .next()
-        .await
-        .ok_or_else(|| "CDP adapter omitted denial".to_owned())?
-        .map_err(|e| e.to_string())?
-        .into_text()
-        .map_err(|e| e.to_string())?;
+    let (other_targets, _) =
+        cdp_wire_request(&mut other_socket, 23, "Target.getTargets", json!({})).await?;
     require!(
-        serde_json::from_str::<Value>(&cdp_denial).map_err(|e| e.to_string())?["error"].is_object(),
-        "CDP admitted foreign session: {cdp_denial}"
+        !other_targets.to_string().contains(&owner_target),
+        "Target.getTargets disclosed owner target: {other_targets}"
     );
-    socket.close(None).await.map_err(|e| e.to_string())?;
-    cdp_server.abort();
+    for (id, method, params) in [
+        (
+            24,
+            "Target.attachToTarget",
+            json!({"targetId":owner_target,"flatten":true}),
+        ),
+        (25, "Target.getTargetInfo", json!({"targetId":owner_target})),
+        (
+            26,
+            "Page.getFrameTree",
+            json!({"sessionId":owner_cdp_session}),
+        ),
+    ] {
+        let (denial, _) = cdp_wire_request(&mut other_socket, id, method, params).await?;
+        require!(
+            denial["error"].is_object(),
+            "CDP admitted owner identifier via {method}: {denial}"
+        );
+        require!(
+            !denial.to_string().contains(&owner_target)
+                && !denial.to_string().contains(&owner_cdp_session),
+            "CDP denial disclosed owner identifiers via {method}: {denial}"
+        );
+    }
+    owner_socket.close(None).await.map_err(|e| e.to_string())?;
+    other_socket.close(None).await.map_err(|e| e.to_string())?;
+    owner_server.abort();
+    other_server.abort();
 
     let root = tempfile::tempdir().map_err(|error| error.to_string())?;
     let store = ArtifactStore::new(root.path(), 4096, 4096);

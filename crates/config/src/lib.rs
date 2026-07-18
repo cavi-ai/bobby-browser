@@ -22,6 +22,11 @@ pub struct InterfaceConfig {
     pub max_event_retention: usize,
     #[serde(default = "default_max_connections", alias = "maxConnections")]
     pub max_connections: usize,
+    #[serde(
+        default = "default_max_rejection_workers",
+        alias = "maxRejectionWorkers"
+    )]
+    pub max_rejection_workers: usize,
     #[serde(default = "default_token_records_path", alias = "tokenRecordsPath")]
     pub token_records_path: PathBuf,
 }
@@ -42,6 +47,10 @@ const fn default_max_connections() -> usize {
     64
 }
 
+const fn default_max_rejection_workers() -> usize {
+    16
+}
+
 fn default_token_records_path() -> PathBuf {
     PathBuf::from("./data/storage/authorities.json")
 }
@@ -53,6 +62,7 @@ impl Default for InterfaceConfig {
             max_event_batch: default_max_event_batch(),
             max_event_retention: default_max_event_retention(),
             max_connections: default_max_connections(),
+            max_rejection_workers: default_max_rejection_workers(),
             token_records_path: default_token_records_path(),
         }
     }
@@ -71,6 +81,9 @@ impl InterfaceConfig {
         }
         if self.max_connections == 0 {
             return Err("interface max_connections must be positive");
+        }
+        if self.max_rejection_workers == 0 {
+            return Err("interface max_rejection_workers must be positive");
         }
         if self.token_records_path.as_os_str().is_empty() {
             return Err("interface token_records_path must not be empty");
@@ -188,6 +201,7 @@ mod tests {
         assert_eq!(interface.max_event_batch, 256);
         assert_eq!(interface.max_event_retention, 16_384);
         assert_eq!(interface.max_connections, 64);
+        assert_eq!(interface.max_rejection_workers, 16);
         assert_eq!(
             interface.token_records_path,
             std::path::PathBuf::from("./data/storage/authorities.json")
@@ -236,6 +250,10 @@ mod tests {
             },
             InterfaceConfig {
                 max_connections: 0,
+                ..InterfaceConfig::default()
+            },
+            InterfaceConfig {
+                max_rejection_workers: 0,
                 ..InterfaceConfig::default()
             },
             InterfaceConfig {

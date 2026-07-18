@@ -121,7 +121,9 @@ outcome remains `NeedsReconciliation`; it is never silently replayed.
 
 Release gates exercise 64 authenticated persistent connections; overflow fails
 immediately with typed HTTP `429 ResourceExhausted` and `Retry-After: 1`. They
-also prove FIFO admission for eight active workflows across 32 warm/resumable
+bound overload responses to `interface.max_rejection_workers` (default 16);
+connections beyond that pool close immediately without spawning per-peer work.
+The gates also prove FIFO admission for eight active workflows across 32 warm/resumable
 sessions, slow event consumers, and an `ArtifactReader` maximum of eight
 concurrent reads whose overload is typed retryable with a 25 ms retry delay.
 Equivalent-work measurements use one discarded warmup followed by seven paired

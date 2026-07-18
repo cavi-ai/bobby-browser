@@ -169,7 +169,14 @@ async fn production_listener_enforces_sixty_four_live_connections() {
         },
         config::InterfaceConfig::default(),
     ));
-    let server = tokio::spawn(broker::serve_listener(listener, app, 64));
+    let rejection_stats = broker::RejectionWorkerStats::default();
+    let server = tokio::spawn(broker::serve_listener_with_rejection_limit(
+        listener,
+        app,
+        64,
+        16,
+        rejection_stats.clone(),
+    ));
     let request=format!("GET /v1/runtime HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nx-interface-version: {}\r\nx-correlation-id: {}\r\nx-deadline: {}\r\n\r\n",types::CURRENT_INTERFACE_VERSION,uuid::Uuid::new_v4(),(Utc::now()+ChronoDuration::seconds(30)).to_rfc3339());
     let mut clients = Vec::new();
     for _ in 0..64 {
@@ -190,6 +197,51 @@ async fn production_listener_enforces_sixty_four_live_connections() {
     );
     assert!(response.contains("\"retryable\":true"), "{response}");
     assert!(response.contains("\"retryAfterMs\":1000"), "{response}");
+
+    let mut slow_rejections = Vec::new();
+    for _ in 0..16 {
+        slow_rejections.push(TcpStream::connect(address).await.unwrap());
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while rejection_stats.active() < 16 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("authenticated listener should saturate only the configured rejectors");
+    let mut flood_reads = tokio::task::JoinSet::new();
+    for _ in 0..256 {
+        let mut peer = TcpStream::connect(address).await.unwrap();
+        flood_reads.spawn(async move {
+            let mut byte = [0_u8; 1];
+            tokio::time::timeout(Duration::from_millis(250), peer.read(&mut byte))
+                .await
+                .is_ok_and(|read| read.is_ok_and(|count| count == 0))
+        });
+    }
+    while let Some(closed) = flood_reads.join_next().await {
+        assert!(
+            closed.unwrap(),
+            "excess authenticated peer was not promptly dropped"
+        );
+    }
+    for mut peer in slow_rejections {
+        let mut overload = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut overload))
+            .await
+            .expect("bounded rejector should finish")
+            .unwrap();
+        assert!(overload.starts_with(b"HTTP/1.1 429"));
+    }
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while rejection_stats.active() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("rejector accounting should drain after the authenticated flood");
+    assert_eq!(rejection_stats.peak(), 16);
+
     drop(clients.pop());
     let retry_started = std::time::Instant::now();
     tokio::time::sleep(Duration::from_secs(1)).await;

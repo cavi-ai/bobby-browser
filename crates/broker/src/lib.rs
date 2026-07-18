@@ -6,7 +6,10 @@ use std::{
     io,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
     task::{Context, Poll},
 };
 
@@ -201,20 +204,72 @@ pub fn router(state: AppState) -> Router {
 struct ConnectionLimitedListener {
     inner: TcpListener,
     permits: Arc<Semaphore>,
+    rejection_permits: Arc<Semaphore>,
+    rejection_stats: RejectionWorkerStats,
 }
 
 impl ConnectionLimitedListener {
-    fn new(inner: TcpListener, max_connections: usize) -> io::Result<Self> {
-        if max_connections == 0 {
+    fn new(
+        inner: TcpListener,
+        max_connections: usize,
+        max_rejection_workers: usize,
+        rejection_stats: RejectionWorkerStats,
+    ) -> io::Result<Self> {
+        if max_connections == 0 || max_rejection_workers == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "max_connections must be positive",
+                "connection and rejection worker limits must be positive",
             ));
         }
         Ok(Self {
             inner,
             permits: Arc::new(Semaphore::new(max_connections)),
+            rejection_permits: Arc::new(Semaphore::new(max_rejection_workers)),
+            rejection_stats,
         })
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct RejectionWorkerStats {
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RejectionWorkerSnapshot {
+    pub active: usize,
+    pub peak: usize,
+}
+
+impl RejectionWorkerStats {
+    pub fn snapshot(&self) -> RejectionWorkerSnapshot {
+        RejectionWorkerSnapshot {
+            active: self.active.load(Ordering::Acquire),
+            peak: self.peak.load(Ordering::Acquire),
+        }
+    }
+
+    pub fn active(&self) -> usize {
+        self.snapshot().active
+    }
+
+    pub fn peak(&self) -> usize {
+        self.snapshot().peak
+    }
+
+    fn enter(&self) -> ActiveRejectionWorker {
+        let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        self.peak.fetch_max(active, Ordering::AcqRel);
+        ActiveRejectionWorker(self.clone())
+    }
+}
+
+struct ActiveRejectionWorker(RejectionWorkerStats);
+
+impl Drop for ActiveRejectionWorker {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -273,7 +328,14 @@ impl Listener for ConnectionLimitedListener {
                     address,
                 );
             }
+            let Ok(rejection_permit) = self.rejection_permits.clone().try_acquire_owned() else {
+                drop(inner);
+                continue;
+            };
+            let active_rejection = self.rejection_stats.enter();
             tokio::spawn(async move {
+                let _rejection_permit = rejection_permit;
+                let _active_rejection = active_rejection;
                 let mut request_prefix = [0_u8; 1024];
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(100),
@@ -309,8 +371,30 @@ pub async fn serve_listener(
     app: Router,
     max_connections: usize,
 ) -> io::Result<()> {
+    serve_listener_with_rejection_limit(
+        listener,
+        app,
+        max_connections,
+        16,
+        RejectionWorkerStats::default(),
+    )
+    .await
+}
+
+pub async fn serve_listener_with_rejection_limit(
+    listener: TcpListener,
+    app: Router,
+    max_connections: usize,
+    max_rejection_workers: usize,
+    rejection_stats: RejectionWorkerStats,
+) -> io::Result<()> {
     axum::serve(
-        ConnectionLimitedListener::new(listener, max_connections)?,
+        ConnectionLimitedListener::new(
+            listener,
+            max_connections,
+            max_rejection_workers,
+            rejection_stats,
+        )?,
         app,
     )
     .await
@@ -413,6 +497,7 @@ where
 
 pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
     let max_connections = config.interface.max_connections;
+    let max_rejection_workers = config.interface.max_rejection_workers;
     let (app, listener) = bootstrap_listener_with(
         config,
         startup,
@@ -429,7 +514,14 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         },
     )
     .await?;
-    serve_listener(listener, app, max_connections).await?;
+    serve_listener_with_rejection_limit(
+        listener,
+        app,
+        max_connections,
+        max_rejection_workers,
+        RejectionWorkerStats::default(),
+    )
+    .await?;
     Ok(())
 }
 
