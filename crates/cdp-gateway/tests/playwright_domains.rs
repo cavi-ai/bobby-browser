@@ -8,6 +8,21 @@ use interface_core::AuthorityStore;
 use serde_json::json;
 use types::{Capability, PageId, PrincipalId, SessionId, SessionState};
 
+const MAX_RECORDED_PROTOCOL_ITEMS: usize = 16;
+
+#[derive(Debug)]
+struct ProtocolRecorder(Vec<serde_json::Value>);
+
+impl ProtocolRecorder {
+    fn record(&mut self, value: serde_json::Value) {
+        assert!(
+            self.0.len() < MAX_RECORDED_PROTOCOL_ITEMS,
+            "protocol recording exceeded its hard bound"
+        );
+        self.0.push(value);
+    }
+}
+
 async fn connection(capabilities: impl IntoIterator<Item = Capability>) -> CdpConnection {
     let authority = AuthorityStore::in_memory();
     let token = authority
@@ -34,6 +49,104 @@ async fn connection(capabilities: impl IntoIterator<Item = Capability>) -> CdpCo
         }),
         MethodRegistry::compiled(),
     )
+}
+
+async fn page_creating_connection() -> CdpConnection {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [Capability::SessionRead, Capability::PageWrite],
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let now = Utc::now();
+    CdpConnection::new(
+        authority.verify(&token).await.unwrap(),
+        Arc::new(support::PageCreatingRuntime {
+            session: SessionState {
+                id: SessionId::new(),
+                profile: "p".into(),
+                proxy: None,
+                page_ids: vec![],
+                created_at: now,
+                last_used_at: now,
+            },
+        }),
+        MethodRegistry::compiled(),
+    )
+}
+
+#[tokio::test]
+async fn puppeteer_target_manager_receives_tab_then_child_page_with_parent_routing() {
+    let connection = page_creating_connection().await;
+    let mut recorder = ProtocolRecorder(Vec::new());
+    for request in [
+        CdpRequest::new(
+            1,
+            "Target.setDiscoverTargets",
+            json!({"discover":true,"filter":[{}]}),
+        ),
+        CdpRequest::new(
+            2,
+            "Target.setAutoAttach",
+            json!({
+                "autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,
+                "filter":[{"type":"page","exclude":true},{}]
+            }),
+        ),
+        CdpRequest::new(3, "Target.createTarget", json!({"url":"about:blank"})),
+    ] {
+        recorder.record(json!({"request":{"id":request.id,"method":request.method,"sessionId":request.session_id}}));
+        let response = connection.dispatch(request).await;
+        recorder.record(serde_json::to_value(response).unwrap());
+    }
+    let events = connection.drain_events().await;
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.method.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Target.targetCreated",
+            "Target.targetCreated",
+            "Target.attachedToTarget"
+        ]
+    );
+    let tab = events.last().unwrap();
+    assert_eq!(tab.params["targetInfo"]["type"], "tab");
+    let tab_session = tab.params["sessionId"].as_str().unwrap().to_owned();
+    let tab_target = tab.params["targetInfo"]["targetId"].clone();
+    for event in events {
+        recorder.record(serde_json::to_value(event).unwrap());
+    }
+
+    let mut nested = CdpRequest::new(
+        4,
+        "Target.setAutoAttach",
+        json!({
+            "autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{}]
+        }),
+    );
+    nested.session_id = Some(tab_session.clone());
+    recorder.record(
+        json!({"request":{"id":nested.id,"method":nested.method,"sessionId":nested.session_id}}),
+    );
+    let response = connection.dispatch(nested).await;
+    assert!(response.error().is_none());
+    recorder.record(serde_json::to_value(response).unwrap());
+    let child = connection
+        .next_event()
+        .await
+        .expect("nested page attachment");
+    recorder.record(serde_json::to_value(&child).unwrap());
+    assert_eq!(child.method, "Target.attachedToTarget");
+    assert_eq!(child.session_id.as_deref(), Some(tab_session.as_str()));
+    assert_eq!(child.params["targetInfo"]["type"], "page");
+    assert_ne!(child.params["targetInfo"]["targetId"], tab_target);
+    assert!(recorder.0.len() <= MAX_RECORDED_PROTOCOL_ITEMS);
 }
 
 #[tokio::test]
@@ -154,6 +267,82 @@ async fn auto_attach_rejects_malformed_params_and_missing_capability() {
 }
 
 #[tokio::test]
+async fn discovery_and_auto_attach_filters_are_stateful_and_fail_closed() {
+    let connection = connection([Capability::SessionRead]).await;
+    let disabled = connection
+        .dispatch(CdpRequest::new(
+            1,
+            "Target.setDiscoverTargets",
+            json!({"discover": false}),
+        ))
+        .await;
+    assert!(disabled.error().is_none());
+    assert!(connection.next_event().await.is_none());
+
+    let excluded = connection
+        .dispatch(CdpRequest::new(
+            2,
+            "Target.setDiscoverTargets",
+            json!({
+                "discover": true, "filter": [{"type": "page", "exclude": true}]
+            }),
+        ))
+        .await;
+    assert!(excluded.error().is_none());
+    assert!(
+        connection.next_event().await.is_none(),
+        "excluded target must not be discovered"
+    );
+
+    let matching = connection
+        .dispatch(CdpRequest::new(
+            3,
+            "Target.setDiscoverTargets",
+            json!({
+                "discover": true, "filter": [{"type": "page"}]
+            }),
+        ))
+        .await;
+    assert!(matching.error().is_none());
+    assert_eq!(
+        connection.next_event().await.unwrap().method,
+        "Target.targetCreated"
+    );
+
+    let off = connection
+        .dispatch(CdpRequest::new(
+            4,
+            "Target.setAutoAttach",
+            json!({
+                "autoAttach": false, "waitForDebuggerOnStart": false, "flatten": true,
+                "filter": [{"type": "page"}]
+            }),
+        ))
+        .await;
+    assert!(off.error().is_none());
+    assert!(
+        connection.next_event().await.is_none(),
+        "auto-attach off must suppress attachment"
+    );
+
+    let filtered = connection
+        .dispatch(CdpRequest::new(
+            5,
+            "Target.setAutoAttach",
+            json!({
+                "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true,
+                "filter": [{"type": "page", "exclude": true}]
+            }),
+        ))
+        .await;
+    assert!(filtered.error().is_none());
+    assert!(
+        connection.next_event().await.is_none(),
+        "excluded target must not be attached"
+    );
+}
+
+#[tokio::test]
 async fn download_behavior_is_bounded_and_capability_checked() {
     let allowed = connection([Capability::FileDownload])
         .await
@@ -197,7 +386,10 @@ async fn puppeteer_user_agent_compatibility_is_an_exact_current_value_noop() {
             json!({"userAgent":"mutated-agent"}),
         ))
         .await;
-    assert_eq!(mutation.error().unwrap().code, CdpErrorCode::InvalidParams as i32);
+    assert_eq!(
+        mutation.error().unwrap().code,
+        CdpErrorCode::InvalidParams as i32
+    );
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ uuid.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 config = { path = "../config" }
+interface-conformance = { path = "../interface-conformance" }
 sdk-core = { path = "../sdk-core" }
 test-site = { path = "../test-site" }
 tokio-tungstenite = "0.29"

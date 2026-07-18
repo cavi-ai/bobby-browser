@@ -64,7 +64,11 @@ pub struct RestartLineage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum RecoveryDecision {
     Resumed {
         checkpoint_id: CheckpointId,

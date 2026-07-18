@@ -274,17 +274,17 @@ fn evidence_variants() -> Vec<Value> {
             json!({
                 "path":{"type":"string","enum":["directHttp","chromium","chromiumFallback"]},
                 "reason":{"type":"string","enum":["eligibleStaticDocument","eligibleExplicitDownload","ineligibleCommand","semanticTargetRequired","javascriptRequired","unsupportedContentType","stateConflict","policyRequired"]},
-                "state_version":{"type":"integer","minimum":0},"elapsed_ms":{"type":"integer","minimum":0},
+                "stateVersion":{"type":"integer","minimum":0},"elapsedMs":{"type":"integer","minimum":0},
                 "bytes":nullable(json!({"type":"integer","minimum":0})),"sha256":nullable(sha256()),
-                "final_url":nullable(string(0, MAX_URL_BYTES)),"content_type":nullable(string(0,256)),
+                "finalUrl":nullable(string(0, MAX_URL_BYTES)),"contentType":nullable(string(0,256)),
                 "status":nullable(json!({"type":"integer","minimum":100,"maximum":599})),
-                "redirect_chain":array(string(0, MAX_URL_BYTES), 32)
+                "redirectChain":array(string(0, MAX_URL_BYTES), 32)
             }),
             &[
                 "path",
                 "reason",
-                "state_version",
-                "elapsed_ms",
+                "stateVersion",
+                "elapsedMs",
                 "bytes",
                 "sha256",
             ],
@@ -312,17 +312,17 @@ fn evidence_variants() -> Vec<Value> {
         tagged_fields(
             "page",
             page_evidence_properties(),
-            &["page_id", "url", "title"],
+            &["pageId", "url", "title"],
         ),
         tagged_fields(
             "pages",
-            json!({"pages":array(object(page_evidence_properties(), &["page_id","url","title"]),MAX_COLLECTION_ITEMS)}),
+            json!({"pages":array(object(page_evidence_properties(), &["pageId","url","title"]),MAX_COLLECTION_ITEMS)}),
             &["pages"],
         ),
         tagged_fields(
             "popup",
-            json!({"opener_page_id":id(),"page_id":id(),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES)}),
-            &["opener_page_id", "page_id", "url", "title"],
+            json!({"openerPageId":id(),"pageId":id(),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES)}),
+            &["openerPageId", "pageId", "url", "title"],
         ),
         tagged_fields(
             "download",
@@ -335,26 +335,21 @@ fn evidence_variants() -> Vec<Value> {
                 "target":{"$ref":"#/$defs/TargetSpec"},
                 "fingerprint":object(json!({"pageId":id(),"frame":nullable(string(0,MAX_STRING_BYTES)),"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"stableAttributes":{"type":"object","maxProperties":64,"propertyNames":{"maxLength":128},"additionalProperties":string(0,MAX_STRING_BYTES)}}), &["pageId","frame","role","name","stableAttributes"]),
                 "candidates":array(object(json!({"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"score":{"type":"integer","minimum":-1000000,"maximum":1000000},"reasons":array(string(0,MAX_STRING_BYTES),64)}), &["role","name","score","reasons"]),64),
-                "best_match_authorized":{"type":"boolean"}
+                "bestMatchAuthorized":{"type":"boolean"}
             }),
-            &[
-                "target",
-                "fingerprint",
-                "candidates",
-                "best_match_authorized",
-            ],
+            &["target", "fingerprint", "candidates", "bestMatchAuthorized"],
         ),
         tagged_fields(
             "wait",
-            json!({"condition":{"$ref":"#/$defs/WaitCondition"},"elapsed_ms":{"type":"integer","minimum":0},"observations":{"type":"integer","minimum":0}}),
-            &["condition", "elapsed_ms", "observations"],
+            json!({"condition":{"$ref":"#/$defs/WaitCondition"},"elapsedMs":{"type":"integer","minimum":0},"observations":{"type":"integer","minimum":0}}),
+            &["condition", "elapsedMs", "observations"],
         ),
         tagged_fields(
             "screenshot",
-            json!({"artifact_id":string(1,128),"media_type":string(1,256),"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384},"bytes":{"type":"integer","minimum":1,"maximum":1073741824u64},"sha256":sha256()}),
+            json!({"artifactId":string(1,128),"mediaType":string(1,256),"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384},"bytes":{"type":"integer","minimum":1,"maximum":1073741824u64},"sha256":sha256()}),
             &[
-                "artifact_id",
-                "media_type",
+                "artifactId",
+                "mediaType",
                 "width",
                 "height",
                 "bytes",
@@ -365,25 +360,25 @@ fn evidence_variants() -> Vec<Value> {
 }
 
 fn page_evidence_properties() -> Value {
-    json!({"page_id":id(),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES)})
+    json!({"pageId":id(),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES)})
 }
 
 fn recovery_decisions() -> Vec<Value> {
     vec![
         status_fields(
             "resumed",
-            json!({"checkpoint_id":id(),"attempt_id":id(),"evidence":array(json!({"$ref":"#/$defs/Evidence"}),MAX_EVIDENCE_ITEMS)}),
-            &["checkpoint_id", "attempt_id", "evidence"],
+            json!({"checkpointId":id(),"attemptId":id(),"evidence":array(json!({"$ref":"#/$defs/Evidence"}),MAX_EVIDENCE_ITEMS)}),
+            &["checkpointId", "attemptId", "evidence"],
         ),
         status_fields(
             "needsReconciliation",
-            json!({"checkpoint_id":id(),"attempt_id":id(),"reason":string(1,MAX_STRING_BYTES),"evidence":array(json!({"$ref":"#/$defs/Evidence"}),MAX_EVIDENCE_ITEMS)}),
-            &["checkpoint_id", "attempt_id", "reason", "evidence"],
+            json!({"checkpointId":id(),"attemptId":id(),"reason":string(1,MAX_STRING_BYTES),"evidence":array(json!({"$ref":"#/$defs/Evidence"}),MAX_EVIDENCE_ITEMS)}),
+            &["checkpointId", "attemptId", "reason", "evidence"],
         ),
         status_fields(
             "restarted",
-            json!({"checkpoint_id":id(),"lineage":object(json!({"workflowId":id(),"abandonedAttemptId":id(),"attemptId":id(),"reason":string(1,MAX_STRING_BYTES)}), &["workflowId","abandonedAttemptId","attemptId","reason"])}),
-            &["checkpoint_id", "lineage"],
+            json!({"checkpointId":id(),"lineage":object(json!({"workflowId":id(),"abandonedAttemptId":id(),"attemptId":id(),"reason":string(1,MAX_STRING_BYTES)}), &["workflowId","abandonedAttemptId","attemptId","reason"])}),
+            &["checkpointId", "lineage"],
         ),
     ]
 }

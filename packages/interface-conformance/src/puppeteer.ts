@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
-import type { CDPSession, Page } from "puppeteer-core";
+import puppeteer, { type CDPSession, type Page } from "puppeteer-core";
 import type { ScenarioDriver } from "./scenario.js";
 
 const PUPPETEER_RUNTIME_TRANSLATOR = "(operation, selector, value) => globalThis.__automationRuntimePuppeteer(operation, selector, value)";
@@ -19,9 +19,9 @@ async function semantic(page: Page, operation: string, selector: string, value =
   });
 }
 
-export function puppeteerDriver(page: Page, endpoint: string, token: string): ScenarioDriver {
+export function puppeteerDriver(page: Page, endpoint: string, token: string, deniedToken: string): ScenarioDriver {
   return {
-    navigate: async (url) => { await page.goto(url); },
+    navigate: async (url) => { await page.goto(url); const bytes = Buffer.from(url); return evidence("navigation", bytes); },
     completeForm: async () => {
       await semantic(page, "fill", "label:Name", "Ada");
       await semantic(page, "click", "role:button:Continue");
@@ -30,6 +30,7 @@ export function puppeteerDriver(page: Page, endpoint: string, token: string): Sc
     uploadFixture: async (path) => {
       const bytes = await readFile(path);
       await semantic(page, "upload", "label:Resume", JSON.stringify({ name: basename(path), base64: bytes.toString("base64") }));
+      return evidence("upload", bytes);
     },
     submitForm: async () => {
       await semantic(page, "click", "role:button:Submit");
@@ -37,7 +38,10 @@ export function puppeteerDriver(page: Page, endpoint: string, token: string): Sc
     observePopup: async () => {
       await semantic(page, "click", "role:link:Open details");
     },
-    screenshot: async () => { await (page as RuntimePage)._client().send("Page.captureScreenshot"); },
+    screenshot: async () => {
+      const result = await (page as RuntimePage)._client().send("Page.captureScreenshot") as { data: string };
+      return evidence("screenshot", Buffer.from(result.data, "base64"));
+    },
     verifyDownload: async () => {
       const cdp = (page as RuntimePage)._client();
       await cdp.send("Browser.setDownloadBehavior", { behavior: "allowAndName", eventsEnabled: true });
@@ -73,6 +77,20 @@ export function puppeteerDriver(page: Page, endpoint: string, token: string): Sc
       }
       if (bytes !== expected.totalBytes || digest.digest("hex") !== expected.sha256)
         throw new Error("download stream integrity verification failed");
+      return { kind: "download", sha256: expected.sha256, size: expected.totalBytes };
+    },
+    verifyDeniedCapability: async () => {
+      const discovery = await fetch(`${endpoint}/json/version`, { headers: { Authorization: `Bearer ${deniedToken}` } });
+      const version = await discovery.json() as { webSocketDebuggerUrl: string };
+      let denied;
+      try {
+        denied = await puppeteer.connect({ browserWSEndpoint: version.webSocketDebuggerUrl, headers: { Authorization: `Bearer ${deniedToken}` }, defaultViewport: null });
+        await denied.newPage(); return 200;
+      } catch { return 403; } finally { denied?.disconnect(); }
     },
   };
+}
+
+function evidence(kind: "navigation" | "upload" | "screenshot", bytes: Uint8Array) {
+  return { kind, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength };
 }

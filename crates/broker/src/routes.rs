@@ -103,9 +103,21 @@ async fn submit_command(
     }
     let outcome = request
         .runtime
-        .submit(request.context.clone(), envelope)
+        .submit(request.context.clone(), envelope.clone())
         .await
         .map_err(ProtocolError::from)?;
+    state
+        .artifacts
+        .admit_outcome(&request.handle, &request.context, &envelope, &outcome)
+        .await
+        .map_err(|_| {
+            ProtocolError::from(interface_error(
+                InterfaceErrorCode::ResourceExhausted,
+                "artifact catalog capacity exhausted",
+                request.context.correlation_id.clone(),
+                None,
+            ))
+        })?;
     let payload = serde_json::to_value(&outcome).unwrap_or_else(|_| {
         serde_json::json!({
             "error": "command outcome could not be serialized"

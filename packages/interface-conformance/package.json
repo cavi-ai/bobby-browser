@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "test:playwright": "pnpm run build && node --test dist/test/playwright.test.js",
     "test:puppeteer": "pnpm run build && node --test dist/test/puppeteer.test.js",
-    "test": "pnpm run build && node --test dist/test/*.test.js"
+    "test": "pnpm run build && node dist/src/matrix.js"
   },
   "devDependencies": {
     "@bobby-browser/sdk": "workspace:*",

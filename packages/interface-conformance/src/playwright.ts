@@ -1,10 +1,11 @@
-import type { Page } from "playwright-core";
+import { chromium, type Page } from "playwright-core";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { ScenarioDriver } from "./scenario.js";
 
-export function playwrightDriver(page: Page, endpoint: string, token: string): ScenarioDriver {
+export function playwrightDriver(page: Page, endpoint: string, token: string, deniedToken: string): ScenarioDriver {
   return {
-    navigate: async (url) => { await page.goto(url); },
+    navigate: async (url) => { await page.goto(url); const bytes = Buffer.from(url); return evidence("navigation", bytes); },
     completeForm: async () => {
       await page.getByLabel("Name").fill("Ada");
       await page.getByRole("button", { name: "Continue" }).click();
@@ -14,14 +15,14 @@ export function playwrightDriver(page: Page, endpoint: string, token: string): S
       await page.getByRole("button", { name: "Submit" }).click();
       await page.getByText("Submitted: Ada @ Analytical Engines").waitFor();
     },
-    uploadFixture: async (path) => { await page.getByLabel("Resume").setInputFiles(path); },
+    uploadFixture: async (path) => { const bytes = await readFile(path); await page.getByLabel("Resume").setInputFiles(path); return evidence("upload", bytes); },
     observePopup: async () => {
       const popup = page.waitForEvent("popup");
       await page.getByRole("link", { name: "Open details" }).click();
       const opened = await popup;
       if (!opened.url()) throw new Error("popup target did not expose a verified URL");
     },
-    screenshot: async () => { await page.screenshot(); },
+    screenshot: async () => { const bytes = await page.screenshot(); return evidence("screenshot", bytes); },
     verifyDownload: async () => {
       const browser = page.context().browser();
       if (!browser) throw new Error("browser is unavailable");
@@ -59,6 +60,20 @@ export function playwrightDriver(page: Page, endpoint: string, token: string): S
       if (bytes !== expected.totalBytes || digest.digest("hex") !== expected.sha256)
         throw new Error("download stream integrity verification failed");
       await cdp.detach();
+      return { kind: "download", sha256: expected.sha256, size: expected.totalBytes };
+    },
+    verifyDeniedCapability: async () => {
+      let denied;
+      try {
+        denied = await chromium.connectOverCDP(endpoint, { headers: { Authorization: `Bearer ${deniedToken}` } });
+        const cdp = await denied.newBrowserCDPSession();
+        await cdp.send("Target.createTarget", { url: "about:blank" });
+        return 200;
+      } catch { return 403; } finally { if (denied) await denied.close(); }
     },
   };
+}
+
+function evidence(kind: "navigation" | "upload" | "screenshot", bytes: Uint8Array) {
+  return { kind, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength };
 }
