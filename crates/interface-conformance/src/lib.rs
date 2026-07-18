@@ -33,9 +33,11 @@ pub const CANONICAL_ALLOWED: [&str; 4] = [
     "artifact:capture",
     "file:download",
 ];
-pub const CANONICAL_EVENT_ORDER: [&str; 7] = [
+pub const CANONICAL_EVENT_ORDER: [&str; 9] = [
     "navigation.completed",
     "upload.completed",
+    "checkpoint.saved",
+    "boundary.completed",
     "checkpoint.saved",
     "boundary.completed",
     "screenshot.verified",
@@ -81,6 +83,8 @@ pub struct CheckpointLineage {
     pub boundary: String,
     pub replayed: bool,
     pub checkpoint_id: String,
+    pub workflow_id: String,
+    pub boundary_command_id: String,
     pub recovery_status: String,
 }
 
@@ -125,8 +129,10 @@ pub fn validate_canonical_proof(proof: CanonicalProof) -> Result<CanonicalProof,
             .collect::<Vec<_>>()
             != CANONICAL_EVENT_ORDER
         || proof.checkpoint_lineage.replayed
-        || proof.checkpoint_lineage.boundary != "submit"
+        || proof.checkpoint_lineage.boundary != "boundary"
         || uuid::Uuid::parse_str(&proof.checkpoint_lineage.checkpoint_id).is_err()
+        || uuid::Uuid::parse_str(&proof.checkpoint_lineage.workflow_id).is_err()
+        || uuid::Uuid::parse_str(&proof.checkpoint_lineage.boundary_command_id).is_err()
         || !matches!(
             proof.checkpoint_lineage.recovery_status.as_str(),
             "resumed" | "needsReconciliation"
@@ -161,9 +167,11 @@ mod tests {
             },
             event_ordering: CANONICAL_EVENT_ORDER.map(str::to_owned).to_vec(),
             checkpoint_lineage: CheckpointLineage {
-                boundary: "submit".into(),
+                boundary: "boundary".into(),
                 replayed: false,
                 checkpoint_id: uuid::Uuid::new_v4().to_string(),
+                workflow_id: uuid::Uuid::new_v4().to_string(),
+                boundary_command_id: uuid::Uuid::new_v4().to_string(),
                 recovery_status: "needsReconciliation".into(),
             },
         }

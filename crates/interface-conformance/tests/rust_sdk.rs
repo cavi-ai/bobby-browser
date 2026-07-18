@@ -6,10 +6,10 @@ use interface_core::RuntimeInterface;
 use sha2::{Digest, Sha256};
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
-    ClickAndWaitForDownloadCommand, CommandClass, CommandEnvelope, CommandId, CommandOutcome,
-    CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, OpenPageRequest,
-    PrimitiveCommand, ScreenshotMode, UploadFilesCommand, WaitUntil, WorkflowCheckpoint,
-    WorkflowId,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
+    CommandId, CommandOutcome, CreateSessionRequest, Evidence, InspectCommand, NavigateCommand,
+    OpenPageRequest, PrimitiveCommand, ScreenshotMode, UploadFilesCommand, WaitUntil,
+    WorkflowCheckpoint, WorkflowId,
 };
 
 #[tokio::test]
@@ -116,6 +116,72 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         })
         .unwrap();
     observed.push("command.boundary");
+    let popup_id = CommandId::new();
+    let popup_checkpoint = WorkflowCheckpoint {
+        schema_version: 1,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: workflow.clone(),
+        attempt_id: attempt.clone(),
+        session_id: session.id.clone(),
+        page_id: page.id.clone(),
+        restart_url: url.clone(),
+        current_url: url.clone(),
+        cursor: Some(inspect_id),
+        boundary_command_id: Some(popup_id.clone()),
+        recovery_class: CommandClass::Boundary,
+        invariants: vec![
+            CheckpointInvariant::Url { value: url },
+            CheckpointInvariant::Title { value: title },
+        ],
+        replayable_inputs: vec![],
+        evidence: inspect_evidence.clone(),
+        recovery_history: vec![],
+        created_at: chrono::Utc::now(),
+    };
+    runtime
+        .checkpoint(context(), popup_checkpoint, inspect_evidence.clone())
+        .await
+        .unwrap();
+    event_ordering.push("checkpoint.saved".to_owned());
+    completed(
+        &runtime
+            .submit(
+                context(),
+                envelope(
+                    popup_id,
+                    PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
+                        selector: "#root-popup".into(),
+                        target: None,
+                        timeout_ms: 15_000,
+                    }),
+                ),
+            )
+            .await
+            .unwrap(),
+    );
+    event_ordering.push("boundary.completed".to_owned());
+    let inspect_id = CommandId::new();
+    let inspection = runtime
+        .submit(
+            context(),
+            envelope(
+                inspect_id.clone(),
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ),
+        )
+        .await
+        .unwrap();
+    let inspect_evidence = completed(&inspection);
+    let (url, title) = inspect_evidence
+        .iter()
+        .find_map(|item| {
+            if let Evidence::Inspection { url, title, .. } = item {
+                Some((url.clone(), title.clone()))
+            } else {
+                None
+            }
+        })
+        .unwrap();
     let boundary_id = CommandId::new();
     let checkpoint = WorkflowCheckpoint {
         schema_version: 1,
@@ -274,9 +340,16 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
         },
         event_ordering,
         checkpoint_lineage: CheckpointLineage {
-            boundary: "submit".into(),
+            boundary: "boundary".into(),
             replayed,
             checkpoint_id: recovery_checkpoint.0.to_string(),
+            workflow_id: saved_checkpoint.workflow_id.0.to_string(),
+            boundary_command_id: saved_checkpoint
+                .boundary_command_id
+                .as_ref()
+                .unwrap()
+                .0
+                .to_string(),
             recovery_status: recovery_status.into(),
         },
     };

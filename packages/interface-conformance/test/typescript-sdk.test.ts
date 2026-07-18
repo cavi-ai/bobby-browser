@@ -43,6 +43,13 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
         proofEvidence.push(evidence("upload", fixtureBytes)); eventOrdering.push("upload.completed"); break;
       }
       case "command.boundary": {
+        const popupInspection = command("inspect", { selector:null, target:null, includeHtml:false });
+        const popupObserved = await client.submit(popupInspection); assert.equal(popupObserved.status,"completed");
+        const popupState=popupObserved.evidence.find((item):item is Extract<Evidence,{kind:"inspection"}>=>item.kind==="inspection"); assert(popupState);
+        const popupEnvelope=command("clickAndWaitForPopup",{selector:"#root-popup",target:null,timeoutMs:15_000});
+        const popupCheckpoint:WorkflowCheckpoint={schemaVersion:1,checkpointId:randomUUID(),workflowId:ids.workflow,attemptId:ids.attempt,sessionId,pageId,restartUrl:popupState.url,currentUrl:popupState.url,cursor:popupInspection.commandId,boundaryCommandId:popupEnvelope.commandId,recoveryClass:"boundary",invariants:[{kind:"url",value:popupState.url},{kind:"title",value:popupState.title}],replayableInputs:[],evidence:popupObserved.evidence,recoveryHistory:[],createdAt:new Date().toISOString()};
+        await client.checkpoint({checkpoint:popupCheckpoint,evidence:popupObserved.evidence}); eventOrdering.push("checkpoint.saved");
+        const popupOutcome=await client.submit(popupEnvelope); assert.equal(popupOutcome.status,"completed"); eventOrdering.push("boundary.completed");
         const inspection = command("inspect", { selector:null, target:null, includeHtml:false });
         const observed = await client.submit(inspection); assert.equal(observed.status, "completed");
         const state = observed.evidence.find((item): item is Extract<Evidence,{kind:"inspection"}> => item.kind === "inspection"); assert(state);
@@ -72,7 +79,8 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
         eventOrdering.push("events.read");
         let deniedStatus = 200; try { await denied.runtimeInfo(); } catch (error) { assert(error instanceof RuntimeClientError); deniedStatus = error.status ?? 0; }
         assert(eventOrdering.length >= 5);
-        return { outcomeStatus:"completed", evidence:proofEvidence, authorization:{ allowed:["page:write","file:upload","artifact:capture","file:download"], denied:{ capability:"session:read",status:deniedStatus } }, eventOrdering, checkpointLineage:{ boundary:"submit",replayed,checkpointId:recoveryCheckpointId,recoveryStatus } } satisfies CanonicalInterfaceProof;
+        assert(boundaryCheckpoint?.boundaryCommandId);
+        return { outcomeStatus:"completed", evidence:proofEvidence, authorization:{ allowed:["page:write","file:upload","artifact:capture","file:download"], denied:{ capability:"session:read",status:deniedStatus } }, eventOrdering, checkpointLineage:{ boundary:"boundary",replayed,checkpointId:recoveryCheckpointId,workflowId:ids.workflow,boundaryCommandId:boundaryCheckpoint.boundaryCommandId,recoveryStatus } } satisfies CanonicalInterfaceProof;
       }
     }
     return { ok: true };

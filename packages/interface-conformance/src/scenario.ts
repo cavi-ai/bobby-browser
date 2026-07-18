@@ -4,13 +4,13 @@ export type ScenarioProof = {
   evidence: EvidenceProof[];
   authorization: { allowed: string[]; denied: { capability: "session:read"; status: number } };
   eventOrdering: string[];
-  checkpointLineage: { boundary: "submit"; replayed: boolean; checkpointId: string; recoveryStatus: string };
+  checkpointLineage: { boundary: "boundary"; replayed: boolean; checkpointId: string; workflowId: string; boundaryCommandId: string; recoveryStatus: string };
 };
 
 export const CANONICAL_ALLOWED = ["page:write", "file:upload", "artifact:capture", "file:download"] as const;
-export const CANONICAL_EVENT_ORDER = ["navigation.completed", "upload.completed", "checkpoint.saved", "boundary.completed", "screenshot.verified", "recovery.inspected", "events.read"] as const;
-export type CheckpointObservation = { checkpointId: string; workflowId: string; boundary: "submit" };
-export type RecoveryObservation = { status: string; checkpointId: string; boundary: "submit"; replayed: boolean };
+export const CANONICAL_EVENT_ORDER = ["navigation.completed", "upload.completed", "checkpoint.saved", "boundary.completed", "checkpoint.saved", "boundary.completed", "screenshot.verified", "recovery.inspected", "events.read"] as const;
+export type CheckpointObservation = { checkpointId: string; workflowId: string; boundaryCommandId: string; boundary: "boundary" };
+export type RecoveryObservation = { status: string; checkpointId: string; workflowId: string; boundaryCommandId: string; boundary: "boundary"; replayed: boolean };
 export type EventObservation = { events: Array<{ cursor: number; kind: string; payload: unknown }> };
 export type ProtocolInventory = { methods: string[]; events: string[] };
 
@@ -54,9 +54,10 @@ export async function runCanonicalScenario(
   const navigation = await driver.navigate(baseUrl);
   await driver.completeForm();
   const upload = await driver.uploadFixture(fixturePath);
-  const checkpoint = await driver.checkpoint();
+  const popupCheckpoint = await driver.checkpoint();
   await driver.submitForm();
   await driver.observePopup();
+  const checkpoint = await driver.checkpoint();
   const download = await driver.verifyDownload();
   const screenshot = await driver.screenshot();
   const recovery = await driver.recover();
@@ -64,13 +65,23 @@ export async function runCanonicalScenario(
     throw new Error("recovery checkpoint lineage differs from the persisted checkpoint");
   const eventBatch = await driver.readEvents();
   const eventOrdering = eventBatch.events.map(event => event.kind);
+  const checkpointEvents = eventBatch.events.filter(event => event.kind === "checkpoint.saved").map(event => event.payload as Record<string, unknown>);
+  const boundaryEvents = eventBatch.events.filter(event => event.kind === "boundary.completed").map(event => event.payload as Record<string, unknown>);
+  for (const [index, reserved] of [popupCheckpoint, checkpoint].entries()) {
+    if (reserved.boundaryCommandId !== boundaryEvents[index]?.commandId || reserved.workflowId !== boundaryEvents[index]?.workflowId)
+      throw new Error("boundary outcome did not consume the reserved checkpoint identity");
+    if (checkpointEvents[index]?.boundaryCommandId !== reserved.boundaryCommandId || checkpointEvents[index]?.checkpointId !== reserved.checkpointId)
+      throw new Error("persisted checkpoint did not retain the reserved boundary identity");
+  }
+  if (recovery.workflowId !== checkpoint.workflowId || recovery.boundaryCommandId !== checkpoint.boundaryCommandId)
+    throw new Error("recovery did not inspect the consumed boundary workflow");
   const deniedStatus = await driver.verifyDeniedCapability();
   if (deniedStatus !== 403) throw new Error(`negative capability was not denied exactly: ${deniedStatus}`);
   return {
     outcomeStatus: "completed", evidence: [navigation, upload, screenshot, download],
     authorization: { allowed: [...CANONICAL_ALLOWED], denied: { capability: "session:read", status: deniedStatus } },
     eventOrdering,
-    checkpointLineage: { boundary: checkpoint.boundary, replayed: recovery.replayed, checkpointId: recovery.checkpointId, recoveryStatus: recovery.status },
+    checkpointLineage: { boundary: checkpoint.boundary, replayed: recovery.replayed, checkpointId: recovery.checkpointId, workflowId: recovery.workflowId, boundaryCommandId: recovery.boundaryCommandId, recoveryStatus: recovery.status },
   };
 }
 
@@ -107,8 +118,11 @@ export function normalizeCanonicalProof(value: unknown): CanonicalInterfaceProof
   if (!Array.isArray(proof.eventOrdering) || proof.eventOrdering.join(",") !== CANONICAL_EVENT_ORDER.join(","))
     throw new Error("interface proof event ordering differs from the canonical proof");
   if (proof.checkpointLineage?.replayed !== false) throw new Error("implicit boundary replay is forbidden");
+  if (proof.checkpointLineage.boundary !== "boundary") throw new Error("checkpoint lineage is not a boundary checkpoint");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(proof.checkpointLineage.checkpointId))
     throw new Error("interface proof lacks persisted checkpoint identity");
+  for (const id of [proof.checkpointLineage.workflowId, proof.checkpointLineage.boundaryCommandId])
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error("interface proof lacks linked boundary identity");
   if (!["resumed", "needsReconciliation"].includes(proof.checkpointLineage.recoveryStatus))
     throw new Error("interface proof contains an invalid recovery decision");
   return proof as CanonicalInterfaceProof;

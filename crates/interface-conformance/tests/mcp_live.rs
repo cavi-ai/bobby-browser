@@ -12,9 +12,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
-    ClickAndWaitForDownloadCommand, CommandClass, CommandEnvelope, CommandId, CommandOutcome,
-    Evidence, InspectCommand, NavigateCommand, PrimitiveCommand, ScreenshotMode,
-    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
+    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PrimitiveCommand,
+    ScreenshotMode, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 #[tokio::test]
@@ -151,6 +151,76 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         })
         .unwrap();
     observed.push("command.boundary");
+    let popup_id = CommandId::new();
+    let popup_checkpoint = WorkflowCheckpoint {
+        schema_version: 1,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: workflow.clone(),
+        attempt_id: attempt.clone(),
+        session_id: sid.clone(),
+        page_id: pid.clone(),
+        restart_url: url.clone(),
+        current_url: url.clone(),
+        cursor: Some(inspect_id),
+        boundary_command_id: Some(popup_id.clone()),
+        recovery_class: CommandClass::Boundary,
+        invariants: vec![
+            CheckpointInvariant::Url { value: url },
+            CheckpointInvariant::Title { value: title },
+        ],
+        replayable_inputs: vec![],
+        evidence: inspect_evidence.clone(),
+        recovery_history: vec![],
+        created_at: chrono::Utc::now(),
+    };
+    tool(
+        &server,
+        &mut id,
+        "checkpoint_save",
+        json!({"checkpoint":popup_checkpoint,"evidence":inspect_evidence}),
+    )
+    .await;
+    event_ordering.push("checkpoint.saved".to_owned());
+    command(
+        &server,
+        &mut id,
+        &env(
+            popup_id,
+            PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
+                selector: "#root-popup".into(),
+                target: None,
+                timeout_ms: 15_000,
+            }),
+        ),
+    )
+    .await;
+    event_ordering.push("boundary.completed".to_owned());
+    let inspect_id = CommandId::new();
+    let inspection = command(
+        &server,
+        &mut id,
+        &env(
+            inspect_id.clone(),
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ),
+    )
+    .await;
+    let inspect: CommandOutcome = serde_json::from_value(inspection).unwrap();
+    let inspect_evidence = completed(&inspect)
+        .iter()
+        .filter(|e| matches!(e, Evidence::Inspection { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let (url, title) = inspect_evidence
+        .iter()
+        .find_map(|e| {
+            if let Evidence::Inspection { url, title, .. } = e {
+                Some((url.clone(), title.clone()))
+            } else {
+                None
+            }
+        })
+        .unwrap();
     let boundary_id = CommandId::new();
     let checkpoint = WorkflowCheckpoint {
         schema_version: 1,
@@ -340,9 +410,14 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         },
         event_ordering,
         checkpoint_lineage: CheckpointLineage {
-            boundary: "submit".into(),
+            boundary: "boundary".into(),
             replayed,
             checkpoint_id: recovery_checkpoint,
+            workflow_id: saved_checkpoint["workflowId"].as_str().unwrap().to_owned(),
+            boundary_command_id: saved_checkpoint["boundaryCommandId"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
             recovery_status,
         },
     };
