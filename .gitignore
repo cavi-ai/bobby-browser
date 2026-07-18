@@ -1,4 +1,6 @@
 /target
+node_modules/
+/packages/typescript-sdk/dist
 /data/cache
 /data/storage
 .DS_Store
