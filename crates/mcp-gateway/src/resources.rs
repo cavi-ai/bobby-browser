@@ -4,7 +4,10 @@ use interface_core::{
     ArtifactContent, ArtifactReader, ArtifactReference, CapabilityHandle, InterfaceResult,
 };
 use tokio::sync::RwLock;
-use types::{RequestContext, SessionId};
+use types::{
+    CommandEnvelope, CommandOutcome, ErrorLayer, Evidence, InterfaceError, InterfaceErrorCode,
+    RequestContext, SessionId,
+};
 
 #[derive(Clone)]
 pub struct ArtifactResources {
@@ -33,8 +36,7 @@ impl ArtifactResources {
         }
     }
 
-    /// Registers only an opaque reference already issued by `ArtifactReader`.
-    pub async fn register_trusted(
+    async fn register_trusted(
         &self,
         session_id: SessionId,
         reference: ArtifactReference,
@@ -45,6 +47,62 @@ impl ArtifactResources {
             return Err(ArtifactCatalogFull);
         }
         entries.insert(artifact_id, (session_id, reference));
+        Ok(())
+    }
+
+    /// Admits screenshot evidence only after `ArtifactReader` independently verifies the
+    /// committed artifact and issues an opaque reference. Callers never provide a path,
+    /// ownership assertion, or `ArtifactRecord`.
+    pub(crate) async fn register_outcome(
+        &self,
+        handle: &CapabilityHandle,
+        context: &RequestContext,
+        envelope: &CommandEnvelope,
+        outcome: &CommandOutcome,
+    ) -> InterfaceResult<()> {
+        let CommandOutcome::Completed { evidence, .. } = outcome else {
+            return Ok(());
+        };
+        let Some(reader) = &self.reader else {
+            return Ok(());
+        };
+        let Some(page_id) = envelope.page_id.clone() else {
+            if evidence
+                .iter()
+                .any(|item| matches!(item, Evidence::Screenshot { .. }))
+            {
+                return Err(resource_error(context, InterfaceErrorCode::InvalidRequest));
+            }
+            return Ok(());
+        };
+        for item in evidence {
+            let Evidence::Screenshot {
+                artifact_id,
+                media_type,
+                width,
+                height,
+                bytes,
+                sha256,
+            } = item
+            else {
+                continue;
+            };
+            let record = artifact_store::ArtifactRecord {
+                artifact_id: artifact_id.clone(),
+                page_id: page_id.clone(),
+                media_type: media_type.clone(),
+                width: *width,
+                height: *height,
+                bytes: *bytes,
+                sha256: sha256.clone(),
+            };
+            let reference = reader
+                .register(handle, context, &envelope.session_id, &record)
+                .await?;
+            self.register_trusted(envelope.session_id.clone(), reference)
+                .await
+                .map_err(|_| resource_error(context, InterfaceErrorCode::ResourceExhausted))?;
+        }
         Ok(())
     }
 
@@ -69,6 +127,20 @@ impl ArtifactResources {
             .read(handle, context, &session_id, &reference)
             .await
             .map(Some)
+    }
+}
+
+fn resource_error(context: &RequestContext, code: InterfaceErrorCode) -> InterfaceError {
+    InterfaceError {
+        code,
+        layer: ErrorLayer::Interface,
+        message: "runtime interface request failed".to_owned(),
+        correlation_id: context.correlation_id.clone(),
+        command_id: None,
+        retryable: false,
+        retry_after_ms: None,
+        reconciliation_required: false,
+        required_capability: None,
     }
 }
 

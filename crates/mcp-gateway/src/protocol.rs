@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_INPUT_BYTES: usize = 256 * 1024;
+pub const MAX_REQUEST_ID_BYTES: usize = 256;
 pub const MAX_EVENT_LIMIT: usize = 256;
 
 pub const PARSE_ERROR: i64 = -32700;

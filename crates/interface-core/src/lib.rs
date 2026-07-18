@@ -78,6 +78,23 @@ impl AuthorizationGuard {
         ctx: &RequestContext,
         operation: InterfaceOperation,
     ) -> InterfaceResult<()> {
+        self.validate(ctx)?;
+        for capability in operation.required() {
+            if !self.authority.allows(*capability) || !ctx.capabilities.contains(*capability) {
+                return Err(interface_error(
+                    ctx,
+                    InterfaceErrorCode::MissingCapability,
+                    "required capability is missing",
+                    Some(*capability),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates the live credential and request identity without selecting an operation.
+    /// Enumeration boundaries use this before filtering entries by capability.
+    pub fn validate(&self, ctx: &RequestContext) -> InterfaceResult<()> {
         let now = Utc::now();
         if ctx.validate_at(now).is_err() {
             return Err(interface_error(
@@ -95,17 +112,11 @@ impl AuthorizationGuard {
                 None,
             ));
         }
-        for capability in operation.required() {
-            if !self.authority.allows(*capability) || !ctx.capabilities.contains(*capability) {
-                return Err(interface_error(
-                    ctx,
-                    InterfaceErrorCode::MissingCapability,
-                    "required capability is missing",
-                    Some(*capability),
-                ));
-            }
-        }
         Ok(())
+    }
+
+    pub fn capability_handle(&self) -> CapabilityHandle {
+        self.authority.clone()
     }
 }
 

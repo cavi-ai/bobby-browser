@@ -3,13 +3,18 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration as StdDuration,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{Duration, Utc};
-use futures_util::{stream::FuturesUnordered, StreamExt};
+use futures_util::{stream::FuturesUnordered, FutureExt, StreamExt};
 use interface_core::{AuthorizationGuard, CapabilityHandle, EventStore, RuntimeInterface};
+use sdk_core::AuthenticatedRuntime;
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 use tokio::{
@@ -19,12 +24,14 @@ use tokio::{
 
 use crate::protocol::{
     error, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
-    MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MCP_PROTOCOL_VERSION, METHOD_NOT_FOUND,
-    NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
+    MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
+    METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
 };
+use crate::schema::{tool_schema, validate_tool_arguments};
 use crate::ArtifactResources;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
+const MAX_PENDING_CANCELLATIONS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lifecycle {
@@ -41,25 +48,36 @@ pub struct Server {
     resources: ArtifactResources,
     lifecycle: Mutex<Lifecycle>,
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
+    pending_cancellations: Mutex<BTreeSet<String>>,
+    shutting_down: AtomicBool,
 }
 
 impl Server {
-    pub fn new(runtime: Arc<dyn RuntimeInterface>, handle: CapabilityHandle) -> Self {
+    pub fn new(runtime: Arc<AuthenticatedRuntime>) -> Self {
+        Self::production(
+            runtime,
+            EventStore::new(16_384),
+            ArtifactResources::default(),
+        )
+    }
+
+    pub fn production(
+        runtime: Arc<AuthenticatedRuntime>,
+        events: EventStore,
+        resources: ArtifactResources,
+    ) -> Self {
+        let handle = runtime.capability_handle();
         Self {
             runtime,
             handle: handle.clone(),
             authorization: AuthorizationGuard::new(handle),
-            events: EventStore::new(16_384),
-            resources: ArtifactResources::default(),
+            events,
+            resources,
             lifecycle: Mutex::new(Lifecycle::AwaitingInitialize),
             in_flight: Mutex::new(BTreeMap::new()),
+            pending_cancellations: Mutex::new(BTreeSet::new()),
+            shutting_down: AtomicBool::new(false),
         }
-    }
-
-    pub fn with_boundaries(mut self, events: EventStore, resources: ArtifactResources) -> Self {
-        self.events = events;
-        self.resources = resources;
-        self
     }
 
     pub async fn handle_message(&self, message: Value) -> Option<Value> {
@@ -72,6 +90,11 @@ impl Server {
             .as_ref()
             .is_some_and(|id| !id.is_string() && !id.is_number())
         {
+            return Some(error(Value::Null, INVALID_REQUEST, "Invalid Request", None));
+        }
+        if id.as_ref().is_some_and(|id| {
+            serde_json::to_vec(id).map_or(true, |bytes| bytes.len() > MAX_REQUEST_ID_BYTES)
+        }) {
             return Some(error(Value::Null, INVALID_REQUEST, "Invalid Request", None));
         }
         if object.get("jsonrpc") != Some(&Value::String("2.0".to_owned())) {
@@ -94,11 +117,16 @@ impl Server {
             if *lifecycle != Lifecycle::AwaitingInitialize {
                 return id.map(|id| error(id, INVALID_REQUEST, "Invalid Request", None));
             }
+            if !params.get("capabilities").is_some_and(Value::is_object) {
+                return id.map(|id| error(id, INVALID_PARAMS, "Invalid params", None));
+            }
             let parsed = serde_json::from_value::<InitializeParams>(params);
             let Ok(parsed) = parsed else {
                 return id.map(|id| error(id, INVALID_PARAMS, "Invalid params", None));
             };
-            if parsed.protocol_version != MCP_PROTOCOL_VERSION {
+            if parsed.protocol_version != MCP_PROTOCOL_VERSION
+                || !bounded_client_capabilities(&parsed.capabilities)
+            {
                 return id.map(|id| {
                     error(
                         id,
@@ -151,14 +179,14 @@ impl Server {
                 Ok(cancellation) => cancellation,
                 Err(()) => return None,
             };
-            if let Some(notification) = self
-                .in_flight
-                .lock()
-                .await
-                .get(&request_key(&cancellation.request_id))
-                .cloned()
-            {
+            let key = request_key(&cancellation.request_id);
+            if let Some(notification) = self.in_flight.lock().await.get(&key).cloned() {
                 notification.notify_one();
+            } else {
+                let mut pending = self.pending_cancellations.lock().await;
+                if pending.len() < MAX_PENDING_CANCELLATIONS {
+                    pending.insert(key);
+                }
             }
             return None;
         }
@@ -167,12 +195,25 @@ impl Server {
         let id = id.expect("request id checked above");
         let key = request_key(&id);
         let cancelled = Arc::new(Notify::new());
+        if self.shutting_down.load(Ordering::Acquire)
+            || self.pending_cancellations.lock().await.remove(&key)
+        {
+            return Some(error(id, REQUEST_CANCELLED, "Request cancelled", None));
+        }
         {
             let mut in_flight = self.in_flight.lock().await;
             if in_flight.contains_key(&key) {
                 return Some(error(id, INVALID_REQUEST, "Invalid Request", None));
             }
             in_flight.insert(key.clone(), cancelled.clone());
+        }
+        // Close the race where cancellation observes no in-flight request after the
+        // request's first pending check but immediately before registration.
+        if self.pending_cancellations.lock().await.remove(&key) {
+            cancelled.notify_one();
+        }
+        if self.shutting_down.load(Ordering::Acquire) {
+            cancelled.notify_one();
         }
         let response = tokio::select! {
             response = self.dispatch_request(id.clone(), method, params) => response,
@@ -189,18 +230,67 @@ impl Server {
 
     async fn dispatch_request(&self, id: Value, method: &str, params: Value) -> Value {
         match method {
-            "ping" if empty_object(&params) => success(id, json!({})),
+            "ping" if empty_object(&params) => self.authenticated_empty(id, json!({})),
             "ping" => error(id, INVALID_PARAMS, "Invalid params", None),
+            "methods/list" => self.list_methods(id, params),
             "tools/list" => self.list_tools(id, params),
             "tools/call" => self.call_tool(id, params).await,
             "resources/list" => self.list_resources(id, params).await,
             "resources/read" => self.read_resource(id, params).await,
             "resources/templates/list" if valid_initial_list_params(&params) => {
-                success(id, json!({"resourceTemplates": []}))
+                match self.authorize_response(id.clone(), types::InterfaceOperation::ReadArtifact) {
+                    Ok(()) => success(id, json!({"resourceTemplates": []})),
+                    Err(response) => response,
+                }
             }
             "resources/templates/list" => error(id, INVALID_PARAMS, "Invalid params", None),
             _ => error(id, METHOD_NOT_FOUND, "Method not found", None),
         }
+    }
+
+    fn authenticated_empty(&self, id: Value, result: Value) -> Value {
+        let context = self.request_context();
+        match self.authorization.validate(&context) {
+            Ok(()) => success(id, result),
+            Err(error) => interface_error_response(id, error),
+        }
+    }
+
+    fn authorize_response(
+        &self,
+        id: Value,
+        operation: types::InterfaceOperation,
+    ) -> Result<(), Value> {
+        let context = self.request_context();
+        self.authorization
+            .authorize(&context, operation)
+            .map_err(|error| interface_error_response(id, error))
+    }
+
+    fn request_context(&self) -> types::RequestContext {
+        self.handle.context(Utc::now() + Duration::minutes(1), None)
+    }
+
+    fn list_methods(&self, id: Value, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&context) {
+            return interface_error_response(id, interface_error);
+        }
+        if !valid_initial_list_params(&params) {
+            return error(id, INVALID_PARAMS, "Invalid params", None);
+        }
+        let mut methods = vec!["methods/list", "ping", "tools/call", "tools/list"];
+        if context
+            .capabilities
+            .contains(types::Capability::ArtifactRead)
+        {
+            methods.extend([
+                "resources/list",
+                "resources/read",
+                "resources/templates/list",
+            ]);
+        }
+        success(id, json!({"methods":methods}))
     }
 
     pub async fn serve<R, W>(&self, input: R, output: W) -> io::Result<()>
@@ -231,6 +321,9 @@ impl Server {
                                     let response = self.handle_message(message).await;
                                     write_response(&output, response).await
                                 }));
+                                if let Some(Some(result)) = pending.next().now_or_never() {
+                                    result?;
+                                }
                                 None
                             }
                             Err(_) => Some(error(Value::Null, PARSE_ERROR, "Parse error", None)),
@@ -246,17 +339,34 @@ impl Server {
                 Some(result) = pending.next(), if !pending.is_empty() => result?,
             }
         }
+        self.shutting_down.store(true, Ordering::Release);
         for notification in self.in_flight.lock().await.values() {
             notification.notify_one();
         }
-        while let Some(result) = pending.next().await {
-            result?;
+        let drain = async {
+            while let Some(result) = pending.next().await {
+                result?;
+            }
+            Ok::<(), io::Error>(())
+        };
+        match tokio::time::timeout(StdDuration::from_millis(250), drain).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "request drain timed out",
+                ))
+            }
         }
         let result = output.lock().await.flush().await;
         result
     }
 
     fn list_tools(&self, id: Value, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&context) {
+            return interface_error_response(id, interface_error);
+        }
         if !valid_initial_list_params(&params) {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         }
@@ -287,13 +397,15 @@ impl Server {
     }
 
     async fn list_resources(&self, id: Value, params: Value) -> Value {
-        let valid_params = valid_initial_list_params(&params);
-        if !valid_params || !self.has_capability(types::Capability::ArtifactRead) {
-            return if valid_params {
-                success(id, json!({"resources":[]}))
-            } else {
-                error(id, INVALID_PARAMS, "Invalid params", None)
-            };
+        let context = self.request_context();
+        if let Err(interface_error) = self
+            .authorization
+            .authorize(&context, types::InterfaceOperation::ReadArtifact)
+        {
+            return interface_error_response(id, interface_error);
+        }
+        if !valid_initial_list_params(&params) {
+            return error(id, INVALID_PARAMS, "Invalid params", None);
         }
         let resources = self
             .resources
@@ -312,6 +424,13 @@ impl Server {
     }
 
     async fn read_resource(&self, id: Value, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self
+            .authorization
+            .authorize(&context, types::InterfaceOperation::ReadArtifact)
+        {
+            return interface_error_response(id, interface_error);
+        }
         let input: ResourceReadArgs = match bounded_parse(params) {
             Ok(input) => input,
             Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
@@ -319,13 +438,6 @@ impl Server {
         let Some(artifact_id) = parse_artifact_uri(&input.uri) else {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         };
-        let context = self.handle.context(Utc::now() + Duration::minutes(1), None);
-        if let Err(interface_error) = self
-            .authorization
-            .authorize(&context, types::InterfaceOperation::ReadArtifact)
-        {
-            return interface_error_response(id, interface_error);
-        }
         let content = match self
             .resources
             .read(&self.handle, &context, artifact_id)
@@ -386,6 +498,10 @@ impl Server {
     }
 
     async fn call_tool(&self, id: Value, params: Value) -> Value {
+        let identity_context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&identity_context) {
+            return interface_error_response(id, interface_error);
+        }
         let call: ToolCall = match bounded_parse(params) {
             Ok(call) => call,
             Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
@@ -394,6 +510,13 @@ impl Server {
             return error(id, METHOD_NOT_FOUND, "Method not found", None);
         }
         let mut context = self.handle.context(Utc::now() + Duration::minutes(1), None);
+        let operation = required_operation(&call.name).expect("availability checked above");
+        if let Err(interface_error) = self.authorization.authorize(&context, operation) {
+            return interface_error_response(id, interface_error);
+        }
+        if !validate_tool_arguments(&call.name, &call.arguments) {
+            return error(id, INVALID_PARAMS, "Invalid params", None);
+        }
         let result = match call.name.as_str() {
             "runtime_info" => {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
@@ -461,19 +584,35 @@ impl Server {
                     },
                     None => None,
                 };
-                match self.runtime.submit(context, input.envelope).await {
-                    Ok(outcome) => match to_json(outcome) {
-                        Ok(value) => {
-                            self.events
-                                .append(interface_core::Event::new(
-                                    "command.outcome",
-                                    value.clone(),
-                                ))
-                                .await;
-                            Ok(value)
+                let envelope = input.envelope;
+                let registration_context = context.clone();
+                match self.runtime.submit(context, envelope.clone()).await {
+                    Ok(outcome) => {
+                        if let Err(error) = self
+                            .resources
+                            .register_outcome(
+                                &self.handle,
+                                &registration_context,
+                                &envelope,
+                                &outcome,
+                            )
+                            .await
+                        {
+                            return interface_error_response(id, error);
                         }
-                        Err(error) => Err(error),
-                    },
+                        match to_json(outcome) {
+                            Ok(value) => {
+                                self.events
+                                    .append(interface_core::Event::new(
+                                        "command.outcome",
+                                        value.clone(),
+                                    ))
+                                    .await;
+                                Ok(value)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
                     Err(error) => Err(error),
                 }
             }
@@ -596,25 +735,84 @@ impl Server {
             .capabilities;
         required_capability(name).is_some_and(|required| capabilities.contains(required))
     }
-
-    fn has_capability(&self, capability: types::Capability) -> bool {
-        self.handle
-            .context(Utc::now() + Duration::minutes(1), None)
-            .capabilities
-            .contains(capability)
-    }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InitializeParams {
     protocol_version: String,
-    #[serde(rename = "capabilities")]
-    _capabilities: Value,
+    capabilities: ClientCapabilities,
     #[serde(rename = "clientInfo")]
     _client_info: Implementation,
     #[serde(default, rename = "_meta")]
     _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClientCapabilities {
+    #[serde(default)]
+    experimental: Option<BTreeMap<String, Value>>,
+    #[serde(default)]
+    roots: Option<RootsCapability>,
+    #[serde(default)]
+    sampling: Option<EmptyCapability>,
+    #[serde(default)]
+    elicitation: Option<EmptyCapability>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RootsCapability {
+    #[serde(default)]
+    list_changed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyCapability {}
+
+fn bounded_client_capabilities(capabilities: &ClientCapabilities) -> bool {
+    let _known = (
+        capabilities.roots.as_ref().map(|roots| roots.list_changed),
+        capabilities.sampling.is_some(),
+        capabilities.elicitation.is_some(),
+    );
+    let Some(experimental) = &capabilities.experimental else {
+        return true;
+    };
+    if experimental.len() > 32
+        || serde_json::to_vec(experimental).map_or(true, |bytes| bytes.len() > 16 * 1024)
+    {
+        return false;
+    }
+    let mut nodes = 0usize;
+    experimental.iter().all(|(key, value)| {
+        !key.is_empty() && key.len() <= 128 && bounded_json_value(value, 0, &mut nodes)
+    })
+}
+
+fn bounded_json_value(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+    *nodes = nodes.saturating_add(1);
+    if depth > 8 || *nodes > 256 {
+        return false;
+    }
+    match value {
+        Value::String(value) => value.len() <= 4096,
+        Value::Array(values) => {
+            values.len() <= 64
+                && values
+                    .iter()
+                    .all(|value| bounded_json_value(value, depth + 1, nodes))
+        }
+        Value::Object(values) => {
+            values.len() <= 64
+                && values.iter().all(|(key, value)| {
+                    key.len() <= 128 && bounded_json_value(value, depth + 1, nodes)
+                })
+        }
+        _ => true,
+    }
 }
 
 #[derive(Deserialize)]
@@ -817,49 +1015,18 @@ fn required_capability(name: &str) -> Option<types::Capability> {
     }
 }
 
-fn tool_schema(name: &str) -> Value {
-    let properties = match name {
-        "runtime_info" | "session_list" => json!({}),
-        "session_create" => json!({
-            "profile":{"type":"string","minLength":1,"maxLength":128},
-            "proxy":{"type":["string","null"],"maxLength":2048}
-        }),
-        "page_open" => json!({
-            "sessionId":{"type":"string","format":"uuid","maxLength":36}
-        }),
-        "command_execute" => json!({
-            "envelope":{"type":"object","maxProperties":8},
-            "idempotencyKey":{"type":"string","minLength":1,"maxLength":128}
-        }),
-        "checkpoint_save" => json!({
-            "checkpoint":{"type":"object","maxProperties":18},
-            "evidence":{"type":"array","maxItems":256}
-        }),
-        "workflow_recover" => json!({
-            "workflowId":{"type":"string","format":"uuid","maxLength":36}
-        }),
-        "events_read" => json!({
-            "cursor":{"type":"integer","minimum":0},
-            "limit":{"type":"integer","minimum":1,"maximum":MAX_EVENT_LIMIT}
-        }),
-        _ => json!({}),
-    };
-    let required = match name {
-        "session_create" => json!(["profile"]),
-        "page_open" => json!(["sessionId"]),
-        "command_execute" => json!(["envelope"]),
-        "checkpoint_save" => json!(["checkpoint"]),
-        "workflow_recover" => json!(["workflowId"]),
-        "events_read" => json!(["limit"]),
-        _ => json!([]),
-    };
-    json!({
-        "$schema":"https://json-schema.org/draft/2020-12/schema",
-        "type":"object",
-        "properties":properties,
-        "required":required,
-        "additionalProperties":false
-    })
+fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
+    match name {
+        "checkpoint_save" => Some(types::InterfaceOperation::CreateCheckpoint),
+        "command_execute" => Some(types::InterfaceOperation::SubmitCommand),
+        "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
+        "page_open" => Some(types::InterfaceOperation::OpenPage),
+        "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
+        "session_create" => Some(types::InterfaceOperation::CreateSession),
+        "session_list" => Some(types::InterfaceOperation::ReadSession),
+        "workflow_recover" => Some(types::InterfaceOperation::RecoverWorkflow),
+        _ => None,
+    }
 }
 
 fn tool_description(name: &str) -> &'static str {
@@ -984,16 +1151,60 @@ where
     let serialized = if serialized.len() <= MAX_FRAME_BYTES {
         serialized
     } else {
-        serde_json::to_vec(&error(
-            response.get("id").cloned().unwrap_or(Value::Null),
+        let fallback_id = response
+            .get("id")
+            .filter(|id| {
+                serde_json::to_vec(id).is_ok_and(|bytes| bytes.len() <= MAX_REQUEST_ID_BYTES)
+            })
+            .cloned()
+            .unwrap_or(Value::Null);
+        let fallback = serde_json::to_vec(&error(
+            fallback_id,
             INTERNAL_ERROR,
             "Internal error",
             Some(json!({"reason":"resultTooLarge","maxBytes":MAX_FRAME_BYTES})),
         ))
-        .map_err(io::Error::other)?
+        .map_err(io::Error::other)?;
+        if fallback.len() <= MAX_FRAME_BYTES {
+            fallback
+        } else {
+            serde_json::to_vec(&error(Value::Null, INTERNAL_ERROR, "Internal error", None))
+                .map_err(io::Error::other)?
+        }
     };
     let mut output = output.lock().await;
     output.write_all(&serialized).await?;
     output.write_all(b"\n").await?;
     output.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interface_error_metadata_is_preserved_while_diagnostic_is_redacted() {
+        let secret = "planted-secret-diagnostic";
+        let response = interface_error_response(
+            json!(7),
+            types::InterfaceError {
+                code: types::InterfaceErrorCode::ResourceExhausted,
+                layer: types::ErrorLayer::Interface,
+                message: secret.to_owned(),
+                correlation_id: types::CorrelationId::new(),
+                command_id: None,
+                retryable: true,
+                retry_after_ms: Some(1_234),
+                reconciliation_required: true,
+                required_capability: Some(types::Capability::SessionRead),
+            },
+        );
+        assert!(!response.to_string().contains(secret));
+        let error = &response["error"]["data"]["interfaceError"];
+        assert_eq!(error["code"], "resourceExhausted");
+        assert_eq!(error["retryable"], true);
+        assert_eq!(error["retryAfterMs"], 1_234);
+        assert_eq!(error["reconciliationRequired"], true);
+        assert_eq!(error["requiredCapability"], "session:read");
+    }
 }

@@ -1231,9 +1231,11 @@ dependencies = [
  "config",
  "futures-util",
  "interface-core",
+ "page-runtime",
  "sdk-core",
  "serde",
  "serde_json",
+ "session-manager",
  "sha2",
  "tempfile",
  "thiserror",
@@ -1241,6 +1243,8 @@ dependencies = [
  "tracing 0.1.44",
  "types",
  "uuid",
+ "worker-pool",
+ "workflow-journal",
 ]
 
 [[package]]
