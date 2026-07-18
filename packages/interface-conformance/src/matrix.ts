@@ -12,10 +12,10 @@ try {
   const child=spawn(process.execPath,["--test",...tests],{stdio:["ignore","pipe","pipe"],env:{...process.env,CONFORMANCE_PROOF_DIR:proofDir}});
   let output="";child.stdout.setEncoding("utf8");child.stderr.setEncoding("utf8");child.stdout.on("data",c=>{output=(output+String(c)).slice(-32768)});child.stderr.on("data",c=>{output=(output+String(c)).slice(-32768)});
   const[code]=await once(child,"exit") as [number|null,NodeJS.Signals|null];assert.equal(code,0,output);
-  const records=await Promise.all(interfaces.map(async name=>JSON.parse(await readFile(join(proofDir,`${name}.json`),"utf8")) as {proof:{checkpointLineage:{checkpointId:string};[key:string]:unknown};rawEvidence:Array<{kind:string;sha256:string;size:number}>;normalization:string}));
+  const records=await Promise.all(interfaces.map(async name=>JSON.parse(await readFile(join(proofDir,`${name}.json`),"utf8")) as {proof:{checkpointLineage:{checkpointId:string;workflowId:string;boundaryCommandId:string};[key:string]:unknown};rawEvidence:Array<{kind:string;sha256:string;size:number}>;normalization:string}));
   const comparable=records.map(record=>{
-    assert.match(record.proof.checkpointLineage.checkpointId,/^[0-9a-f-]{36}$/i);
-    const {checkpointId:_,...lineage}=record.proof.checkpointLineage;
+    for(const id of [record.proof.checkpointLineage.checkpointId,record.proof.checkpointLineage.workflowId,record.proof.checkpointLineage.boundaryCommandId]) assert.match(id,/^[0-9a-f-]{36}$/i);
+    const {checkpointId:_,workflowId:__,boundaryCommandId:___,...lineage}=record.proof.checkpointLineage;
     return {...record.proof,checkpointLineage:lineage};
   });
   for(let index=1;index<comparable.length;index++)assert.deepEqual(comparable[index],comparable[0],`${interfaces[index]} weakened the canonical normalized proof`);

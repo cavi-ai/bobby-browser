@@ -33,11 +33,56 @@ use tokio::{
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, CommandClass,
-    CommandEnvelope, CommandId, CommandOutcome, InspectCommand, InterfaceError, NavigateCommand,
-    OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision, RequestContext, ScreenshotMode,
-    SessionId, SessionState, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
-    TextMatch, TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CommandEnvelope, CommandId, CommandOutcome, CorrelationId, ErrorLayer, InspectCommand,
+    InterfaceError, InterfaceErrorCode, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    RecoveryDecision, RequestContext, ScreenshotMode, SessionId, SessionState,
+    SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch, TypeTextCommand,
+    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
+
+fn boundary_state_error(message: &str) -> InterfaceError {
+    InterfaceError {
+        code: InterfaceErrorCode::InvalidRequest,
+        layer: ErrorLayer::Interface,
+        message: message.to_owned(),
+        correlation_id: CorrelationId::new(),
+        command_id: None,
+        retryable: false,
+        retry_after_ms: None,
+        reconciliation_required: false,
+        required_capability: None,
+    }
+}
+
+fn consume_pending_boundary(
+    state: &mut Option<AutomationBoundary>,
+    session_id: &SessionId,
+    page_id: &PageId,
+    now: chrono::DateTime<Utc>,
+) -> Result<AutomationBoundary, InterfaceError> {
+    let Some(pending) = state.as_mut() else {
+        return Err(boundary_state_error(
+            "boundary command requires a reserved checkpoint",
+        ));
+    };
+    if pending.phase != AutomationBoundaryPhase::Pending {
+        return Err(boundary_state_error(
+            "reserved boundary was already consumed",
+        ));
+    }
+    if pending.expires_at <= now {
+        return Err(boundary_state_error(
+            "reserved boundary expired before dispatch",
+        ));
+    }
+    if &pending.session_id != session_id || &pending.page_id != page_id {
+        return Err(boundary_state_error(
+            "reserved boundary belongs to another runtime page",
+        ));
+    }
+    pending.phase = AutomationBoundaryPhase::Consumed;
+    Ok(pending.clone())
+}
 use uuid::Uuid;
 
 use crate::{
@@ -284,7 +329,7 @@ pub struct CdpConnection {
     discovery_filter: Mutex<Option<Vec<domains::target::TargetFilter>>>,
     auto_attach: Mutex<Option<(bool, Vec<domains::target::TargetFilter>)>>,
     pending_tab_children: Mutex<HashMap<String, (String, Value)>>,
-    automation_checkpoint: Mutex<Option<(WorkflowId, CheckpointId)>>,
+    automation_boundary: Mutex<Option<AutomationBoundary>>,
     interface_events: EventStore,
     observed_methods: Mutex<BTreeSet<String>>,
     observed_events: Mutex<BTreeSet<String>>,
@@ -295,6 +340,25 @@ struct RemoteObject {
     internal: String,
     scope: String,
     generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomationBoundaryPhase {
+    Pending,
+    Consumed,
+    Recovered,
+}
+
+#[derive(Clone)]
+struct AutomationBoundary {
+    workflow_id: WorkflowId,
+    attempt_id: AttemptId,
+    command_id: CommandId,
+    checkpoint_id: CheckpointId,
+    session_id: SessionId,
+    page_id: PageId,
+    expires_at: chrono::DateTime<Utc>,
+    phase: AutomationBoundaryPhase,
 }
 
 #[derive(Clone)]
@@ -500,7 +564,7 @@ impl CdpConnection {
             discovery_filter: Mutex::new(None),
             auto_attach: Mutex::new(None),
             pending_tab_children: Mutex::new(HashMap::new()),
-            automation_checkpoint: Mutex::new(None),
+            automation_boundary: Mutex::new(None),
             interface_events: EventStore::new(64),
             observed_methods: Mutex::new(BTreeSet::new()),
             observed_events: Mutex::new(BTreeSet::new()),
@@ -783,9 +847,17 @@ impl CdpConnection {
                 let Some((session_id, page_id)) = self.automation_runtime_identity(request.session_id.as_deref(),ctx.clone()).await else {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "checkpoint requires a runtime page session"));
                 };
+                {
+                    let mut state = self.automation_boundary.lock().await;
+                    if state.as_ref().is_some_and(|pending| pending.phase == AutomationBoundaryPhase::Pending && pending.expires_at > Utc::now()) {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "a browser boundary is already reserved"));
+                    }
+                    *state = None;
+                }
                 let workflow_id = WorkflowId::new();
                 let attempt_id = AttemptId::new();
                 let inspect_id = CommandId::new();
+                let command_id = CommandId::new();
                 let evidence = match self.runtime.submit(ctx.clone(), CommandEnvelope {
                     schema_version:1, command_id:inspect_id.clone(), workflow_id:workflow_id.clone(), attempt_id:attempt_id.clone(),
                     session_id:session_id.clone(), page_id:Some(page_id.clone()), deadline:Utc::now()+Duration::seconds(30),
@@ -799,27 +871,28 @@ impl CdpConnection {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "checkpoint inspection lacked verified state"));
                 };
                 let checkpoint_id=CheckpointId::new();
-                let checkpoint=WorkflowCheckpoint { schema_version:1, checkpoint_id:checkpoint_id.clone(), workflow_id:workflow_id.clone(), attempt_id,
-                    session_id, page_id, restart_url:url.clone(), current_url:url.clone(), cursor:Some(inspect_id), boundary_command_id:None,
-                    recovery_class:CommandClass::Reconciliable, invariants:vec![CheckpointInvariant::Url{value:url},CheckpointInvariant::Title{value:title}],
+                let checkpoint=WorkflowCheckpoint { schema_version:1, checkpoint_id:checkpoint_id.clone(), workflow_id:workflow_id.clone(), attempt_id:attempt_id.clone(),
+                    session_id:session_id.clone(), page_id:page_id.clone(), restart_url:url.clone(), current_url:url.clone(), cursor:Some(inspect_id), boundary_command_id:Some(command_id.clone()),
+                    recovery_class:CommandClass::Boundary, invariants:vec![CheckpointInvariant::Url{value:url},CheckpointInvariant::Title{value:title}],
                     replayable_inputs:vec![], evidence:evidence.clone(), recovery_history:vec![], created_at:Utc::now() };
                 match self.runtime.checkpoint(ctx, checkpoint, evidence).await {
                     Ok(saved) => {
-                        *self.automation_checkpoint.lock().await=Some((workflow_id.clone(),checkpoint_id.clone()));
+                        *self.automation_boundary.lock().await=Some(AutomationBoundary { workflow_id:workflow_id.clone(), attempt_id, command_id:command_id.clone(), checkpoint_id:checkpoint_id.clone(), session_id, page_id, expires_at:Utc::now()+Duration::seconds(30), phase:AutomationBoundaryPhase::Pending });
                         self.record_interface_event("checkpoint.saved", serde_json::to_value(&saved).unwrap_or(Value::Null)).await;
-                        Ok(json!({"checkpointId":checkpoint_id,"workflowId":workflow_id,"boundary":"submit"}))
+                        Ok(json!({"checkpointId":checkpoint_id,"workflowId":workflow_id,"boundaryCommandId":command_id,"boundary":"boundary"}))
                     }
                     Err(error) => Err(error),
                 }
             }
             Some(Handler::AutomationRecoveryInspect) => {
                 if !request.params.as_object().is_some_and(serde_json::Map::is_empty) { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.recoveryInspect takes no parameters")); }
-                let Some((workflow_id,checkpoint_id))=self.automation_checkpoint.lock().await.clone() else { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"no verified browser checkpoint")); };
-                match self.runtime.recover(ctx,workflow_id).await {
+                let Some(boundary)=self.automation_boundary.lock().await.clone().filter(|state| state.phase==AutomationBoundaryPhase::Consumed) else { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"no consumed browser boundary")); };
+                match self.runtime.recover(ctx,boundary.workflow_id.clone()).await {
                     Ok(decision) => {
                         let (status,replayed,observed_checkpoint)=match decision { RecoveryDecision::Resumed{checkpoint_id,..}=>("resumed",false,checkpoint_id), RecoveryDecision::NeedsReconciliation{checkpoint_id,..}=>("needsReconciliation",false,checkpoint_id), RecoveryDecision::Restarted{checkpoint_id,..}=>("restarted",true,checkpoint_id) };
-                        if observed_checkpoint != checkpoint_id { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"recovery checkpoint lineage changed")); }
-                        let response=json!({"status":status,"checkpointId":observed_checkpoint,"boundary":"submit","replayed":replayed});
+                        if observed_checkpoint != boundary.checkpoint_id { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"recovery checkpoint lineage changed")); }
+                        let response=json!({"status":status,"checkpointId":observed_checkpoint,"workflowId":boundary.workflow_id,"boundaryCommandId":boundary.command_id,"boundary":"boundary","replayed":replayed});
+                        if let Some(state)=self.automation_boundary.lock().await.as_mut() { state.phase=AutomationBoundaryPhase::Recovered; }
                         self.record_interface_event("recovery.inspected",response.clone()).await;
                         Ok(response)
                     }
@@ -1048,7 +1121,6 @@ impl CdpConnection {
                                     self.streams.lock().await.remove(&stream_id);
                                     return CdpResponse::failure(&request, error);
                                 }
-                                self.record_interface_event("boundary.completed", json!({"evidence":evidence})).await;
                                 CdpResponse::success(&request, json!({"result":{"type":"undefined"}}))
                             }
                             Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "pinned Puppeteer download did not complete")),
@@ -1245,7 +1317,6 @@ impl CdpConnection {
                                     self.streams.lock().await.remove(&stream_id);
                                     return CdpResponse::failure(&request, error);
                                 }
-                                self.record_interface_event("boundary.completed", json!({"evidence":evidence})).await;
                                 CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}}))
                             }
                             Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not complete")),
@@ -1809,81 +1880,30 @@ impl CdpConnection {
         page_id: PageId,
         command: PrimitiveCommand,
     ) -> Result<CommandOutcome, InterfaceError> {
-        let workflow_id = WorkflowId::new();
-        let attempt_id = AttemptId::new();
-        let inspect_id = CommandId::new();
-        let observed = match self
+        let boundary = {
+            let mut state = self.automation_boundary.lock().await;
+            consume_pending_boundary(&mut state, &session_id, &page_id, Utc::now())?
+        };
+        let outcome = self
             .runtime
-            .submit(
-                ctx.clone(),
-                CommandEnvelope {
-                    schema_version: CommandEnvelope::SCHEMA_VERSION,
-                    command_id: inspect_id.clone(),
-                    workflow_id: workflow_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    session_id: session_id.clone(),
-                    page_id: Some(page_id.clone()),
-                    deadline: Utc::now() + Duration::seconds(30),
-                    command: PrimitiveCommand::Inspect(InspectCommand::default()),
-                },
-            )
-            .await?
-        {
-            CommandOutcome::Completed { evidence, .. } => evidence,
-            outcome => return Ok(outcome),
-        };
-        let Some((url, title)) = observed.iter().find_map(|item| match item {
-            types::Evidence::Inspection { url, title, .. } => Some((url.clone(), title.clone())),
-            _ => None,
-        }) else {
-            return Ok(CommandOutcome::Completed {
-                command_id: inspect_id,
-                evidence: observed,
-            });
-        };
-        let command_id = CommandId::new();
-        self.runtime
-            .checkpoint(
-                ctx.clone(),
-                WorkflowCheckpoint {
-                    schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
-                    checkpoint_id: CheckpointId::new(),
-                    workflow_id: workflow_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    session_id: session_id.clone(),
-                    page_id: page_id.clone(),
-                    restart_url: url.clone(),
-                    current_url: url.clone(),
-                    cursor: Some(inspect_id),
-                    boundary_command_id: Some(command_id.clone()),
-                    recovery_class: CommandClass::Boundary,
-                    invariants: vec![
-                        CheckpointInvariant::Url { value: url },
-                        CheckpointInvariant::Title { value: title },
-                    ],
-                    replayable_inputs: Vec::new(),
-                    evidence: Vec::new(),
-                    recovery_history: Vec::new(),
-                    created_at: Utc::now(),
-                },
-                observed,
-            )
-            .await?;
-        self.runtime
             .submit(
                 ctx,
                 CommandEnvelope {
                     schema_version: CommandEnvelope::SCHEMA_VERSION,
-                    command_id,
-                    workflow_id,
-                    attempt_id,
+                    command_id: boundary.command_id.clone(),
+                    workflow_id: boundary.workflow_id.clone(),
+                    attempt_id: boundary.attempt_id,
                     session_id,
                     page_id: Some(page_id),
                     deadline: Utc::now() + Duration::seconds(30),
                     command,
                 },
             )
-            .await
+            .await?;
+        if matches!(outcome, CommandOutcome::Completed { .. }) {
+            self.record_interface_event("boundary.completed", json!({"commandId":boundary.command_id,"workflowId":boundary.workflow_id,"outcome":outcome})).await;
+        }
+        Ok(outcome)
     }
 
     pub async fn resolve_target(&self, opaque: &str) -> Option<String> {
@@ -2007,7 +2027,8 @@ fn remote_object_valid(object: &RemoteObject, scope: &str, generation: u64) -> b
 #[cfg(test)]
 mod security_tests {
     use super::{
-        download_events, remote_object_valid, DownloadStreamStore, RemoteObject, UploadStaging,
+        consume_pending_boundary, download_events, remote_object_valid, AutomationBoundary,
+        AutomationBoundaryPhase, DownloadStreamStore, RemoteObject, UploadStaging,
     };
 
     #[test]
@@ -2150,6 +2171,58 @@ mod security_tests {
                 4
             )
             .is_ok());
+    }
+
+    #[test]
+    fn pending_boundary_is_page_scoped_expiring_and_one_shot() {
+        let now = chrono::Utc::now();
+        let session = types::SessionId::new();
+        let page = types::PageId::new();
+        let pending = AutomationBoundary {
+            workflow_id: types::WorkflowId::new(),
+            attempt_id: types::AttemptId::new(),
+            command_id: types::CommandId::new(),
+            checkpoint_id: types::CheckpointId::new(),
+            session_id: session.clone(),
+            page_id: page.clone(),
+            expires_at: now + chrono::Duration::seconds(30),
+            phase: AutomationBoundaryPhase::Pending,
+        };
+        let expected = (
+            pending.workflow_id.clone(),
+            pending.attempt_id.clone(),
+            pending.command_id.clone(),
+            pending.checkpoint_id.clone(),
+        );
+        let mut state = Some(pending);
+        let wrong_session = types::SessionId::new();
+        assert!(consume_pending_boundary(&mut state, &wrong_session, &page, now).is_err());
+        let wrong_page = types::PageId::new();
+        assert!(consume_pending_boundary(&mut state, &session, &wrong_page, now).is_err());
+        assert_eq!(
+            state.as_ref().unwrap().phase,
+            AutomationBoundaryPhase::Pending
+        );
+        let consumed = consume_pending_boundary(&mut state, &session, &page, now).unwrap();
+        assert_eq!(
+            (
+                consumed.workflow_id,
+                consumed.attempt_id,
+                consumed.command_id,
+                consumed.checkpoint_id
+            ),
+            expected
+        );
+        assert!(consume_pending_boundary(&mut state, &session, &page, now).is_err());
+        state.as_mut().unwrap().phase = AutomationBoundaryPhase::Pending;
+        assert!(consume_pending_boundary(
+            &mut state,
+            &session,
+            &page,
+            now + chrono::Duration::seconds(31)
+        )
+        .is_err());
+        assert!(consume_pending_boundary(&mut None, &session, &page, now).is_err());
     }
 }
 
