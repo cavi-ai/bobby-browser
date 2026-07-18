@@ -1,6 +1,7 @@
 import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError } from "./errors.js";
-import { isErrorLayer, isEventBatch, isEventGap, isInterfaceError, isRecord } from "./events.js";
+import { isInterfaceError } from "./events.js";
+import { isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRecord, isRuntimeInfo, isSessionState, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -19,17 +20,25 @@ function deadlineFor(options: RequestOptions | undefined): Date {
 
 function composeSignal(caller: AbortSignal | undefined, deadline: Date): RequestScope {
   const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   let removeCaller = () => {};
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    if (timeout !== undefined) clearTimeout(timeout);
+    removeCaller();
+  };
   if (caller) {
-    const abort = () => controller.abort(caller.reason);
+    const abort = () => { controller.abort(caller.reason); dispose(); };
     if (caller.aborted) abort();
     else {
       caller.addEventListener("abort", abort, { once: true });
       removeCaller = () => caller.removeEventListener("abort", abort);
     }
   }
-  const timeout = setTimeout(() => controller.abort(new Error("deadline")), Math.max(0, deadline.getTime() - Date.now()));
-  return { signal: controller.signal, deadline, dispose: () => { clearTimeout(timeout); removeCaller(); } };
+  if (!controller.signal.aborted) timeout = setTimeout(() => { controller.abort(new Error("deadline")); dispose(); }, Math.max(0, deadline.getTime() - Date.now()));
+  return { signal: controller.signal, deadline, dispose };
 }
 
 function redactedInterfaceError(value: InterfaceError, bearerToken: string): InterfaceError {
@@ -91,12 +100,13 @@ export class BrowserRuntimeClient {
       } catch (error) {
         if (!(error instanceof RuntimeClientError) || error.kind !== "transport" || failures >= retries) throw error;
         failures += 1;
-        await delay(options.retryDelayMs ?? 50, scope.signal);
+        await delay(options.retryDelayMs ?? 50, scope);
         continue;
       }
       failures = 0;
       const payload = await this.#readJson(response, scope);
-      if (response.status === 409 && isRecord(payload) && isInterfaceError(payload.error) && isEventGap(payload.gap)) {
+      if (response.status === 409 && isRecord(payload) && "gap" in payload) {
+        if (!isInterfaceError(payload.error) || !isEventGap(payload.gap)) throw this.#protocol("event gap response has an unexpected shape", response.status);
         throw new RuntimeClientError({ kind: "http", status: response.status, interfaceError: redactedInterfaceError(payload.error, this.#bearerToken), eventGap: payload.gap });
       }
       if (response.status !== 200 || !isEventBatch(payload)) throw this.#responseError(response.status, payload);
@@ -113,7 +123,7 @@ export class BrowserRuntimeClient {
     }
     if (contentType(response) !== mediaTypeEssence(reference.mediaType)) { scoped.scope.dispose(); throw this.#protocol("artifact media type does not match its reference", response.status); }
     const length = response.headers.get("content-length");
-    if (length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) !== reference.bytes)) { scoped.scope.dispose(); throw this.#protocol("artifact content length does not match its reference", response.status); }
+    if (length === null || !/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) !== reference.bytes) { scoped.scope.dispose(); throw this.#protocol("artifact content length does not match its reference", response.status); }
     return verifiedArtifactStream(response.body, reference, scoped.scope);
   }
 
@@ -179,7 +189,7 @@ function commandStatus(outcome: CommandOutcome): number {
 }
 
 function validArtifactReference(reference: ArtifactReference, maximum: number): boolean {
-  return Number.isSafeInteger(reference.bytes) && reference.bytes >= 0 && reference.bytes <= maximum && /^[0-9a-f]{64}$/.test(reference.sha256) && reference.artifactId.length > 0 && reference.artifactId.length <= 128 && mediaTypeEssence(reference.mediaType) !== undefined;
+  return isUuid(reference.referenceId) && Number.isSafeInteger(reference.bytes) && reference.bytes >= 0 && reference.bytes <= maximum && /^[0-9a-f]{64}$/.test(reference.sha256) && reference.artifactId.length > 0 && reference.artifactId.length <= 128 && /^[0-9A-Fa-f-]+$/.test(reference.artifactId) && mediaTypeEssence(reference.mediaType) !== undefined;
 }
 
 function mediaTypeEssence(value: string): string | undefined {
@@ -187,29 +197,19 @@ function mediaTypeEssence(value: string): string | undefined {
   return essence && /^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/.test(essence) ? essence : undefined;
 }
 
-function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, scope: RequestScope): Promise<void> {
   return new Promise((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout>;
-    const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(new RuntimeClientError({ kind: "aborted", message: "Request was aborted" })); };
-    const done = () => { signal.removeEventListener("abort", abort); resolve(); };
+    const abort = () => { clearTimeout(timer); scope.signal.removeEventListener("abort", abort); reject(scopeError(scope)); };
+    const done = () => { scope.signal.removeEventListener("abort", abort); resolve(); };
     timer = setTimeout(done, ms);
-    if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+    if (scope.signal.aborted) abort(); else scope.signal.addEventListener("abort", abort, { once: true });
   });
 }
 
 function scopeError(scope: RequestScope): RuntimeClientError {
   return new RuntimeClientError({ kind: scope.deadline.getTime() <= Date.now() ? "deadline" : "aborted", message: scope.deadline.getTime() <= Date.now() ? "Request deadline exceeded" : "Request was aborted" });
 }
-
-function isRuntimeInfo(value: unknown): value is RuntimeInfo { return isRecord(value) && typeof value.version === "string" && Array.isArray(value.capabilities) && value.capabilities.every((v) => typeof v === "string") && typeof value.active_sessions === "number" && typeof value.queued_jobs === "number" && typeof value.uptime_ms === "number"; }
-function isSessionState(value: unknown): value is SessionState { return isRecord(value) && typeof value.id === "string" && typeof value.profile === "string" && (typeof value.proxy === "string" || value.proxy === null) && Array.isArray(value.page_ids) && typeof value.created_at === "string" && typeof value.last_used_at === "string"; }
-function isPageState(value: unknown): value is PageState { return isRecord(value) && typeof value.id === "string" && typeof value.session_id === "string" && (typeof value.url === "string" || value.url === null) && (value.mode === "Document" || value.mode === "Interactive" || value.mode === "Render") && typeof value.ready_state === "string" && typeof value.pending_requests === "number"; }
-function isCommandOutcome(value: unknown): value is CommandOutcome { return isRecord(value) && typeof value.commandId === "string" && (value.status === "completed" ? Array.isArray(value.evidence) : value.status === "retryableFailure" || value.status === "policyDenied" || value.status === "failed" ? isCommandError(value.error) : value.status === "needsReconciliation" ? isCommandError(value.error) && Array.isArray(value.evidence) : value.status === "resourceExhausted" ? isCommandError(value.error) && typeof value.retryAfterMs === "number" : value.status === "restarted" ? typeof value.priorAttemptId === "string" && typeof value.attemptId === "string" && typeof value.reason === "string" : false); }
-function isCommandError(value: unknown): boolean { return isRecord(value) && isCommandErrorCode(value.code) && typeof value.message === "string" && isErrorLayer(value.layer) && typeof value.retryable === "boolean"; }
-function isCommandErrorCode(value: unknown): boolean { return value === "invalidRequest" || value === "notFound" || value === "deadlineExceeded" || value === "browserLaunchFailed" || value === "browserCommandFailed" || value === "verificationFailed" || value === "journalFailed" || value === "resourceExhausted" || value === "policyDenied" || value === "internal" || value === "targetNotFound" || value === "targetAmbiguous" || value === "frameNotFound" || value === "shadowRootUnavailable" || value === "targetDetached" || value === "waitConditionTimedOut" || value === "screenshotCaptureFailed" || value === "networkPolicyDenied" || value === "httpResponseTooLarge" || value === "httpTransferFailed" || value === "httpStateConflict" || value === "httpEquivalenceUnproven"; }
-function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoint { return isRecord(value) && typeof value.checkpointId === "string" && typeof value.workflowId === "string" && Array.isArray(value.evidence); }
-function isRecoveryDecision(value: unknown): value is RecoveryDecision { return isRecord(value) && (value.status === "resumed" ? typeof value.checkpointId === "string" && typeof value.attemptId === "string" && Array.isArray(value.evidence) : value.status === "needsReconciliation" ? typeof value.checkpointId === "string" && typeof value.attemptId === "string" && typeof value.reason === "string" && Array.isArray(value.evidence) : value.status === "restarted" && typeof value.checkpointId === "string" && isRecord(value.lineage)); }
 
 function verifiedArtifactStream(source: ReadableStream<Uint8Array>, reference: ArtifactReference, scope: RequestScope): ReadableStream<Uint8Array> {
   const reader = source.getReader();
@@ -243,7 +243,11 @@ function verifiedArtifactStream(source: ReadableStream<Uint8Array>, reference: A
         if (delivered) { controller.close(); return; }
         delivered = true;
         controller.enqueue(data!);
-      } catch (error) { controller.error(error); await reader.cancel(error); } finally { scope.dispose(); }
+      } catch (error) {
+        const failure = scope.signal.aborted ? scopeError(scope) : error;
+        controller.error(failure);
+        await reader.cancel(failure);
+      } finally { scope.dispose(); }
     },
     async cancel(reason) { scope.dispose(); await reader.cancel(reason); },
   });
