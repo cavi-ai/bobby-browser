@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Weak},
 };
@@ -20,7 +20,9 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
-use interface_core::{Authority, AuthorizationGuard, CapabilityHandle, RuntimeInterface};
+use interface_core::{
+    Authority, AuthorizationGuard, CapabilityHandle, Event, EventStore, RuntimeInterface,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -32,9 +34,9 @@ use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, InspectCommand, InterfaceError, NavigateCommand,
-    OpenPageRequest, PageId, PrimitiveCommand, RequestContext, ScreenshotMode, SessionId,
-    SessionState, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision, RequestContext, ScreenshotMode,
+    SessionId, SessionState, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
+    TextMatch, TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -47,6 +49,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoveryError {
     Unauthorized,
+    Forbidden,
     NotFound,
     Runtime,
 }
@@ -153,7 +156,11 @@ impl CdpGateway {
         &self,
         bearer: Option<&str>,
     ) -> Result<VersionDescription, DiscoveryError> {
-        self.authenticate(bearer).await?;
+        let handle = self.authenticate(bearer).await?;
+        let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
+        if !ctx.capabilities.contains(types::Capability::SessionRead) {
+            return Err(DiscoveryError::Forbidden);
+        }
         Ok(VersionDescription {
             browser: "AutomationRuntime/0.1".into(),
             protocol_version: "1.3".into(),
@@ -277,6 +284,10 @@ pub struct CdpConnection {
     discovery_filter: Mutex<Option<Vec<domains::target::TargetFilter>>>,
     auto_attach: Mutex<Option<(bool, Vec<domains::target::TargetFilter>)>>,
     pending_tab_children: Mutex<HashMap<String, (String, Value)>>,
+    automation_checkpoint: Mutex<Option<(WorkflowId, CheckpointId)>>,
+    interface_events: EventStore,
+    observed_methods: Mutex<BTreeSet<String>>,
+    observed_events: Mutex<BTreeSet<String>>,
 }
 
 #[derive(Clone)]
@@ -489,6 +500,10 @@ impl CdpConnection {
             discovery_filter: Mutex::new(None),
             auto_attach: Mutex::new(None),
             pending_tab_children: Mutex::new(HashMap::new()),
+            automation_checkpoint: Mutex::new(None),
+            interface_events: EventStore::new(64),
+            observed_methods: Mutex::new(BTreeSet::new()),
+            observed_events: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -523,6 +538,12 @@ impl CdpConnection {
                 CdpError::new(CdpErrorCode::MethodNotFound, "method not found"),
             );
         };
+        {
+            let mut methods = self.observed_methods.lock().await;
+            if methods.len() < 128 {
+                methods.insert(request.method.clone());
+            }
+        }
         if !request.params.is_object() {
             return CdpResponse::failure(
                 &request,
@@ -755,6 +776,71 @@ impl CdpConnection {
                     "cssContentSize":{"x":0,"y":0,"width":1280,"height":720}
                 }))
             }
+            Some(Handler::AutomationCheckpointSave) => {
+                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Automation.checkpointSave takes no parameters"));
+                }
+                let Some((session_id, page_id)) = self.automation_runtime_identity(request.session_id.as_deref(),ctx.clone()).await else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "checkpoint requires a runtime page session"));
+                };
+                let workflow_id = WorkflowId::new();
+                let attempt_id = AttemptId::new();
+                let inspect_id = CommandId::new();
+                let evidence = match self.runtime.submit(ctx.clone(), CommandEnvelope {
+                    schema_version:1, command_id:inspect_id.clone(), workflow_id:workflow_id.clone(), attempt_id:attempt_id.clone(),
+                    session_id:session_id.clone(), page_id:Some(page_id.clone()), deadline:Utc::now()+Duration::seconds(30),
+                    command:PrimitiveCommand::Inspect(InspectCommand::default()),
+                }).await {
+                    Ok(CommandOutcome::Completed { evidence, .. }) => evidence,
+                    Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "checkpoint inspection did not complete")),
+                    Err(error) => return CdpResponse::failure(&request, runtime_error(error)),
+                };
+                let Some((url,title)) = evidence.iter().find_map(|item| if let types::Evidence::Inspection { url,title,.. }=item {Some((url.clone(),title.clone()))} else {None}) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "checkpoint inspection lacked verified state"));
+                };
+                let checkpoint_id=CheckpointId::new();
+                let checkpoint=WorkflowCheckpoint { schema_version:1, checkpoint_id:checkpoint_id.clone(), workflow_id:workflow_id.clone(), attempt_id,
+                    session_id, page_id, restart_url:url.clone(), current_url:url.clone(), cursor:Some(inspect_id), boundary_command_id:None,
+                    recovery_class:CommandClass::Reconciliable, invariants:vec![CheckpointInvariant::Url{value:url},CheckpointInvariant::Title{value:title}],
+                    replayable_inputs:vec![], evidence:evidence.clone(), recovery_history:vec![], created_at:Utc::now() };
+                match self.runtime.checkpoint(ctx, checkpoint, evidence).await {
+                    Ok(saved) => {
+                        *self.automation_checkpoint.lock().await=Some((workflow_id.clone(),checkpoint_id.clone()));
+                        self.record_interface_event("checkpoint.saved", serde_json::to_value(&saved).unwrap_or(Value::Null)).await;
+                        Ok(json!({"checkpointId":checkpoint_id,"workflowId":workflow_id,"boundary":"submit"}))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Some(Handler::AutomationRecoveryInspect) => {
+                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.recoveryInspect takes no parameters")); }
+                let Some((workflow_id,checkpoint_id))=self.automation_checkpoint.lock().await.clone() else { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"no verified browser checkpoint")); };
+                match self.runtime.recover(ctx,workflow_id).await {
+                    Ok(decision) => {
+                        let (status,replayed,observed_checkpoint)=match decision { RecoveryDecision::Resumed{checkpoint_id,..}=>("resumed",false,checkpoint_id), RecoveryDecision::NeedsReconciliation{checkpoint_id,..}=>("needsReconciliation",false,checkpoint_id), RecoveryDecision::Restarted{checkpoint_id,..}=>("restarted",true,checkpoint_id) };
+                        if observed_checkpoint != checkpoint_id { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"recovery checkpoint lineage changed")); }
+                        let response=json!({"status":status,"checkpointId":observed_checkpoint,"boundary":"submit","replayed":replayed});
+                        self.record_interface_event("recovery.inspected",response.clone()).await;
+                        Ok(response)
+                    }
+                    Err(error)=>Err(error),
+                }
+            }
+            Some(Handler::AutomationEventsRead) => {
+                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.eventsRead takes no parameters")); }
+                self.record_interface_event("events.read", json!({"cursor":0,"limit":64})).await;
+                match self.interface_events.read_after(types::EventCursor::ZERO,64).await {
+                    Ok(batch)=>Ok(serde_json::to_value(batch).unwrap_or(Value::Null)),
+                    Err(_)=>return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"browser interface event history gap")),
+                }
+            }
+            Some(Handler::AutomationProtocolInventory) => {
+                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.protocolInventory takes no parameters")); }
+                Ok(json!({
+                    "methods":self.observed_methods.lock().await.iter().cloned().collect::<Vec<_>>(),
+                    "events":self.observed_events.lock().await.iter().cloned().collect::<Vec<_>>(),
+                }))
+            }
             Some(Handler::PageCaptureScreenshot) => {
                 let Some(params) = request.params.as_object() else {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid screenshot parameters"));
@@ -809,6 +895,7 @@ impl CdpConnection {
                         if bytes.len() as u64 != expected_bytes || &sha != expected_sha {
                             return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "screenshot artifact integrity check failed"));
                         }
+                        self.record_interface_event("screenshot.verified", json!({"evidence":evidence})).await;
                         Ok(json!({"data":BASE64.encode(bytes)}))
                     }
                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime screenshot did not complete")),
@@ -961,6 +1048,7 @@ impl CdpConnection {
                                     self.streams.lock().await.remove(&stream_id);
                                     return CdpResponse::failure(&request, error);
                                 }
+                                self.record_interface_event("boundary.completed", json!({"evidence":evidence})).await;
                                 CdpResponse::success(&request, json!({"result":{"type":"undefined"}}))
                             }
                             Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "pinned Puppeteer download did not complete")),
@@ -968,7 +1056,10 @@ impl CdpConnection {
                         };
                     }
                     return match outcome {
-                        Ok(CommandOutcome::Completed { .. }) => CdpResponse::success(&request, json!({"result":{"type":"undefined"}})),
+                        Ok(CommandOutcome::Completed { evidence, .. }) => {
+                            if operation == "upload" { self.record_interface_event("upload.completed", json!({"evidence":evidence})).await; }
+                            CdpResponse::success(&request, json!({"result":{"type":"undefined"}}))
+                        },
                         Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "pinned Puppeteer semantic operation did not complete")),
                         Err(error) => CdpResponse::failure(&request, runtime_error(error)),
                     };
@@ -1060,8 +1151,10 @@ impl CdpConnection {
                     let outcome = self.runtime.submit(ctx, envelope).await;
                     drop(request_dir);
                     return match outcome {
-                        Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Upload { .. })) =>
-                            CdpResponse::success(&request, json!({"result":{"type":"undefined"}})),
+                        Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Upload { .. })) => {
+                            self.record_interface_event("upload.completed", json!({"evidence":evidence})).await;
+                            CdpResponse::success(&request, json!({"result":{"type":"undefined"}}))
+                        },
                         Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime upload did not produce upload evidence")),
                         Err(error) => CdpResponse::failure(&request, runtime_error(error)),
                     };
@@ -1152,6 +1245,7 @@ impl CdpConnection {
                                     self.streams.lock().await.remove(&stream_id);
                                     return CdpResponse::failure(&request, error);
                                 }
+                                self.record_interface_event("boundary.completed", json!({"evidence":evidence})).await;
                                 CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}}))
                             }
                             Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not complete")),
@@ -1316,6 +1410,7 @@ impl CdpConnection {
                             events.insert(3, CdpEvent { method:"Runtime.executionContextCreated".into(), params:json!({"context":{"id":4,"origin":final_url,"name":world_name,"uniqueId":Uuid::new_v4().simple().to_string(),"auxData":{"isDefault":false,"type":"isolated","frameId":target_id}}}), session_id:request.session_id.clone() });
                         }
                         if let Err(error) = self.queue_events(events).await { return CdpResponse::failure(&request, error); }
+                        self.record_interface_event("navigation.completed", json!({"evidence":evidence})).await;
                         let _ = title;
                         Ok(json!({"frameId":target_id,"loaderId":loader_id,"isDownload":false}))
                     }
@@ -1486,7 +1581,14 @@ impl CdpConnection {
                     "event authorization failed",
                 ));
             }
-            translated.push(self.registry.translate_event(event)?);
+            let translated_event = self.registry.translate_event(event)?;
+            {
+                let mut events = self.observed_events.lock().await;
+                if events.len() < 128 {
+                    events.insert(translated_event.method.clone());
+                }
+            }
+            translated.push(translated_event);
         }
         let mut events = self.events.lock().await;
         if events.len() + translated.len() > MAX_QUEUED_EVENTS {
@@ -1505,6 +1607,12 @@ impl CdpConnection {
             .lock()
             .await
             .insert((session_id.unwrap_or("browser").to_owned(), domain));
+    }
+
+    async fn record_interface_event(&self, event: &str, payload: Value) {
+        self.interface_events
+            .append(Event::new(event, payload))
+            .await;
     }
 
     async fn event_enabled(&self, event: &CdpEvent) -> bool {
@@ -1677,6 +1785,21 @@ impl CdpConnection {
             SessionId(Uuid::parse_str(&session).ok()?),
             PageId(Uuid::parse_str(&page).ok()?),
         ))
+    }
+
+    async fn automation_runtime_identity(
+        &self,
+        cdp_session: Option<&str>,
+        ctx: RequestContext,
+    ) -> Option<(SessionId, PageId)> {
+        if let Some(identity) = self.runtime_identity(cdp_session).await {
+            return Some(identity);
+        }
+        let sessions = self.runtime.list_sessions(ctx).await.ok()?;
+        let session = sessions
+            .into_iter()
+            .find(|session| !session.page_ids.is_empty())?;
+        Some((session.id, session.page_ids[0].clone()))
     }
 
     async fn submit_boundary(
@@ -2319,6 +2442,7 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
 fn discovery_response(error: DiscoveryError) -> Response {
     let status = match error {
         DiscoveryError::Unauthorized => StatusCode::UNAUTHORIZED,
+        DiscoveryError::Forbidden => StatusCode::FORBIDDEN,
         DiscoveryError::NotFound => StatusCode::NOT_FOUND,
         DiscoveryError::Runtime => StatusCode::BAD_GATEWAY,
     };

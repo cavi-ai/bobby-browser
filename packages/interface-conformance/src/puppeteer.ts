@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
-import puppeteer, { type CDPSession, type Page } from "puppeteer-core";
+import { type CDPSession, type Page } from "puppeteer-core";
 import type { ScenarioDriver } from "./scenario.js";
 
 const PUPPETEER_RUNTIME_TRANSLATOR = "(operation, selector, value) => globalThis.__automationRuntimePuppeteer(operation, selector, value)";
@@ -81,15 +81,16 @@ export function puppeteerDriver(page: Page, endpoint: string, token: string, den
     },
     verifyDeniedCapability: async () => {
       const discovery = await fetch(`${endpoint}/json/version`, { headers: { Authorization: `Bearer ${deniedToken}` } });
-      const version = await discovery.json() as { webSocketDebuggerUrl: string };
-      let denied;
-      try {
-        denied = await puppeteer.connect({ browserWSEndpoint: version.webSocketDebuggerUrl, headers: { Authorization: `Bearer ${deniedToken}` }, defaultViewport: null });
-        await denied.newPage(); return 200;
-      } catch { return 403; } finally { denied?.disconnect(); }
+      if (discovery.status !== 403) throw new Error(`missing session:read discovery returned ${discovery.status}`);
+      return discovery.status;
     },
+    checkpoint: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.checkpointSave"),
+    recover: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.recoveryInspect"),
+    readEvents: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.eventsRead"),
+    protocolInventory: async () => ((page as RuntimePage)._client() as unknown as RawSession).send("Automation.protocolInventory"),
   };
 }
+type RawSession={send(method:string,params?:Record<string,unknown>):Promise<any>};
 
 function evidence(kind: "navigation" | "upload" | "screenshot", bytes: Uint8Array) {
   return { kind, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength };

@@ -1,6 +1,6 @@
 use interface_conformance::{
     live::ChromeRuntimeHarness, validate_canonical_proof, AuthorizationProof, CanonicalProof,
-    CheckpointLineage, DenialProof, EvidenceProof, CANONICAL_EVENT_ORDER, CANONICAL_STEPS,
+    CheckpointLineage, DenialProof, EvidenceProof, CANONICAL_STEPS,
 };
 use interface_core::{
     ArtifactOwnershipLimits, ArtifactReader, EventStore, SessionOwnershipRegistry,
@@ -56,6 +56,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     initialize(&server).await;
     let mut id = 10;
     let mut observed = Vec::new();
+    let mut event_ordering = Vec::new();
     observed.push("runtime.info");
     tool(&server, &mut id, "runtime_info", json!({})).await;
     observed.push("session.create");
@@ -104,6 +105,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         ),
     )
     .await;
+    event_ordering.push("navigation.completed".to_owned());
     let fixture = harness.upload_root().join("canonical-upload.txt");
     let fixture_bytes = b"bounded fixture\n";
     std::fs::write(&fixture, fixture_bytes).unwrap();
@@ -121,6 +123,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         ),
     )
     .await;
+    event_ordering.push("upload.completed".to_owned());
     let inspect_id = CommandId::new();
     let inspection = command(
         &server,
@@ -170,13 +173,14 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         recovery_history: vec![],
         created_at: chrono::Utc::now(),
     };
-    tool(
+    let saved_checkpoint = tool(
         &server,
         &mut id,
         "checkpoint_save",
         json!({"checkpoint":checkpoint,"evidence":inspect_evidence}),
     )
     .await;
+    event_ordering.push("checkpoint.saved".to_owned());
     let boundary: CommandOutcome = serde_json::from_value(
         command(
             &server,
@@ -193,6 +197,8 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         .await,
     )
     .unwrap();
+    completed(&boundary);
+    event_ordering.push("boundary.completed".to_owned());
     observed.push("artifact.verify");
     let screenshot: CommandOutcome = serde_json::from_value(
         command(
@@ -208,6 +214,8 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         .await,
     )
     .unwrap();
+    completed(&screenshot);
+    event_ordering.push("screenshot.verified".to_owned());
     let shot = completed(&screenshot)
         .iter()
         .find_map(|e| {
@@ -250,7 +258,14 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         json!({"workflowId":workflow}),
     )
     .await;
-    assert_ne!(recovery["status"], "restarted");
+    let recovery_status = recovery["status"].as_str().unwrap().to_owned();
+    let replayed = recovery_status == "restarted";
+    let recovery_checkpoint = recovery["checkpointId"].as_str().unwrap().to_owned();
+    assert_eq!(
+        recovery_checkpoint,
+        saved_checkpoint["checkpointId"].as_str().unwrap()
+    );
+    event_ordering.push("recovery.inspected".to_owned());
     observed.push("events.read");
     let events = tool(
         &server,
@@ -260,6 +275,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     )
     .await;
     assert!(!events["events"].as_array().unwrap().is_empty());
+    event_ordering.push("events.read".to_owned());
     let denied_handle = harness
         .authority
         .verify(&harness.denied_token)
@@ -322,10 +338,12 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
                 status: 403,
             },
         },
-        event_ordering: CANONICAL_EVENT_ORDER.map(str::to_owned).to_vec(),
+        event_ordering,
         checkpoint_lineage: CheckpointLineage {
             boundary: "submit".into(),
-            replayed: false,
+            replayed,
+            checkpoint_id: recovery_checkpoint,
+            recovery_status,
         },
     };
     emit_equality_proof(&proof);

@@ -4,11 +4,15 @@ export type ScenarioProof = {
   evidence: EvidenceProof[];
   authorization: { allowed: string[]; denied: { capability: "session:read"; status: number } };
   eventOrdering: string[];
-  checkpointLineage: { boundary: "submit"; replayed: false };
+  checkpointLineage: { boundary: "submit"; replayed: boolean; checkpointId: string; recoveryStatus: string };
 };
 
 export const CANONICAL_ALLOWED = ["page:write", "file:upload", "artifact:capture", "file:download"] as const;
-export const CANONICAL_EVENT_ORDER = ["navigation.completed", "upload.completed", "boundary.completed", "screenshot.verified", "checkpoint.saved", "events.read"] as const;
+export const CANONICAL_EVENT_ORDER = ["navigation.completed", "upload.completed", "checkpoint.saved", "boundary.completed", "screenshot.verified", "recovery.inspected", "events.read"] as const;
+export type CheckpointObservation = { checkpointId: string; workflowId: string; boundary: "submit" };
+export type RecoveryObservation = { status: string; checkpointId: string; boundary: "submit"; replayed: boolean };
+export type EventObservation = { events: Array<{ cursor: number; kind: string; payload: unknown }> };
+export type ProtocolInventory = { methods: string[]; events: string[] };
 
 export interface ScenarioDriver {
   navigate(url: string): Promise<EvidenceProof>;
@@ -19,6 +23,27 @@ export interface ScenarioDriver {
   screenshot(): Promise<EvidenceProof>;
   verifyDownload(): Promise<EvidenceProof>;
   verifyDeniedCapability(): Promise<number>;
+  checkpoint(): Promise<CheckpointObservation>;
+  recover(): Promise<RecoveryObservation>;
+  readEvents(): Promise<EventObservation>;
+  protocolInventory(): Promise<ProtocolInventory>;
+}
+
+type ManifestEntry = { name: string; scenarios: string[]; playwrightCovered: boolean; puppeteerCovered: boolean };
+export function auditProtocolInventory(inventory: ProtocolInventory, client: "playwright" | "puppeteer", manifest: { methods: ManifestEntry[]; events: ManifestEntry[] }) {
+  if (inventory.methods.length > 128 || inventory.events.length > 128) throw new Error("protocol inventory exceeded its bound");
+  for (const [kind, observed, entries] of [["method", inventory.methods, manifest.methods], ["event", inventory.events, manifest.events]] as const) {
+    const byName = new Map(entries.map(entry => [entry.name, entry]));
+    const unflagged: string[] = [];
+    for (const name of observed) {
+      if (!/^[A-Za-z]+\.[A-Za-z][A-Za-z0-9]+$/.test(name)) throw new Error(`unsanitized observed ${kind}`);
+      const entry = byName.get(name); if (!entry) throw new Error(`observed ${kind} missing from manifest: ${name}`);
+      if (!entry[`${client}Covered`]) unflagged.push(name);
+    }
+    if (unflagged.length) throw new Error(`observed ${client} ${kind}s are not coverage-flagged: ${unflagged.join(",")}`);
+    for (const entry of entries.filter(item => item.scenarios.includes(`${client}-canonical`) && item[`${client}Covered`]))
+      if (!observed.includes(entry.name)) throw new Error(`manifest canonical ${client} ${kind} was not observed: ${entry.name}`);
+  }
 }
 
 export async function runCanonicalScenario(
@@ -29,17 +54,23 @@ export async function runCanonicalScenario(
   const navigation = await driver.navigate(baseUrl);
   await driver.completeForm();
   const upload = await driver.uploadFixture(fixturePath);
+  const checkpoint = await driver.checkpoint();
   await driver.submitForm();
   await driver.observePopup();
-  const screenshot = await driver.screenshot();
   const download = await driver.verifyDownload();
+  const screenshot = await driver.screenshot();
+  const recovery = await driver.recover();
+  if (recovery.checkpointId !== checkpoint.checkpointId || recovery.boundary !== checkpoint.boundary)
+    throw new Error("recovery checkpoint lineage differs from the persisted checkpoint");
+  const eventBatch = await driver.readEvents();
+  const eventOrdering = eventBatch.events.map(event => event.kind);
   const deniedStatus = await driver.verifyDeniedCapability();
-  if (deniedStatus !== 401 && deniedStatus !== 403) throw new Error(`negative capability was not denied: ${deniedStatus}`);
+  if (deniedStatus !== 403) throw new Error(`negative capability was not denied exactly: ${deniedStatus}`);
   return {
     outcomeStatus: "completed", evidence: [navigation, upload, screenshot, download],
     authorization: { allowed: [...CANONICAL_ALLOWED], denied: { capability: "session:read", status: deniedStatus } },
-    eventOrdering: [...CANONICAL_EVENT_ORDER],
-    checkpointLineage: { boundary: "submit", replayed: false },
+    eventOrdering,
+    checkpointLineage: { boundary: checkpoint.boundary, replayed: recovery.replayed, checkpointId: recovery.checkpointId, recoveryStatus: recovery.status },
   };
 }
 
@@ -76,6 +107,10 @@ export function normalizeCanonicalProof(value: unknown): CanonicalInterfaceProof
   if (!Array.isArray(proof.eventOrdering) || proof.eventOrdering.join(",") !== CANONICAL_EVENT_ORDER.join(","))
     throw new Error("interface proof event ordering differs from the canonical proof");
   if (proof.checkpointLineage?.replayed !== false) throw new Error("implicit boundary replay is forbidden");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(proof.checkpointLineage.checkpointId))
+    throw new Error("interface proof lacks persisted checkpoint identity");
+  if (!["resumed", "needsReconciliation"].includes(proof.checkpointLineage.recoveryStatus))
+    throw new Error("interface proof contains an invalid recovery decision");
   return proof as CanonicalInterfaceProof;
 }
 

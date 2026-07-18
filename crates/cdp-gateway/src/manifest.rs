@@ -7,6 +7,10 @@ use crate::{CdpError, CdpErrorCode, CdpEvent};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Handler {
+    AutomationCheckpointSave,
+    AutomationRecoveryInspect,
+    AutomationEventsRead,
+    AutomationProtocolInventory,
     AuditsEnable,
     PerformanceEnable,
     NetworkSetUserAgent,
@@ -42,6 +46,10 @@ pub(crate) enum Handler {
 impl Handler {
     const fn translation_function(self) -> &'static str {
         match self {
+            Self::AutomationCheckpointSave => "persist_verified_browser_checkpoint",
+            Self::AutomationRecoveryInspect => "inspect_browser_recovery_without_replay",
+            Self::AutomationEventsRead => "read_observed_browser_interface_events",
+            Self::AutomationProtocolInventory => "read_bounded_protocol_inventory",
             Self::AuditsEnable => "configure_gateway_audit_events",
             Self::PerformanceEnable => "configure_gateway_performance_metrics",
             Self::NetworkSetUserAgent => "validate_exact_current_user_agent_noop",
@@ -174,6 +182,22 @@ impl MethodRegistry {
             serde_json::from_str(include_str!("../../../docs/cdp-support.json"))
                 .expect("compiled CDP support manifest must be valid");
         let handlers = BTreeMap::from([
+            (
+                "Automation.checkpointSave".to_owned(),
+                Handler::AutomationCheckpointSave,
+            ),
+            (
+                "Automation.recoveryInspect".to_owned(),
+                Handler::AutomationRecoveryInspect,
+            ),
+            (
+                "Automation.eventsRead".to_owned(),
+                Handler::AutomationEventsRead,
+            ),
+            (
+                "Automation.protocolInventory".to_owned(),
+                Handler::AutomationProtocolInventory,
+            ),
             ("Audits.enable".to_owned(), Handler::AuditsEnable),
             ("Performance.enable".to_owned(), Handler::PerformanceEnable),
             (

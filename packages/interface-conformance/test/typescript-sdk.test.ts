@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { writeFile } from "node:fs/promises";
 import { test } from "node:test";
 import { BrowserRuntimeClient, RuntimeClientError, type CommandEnvelope, type Evidence, type WorkflowCheckpoint } from "@bobby-browser/sdk";
-import { CANONICAL_EVENT_ORDER, equalityProof, runCanonicalInterfaceScenario, type CanonicalInterfaceProof } from "../src/scenario.js";
+import { equalityProof, runCanonicalInterfaceScenario, type CanonicalInterfaceProof } from "../src/scenario.js";
 import { typescriptSdkDriver } from "../src/typescript-sdk.js";
 
 test("TypeScript SDK executes every canonical step on the authenticated Chrome runtime", { timeout: 120_000 }, async (t) => {
@@ -20,7 +20,7 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
   const denied = new BrowserRuntimeClient({ baseUrl: boot.endpoint, bearerToken: boot.deniedToken });
   const ids = { workflow: randomUUID(), attempt: randomUUID() };
   const fixture = `${boot.uploadRoot}/canonical-upload.txt`; const fixtureBytes = Buffer.from("bounded fixture\n"); await writeFile(fixture, fixtureBytes);
-  let sessionId = "", pageId = "", boundaryId = ""; let screenshot: Extract<Evidence,{kind:"screenshot"}> | undefined; let boundaryCheckpoint: WorkflowCheckpoint | undefined;
+  let sessionId = "", pageId = "", boundaryId = "", savedCheckpointId = "", recoveryStatus = "", recoveryCheckpointId = ""; let replayed = true; let screenshot: Extract<Evidence,{kind:"screenshot"}> | undefined; let boundaryCheckpoint: WorkflowCheckpoint | undefined;
   const proofEvidence: CanonicalInterfaceProof["evidence"] = [];
   const eventOrdering: string[] = [];
   const command = (kind: CommandEnvelope["command"]["kind"], input: unknown): CommandEnvelope => ({
@@ -50,10 +50,10 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
         boundaryCheckpoint = { schemaVersion:1, checkpointId:randomUUID(), workflowId:ids.workflow, attemptId:ids.attempt, sessionId, pageId,
           restartUrl:state.url, currentUrl:state.url, cursor:inspection.commandId, boundaryCommandId:boundaryId, recoveryClass:"boundary",
           invariants:[{kind:"url",value:state.url},{kind:"title",value:state.title}], replayableInputs:[], evidence:observed.evidence, recoveryHistory:[], createdAt:new Date().toISOString() };
-        await client.checkpoint({ checkpoint: boundaryCheckpoint, evidence: observed.evidence });
+        const saved = await client.checkpoint({ checkpoint: boundaryCheckpoint, evidence: observed.evidence }); savedCheckpointId = saved.checkpointId; eventOrdering.push("checkpoint.saved");
         const outcome = await client.submit(envelope); assert.equal(outcome.status, "completed");
         const download = outcome.evidence.find((item): item is Extract<Evidence,{kind:"download"}> => item.kind === "download"); assert(download);
-        proofEvidence.push({ kind: "download", sha256: download.sha256, size: download.bytes }); eventOrdering.push("submit.completed"); break;
+        proofEvidence.push({ kind: "download", sha256: download.sha256, size: download.bytes }); eventOrdering.push("boundary.completed"); break;
       }
       case "artifact.verify": {
         const outcome = await client.submit(command("captureScreenshot", { mode: { kind: "viewport" } })); assert.equal(outcome.status, "completed");
@@ -63,15 +63,16 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
         proofEvidence.splice(2, 0, { kind: "screenshot", sha256: screenshot.sha256, size }); eventOrdering.push("screenshot.verified"); break;
       }
       case "checkpoint.save": {
-        assert(boundaryCheckpoint); await client.checkpoint({ checkpoint: boundaryCheckpoint, evidence: boundaryCheckpoint.evidence }); eventOrdering.push("checkpoint.saved"); break;
+        assert(boundaryCheckpoint); const saved = await client.checkpoint({ checkpoint: boundaryCheckpoint, evidence: boundaryCheckpoint.evidence }); assert.equal(saved.checkpointId, savedCheckpointId); break;
       }
-      case "recovery.inspect": { const recovery = await client.recover(ids.workflow); assert.notEqual(recovery.status, "restarted", "boundary must not replay"); break; }
+      case "recovery.inspect": { const recovery = await client.recover(ids.workflow); recoveryStatus = recovery.status; recoveryCheckpointId = recovery.checkpointId; replayed = recovery.status === "restarted"; assert.equal(recoveryCheckpointId, savedCheckpointId); eventOrdering.push("recovery.inspected"); break; }
       case "events.read": {
         const iterator = client.events(0, { limit: 1, timeoutMs: 10_000 })[Symbol.asyncIterator](); const observed = await iterator.next(); await iterator.return?.();
         assert.equal(observed.done, false); assert.equal(observed.value.kind, "command.outcome");
+        eventOrdering.push("events.read");
         let deniedStatus = 200; try { await denied.runtimeInfo(); } catch (error) { assert(error instanceof RuntimeClientError); deniedStatus = error.status ?? 0; }
         assert(eventOrdering.length >= 5);
-        return { outcomeStatus:"completed", evidence:proofEvidence, authorization:{ allowed:["page:write","file:upload","artifact:capture","file:download"], denied:{ capability:"session:read",status:deniedStatus } }, eventOrdering:[...CANONICAL_EVENT_ORDER], checkpointLineage:{ boundary:"submit",replayed:false } } satisfies CanonicalInterfaceProof;
+        return { outcomeStatus:"completed", evidence:proofEvidence, authorization:{ allowed:["page:write","file:upload","artifact:capture","file:download"], denied:{ capability:"session:read",status:deniedStatus } }, eventOrdering, checkpointLineage:{ boundary:"submit",replayed,checkpointId:recoveryCheckpointId,recoveryStatus } } satisfies CanonicalInterfaceProof;
       }
     }
     return { ok: true };
