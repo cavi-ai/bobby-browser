@@ -7,9 +7,11 @@ fn mappings_are_connection_scoped_and_invalidated_on_worker_replacement() {
     let target = first.bind_target("session-a", "page-a", RuntimeGeneration(1));
     first.bind_cdp_session("session-a", "worker-session", RuntimeGeneration(1));
     assert!(second.resolve_target(&target).is_none());
-    let events = first.invalidate_generation("session-a", RuntimeGeneration(2));
+    let events = first.generation_events("session-a", RuntimeGeneration(2));
     assert_eq!(events[0].method, "Target.detachedFromTarget");
     assert_eq!(events.last().unwrap().method, "Target.targetDestroyed");
+    assert!(first.resolve_target(&target).is_some());
+    first.remove_generation("session-a", RuntimeGeneration(2));
     assert!(first.resolve_target(&target).is_none());
 }
 
@@ -34,4 +36,12 @@ fn every_identifier_family_is_opaque_and_connection_local() {
             .len(),
         values.len()
     );
+}
+
+#[test]
+fn rebinding_the_same_live_internal_identifier_reuses_the_opaque_id() {
+    let mut ids = IdentifierMap::new();
+    let first = ids.bind_frame("session", "frame", RuntimeGeneration(1));
+    let second = ids.bind_frame("session", "frame", RuntimeGeneration(1));
+    assert_eq!(first, second);
 }

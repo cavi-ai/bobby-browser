@@ -6,6 +6,29 @@ use uuid::Uuid;
 use crate::CdpEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierFamily {
+    BrowserContext,
+    Target,
+    CdpSession,
+    ExecutionContext,
+    Frame,
+    NetworkRequest,
+    Download,
+}
+
+impl IdentifierFamily {
+    pub const ALL: [Self; 7] = [
+        Self::BrowserContext,
+        Self::Target,
+        Self::CdpSession,
+        Self::ExecutionContext,
+        Self::Frame,
+        Self::NetworkRequest,
+        Self::Download,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeGeneration(pub u64);
 
 #[derive(Clone)]
@@ -60,6 +83,13 @@ impl IdentifierMap {
         session: Option<&str>,
         generation: RuntimeGeneration,
     ) -> String {
+        if let Some((existing, _)) = map.iter().find(|(_, binding)| {
+            binding.internal == internal
+                && binding.runtime_session.as_deref() == session
+                && binding.generation == generation
+        }) {
+            return existing.clone();
+        }
         map.insert(
             id.clone(),
             Binding {
@@ -69,6 +99,47 @@ impl IdentifierMap {
             },
         );
         id
+    }
+
+    pub fn bind_family(
+        &mut self,
+        family: IdentifierFamily,
+        session: &str,
+        internal: &str,
+        generation: RuntimeGeneration,
+    ) -> String {
+        match family {
+            IdentifierFamily::BrowserContext => {
+                self.bind_browser_context(session, internal, generation)
+            }
+            IdentifierFamily::Target => self.bind_target(session, internal, generation),
+            IdentifierFamily::CdpSession => self.bind_cdp_session(session, internal, generation),
+            IdentifierFamily::ExecutionContext => {
+                self.bind_execution_context(session, internal, generation)
+            }
+            IdentifierFamily::Frame => self.bind_frame(session, internal, generation),
+            IdentifierFamily::NetworkRequest => {
+                self.bind_network_request(session, internal, generation)
+            }
+            IdentifierFamily::Download => self.bind_download(session, internal, generation),
+        }
+    }
+
+    pub fn adopt_target(
+        &mut self,
+        opaque: String,
+        session: &str,
+        page: &str,
+        generation: RuntimeGeneration,
+    ) {
+        self.targets.insert(
+            opaque,
+            Binding {
+                internal: page.to_owned(),
+                runtime_session: Some(session.to_owned()),
+                generation,
+            },
+        );
     }
     pub fn bind_browser_context(
         &mut self,
@@ -181,12 +252,24 @@ impl IdentifierMap {
         resolve(&self.downloads, opaque)
     }
 
-    pub fn invalidate_generation(
-        &mut self,
+    pub fn resolve_family(&self, family: IdentifierFamily, opaque: &str) -> Option<&str> {
+        match family {
+            IdentifierFamily::BrowserContext => self.resolve_browser_context(opaque),
+            IdentifierFamily::Target => self.resolve_target(opaque),
+            IdentifierFamily::CdpSession => self.resolve_cdp_session(opaque),
+            IdentifierFamily::ExecutionContext => self.resolve_execution_context(opaque),
+            IdentifierFamily::Frame => self.resolve_frame(opaque),
+            IdentifierFamily::NetworkRequest => self.resolve_network_request(opaque),
+            IdentifierFamily::Download => self.resolve_download(opaque),
+        }
+    }
+
+    pub fn generation_events(
+        &self,
         runtime_session: &str,
         current: RuntimeGeneration,
     ) -> Vec<CdpEvent> {
-        let stale_targets: Vec<_> = self
+        let mut stale_targets: Vec<_> = self
             .targets
             .iter()
             .filter(|(_, b)| {
@@ -194,7 +277,8 @@ impl IdentifierMap {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        let stale_sessions: Vec<_> = self
+        stale_targets.sort();
+        let mut stale_sessions: Vec<_> = self
             .cdp_sessions
             .iter()
             .filter(|(_, b)| {
@@ -202,21 +286,32 @@ impl IdentifierMap {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        let stale_execution_contexts: Vec<_> =
+        stale_sessions.sort();
+        let mut stale_execution_contexts: Vec<_> =
             stale_ids(&self.execution_contexts, runtime_session, current);
-        let stale_frames: Vec<_> = stale_ids(&self.frames, runtime_session, current);
+        stale_execution_contexts.sort();
+        let mut stale_frames: Vec<_> = stale_ids(&self.frames, runtime_session, current);
+        stale_frames.sort();
+        let mut stale_browser_contexts: Vec<_> =
+            stale_ids(&self.browser_contexts, runtime_session, current);
+        stale_browser_contexts.sort();
+        let mut stale_network_requests: Vec<_> =
+            stale_ids(&self.network_requests, runtime_session, current);
+        stale_network_requests.sort();
+        let mut stale_downloads: Vec<_> = stale_ids(&self.downloads, runtime_session, current);
+        stale_downloads.sort();
         let mut events = Vec::new();
-        for session_id in &stale_sessions {
+        for request_id in &stale_network_requests {
             events.push(CdpEvent {
-                method: "Target.detachedFromTarget".into(),
-                params: json!({"sessionId": session_id}),
+                method: "Network.loadingFailed".into(),
+                params: json!({"requestId": request_id, "errorText": "worker replaced", "canceled": true}),
                 session_id: None,
             });
         }
-        for target_id in &stale_targets {
+        for guid in &stale_downloads {
             events.push(CdpEvent {
-                method: "Target.targetDestroyed".into(),
-                params: json!({"targetId": target_id}),
+                method: "Browser.downloadProgress".into(),
+                params: json!({"guid": guid, "totalBytes": 0, "receivedBytes": 0, "state": "canceled"}),
                 session_id: None,
             });
         }
@@ -234,12 +329,39 @@ impl IdentifierMap {
                 session_id: None,
             });
         }
-        for id in stale_sessions {
-            self.cdp_sessions.remove(&id);
+        for session_id in &stale_sessions {
+            events.push(CdpEvent {
+                method: "Target.detachedFromTarget".into(),
+                params: json!({"sessionId": session_id}),
+                session_id: None,
+            });
         }
-        for id in stale_targets {
-            self.targets.remove(&id);
+        for target_id in &stale_targets {
+            events.push(CdpEvent {
+                method: "Target.targetDestroyed".into(),
+                params: json!({"targetId": target_id}),
+                session_id: None,
+            });
         }
+        for browser_context_id in &stale_browser_contexts {
+            events.push(CdpEvent {
+                method: "Target.browserContextDestroyed".into(),
+                params: json!({"browserContextId": browser_context_id}),
+                session_id: None,
+            });
+        }
+        events
+    }
+
+    pub fn remove_generation(&mut self, runtime_session: &str, current: RuntimeGeneration) {
+        self.cdp_sessions.retain(|_, binding| {
+            binding.runtime_session.as_deref() != Some(runtime_session)
+                || binding.generation == current
+        });
+        self.targets.retain(|_, binding| {
+            binding.runtime_session.as_deref() != Some(runtime_session)
+                || binding.generation == current
+        });
         for map in [
             &mut self.browser_contexts,
             &mut self.execution_contexts,
@@ -252,7 +374,6 @@ impl IdentifierMap {
                     || binding.generation == current
             });
         }
-        events
     }
 }
 

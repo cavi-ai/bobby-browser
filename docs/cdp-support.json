@@ -19,26 +19,51 @@
   "events": [
     {
       "name": "Target.detachedFromTarget",
+      "requiredCapability": "session:read",
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "worker_generation_detached",
       "scenarios": ["worker-replacement"]
     },
     {
       "name": "Target.targetDestroyed",
+      "requiredCapability": "session:read",
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "worker_generation_destroyed",
       "scenarios": ["worker-replacement"]
     },
     {
       "name": "Runtime.executionContextDestroyed",
+      "requiredCapability": "session:read",
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "worker_generation_execution_context_destroyed",
       "scenarios": ["worker-replacement"]
     },
     {
       "name": "Page.frameDetached",
+      "requiredCapability": "session:read",
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "worker_generation_frame_detached",
+      "scenarios": ["worker-replacement"]
+    },
+    {
+      "name": "Target.browserContextDestroyed",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "cdp-1.3",
+      "translationFunction": "worker_generation_browser_context_destroyed",
+      "scenarios": ["worker-replacement"]
+    },
+    {
+      "name": "Network.loadingFailed",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "cdp-1.3",
+      "translationFunction": "worker_generation_network_failed",
+      "scenarios": ["worker-replacement"]
+    },
+    {
+      "name": "Browser.downloadProgress",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "cdp-1.3",
+      "translationFunction": "worker_generation_download_canceled",
       "scenarios": ["worker-replacement"]
     }
   ]
