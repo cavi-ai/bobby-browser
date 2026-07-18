@@ -131,9 +131,7 @@ pub struct MethodMetadata {
     pub parameter_schema_revision: String,
     pub translation_function: String,
     pub scenarios: Vec<String>,
-    #[serde(skip)]
     pub playwright_covered: bool,
-    #[serde(skip)]
     pub puppeteer_covered: bool,
 }
 
@@ -151,9 +149,7 @@ pub struct EventMetadata {
     pub parameter_schema_revision: String,
     pub translation_function: String,
     pub scenarios: Vec<String>,
-    #[serde(skip)]
     pub playwright_covered: bool,
-    #[serde(skip)]
     pub puppeteer_covered: bool,
 }
 
@@ -174,28 +170,9 @@ pub struct MethodRegistry {
 
 impl MethodRegistry {
     pub fn compiled() -> Self {
-        let mut manifest: SupportManifest =
+        let manifest: SupportManifest =
             serde_json::from_str(include_str!("../../../docs/cdp-support.json"))
                 .expect("compiled CDP support manifest must be valid");
-        for method in &mut manifest.methods {
-            method.playwright_covered = method
-                .scenarios
-                .iter()
-                .any(|scenario| scenario.starts_with("playwright-"));
-            method.puppeteer_covered = method
-                .scenarios
-                .iter()
-                .any(|scenario| scenario.starts_with("puppeteer-"));
-        }
-        for event in &mut manifest.events {
-            event.playwright_covered = event.scenarios.iter().any(|scenario| {
-                scenario.starts_with("playwright-") || scenario == "worker-replacement"
-            });
-            event.puppeteer_covered = event
-                .scenarios
-                .iter()
-                .any(|scenario| scenario.starts_with("puppeteer-"));
-        }
         let handlers = BTreeMap::from([
             ("Audits.enable".to_owned(), Handler::AuditsEnable),
             ("Performance.enable".to_owned(), Handler::PerformanceEnable),

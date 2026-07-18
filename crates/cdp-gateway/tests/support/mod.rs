@@ -9,12 +9,66 @@ use async_trait::async_trait;
 use interface_core::{InterfaceResult, RuntimeInterface};
 use tokio::sync::Notify;
 use types::{
-    CommandEnvelope, CommandOutcome, CreateSessionRequest, Evidence, OpenPageRequest, PageState,
-    RecoveryDecision, RequestContext, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
+    CommandEnvelope, CommandOutcome, CreateSessionRequest, Evidence, OpenPageRequest, PageId,
+    PageMode, PageState, RecoveryDecision, RequestContext, RuntimeInfo, SessionState,
+    WorkflowCheckpoint, WorkflowId,
 };
 
 pub struct StaticRuntime {
     pub sessions: Vec<SessionState>,
+}
+
+pub struct PageCreatingRuntime {
+    pub session: SessionState,
+}
+
+#[async_trait]
+impl RuntimeInterface for PageCreatingRuntime {
+    async fn runtime_info(&self, _: RequestContext) -> InterfaceResult<RuntimeInfo> {
+        unreachable!()
+    }
+    async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
+        Ok(vec![self.session.clone()])
+    }
+    async fn create_session(
+        &self,
+        _: RequestContext,
+        _: CreateSessionRequest,
+    ) -> InterfaceResult<SessionState> {
+        unreachable!()
+    }
+    async fn open_page(
+        &self,
+        _: RequestContext,
+        request: OpenPageRequest,
+    ) -> InterfaceResult<PageState> {
+        Ok(PageState {
+            id: PageId::new(),
+            session_id: request.session_id,
+            url: None,
+            mode: PageMode::Document,
+            ready_state: "created".into(),
+            pending_requests: 0,
+        })
+    }
+    async fn submit(
+        &self,
+        _: RequestContext,
+        _: CommandEnvelope,
+    ) -> InterfaceResult<CommandOutcome> {
+        unreachable!()
+    }
+    async fn checkpoint(
+        &self,
+        _: RequestContext,
+        _: WorkflowCheckpoint,
+        _: Vec<Evidence>,
+    ) -> InterfaceResult<WorkflowCheckpoint> {
+        unreachable!()
+    }
+    async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {
+        unreachable!()
+    }
 }
 
 pub struct BlockingRuntime {

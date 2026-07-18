@@ -22,7 +22,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, RwLock, Semaphore},
 };
-use types::SessionId;
+use types::{CommandEnvelope, CommandOutcome, Evidence, SessionId};
 
 pub use auth::{EnrolledAuthority, StartupCredential, StartupCredentialError};
 
@@ -67,6 +67,51 @@ impl ArtifactCatalog {
             return Err(ArtifactCatalogFull);
         }
         entries.insert(artifact_id, (session_id, reference));
+        Ok(())
+    }
+
+    pub async fn admit_outcome(
+        &self,
+        handle: &CapabilityHandle,
+        context: &types::RequestContext,
+        envelope: &CommandEnvelope,
+        outcome: &CommandOutcome,
+    ) -> Result<(), ArtifactCatalogFull> {
+        let Some(reader) = &self.reader else {
+            return Ok(());
+        };
+        let evidence = match outcome {
+            CommandOutcome::Completed { evidence, .. }
+            | CommandOutcome::NeedsReconciliation { evidence, .. } => evidence,
+            _ => return Ok(()),
+        };
+        for item in evidence {
+            let record = match item {
+                Evidence::Screenshot {
+                    artifact_id,
+                    media_type,
+                    width,
+                    height,
+                    bytes,
+                    sha256,
+                } => artifact_store::ArtifactRecord {
+                    artifact_id: artifact_id.clone(),
+                    page_id: envelope.page_id.clone().ok_or(ArtifactCatalogFull)?,
+                    media_type: media_type.clone(),
+                    width: *width,
+                    height: *height,
+                    bytes: *bytes,
+                    sha256: sha256.clone(),
+                },
+                _ => continue,
+            };
+            let reference = reader
+                .register(handle, context, &envelope.session_id, &record)
+                .await
+                .map_err(|_| ArtifactCatalogFull)?;
+            self.register_trusted(envelope.session_id.clone(), reference)
+                .await?;
+        }
         Ok(())
     }
 

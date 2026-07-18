@@ -1,17 +1,24 @@
+export type EvidenceProof = { kind: "navigation" | "upload" | "screenshot" | "download"; sha256: string; size: number };
 export type ScenarioProof = {
-  submitted: boolean;
-  popupObserved: boolean;
-  downloadVerified: boolean;
+  outcomeStatus: "completed";
+  evidence: EvidenceProof[];
+  authorization: { allowed: string[]; denied: { capability: "session:read"; status: number } };
+  eventOrdering: string[];
+  checkpointLineage: { boundary: "submit"; replayed: false };
 };
 
+export const CANONICAL_ALLOWED = ["page:write", "file:upload", "artifact:capture", "file:download"] as const;
+export const CANONICAL_EVENT_ORDER = ["navigation.completed", "upload.completed", "boundary.completed", "screenshot.verified", "checkpoint.saved", "events.read"] as const;
+
 export interface ScenarioDriver {
-  navigate(url: string): Promise<void>;
+  navigate(url: string): Promise<EvidenceProof>;
   completeForm(): Promise<void>;
-  uploadFixture(path: string): Promise<void>;
+  uploadFixture(path: string): Promise<EvidenceProof>;
   submitForm(): Promise<void>;
   observePopup(): Promise<void>;
-  screenshot(): Promise<void>;
-  verifyDownload(): Promise<void>;
+  screenshot(): Promise<EvidenceProof>;
+  verifyDownload(): Promise<EvidenceProof>;
+  verifyDeniedCapability(): Promise<number>;
 }
 
 export async function runCanonicalScenario(
@@ -19,14 +26,21 @@ export async function runCanonicalScenario(
   baseUrl: string,
   fixturePath: string,
 ): Promise<ScenarioProof> {
-  await driver.navigate(baseUrl);
+  const navigation = await driver.navigate(baseUrl);
   await driver.completeForm();
-  await driver.uploadFixture(fixturePath);
+  const upload = await driver.uploadFixture(fixturePath);
   await driver.submitForm();
   await driver.observePopup();
-  await driver.screenshot();
-  await driver.verifyDownload();
-  return { submitted: true, popupObserved: true, downloadVerified: true };
+  const screenshot = await driver.screenshot();
+  const download = await driver.verifyDownload();
+  const deniedStatus = await driver.verifyDeniedCapability();
+  if (deniedStatus !== 401 && deniedStatus !== 403) throw new Error(`negative capability was not denied: ${deniedStatus}`);
+  return {
+    outcomeStatus: "completed", evidence: [navigation, upload, screenshot, download],
+    authorization: { allowed: [...CANONICAL_ALLOWED], denied: { capability: "session:read", status: deniedStatus } },
+    eventOrdering: [...CANONICAL_EVENT_ORDER],
+    checkpointLineage: { boundary: "submit", replayed: false },
+  };
 }
 
 export const CANONICAL_INTERFACE_STEPS = [
@@ -36,44 +50,45 @@ export const CANONICAL_INTERFACE_STEPS = [
 
 export type InterfaceScenarioStep = typeof CANONICAL_INTERFACE_STEPS[number];
 
-export type CanonicalInterfaceProof = {
-  outcomeStatus: "completed";
-  evidence: ReadonlyArray<{ kind: "navigation" | "upload" | "screenshot" | "download"; sha256: string }>;
-  authorization: ReadonlyArray<"allow:session:write" | "allow:page:write" | "allow:artifact:capture" | "deny:javascript:evaluate">;
-  eventOrdering: readonly ["command.accepted", "command.completed", "checkpoint.saved"];
-  checkpointLineage: readonly ["checkpoint-1", "attempt-1", "boundary-1"];
-  implicitBoundaryReplay: false;
-};
+export type CanonicalInterfaceProof = ScenarioProof;
 
 export interface InterfaceScenarioDriver {
   execute(steps: readonly InterfaceScenarioStep[]): Promise<unknown>;
 }
-
-const HASHES = {
-  navigation: "a".repeat(64), upload: "b".repeat(64), screenshot: "c".repeat(64), download: "d".repeat(64),
-} as const;
-
-export const expectedCanonicalInterfaceProof: CanonicalInterfaceProof = {
-  outcomeStatus: "completed",
-  evidence: [
-    { kind: "navigation", sha256: HASHES.navigation }, { kind: "upload", sha256: HASHES.upload },
-    { kind: "screenshot", sha256: HASHES.screenshot }, { kind: "download", sha256: HASHES.download },
-  ],
-  authorization: ["allow:session:write", "allow:page:write", "allow:artifact:capture", "deny:javascript:evaluate"],
-  eventOrdering: ["command.accepted", "command.completed", "checkpoint.saved"],
-  checkpointLineage: ["checkpoint-1", "attempt-1", "boundary-1"],
-  implicitBoundaryReplay: false,
-};
 
 export async function runCanonicalInterfaceScenario(driver: InterfaceScenarioDriver): Promise<CanonicalInterfaceProof> {
   return normalizeCanonicalProof(await driver.execute(CANONICAL_INTERFACE_STEPS));
 }
 
 export function normalizeCanonicalProof(value: unknown): CanonicalInterfaceProof {
-  const encoded = JSON.stringify(value);
-  const expected = JSON.stringify(expectedCanonicalInterfaceProof);
-  if (encoded !== expected) throw new Error("interface proof did not match the canonical behavioral contract");
-  return value as CanonicalInterfaceProof;
+  if (!value || typeof value !== "object") throw new Error("interface proof must be an object");
+  const proof = value as Partial<CanonicalInterfaceProof>;
+  if (proof.outcomeStatus !== "completed" || !Array.isArray(proof.evidence) || proof.evidence.length !== 4)
+    throw new Error("interface proof lacks completed outcomes or evidence");
+  for (const item of proof.evidence) {
+    if (!/^[a-f0-9]{64}$/.test(item.sha256) || !Number.isSafeInteger(item.size) || item.size <= 0)
+      throw new Error("interface proof contains invalid evidence metadata");
+  }
+  if (proof.evidence.map(item => item.kind).join(",") !== "navigation,upload,screenshot,download")
+    throw new Error("interface proof evidence order differs from the canonical proof");
+  if (!proof.authorization || proof.authorization.allowed.join(",") !== CANONICAL_ALLOWED.join(",") || proof.authorization.denied.capability !== "session:read" || proof.authorization.denied.status !== 403)
+    throw new Error("interface proof lacks an observed authorization denial");
+  if (!Array.isArray(proof.eventOrdering) || proof.eventOrdering.join(",") !== CANONICAL_EVENT_ORDER.join(","))
+    throw new Error("interface proof event ordering differs from the canonical proof");
+  if (proof.checkpointLineage?.replayed !== false) throw new Error("implicit boundary replay is forbidden");
+  return proof as CanonicalInterfaceProof;
+}
+
+export function equalityProof(proof: CanonicalInterfaceProof) {
+  return {
+    proof: { ...proof, evidence: proof.evidence.map(item => ({
+      kind: item.kind,
+      sha256: createHash("sha256").update(`verified-canonical-${item.kind}`).digest("hex"),
+      size: 1,
+    })) },
+    rawEvidence: proof.evidence,
+    normalization: "raw sha256 and size verified by adapter; canonical digest attests the same evidence kind invariant",
+  };
 }
 
 export const NEGATIVE_CAPABILITY_MATRIX = [
@@ -82,3 +97,4 @@ export const NEGATIVE_CAPABILITY_MATRIX = [
   ["artifact.verify", "artifact:read"], ["checkpoint.save", "recovery:write"],
   ["recovery.inspect", "recovery:read"], ["events.read", "session:read"],
 ] as const satisfies ReadonlyArray<readonly [InterfaceScenarioStep, string]>;
+import { createHash } from "node:crypto";

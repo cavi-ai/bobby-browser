@@ -22,5 +22,6 @@ artifact-store = { path = "../artifact-store" }
 
 [dev-dependencies]
 futures-util.workspace = true
+interface-conformance = { path = "../interface-conformance" }
 tower.workspace = true
 tempfile.workspace = true

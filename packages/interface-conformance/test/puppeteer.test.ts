@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import puppeteer from "puppeteer-core";
 import { puppeteerDriver } from "../src/puppeteer.js";
-import { runCanonicalScenario } from "../src/scenario.js";
+import { equalityProof, runCanonicalScenario } from "../src/scenario.js";
 
 test("Puppeteer completes the canonical conformance workflow", { timeout: 120_000 }, async (t) => {
   const child = spawn(process.env.CARGO ?? "cargo", ["run", "-q", "-p", "cdp-gateway", "--example", "conformance_gateway"], {
@@ -28,7 +28,7 @@ test("Puppeteer completes the canonical conformance workflow", { timeout: 120_00
   const line = await readLine(child.stdout).catch(error => {
     throw new Error(`gateway closed before readiness: ${stderr}`, { cause: error });
   });
-  const boot = JSON.parse(line) as { endpoint: string; token: string; site: string };
+  const boot = JSON.parse(line) as { endpoint: string; token: string; deniedToken: string; site: string };
   const discovery = await fetch(`${boot.endpoint}/json/version`, {
     headers: { Authorization: `Bearer ${boot.token}` },
   });
@@ -46,8 +46,11 @@ test("Puppeteer completes the canonical conformance workflow", { timeout: 120_00
   t.after(() => rm(dir, { recursive: true, force: true }));
   const fixture = join(dir, "resume.txt");
   await writeFile(fixture, "bounded fixture\n");
-  const proof = await runCanonicalScenario(puppeteerDriver(page, boot.endpoint, boot.token), boot.site, fixture);
-  assert.deepEqual(proof, { submitted: true, popupObserved: true, downloadVerified: true });
+  const proof = await runCanonicalScenario(puppeteerDriver(page, boot.endpoint, boot.token, boot.deniedToken), boot.site, fixture);
+  assert.equal(proof.outcomeStatus, "completed");
+  assert.equal(proof.authorization.denied.status, 403);
+  assert.deepEqual(proof.evidence.map(item => item.kind), ["navigation", "upload", "screenshot", "download"]);
+  if (process.env.CONFORMANCE_PROOF_DIR) await writeFile(join(process.env.CONFORMANCE_PROOF_DIR, "puppeteer.json"), JSON.stringify(equalityProof(proof)));
 });
 
 async function readLine(stream: NodeJS.ReadableStream): Promise<string> {

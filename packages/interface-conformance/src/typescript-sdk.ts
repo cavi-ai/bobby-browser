@@ -2,10 +2,14 @@ import type { InterfaceScenarioDriver, InterfaceScenarioStep } from "./scenario.
 
 export type TypeScriptSdkScenarioTransport = (request: {
   interface: "typescript-sdk";
-  steps: readonly InterfaceScenarioStep[];
+  step: InterfaceScenarioStep;
   implicitBoundaryReplay: false;
 }) => Promise<unknown>;
 
 export function typescriptSdkDriver(transport: TypeScriptSdkScenarioTransport): InterfaceScenarioDriver {
-  return { execute: steps => transport({ interface: "typescript-sdk", steps, implicitBoundaryReplay: false }) };
+  return { execute: async steps => {
+    let observation: unknown;
+    for (const step of steps) observation = await transport({ interface: "typescript-sdk", step, implicitBoundaryReplay: false });
+    return observation;
+  } };
 }

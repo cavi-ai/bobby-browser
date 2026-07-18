@@ -139,6 +139,22 @@ async fn event_queue_fails_closed_at_the_declared_bound() {
 
 #[test]
 fn manifest_and_handlers_are_bijective_and_have_no_wildcards() {
+    let raw: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/cdp-support.json")).unwrap();
+    for kind in ["methods", "events"] {
+        for entry in raw[kind].as_array().unwrap() {
+            assert!(
+                entry["playwrightCovered"].is_boolean(),
+                "{kind} entry lacks explicit playwrightCovered: {}",
+                entry["name"]
+            );
+            assert!(
+                entry["puppeteerCovered"].is_boolean(),
+                "{kind} entry lacks explicit puppeteerCovered: {}",
+                entry["name"]
+            );
+        }
+    }
     let registry = MethodRegistry::compiled();
     registry.validate().unwrap();
     assert!(registry.methods().all(|method| !method.name.contains('*')));
@@ -151,6 +167,23 @@ fn manifest_and_handlers_are_bijective_and_have_no_wildcards() {
         .events()
         .all(|event| registry.has_event_translator(&event.name)));
     assert_eq!(registry.event_count(), registry.event_translator_count());
+    for exercised in [
+        "Runtime.callFunctionOn",
+        "Page.captureScreenshot",
+        "Browser.setDownloadBehavior",
+    ] {
+        assert!(
+            registry.method(exercised).unwrap().puppeteer_covered,
+            "{exercised} must be explicitly covered by Puppeteer"
+        );
+    }
+    assert!(
+        registry
+            .events()
+            .find(|event| event.name == "Browser.downloadProgress")
+            .unwrap()
+            .puppeteer_covered
+    );
     for emitted in [
         "Target.attachedToTarget",
         "Runtime.executionContextCreated",

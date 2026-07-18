@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{CdpError, CdpErrorCode};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AutoAttach {
     pub auto_attach: bool,
@@ -13,12 +13,27 @@ pub(crate) struct AutoAttach {
     pub filter: Vec<TargetFilter>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TargetFilter {
     #[serde(rename = "type")]
     pub target_type: Option<String>,
     pub exclude: Option<bool>,
+}
+
+pub(crate) fn filter_matches(filters: &[TargetFilter], target_type: &str) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    filters
+        .iter()
+        .find(|filter| {
+            filter
+                .target_type
+                .as_deref()
+                .is_none_or(|kind| kind == target_type)
+        })
+        .is_some_and(|filter| !filter.exclude.unwrap_or(false))
 }
 
 pub(crate) fn auto_attach(params: Value) -> Result<AutoAttach, CdpError> {

@@ -202,6 +202,7 @@ dependencies = [
  "chrono",
  "config",
  "futures-util",
+ "interface-conformance",
  "interface-core",
  "sdk-core",
  "serde",
@@ -279,6 +280,7 @@ dependencies = [
  "chrono",
  "config",
  "futures-util",
+ "interface-conformance",
  "interface-core",
  "sdk-core",
  "serde",
@@ -1093,12 +1095,17 @@ dependencies = [
 name = "interface-conformance"
 version = "0.1.0"
 dependencies = [
+ "artifact-store",
  "chrono",
+ "config",
  "interface-core",
  "mcp-gateway",
  "sdk-core",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "test-site",
  "tokio",
  "types",
  "uuid",
