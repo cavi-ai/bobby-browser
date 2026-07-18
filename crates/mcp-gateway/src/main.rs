@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
+use artifact_store::ArtifactStore;
 use chrono::{DateTime, Utc};
 use config::AppConfig;
-use interface_core::{AuthorityStore, SessionOwnershipRegistry};
-use mcp_gateway::Server;
+use interface_core::{
+    ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, EventStore, SessionOwnershipRegistry,
+};
+use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use sha2::{Digest, Sha256};
 use types::{Capability, PrincipalId};
@@ -30,15 +33,38 @@ async fn run() -> anyhow::Result<()> {
     if !handle.is_valid_at(Utc::now()) {
         anyhow::bail!("startup credential expired during runtime construction");
     }
-    let (_ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
+    let artifact_records = config.interface.max_event_retention;
+    let artifact_bytes = u64::try_from(config.browser.max_artifact_bytes)?
+        .checked_mul(u64::try_from(artifact_records)?)
+        .ok_or_else(|| anyhow::anyhow!("artifact ownership byte bound overflow"))?;
+    let (ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
+    let artifact_store = ArtifactStore::new(
+        config.browser.artifacts_dir.clone(),
+        config.browser.max_artifact_bytes,
+        config.browser.max_screenshot_dimension,
+    );
+    let artifact_reader = ArtifactReader::new(
+        artifact_store,
+        ownership,
+        config.browser.max_artifact_bytes,
+        ArtifactOwnershipLimits {
+            max_records: artifact_records,
+            max_bytes: artifact_bytes,
+        },
+    )?;
+    let resources = ArtifactResources::new(artifact_reader, artifact_records);
     let authenticated = Arc::new(AuthenticatedRuntime::with_session_ownership(
         runtime,
         handle.clone(),
         recorder,
     ));
-    Server::new(authenticated, handle)
-        .serve(tokio::io::stdin(), tokio::io::stdout())
-        .await?;
+    Server::production(
+        authenticated,
+        EventStore::new(config.interface.max_event_retention),
+        resources,
+    )
+    .serve(tokio::io::stdin(), tokio::io::stdout())
+    .await?;
     Ok(())
 }
 

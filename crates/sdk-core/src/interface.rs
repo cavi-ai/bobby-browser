@@ -24,6 +24,7 @@ pub struct AuthenticatedRuntime {
     idempotency: IdempotencyStore,
     submit_dispatches: Arc<AtomicUsize>,
     create_session_dispatches: Arc<AtomicUsize>,
+    checkpoint_dispatches: Arc<AtomicUsize>,
     session_ownership: Option<SessionOwnershipRecorder>,
 }
 
@@ -43,6 +44,7 @@ impl AuthenticatedRuntime {
             idempotency,
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
             create_session_dispatches: Arc::new(AtomicUsize::new(0)),
+            checkpoint_dispatches: Arc::new(AtomicUsize::new(0)),
             session_ownership: None,
         }
     }
@@ -58,6 +60,7 @@ impl AuthenticatedRuntime {
             idempotency: IdempotencyStore::default(),
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
             create_session_dispatches: Arc::new(AtomicUsize::new(0)),
+            checkpoint_dispatches: Arc::new(AtomicUsize::new(0)),
             session_ownership: Some(session_ownership),
         }
     }
@@ -68,6 +71,14 @@ impl AuthenticatedRuntime {
 
     pub fn create_session_dispatch_count(&self) -> usize {
         self.create_session_dispatches.load(Ordering::Acquire)
+    }
+
+    pub fn checkpoint_dispatch_count(&self) -> usize {
+        self.checkpoint_dispatches.load(Ordering::Acquire)
+    }
+
+    pub fn capability_handle(&self) -> CapabilityHandle {
+        self.authorization.capability_handle()
     }
 }
 
@@ -201,6 +212,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<WorkflowCheckpoint> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        self.checkpoint_dispatches.fetch_add(1, Ordering::AcqRel);
         self.inner
             .checkpoint(checkpoint, evidence)
             .await

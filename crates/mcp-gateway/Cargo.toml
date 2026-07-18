@@ -24,3 +24,7 @@ artifact-store = { path = "../artifact-store" }
 [dev-dependencies]
 async-trait.workspace = true
 tempfile.workspace = true
+page-runtime = { path = "../page-runtime" }
+session-manager = { path = "../session-manager" }
+worker-pool = { path = "../worker-pool" }
+workflow-journal = { path = "../workflow-journal" }
