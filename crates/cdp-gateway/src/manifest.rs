@@ -3,10 +3,46 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use types::Capability;
 
+use crate::{CdpError, CdpErrorCode, CdpEvent};
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Handler {
     BrowserGetVersion,
     TargetGetTargets,
+}
+
+impl Handler {
+    const fn translation_function(self) -> &'static str {
+        match self {
+            Self::BrowserGetVersion => "runtime_info",
+            Self::TargetGetTargets => "list_sessions",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum EventTranslator {
+    TargetDetached,
+    TargetDestroyed,
+    ExecutionContextDestroyed,
+    FrameDetached,
+    BrowserContextDestroyed,
+    NetworkLoadingFailed,
+    DownloadProgress,
+}
+
+impl EventTranslator {
+    const fn translation_function(self) -> &'static str {
+        match self {
+            Self::TargetDetached => "worker_generation_detached",
+            Self::TargetDestroyed => "worker_generation_destroyed",
+            Self::ExecutionContextDestroyed => "worker_generation_execution_context_destroyed",
+            Self::FrameDetached => "worker_generation_frame_detached",
+            Self::BrowserContextDestroyed => "worker_generation_browser_context_destroyed",
+            Self::NetworkLoadingFailed => "worker_generation_network_failed",
+            Self::DownloadProgress => "worker_generation_download_canceled",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,9 +73,16 @@ impl MethodMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct EventMetadata {
     pub name: String,
+    pub required_capability: String,
     pub parameter_schema_revision: String,
     pub translation_function: String,
     pub scenarios: Vec<String>,
+}
+
+impl EventMetadata {
+    pub fn capability(&self) -> Option<Capability> {
+        parse_capability(&self.required_capability)
+    }
 }
 
 #[derive(Clone)]
@@ -48,6 +91,7 @@ pub struct MethodRegistry {
     methods: BTreeMap<String, MethodMetadata>,
     events: BTreeMap<String, EventMetadata>,
     handlers: BTreeMap<String, Handler>,
+    event_translators: BTreeMap<String, EventTranslator>,
 }
 
 impl MethodRegistry {
@@ -58,6 +102,36 @@ impl MethodRegistry {
         let handlers = BTreeMap::from([
             ("Browser.getVersion".to_owned(), Handler::BrowserGetVersion),
             ("Target.getTargets".to_owned(), Handler::TargetGetTargets),
+        ]);
+        let event_translators = BTreeMap::from([
+            (
+                "Target.detachedFromTarget".to_owned(),
+                EventTranslator::TargetDetached,
+            ),
+            (
+                "Target.targetDestroyed".to_owned(),
+                EventTranslator::TargetDestroyed,
+            ),
+            (
+                "Runtime.executionContextDestroyed".to_owned(),
+                EventTranslator::ExecutionContextDestroyed,
+            ),
+            (
+                "Page.frameDetached".to_owned(),
+                EventTranslator::FrameDetached,
+            ),
+            (
+                "Target.browserContextDestroyed".to_owned(),
+                EventTranslator::BrowserContextDestroyed,
+            ),
+            (
+                "Network.loadingFailed".to_owned(),
+                EventTranslator::NetworkLoadingFailed,
+            ),
+            (
+                "Browser.downloadProgress".to_owned(),
+                EventTranslator::DownloadProgress,
+            ),
         ]);
         let registry = Self {
             schema_revision: manifest.schema_revision,
@@ -72,6 +146,7 @@ impl MethodRegistry {
                 .map(|entry| (entry.name.clone(), entry))
                 .collect(),
             handlers,
+            event_translators,
         };
         registry
             .validate()
@@ -93,6 +168,11 @@ impl MethodRegistry {
         {
             return Err("manifest and handler registry are not bijective".into());
         }
+        if self.events.keys().cloned().collect::<BTreeSet<_>>()
+            != self.event_translators.keys().cloned().collect()
+        {
+            return Err("manifest and event translator registry are not bijective".into());
+        }
         for method in self.methods.values() {
             if method.capability().is_none()
                 || method.parameter_schema_revision.is_empty()
@@ -101,13 +181,30 @@ impl MethodRegistry {
             {
                 return Err(format!("incomplete method metadata for {}", method.name));
             }
+            if self
+                .handlers
+                .get(&method.name)
+                .is_none_or(|handler| handler.translation_function() != method.translation_function)
+            {
+                return Err(format!("method translator mismatch for {}", method.name));
+            }
         }
         for event in self.events.values() {
-            if event.parameter_schema_revision.is_empty()
+            if event.capability().is_none()
+                || event.parameter_schema_revision.is_empty()
                 || event.translation_function.is_empty()
                 || event.scenarios.is_empty()
             {
                 return Err(format!("incomplete event metadata for {}", event.name));
+            }
+            if self
+                .event_translators
+                .get(&event.name)
+                .is_none_or(|translator| {
+                    translator.translation_function() != event.translation_function
+                })
+            {
+                return Err(format!("event translator mismatch for {}", event.name));
             }
         }
         Ok(())
@@ -130,6 +227,51 @@ impl MethodRegistry {
     }
     pub(crate) fn handler(&self, name: &str) -> Option<Handler> {
         self.handlers.get(name).copied()
+    }
+    pub fn events(&self) -> impl Iterator<Item = &EventMetadata> {
+        self.events.values()
+    }
+    pub fn has_event_translator(&self, name: &str) -> bool {
+        self.event_translators.contains_key(name)
+    }
+    pub fn event_count(&self) -> usize {
+        self.events.len()
+    }
+    pub fn event_translator_count(&self) -> usize {
+        self.event_translators.len()
+    }
+    pub(crate) fn event(&self, name: &str) -> Option<&EventMetadata> {
+        self.events.get(name)
+    }
+
+    pub(crate) fn translate_event(&self, event: CdpEvent) -> Result<CdpEvent, CdpError> {
+        let Some(translator) = self.event_translators.get(&event.method) else {
+            return Err(CdpError::new(
+                CdpErrorCode::MethodNotFound,
+                "event is not supported",
+            ));
+        };
+        let required = match translator {
+            EventTranslator::TargetDetached => "sessionId",
+            EventTranslator::TargetDestroyed => "targetId",
+            EventTranslator::ExecutionContextDestroyed => "executionContextUniqueId",
+            EventTranslator::FrameDetached => "frameId",
+            EventTranslator::BrowserContextDestroyed => "browserContextId",
+            EventTranslator::NetworkLoadingFailed => "requestId",
+            EventTranslator::DownloadProgress => "guid",
+        };
+        if event
+            .params
+            .get(required)
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            return Err(CdpError::new(
+                CdpErrorCode::InvalidParams,
+                "invalid event payload",
+            ));
+        }
+        Ok(event)
     }
 }
 

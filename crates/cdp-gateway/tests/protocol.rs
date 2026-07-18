@@ -109,11 +109,19 @@ async fn event_queue_fails_closed_at_the_declared_bound() {
         Arc::new(RecordingRuntime::default()),
         MethodRegistry::compiled(),
     );
+    assert!(connection
+        .queue_event(CdpEvent {
+            method: "Target.targetDestroyed".into(),
+            params: json!({}),
+            session_id: None,
+        })
+        .await
+        .is_err());
     for index in 0..cdp_gateway::MAX_QUEUED_EVENTS {
         connection
             .queue_event(CdpEvent {
-                method: "Runtime.consoleAPICalled".into(),
-                params: json!({"index": index}),
+                method: "Target.targetDestroyed".into(),
+                params: json!({"targetId": format!("target-{index}")}),
                 session_id: None,
             })
             .await
@@ -121,8 +129,8 @@ async fn event_queue_fails_closed_at_the_declared_bound() {
     }
     assert!(connection
         .queue_event(CdpEvent {
-            method: "Runtime.consoleAPICalled".into(),
-            params: json!({}),
+            method: "Target.targetDestroyed".into(),
+            params: json!({"targetId": "overflow"}),
             session_id: None,
         })
         .await
@@ -138,4 +146,9 @@ fn manifest_and_handlers_are_bijective_and_have_no_wildcards() {
         .methods()
         .all(|method| registry.has_handler(&method.name)));
     assert_eq!(registry.method_count(), registry.handler_count());
+    assert!(registry.events().all(|event| event.capability().is_some()));
+    assert!(registry
+        .events()
+        .all(|event| registry.has_event_translator(&event.name)));
+    assert_eq!(registry.event_count(), registry.event_translator_count());
 }
