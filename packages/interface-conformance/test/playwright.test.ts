@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { chromium } from "playwright-core";
 import { playwrightDriver } from "../src/playwright.js";
-import { equalityProof, runCanonicalScenario } from "../src/scenario.js";
+import { auditProtocolInventory, equalityProof, runCanonicalScenario } from "../src/scenario.js";
 
 test("Playwright completes the canonical conformance workflow", { timeout: 120_000 }, async (t) => {
   const child = spawn(process.env.CARGO ?? "cargo", ["run", "-q", "-p", "cdp-gateway", "--example", "conformance_gateway"], {
@@ -42,7 +42,10 @@ test("Playwright completes the canonical conformance workflow", { timeout: 120_0
   t.after(() => rm(dir, { recursive: true, force: true }));
   const fixture = join(dir, "resume.txt");
   await writeFile(fixture, "bounded fixture\n");
-  const proof = await runCanonicalScenario(playwrightDriver(page, boot.endpoint, boot.token, boot.deniedToken), boot.site, fixture);
+  const driver = playwrightDriver(page, boot.endpoint, boot.token, boot.deniedToken);
+  const proof = await runCanonicalScenario(driver, boot.site, fixture);
+  const manifest = JSON.parse(await readFile(new URL("../../../../docs/cdp-support.json", import.meta.url), "utf8"));
+  auditProtocolInventory(await driver.protocolInventory(), "playwright", manifest);
   assert.equal(proof.outcomeStatus, "completed");
   assert.equal(proof.authorization.denied.status, 403);
   assert.deepEqual(proof.evidence.map(item => item.kind), ["navigation", "upload", "screenshot", "download"]);

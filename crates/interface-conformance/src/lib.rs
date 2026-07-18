@@ -33,12 +33,13 @@ pub const CANONICAL_ALLOWED: [&str; 4] = [
     "artifact:capture",
     "file:download",
 ];
-pub const CANONICAL_EVENT_ORDER: [&str; 6] = [
+pub const CANONICAL_EVENT_ORDER: [&str; 7] = [
     "navigation.completed",
     "upload.completed",
+    "checkpoint.saved",
     "boundary.completed",
     "screenshot.verified",
-    "checkpoint.saved",
+    "recovery.inspected",
     "events.read",
 ];
 
@@ -79,6 +80,8 @@ pub struct DenialProof {
 pub struct CheckpointLineage {
     pub boundary: String,
     pub replayed: bool,
+    pub checkpoint_id: String,
+    pub recovery_status: String,
 }
 
 pub trait RustSdkScenarioDriver {
@@ -122,8 +125,69 @@ pub fn validate_canonical_proof(proof: CanonicalProof) -> Result<CanonicalProof,
             .collect::<Vec<_>>()
             != CANONICAL_EVENT_ORDER
         || proof.checkpoint_lineage.replayed
+        || proof.checkpoint_lineage.boundary != "submit"
+        || uuid::Uuid::parse_str(&proof.checkpoint_lineage.checkpoint_id).is_err()
+        || !matches!(
+            proof.checkpoint_lineage.recovery_status.as_str(),
+            "resumed" | "needsReconciliation"
+        )
     {
         return Err("Rust SDK proof lacked real normalized observations");
     }
     Ok(proof)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_proof() -> CanonicalProof {
+        CanonicalProof {
+            outcome_status: "completed".into(),
+            evidence: ["navigation", "upload", "screenshot", "download"]
+                .into_iter()
+                .map(|kind| EvidenceProof {
+                    kind: kind.into(),
+                    sha256: "a".repeat(64),
+                    size: 1,
+                })
+                .collect(),
+            authorization: AuthorizationProof {
+                allowed: CANONICAL_ALLOWED.map(str::to_owned).to_vec(),
+                denied: DenialProof {
+                    capability: "session:read".into(),
+                    status: 403,
+                },
+            },
+            event_ordering: CANONICAL_EVENT_ORDER.map(str::to_owned).to_vec(),
+            checkpoint_lineage: CheckpointLineage {
+                boundary: "submit".into(),
+                replayed: false,
+                checkpoint_id: uuid::Uuid::new_v4().to_string(),
+                recovery_status: "needsReconciliation".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn rejects_reordered_observed_event_batch() {
+        let mut proof = valid_proof();
+        proof.event_ordering.swap(1, 2);
+        assert!(validate_canonical_proof(proof).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_checkpoint_lineage() {
+        let mut proof = valid_proof();
+        proof.checkpoint_lineage.checkpoint_id.clear();
+        assert!(validate_canonical_proof(proof).is_err());
+    }
+
+    #[test]
+    fn rejects_implicit_boundary_replay() {
+        let mut proof = valid_proof();
+        proof.checkpoint_lineage.replayed = true;
+        proof.checkpoint_lineage.recovery_status = "restarted".into();
+        assert!(validate_canonical_proof(proof).is_err());
+    }
 }

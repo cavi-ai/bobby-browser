@@ -1,9 +1,13 @@
-import { chromium, type Page } from "playwright-core";
+import { type CDPSession, type Page } from "playwright-core";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { ScenarioDriver } from "./scenario.js";
 
 export function playwrightDriver(page: Page, endpoint: string, token: string, deniedToken: string): ScenarioDriver {
+  let automation: Promise<CDPSession> | undefined;
+  const automationCdp = () => automation ??= (async () => {
+    const browser=page.context().browser(); if(!browser) throw new Error("browser is unavailable"); return browser.newBrowserCDPSession();
+  })();
   return {
     navigate: async (url) => { await page.goto(url); const bytes = Buffer.from(url); return evidence("navigation", bytes); },
     completeForm: async () => {
@@ -63,16 +67,17 @@ export function playwrightDriver(page: Page, endpoint: string, token: string, de
       return { kind: "download", sha256: expected.sha256, size: expected.totalBytes };
     },
     verifyDeniedCapability: async () => {
-      let denied;
-      try {
-        denied = await chromium.connectOverCDP(endpoint, { headers: { Authorization: `Bearer ${deniedToken}` } });
-        const cdp = await denied.newBrowserCDPSession();
-        await cdp.send("Target.createTarget", { url: "about:blank" });
-        return 200;
-      } catch { return 403; } finally { if (denied) await denied.close(); }
+      const response=await fetch(`${endpoint}/json/version`,{headers:{Authorization:`Bearer ${deniedToken}`}});
+      if(response.status!==403) throw new Error(`missing session:read discovery returned ${response.status}`);
+      return response.status;
     },
+    checkpoint: async () => (await automationCdp() as unknown as RawSession).send("Automation.checkpointSave"),
+    recover: async () => (await automationCdp() as unknown as RawSession).send("Automation.recoveryInspect"),
+    readEvents: async () => (await automationCdp() as unknown as RawSession).send("Automation.eventsRead"),
+    protocolInventory: async () => (await automationCdp() as unknown as RawSession).send("Automation.protocolInventory"),
   };
 }
+type RawSession={send(method:string,params?:Record<string,unknown>):Promise<any>};
 
 function evidence(kind: "navigation" | "upload" | "screenshot", bytes: Uint8Array) {
   return { kind, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength };

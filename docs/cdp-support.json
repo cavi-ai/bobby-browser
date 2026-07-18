@@ -118,10 +118,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "configure_gateway_log_events",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Network.enable",
@@ -129,10 +130,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "configure_gateway_network_events",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Page.addScriptToEvaluateOnNewDocument",
@@ -152,10 +154,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "create_runtime_isolated_context",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Page.captureScreenshot",
@@ -174,10 +177,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "configure_gateway_page_events",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Page.getFrameTree",
@@ -185,10 +189,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "runtime_frame_tree",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Page.getLayoutMetrics",
@@ -207,10 +212,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "submit_runtime_navigation",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Page.setLifecycleEventsEnabled",
@@ -218,10 +224,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "configure_gateway_lifecycle_events",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Runtime.enable",
@@ -229,10 +236,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "configure_gateway_runtime_events",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Runtime.callFunctionOn",
@@ -273,10 +281,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "validate_already_running_target_compatibility",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Target.attachToBrowserTarget",
@@ -324,15 +333,52 @@
       "puppeteerCovered": false
     },
     {
+      "name": "Automation.checkpointSave",
+      "requiredCapability": "recovery:write",
+      "parameterSchemaRevision": "automation-conformance-1",
+      "translationFunction": "persist_verified_browser_checkpoint",
+      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "playwrightCovered": true,
+      "puppeteerCovered": true
+    },
+    {
+      "name": "Automation.recoveryInspect",
+      "requiredCapability": "recovery:read",
+      "parameterSchemaRevision": "automation-conformance-1",
+      "translationFunction": "inspect_browser_recovery_without_replay",
+      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "playwrightCovered": true,
+      "puppeteerCovered": true
+    },
+    {
+      "name": "Automation.eventsRead",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "automation-conformance-1",
+      "translationFunction": "read_observed_browser_interface_events",
+      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "playwrightCovered": true,
+      "puppeteerCovered": true
+    },
+    {
+      "name": "Automation.protocolInventory",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "automation-conformance-1",
+      "translationFunction": "read_bounded_protocol_inventory",
+      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "playwrightCovered": true,
+      "puppeteerCovered": true
+    },
+    {
       "name": "Target.setAutoAttach",
       "requiredCapability": "session:read",
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "attach_runtime_targets",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     }
   ],
   "events": [
@@ -353,10 +399,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "runtime_download_will_begin",
       "scenarios": [
-        "playwright-download"
+        "playwright-download",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Page.frameNavigated",
@@ -364,10 +411,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "runtime_navigation_committed",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Page.lifecycleEvent",
@@ -375,10 +423,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "runtime_lifecycle_observed",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Runtime.executionContextCreated",
@@ -386,10 +435,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "runtime_execution_context_created",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Runtime.executionContextsCleared",
@@ -397,10 +447,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "runtime_execution_contexts_cleared",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Target.attachedToTarget",
@@ -408,10 +459,11 @@
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "runtime_target_attached",
       "scenarios": [
-        "playwright-connect-over-cdp"
+        "playwright-connect-over-cdp",
+        "puppeteer-canonical"
       ],
       "playwrightCovered": true,
-      "puppeteerCovered": false
+      "puppeteerCovered": true
     },
     {
       "name": "Target.detachedFromTarget",
