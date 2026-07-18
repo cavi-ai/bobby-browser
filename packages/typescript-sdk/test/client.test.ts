@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import test from "node:test";
+import { inspect } from "node:util";
 
-import { BrowserRuntimeClient, RuntimeClientError, type CommandEnvelope } from "../src/index.js";
+import { BrowserRuntimeClient, RuntimeClientError, type Capability, type CommandEnvelope, type EventOptions, type InterfaceErrorCode } from "../src/index.js";
 
 const TOKEN = "test-bearer-token";
 const COMMAND_ID = "00000000-0000-4000-8000-000000000001";
@@ -67,8 +68,11 @@ function trackedAbortController(): { controller: AbortController; counts: () => 
 
 async function rejectsPromptly(promise: Promise<unknown>, validate: (error: unknown) => boolean): Promise<void> {
   const started = Date.now();
-  await assert.rejects(promise, (error: unknown) => validate(error));
-  assert.ok(Date.now() - started < 500, "operation did not reject promptly");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("operation did not reject promptly")), 200); });
+  try { await assert.rejects(Promise.race([promise, timeout]), (error: unknown) => validate(error)); }
+  finally { if (timer !== undefined) clearTimeout(timer); }
+  assert.ok(Date.now() - started < 200, "operation did not reject promptly");
 }
 
 test("preserves reconciliation metadata without exposing the bearer token", async () => {
@@ -160,7 +164,7 @@ test("streams artifact bytes and rejects a digest mismatch at stream completion"
 
     const bad = await client.artifact({ referenceId: REFERENCE_ID, artifactId: COMMAND_ID, bytes: bytes.byteLength, sha256: "00".repeat(32), mediaType: "application/octet-stream" });
     const badReader = bad.getReader();
-    await assert.rejects(badReader.read(), /artifact digest/);
+    await assert.rejects(badReader.read(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol" && error.message === "Artifact verification failed");
   });
 });
 
@@ -315,35 +319,46 @@ test("caller abort during artifact body read rejects before exposing bytes and r
   assert.deepEqual(tracked.counts(), { added: 1, removed: 1 });
 });
 
-test("caller abort during artifact hashing rejects before release", async () => {
-  const tracked = trackedAbortController();
+test("caller abort and deadline reject while artifact hashing remains blocked", async () => {
   const bytes = new TextEncoder().encode("artifact");
-  const originalDigest = crypto.subtle.digest.bind(crypto.subtle);
-  let hashing!: () => void;
-  const hashingStarted = new Promise<void>((resolve) => { hashing = resolve; });
-  let release!: () => void;
-  const hashGate = new Promise<void>((resolve) => { release = resolve; });
-  Object.defineProperty(crypto.subtle, "digest", { configurable: true, value: async (...args: Parameters<SubtleCrypto["digest"]>) => {
-    hashing();
-    await hashGate;
-    return originalDigest(...args);
-  } });
-  try {
-    const client = new BrowserRuntimeClient({
-      baseUrl: "https://runtime.invalid",
-      bearerToken: TOKEN,
-      fetch: async () => new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream", "content-length": String(bytes.byteLength) } }),
-    });
-    const stream = await client.artifact({ referenceId: REFERENCE_ID, artifactId: COMMAND_ID, bytes: bytes.byteLength, sha256: "c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c", mediaType: "application/octet-stream" }, { signal: tracked.controller.signal, timeoutMs: 10_000 });
-    const read = stream.getReader().read();
-    await hashingStarted;
-    tracked.controller.abort();
-    release();
-    await rejectsPromptly(read, (error) => error instanceof RuntimeClientError && error.kind === "aborted");
-  } finally {
-    Reflect.deleteProperty(crypto.subtle, "digest");
+  for (const kind of ["aborted", "deadline"] as const) {
+    const tracked = trackedAbortController();
+    let hashing!: () => void;
+    const hashingStarted = new Promise<void>((resolve) => { hashing = resolve; });
+    let settleDigest!: (value: ArrayBuffer) => void;
+    let rejectDigest!: (error: Error) => void;
+    const hashGate = new Promise<ArrayBuffer>((resolve, reject) => { settleDigest = resolve; rejectDigest = reject; });
+    Object.defineProperty(crypto.subtle, "digest", { configurable: true, value: async () => { hashing(); return hashGate; } });
+    let exposed = 0;
+    let unhandled = 0;
+    const onUnhandled = () => { unhandled += 1; };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const client = new BrowserRuntimeClient({
+        baseUrl: "https://runtime.invalid",
+        bearerToken: TOKEN,
+        fetch: async () => new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream", "content-length": String(bytes.byteLength) } }),
+      });
+      const stream = await client.artifact(
+        { referenceId: REFERENCE_ID, artifactId: COMMAND_ID, bytes: bytes.byteLength, sha256: "c7c5c1d70c5dec4416ab6158afd0b223ef40c29b1dc1f97ed9428b94d4cadb1c", mediaType: "application/octet-stream" },
+        kind === "aborted" ? { signal: tracked.controller.signal, timeoutMs: 10_000 } : { timeoutMs: 20 },
+      );
+      const read = stream.getReader().read().then((chunk) => { exposed += chunk.value?.byteLength ?? 0; return chunk; });
+      await hashingStarted;
+      if (kind === "aborted") tracked.controller.abort();
+      await rejectsPromptly(read, (error) => error instanceof RuntimeClientError && error.kind === kind);
+      assert.equal(exposed, 0);
+      if (kind === "aborted") rejectDigest(new Error(`late digest ${TOKEN}`));
+      else settleDigest(new ArrayBuffer(32));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(unhandled, 0);
+    } finally {
+      settleDigest(new ArrayBuffer(32));
+      process.removeListener("unhandledRejection", onUnhandled);
+      Reflect.deleteProperty(crypto.subtle, "digest");
+    }
+    if (kind === "aborted") assert.deepEqual(tracked.counts(), { added: 1, removed: 1 });
   }
-  assert.deepEqual(tracked.counts(), { added: 1, removed: 1 });
 });
 
 test("deadline and caller abort interrupt event retry backoff without leaked listeners", async () => {
@@ -357,6 +372,73 @@ test("deadline and caller abort interrupt event retry backoff without leaked lis
   setTimeout(() => tracked.controller.abort(), 15);
   await rejectsPromptly(next, (error) => error instanceof RuntimeClientError && error.kind === "aborted");
   assert.deepEqual(tracked.counts(), { added: 1, removed: 1 });
+});
+
+test("rejects out-of-context and oversized event batches without rewinding the iterator", async () => {
+  const fixtures = [
+    [{ events: [{ cursor: 1, kind: "old", payload: null }], latestAvailable: 10 }, { limit: 100 }],
+    [{ events: [{ cursor: 11, kind: "one", payload: null }, { cursor: 12, kind: "two", payload: null }], latestAvailable: 12 }, { limit: 1 }],
+  ] as const;
+  for (const [payload, options] of fixtures) {
+    let requests = 0;
+    const client = new BrowserRuntimeClient({
+      baseUrl: "https://runtime.invalid",
+      bearerToken: TOKEN,
+      fetch: async () => { requests += 1; return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } }); },
+    });
+    await assert.rejects(client.events(10, options)[Symbol.asyncIterator]().next(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+    assert.equal(requests, 1);
+  }
+});
+
+test("rejects invalid SDK resource and event options before network access", async () => {
+  const invalidArtifactMaximums = [0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 256 * 1024 * 1024 + 1];
+  for (const maxArtifactBytes of invalidArtifactMaximums) {
+    assert.throws(() => new BrowserRuntimeClient({ baseUrl: "https://runtime.invalid", bearerToken: TOKEN, maxArtifactBytes }), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  }
+
+  let requests = 0;
+  const client = new BrowserRuntimeClient({ baseUrl: "https://runtime.invalid", bearerToken: TOKEN, fetch: async () => { requests += 1; throw new Error("must not fetch"); } });
+  const invalid: Array<{ cursor: number; options: EventOptions }> = [
+    { cursor: -1, options: {} },
+    { cursor: 0.5, options: {} },
+    { cursor: Number.NaN, options: {} },
+    { cursor: Number.POSITIVE_INFINITY, options: {} },
+    { cursor: 0, options: { limit: 0 } },
+    { cursor: 0, options: { limit: 257 } },
+    { cursor: 0, options: { limit: 1.5 } },
+    { cursor: 0, options: { limit: Number.NaN } },
+    { cursor: 0, options: { maxTransportRetries: -1 } },
+    { cursor: 0, options: { maxTransportRetries: 11 } },
+    { cursor: 0, options: { maxTransportRetries: 0.5 } },
+    { cursor: 0, options: { maxTransportRetries: Number.POSITIVE_INFINITY } },
+    { cursor: 0, options: { retryDelayMs: -1 } },
+    { cursor: 0, options: { retryDelayMs: 60_001 } },
+    { cursor: 0, options: { retryDelayMs: 0.5 } },
+    { cursor: 0, options: { retryDelayMs: Number.NaN } },
+  ];
+  for (const fixture of invalid) {
+    await assert.rejects(client.events(fixture.cursor, fixture.options)[Symbol.asyncIterator]().next(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  }
+  assert.equal(requests, 0);
+});
+
+test("sanitizes artifact body and digest failures into typed protocol errors", async () => {
+  const source = new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error(`body source leaked ${TOKEN}`)); } });
+  const client = new BrowserRuntimeClient({
+    baseUrl: "https://runtime.invalid",
+    bearerToken: TOKEN,
+    fetch: async () => new Response(source, { status: 200, headers: { "content-type": "application/octet-stream", "content-length": "8" } }),
+  });
+  const stream = await client.artifact({ referenceId: REFERENCE_ID, artifactId: COMMAND_ID, bytes: 8, sha256: "00".repeat(32), mediaType: "application/octet-stream" });
+  await assert.rejects(stream.getReader().read(), (error: unknown) => {
+    assert.ok(error instanceof RuntimeClientError);
+    assert.equal(error.kind, "protocol");
+    const surfaces = [String(error), error.message, error.stack ?? "", inspect(error, { showHidden: true }), JSON.stringify(error), JSON.stringify(Object.fromEntries(Object.entries(error)))];
+    for (const surface of surfaces) assert.doesNotMatch(surface, new RegExp(TOKEN));
+    assert.equal("cause" in error, false);
+    return true;
+  });
 });
 
 test("preserves the structured InterfaceError metadata matrix for recover and artifact", async () => {
@@ -399,6 +481,54 @@ test("preserves the structured InterfaceError metadata matrix for recover and ar
       return true;
     });
   });
+});
+
+test("enforces the complete InterfaceError HTTP status table and rejects error envelopes at 200", async () => {
+  const cases: Array<[InterfaceErrorCode, number]> = [
+    ["authenticationFailed", 401], ["tokenExpired", 401],
+    ["missingCapability", 403], ["malformedScope", 403],
+    ["artifactDenied", 404], ["notFound", 404],
+    ["deadlineExceeded", 408], ["idempotencyConflict", 409],
+    ["resourceExhausted", 429], ["internal", 500],
+    ["invalidRequest", 422], ["unsupportedInterfaceVersion", 422],
+    ["invalidIdempotencyKey", 422], ["unsupportedOperation", 422],
+  ];
+  const payload = (code: InterfaceErrorCode) => ({ error: { code, layer: "interface", message: "x", correlationId: CORRELATION_ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null } });
+  for (const [code, status] of cases) {
+    const accepted = new BrowserRuntimeClient({ baseUrl: "https://runtime.invalid", bearerToken: TOKEN, fetch: async () => new Response(JSON.stringify(payload(code)), { status, headers: { "content-type": "application/json" } }) });
+    await assert.rejects(accepted.runtimeInfo(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "http" && error.code === code && error.status === status);
+    const wrong = new BrowserRuntimeClient({ baseUrl: "https://runtime.invalid", bearerToken: TOKEN, fetch: async () => new Response(JSON.stringify(payload(code)), { status: 200, headers: { "content-type": "application/json" } }) });
+    await assert.rejects(wrong.runtimeInfo(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol" && error.code === undefined);
+  }
+  const extraEnvelope = new BrowserRuntimeClient({ baseUrl: "https://runtime.invalid", bearerToken: TOKEN, fetch: async () => new Response(JSON.stringify({ ...payload("internal"), unexpected: true }), { status: 500, headers: { "content-type": "application/json" } }) });
+  await assert.rejects(extraEnvelope.runtimeInfo(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+});
+
+test("redacts the bearer token from all RuntimeClientError metadata and serialization surfaces", async () => {
+  const scenarios = [
+    { token: CORRELATION_ID, status: 409, error: { code: "idempotencyConflict", message: `secret ${CORRELATION_ID}`, correlationId: CORRELATION_ID, commandId: CORRELATION_ID, requiredCapability: null } },
+    { token: "read", status: 403, error: { code: "missingCapability", message: "read denied", correlationId: CORRELATION_ID, commandId: null, requiredCapability: "artifact:read" } },
+    { token: "internal", status: 500, error: { code: "internal", message: "internal failure", correlationId: CORRELATION_ID, commandId: null, requiredCapability: null } },
+    { token: "http", status: 500, error: { code: "internal", message: "http failure", correlationId: CORRELATION_ID, commandId: null, requiredCapability: null } },
+  ] as const;
+  for (const scenario of scenarios) {
+    const body = { error: { ...scenario.error, layer: "interface", retryable: false, retryAfterMs: null, reconciliationRequired: scenario.status === 409 } };
+    const client = new BrowserRuntimeClient({ baseUrl: "https://runtime.invalid", bearerToken: scenario.token, fetch: async () => new Response(JSON.stringify(body), { status: scenario.status, headers: { "content-type": "application/json" } }) });
+    await assert.rejects(client.runtimeInfo(), (error: unknown) => {
+      assert.ok(error instanceof RuntimeClientError);
+      const surfaces = [String(error), error.message, error.stack ?? "", inspect(error, { showHidden: true }), JSON.stringify(error), JSON.stringify(Object.fromEntries(Object.entries(error)))];
+      for (const surface of surfaces) assert.equal(surface.includes(scenario.token), false, surface);
+      return true;
+    });
+  }
+});
+
+test("RuntimeClientError metadata exposes exact contract types", () => {
+  const error = new RuntimeClientError({ kind: "protocol", message: "x" });
+  const code: InterfaceErrorCode | undefined = error.code;
+  const requiredCapability: Capability | null | undefined = error.requiredCapability;
+  assert.equal(code, undefined);
+  assert.equal(requiredCapability, undefined);
 });
 
 test("client rejects malformed nested fixtures from every JSON response family", async () => {

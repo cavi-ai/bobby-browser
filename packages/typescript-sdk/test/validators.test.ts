@@ -11,6 +11,7 @@ import {
   isSessionState,
   isWorkflowCheckpoint,
 } from "../src/validators.js";
+import { isInterfaceError } from "../src/events.js";
 
 const ID = "00000000-0000-4000-8000-000000000001";
 const ID_2 = "00000000-0000-4000-8000-000000000002";
@@ -109,7 +110,7 @@ test("deep validators accept every exact public response variant", () => {
     { status: "needsReconciliation", checkpointId: ID, attemptId: ID_2, reason: "inspect", evidence: [] },
     recoveryDecision(),
   ]) assert.equal(isRecoveryDecision(decision), true, JSON.stringify(decision));
-  assert.equal(isEventBatch({ events: [{ cursor: 0, kind: "command.outcome", payload: null }], latestAvailable: 0 }), true);
+  assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "command.outcome", payload: null }], latestAvailable: 1 }, 0, 100), true);
   assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 0 }), true);
 });
 
@@ -124,7 +125,7 @@ test("malformed nested fixtures are rejected for every public response family", 
     ["CommandOutcome/CommandError", isCommandOutcome({ status: "failed", commandId: ID, error: { code: "unknown", message: "x", layer: "workflow", retryable: false } })],
     ["WorkflowCheckpoint", isWorkflowCheckpoint(invalidCheckpoint)],
     ["RecoveryDecision", isRecoveryDecision({ status: "restarted", checkpointId: ID, lineage: { workflowId: ID, abandonedAttemptId: "bad", attemptId: ID_2, reason: "x" } })],
-    ["EventBatch", isEventBatch({ events: [{ cursor: Number.MAX_SAFE_INTEGER + 1, kind: "x", payload: null }], latestAvailable: 0 })],
+    ["EventBatch", isEventBatch({ events: [{ cursor: Number.MAX_SAFE_INTEGER + 1, kind: "x", payload: null }], latestAvailable: 0 }, 0, 100)],
     ["EventGap", isEventGap({ reason: "historyLost", earliestAvailable: -1 })],
   ];
   for (const [family, accepted] of malformed) assert.equal(accepted, false, family);
@@ -138,6 +139,60 @@ test("validators reject invalid UUID, timestamp, digest, finite-number, and opti
   assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "executionPath", path: "directHttp", reason: "eligibleStaticDocument", stateVersion: 0, elapsedMs: 0, bytes: null, sha256: SHA }] }), false);
   assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "executionPath", path: "directHttp", reason: "eligibleStaticDocument", stateVersion: 0, elapsedMs: 0, bytes: null, sha256: null, finalUrl: 1 }] }), false);
   assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "resolution", target: target(), fingerprint: { pageId: ID, frame: null, role: null, name: null, stableAttributes: {} }, candidates: [{ role: null, name: null, score: 1.5, reasons: [] }], bestMatchAuthorized: false }] }), false);
-  assert.equal(isEventBatch({ events: [{ cursor: 2, kind: "x", payload: null }, { cursor: 1, kind: "x", payload: null }], latestAvailable: 2 }), false);
-  assert.equal(isEventBatch({ events: [{ cursor: 2, kind: "x", payload: null }], latestAvailable: 1 }), false);
+  assert.equal(isEventBatch({ events: [{ cursor: 2, kind: "x", payload: null }, { cursor: 1, kind: "x", payload: null }], latestAvailable: 2 }, 0, 100), false);
+  assert.equal(isEventBatch({ events: [{ cursor: 2, kind: "x", payload: null }], latestAvailable: 1 }, 0, 100), false);
+});
+
+test("validators reject unknown and variant-incompatible keys at every object layer", () => {
+  const withExtra = <T extends Record<string, unknown>>(value: T): T & { unexpected: boolean } => ({ ...value, unexpected: true });
+  assert.equal(isRuntimeInfo(withExtra({ version: "1", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 0 })), false);
+  assert.equal(isSessionState(withExtra({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: TIME, last_used_at: TIME })), false);
+  assert.equal(isPageState(withExtra({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 })), false);
+
+  for (const evidence of evidenceFixtures()) {
+    assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [withExtra(evidence as Record<string, unknown>)] }), false, `extra evidence key: ${JSON.stringify(evidence)}`);
+  }
+  assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [], error: { code: "internal", message: "x", layer: "workflow", retryable: false } }), false);
+  assert.equal(isCommandOutcome({ status: "retryableFailure", commandId: ID, error: { code: "internal", message: "x", layer: "workflow", retryable: true }, evidence: [] }), false);
+  assert.equal(isCommandOutcome({ status: "failed", commandId: ID, error: withExtra({ code: "internal", message: "x", layer: "workflow", retryable: false }) }), false);
+
+  const nestedTarget = target() as Record<string, unknown>;
+  assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "resolution", target: withExtra(nestedTarget), fingerprint: { pageId: ID, frame: null, role: null, name: null, stableAttributes: {} }, candidates: [], bestMatchAuthorized: false }] }), false);
+  assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "resolution", target: nestedTarget, fingerprint: withExtra({ pageId: ID, frame: null, role: null, name: null, stableAttributes: {} }), candidates: [], bestMatchAuthorized: false }] }), false);
+  assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "resolution", target: nestedTarget, fingerprint: { pageId: ID, frame: null, role: null, name: null, stableAttributes: {} }, candidates: [withExtra({ role: null, name: null, score: 0, reasons: [] })], bestMatchAuthorized: false }] }), false);
+  assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "pages", pages: [withExtra({ pageId: ID, url: "https://example.test/", title: "Example" })] }] }), false);
+  assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "wait", condition: withExtra({ kind: "url", matcher: { kind: "exact", value: "x" } }), elapsedMs: 0, observations: 0 }] }), false);
+  assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "wait", condition: { kind: "url", matcher: withExtra({ kind: "exact", value: "x" }) }, elapsedMs: 0, observations: 0 }] }), false);
+
+  const extraCheckpoint = checkpoint();
+  extraCheckpoint.unexpected = true;
+  assert.equal(isWorkflowCheckpoint(extraCheckpoint), false);
+  for (const invariant of [
+    { kind: "url", value: "x", unexpected: true },
+    { kind: "title", value: "x", selector: "#bad" },
+    { kind: "text", selector: "#x", value: "x", title: "bad" },
+  ]) {
+    const value = checkpoint();
+    value.invariants = [invariant];
+    assert.equal(isWorkflowCheckpoint(value), false);
+  }
+  const extraHistory = checkpoint();
+  extraHistory.recoveryHistory = [{ recordedAt: TIME, decision: recoveryDecision(), unexpected: true }];
+  assert.equal(isWorkflowCheckpoint(extraHistory), false);
+
+  assert.equal(isRecoveryDecision({ status: "resumed", checkpointId: ID, attemptId: ID_2, evidence: [], lineage: {} }), false);
+  assert.equal(isRecoveryDecision({ status: "restarted", checkpointId: ID, lineage: withExtra({ workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "x" }) }), false);
+  assert.equal(isRecoveryDecision({ status: "restarted", checkpointId: ID, lineage: { workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "x" }, evidence: [] }), false);
+
+  assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "x", payload: null, unexpected: true }], latestAvailable: 1 }, 0, 1), false);
+  assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "x", payload: null }], latestAvailable: 1, unexpected: true }, 0, 1), false);
+  assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 1, unexpected: true }), false);
+  assert.equal(isInterfaceError({ code: "internal", layer: "interface", message: "x", correlationId: ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null, unexpected: true }), false);
+});
+
+test("EventBatch validation is contextual to the requested cursor and limit", () => {
+  assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "x", payload: null }], latestAvailable: 10 }, 10, 100), false);
+  assert.equal(isEventBatch({ events: [{ cursor: 11, kind: "x", payload: null }, { cursor: 12, kind: "x", payload: null }], latestAvailable: 12 }, 10, 1), false);
+  assert.equal(isEventBatch({ events: [{ cursor: 11, kind: "x", payload: null }], latestAvailable: 9 }, 10, 1), false);
+  assert.equal(isEventBatch({ events: [{ cursor: 11, kind: "x", payload: null }], latestAvailable: 11 }, 10, 1), true);
 });

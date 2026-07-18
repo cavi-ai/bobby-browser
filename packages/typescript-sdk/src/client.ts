@@ -1,24 +1,28 @@
 import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
-import { RuntimeClientError } from "./errors.js";
+import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
-import { isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRecord, isRuntimeInfo, isSessionState, isUuid, isWorkflowCheckpoint } from "./validators.js";
+import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRuntimeInfo, isSessionState, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_SDK_ARTIFACT_BYTES = 256 * 1024 * 1024;
+const MAX_EVENT_LIMIT = 256;
+const MAX_EVENT_TRANSPORT_RETRIES = 10;
+const MAX_EVENT_RETRY_DELAY_MS = 60_000;
 
-interface RequestScope { signal: AbortSignal; deadline: Date; dispose(): void; }
+interface RequestScope { signal: AbortSignal; deadline: Date; redact: RuntimeErrorRedactor; dispose(): void; }
 interface ScopedResponse { response: Response; scope: RequestScope; }
 
-function deadlineFor(options: RequestOptions | undefined): Date {
+function deadlineFor(options: RequestOptions | undefined, redact: RuntimeErrorRedactor): Date {
   const absolute = options?.deadline === undefined ? undefined : new Date(options.deadline);
   const relative = options?.timeoutMs === undefined ? undefined : new Date(Date.now() + options.timeoutMs);
   const deadline = absolute && relative ? new Date(Math.min(absolute.getTime(), relative.getTime())) : absolute ?? relative ?? new Date(Date.now() + DEFAULT_TIMEOUT_MS);
-  if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) throw new RuntimeClientError({ kind: "deadline", message: "Request deadline has already elapsed" });
+  if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) throw new RuntimeClientError({ kind: "deadline", message: "Request deadline has already elapsed", redactor: redact });
   return deadline;
 }
 
-function composeSignal(caller: AbortSignal | undefined, deadline: Date): RequestScope {
+function composeSignal(caller: AbortSignal | undefined, deadline: Date, redact: RuntimeErrorRedactor): RequestScope {
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let removeCaller = () => {};
@@ -38,15 +42,19 @@ function composeSignal(caller: AbortSignal | undefined, deadline: Date): Request
     }
   }
   if (!controller.signal.aborted) timeout = setTimeout(() => { controller.abort(new Error("deadline")); dispose(); }, Math.max(0, deadline.getTime() - Date.now()));
-  return { signal: controller.signal, deadline, dispose };
-}
-
-function redactedInterfaceError(value: InterfaceError, bearerToken: string): InterfaceError {
-  return { ...value, message: value.message.split(bearerToken).join("[redacted]") };
+  return { signal: controller.signal, deadline, redact, dispose };
 }
 
 function contentType(response: Response): string | undefined {
   return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+}
+
+export interface BrowserRuntimeClientOptions {
+  baseUrl: string;
+  bearerToken: string;
+  fetch?: typeof fetch;
+  /** Positive safe integer capped at 256 MiB to bound the single verification buffer. */
+  maxArtifactBytes?: number;
 }
 
 export class BrowserRuntimeClient {
@@ -54,14 +62,16 @@ export class BrowserRuntimeClient {
   readonly #bearerToken: string;
   readonly #fetch: typeof fetch;
   readonly #maxArtifactBytes: number;
+  readonly #redact: RuntimeErrorRedactor;
 
-  constructor(options: { baseUrl: string; bearerToken: string; fetch?: typeof fetch; maxArtifactBytes?: number }) {
+  constructor(options: BrowserRuntimeClientOptions) {
     if (!options.baseUrl || !options.bearerToken) throw new Error("baseUrl and bearerToken are required");
+    this.#redact = (value) => value.split(options.bearerToken).join("");
     this.#baseUrl = options.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
     this.#bearerToken = options.bearerToken;
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#maxArtifactBytes = options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
-    if (!Number.isSafeInteger(this.#maxArtifactBytes) || this.#maxArtifactBytes < 0) throw new Error("maxArtifactBytes must be a nonnegative safe integer");
+    if (!Number.isSafeInteger(this.#maxArtifactBytes) || this.#maxArtifactBytes <= 0 || this.#maxArtifactBytes > MAX_SDK_ARTIFACT_BYTES) throw this.#protocol("maxArtifactBytes must be a positive safe integer within the SDK allocation cap");
   }
 
   [Symbol.for("nodejs.util.inspect.custom")](): string { return "BrowserRuntimeClient { bearerToken: [redacted] }"; }
@@ -88,7 +98,8 @@ export class BrowserRuntimeClient {
   }
 
   async *events(cursor: number, options: EventOptions = {}): AsyncIterable<InterfaceEvent> {
-    const scope = composeSignal(options.signal, deadlineFor(options));
+    if (!validEventOptions(cursor, options)) throw this.#protocol("event cursor or retry options are outside SDK bounds");
+    const scope = composeSignal(options.signal, deadlineFor(options, this.#redact), this.#redact);
     let after = cursor;
     const limit = options.limit ?? 100;
     const retries = options.maxTransportRetries ?? 2;
@@ -105,11 +116,11 @@ export class BrowserRuntimeClient {
       }
       failures = 0;
       const payload = await this.#readJson(response, scope);
-      if (response.status === 409 && isRecord(payload) && "gap" in payload) {
+      if (response.status === 409 && hasExactKeys(payload, ["error", "gap"])) {
         if (!isInterfaceError(payload.error) || !isEventGap(payload.gap)) throw this.#protocol("event gap response has an unexpected shape", response.status);
-        throw new RuntimeClientError({ kind: "http", status: response.status, interfaceError: redactedInterfaceError(payload.error, this.#bearerToken), eventGap: payload.gap });
+        throw new RuntimeClientError({ kind: "http", status: response.status, interfaceError: payload.error, eventGap: payload.gap, redactor: this.#redact });
       }
-      if (response.status !== 200 || !isEventBatch(payload)) throw this.#responseError(response.status, payload);
+      if (response.status !== 200 || !isEventBatch(payload, after, limit)) throw this.#responseError(response.status, payload);
       for (const event of payload.events) { after = event.cursor; yield event; }
     }} finally { scope.dispose(); }
   }
@@ -124,7 +135,8 @@ export class BrowserRuntimeClient {
     if (contentType(response) !== mediaTypeEssence(reference.mediaType)) { scoped.scope.dispose(); throw this.#protocol("artifact media type does not match its reference", response.status); }
     const length = response.headers.get("content-length");
     if (length === null || !/^\d+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) !== reference.bytes) { scoped.scope.dispose(); throw this.#protocol("artifact content length does not match its reference", response.status); }
-    return verifiedArtifactStream(response.body, reference, scoped.scope);
+    try { return verifiedArtifactStream(response.body, reference, scoped.scope); }
+    catch { scoped.scope.dispose(); throw this.#protocol("artifact body could not be consumed", response.status); }
   }
 
   async #json<T>(method: string, path: string, body: unknown, options: RequestOptions | undefined, valid: (value: unknown) => value is T): Promise<T> {
@@ -141,7 +153,7 @@ export class BrowserRuntimeClient {
 
   async #request(method: string, path: string, body: unknown, options: RequestOptions | undefined, existing?: RequestScope): Promise<ScopedResponse> {
     const owned = existing === undefined;
-    const scope = existing ?? composeSignal(options?.signal, deadlineFor(options));
+    const scope = existing ?? composeSignal(options?.signal, deadlineFor(options, this.#redact), this.#redact);
     try {
       const response = await this.#fetch(`${this.#baseUrl}${path}`, {
         method,
@@ -161,9 +173,9 @@ export class BrowserRuntimeClient {
       if (owned) scope.dispose();
       if (scope.signal.aborted) {
         const kind = scope.deadline.getTime() <= Date.now() ? "deadline" : "aborted";
-        throw new RuntimeClientError({ kind, message: kind === "deadline" ? "Request deadline exceeded" : "Request was aborted" });
+        throw new RuntimeClientError({ kind, message: kind === "deadline" ? "Request deadline exceeded" : "Request was aborted", redactor: this.#redact });
       }
-      throw new RuntimeClientError({ kind: "transport", message: "Runtime transport request failed" });
+      throw new RuntimeClientError({ kind: "transport", message: "Runtime transport request failed", redactor: this.#redact });
     }
   }
 
@@ -173,10 +185,13 @@ export class BrowserRuntimeClient {
   }
 
   #responseError(status: number, payload: unknown): RuntimeClientError {
-    if (isRecord(payload) && isInterfaceError(payload.error)) return new RuntimeClientError({ kind: "http", status, interfaceError: redactedInterfaceError(payload.error, this.#bearerToken) });
+    if (hasExactKeys(payload, ["error"]) && isInterfaceError(payload.error)) {
+      if (interfaceErrorStatus(payload.error.code) !== status) return this.#protocol("interface error status does not match broker mapping", status);
+      return new RuntimeClientError({ kind: "http", status, interfaceError: payload.error, redactor: this.#redact });
+    }
     return this.#protocol("response has an unexpected status or shape", status);
   }
-  #protocol(message: string, status?: number): RuntimeClientError { return new RuntimeClientError({ kind: "protocol", status, message }); }
+  #protocol(message: string, status?: number): RuntimeClientError { return new RuntimeClientError({ kind: "protocol", status, message, redactor: this.#redact }); }
 }
 
 function commandStatus(outcome: CommandOutcome): number {
@@ -186,6 +201,28 @@ function commandStatus(outcome: CommandOutcome): number {
   if (outcome.status === "policyDenied") return 403;
   if (outcome.status === "resourceExhausted") return 429;
   return outcome.error.code === "invalidRequest" ? 422 : 500;
+}
+
+function interfaceErrorStatus(code: InterfaceError["code"]): number {
+  if (code === "authenticationFailed" || code === "tokenExpired") return 401;
+  if (code === "missingCapability" || code === "malformedScope") return 403;
+  if (code === "artifactDenied" || code === "notFound") return 404;
+  if (code === "deadlineExceeded") return 408;
+  if (code === "idempotencyConflict") return 409;
+  if (code === "resourceExhausted") return 429;
+  if (code === "internal") return 500;
+  return 422;
+}
+
+function isBoundedInteger(value: unknown, minimum: number, maximum: number): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+}
+
+function validEventOptions(cursor: number, options: EventOptions): boolean {
+  return isBoundedInteger(cursor, 0, Number.MAX_SAFE_INTEGER)
+    && (options.limit === undefined || isBoundedInteger(options.limit, 1, MAX_EVENT_LIMIT))
+    && (options.maxTransportRetries === undefined || isBoundedInteger(options.maxTransportRetries, 0, MAX_EVENT_TRANSPORT_RETRIES))
+    && (options.retryDelayMs === undefined || isBoundedInteger(options.retryDelayMs, 0, MAX_EVENT_RETRY_DELAY_MS));
 }
 
 function validArtifactReference(reference: ArtifactReference, maximum: number): boolean {
@@ -208,7 +245,30 @@ function delay(ms: number, scope: RequestScope): Promise<void> {
 }
 
 function scopeError(scope: RequestScope): RuntimeClientError {
-  return new RuntimeClientError({ kind: scope.deadline.getTime() <= Date.now() ? "deadline" : "aborted", message: scope.deadline.getTime() <= Date.now() ? "Request deadline exceeded" : "Request was aborted" });
+  return new RuntimeClientError({ kind: scope.deadline.getTime() <= Date.now() ? "deadline" : "aborted", message: scope.deadline.getTime() <= Date.now() ? "Request deadline exceeded" : "Request was aborted", redactor: scope.redact });
+}
+
+function artifactProtocolError(scope: RequestScope): RuntimeClientError {
+  return new RuntimeClientError({ kind: "protocol", message: "Artifact verification failed", redactor: scope.redact });
+}
+
+function raceWithScope<T>(operation: Promise<T>, scope: RequestScope): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      scope.signal.removeEventListener("abort", abort);
+      action();
+    };
+    const abort = () => finish(() => reject(scopeError(scope)));
+    if (scope.signal.aborted) abort();
+    else scope.signal.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 function verifiedArtifactStream(source: ReadableStream<Uint8Array>, reference: ArtifactReference, scope: RequestScope): ReadableStream<Uint8Array> {
@@ -230,7 +290,8 @@ function verifiedArtifactStream(source: ReadableStream<Uint8Array>, reference: A
       buffered.set(next.value, bytes - next.value.byteLength);
     }
     if (bytes !== reference.bytes) throw new Error("artifact byte count does not match its reference");
-    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", buffered))).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const digestBytes = await raceWithScope(crypto.subtle.digest("SHA-256", buffered), scope);
+    const digest = Array.from(new Uint8Array(digestBytes)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
     if (scope.signal.aborted) throw scopeError(scope);
     if (digest !== reference.sha256.toLowerCase()) throw new Error("artifact digest does not match its reference");
     data = buffered;
@@ -244,11 +305,15 @@ function verifiedArtifactStream(source: ReadableStream<Uint8Array>, reference: A
         delivered = true;
         controller.enqueue(data!);
       } catch (error) {
-        const failure = scope.signal.aborted ? scopeError(scope) : error;
+        const failure = scope.signal.aborted ? scopeError(scope) : error instanceof RuntimeClientError ? error : artifactProtocolError(scope);
         controller.error(failure);
-        await reader.cancel(failure);
+        try { await reader.cancel(failure); } catch { /* body-source failures never replace the sanitized surface */ }
       } finally { scope.dispose(); }
     },
-    async cancel(reason) { scope.dispose(); await reader.cancel(reason); },
+    async cancel() {
+      scope.dispose();
+      try { await reader.cancel(); }
+      catch { throw artifactProtocolError(scope); }
+    },
   });
 }

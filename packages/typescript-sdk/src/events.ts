@@ -1,10 +1,10 @@
 import type { InterfaceError } from "./contracts.js";
-import { isRecord, isUuid } from "./validators.js";
+import { hasExactKeys, isRecord, isUuid } from "./validators.js";
 
 export { isEventBatch, isEventGap, isRecord } from "./validators.js";
 
 export function isInterfaceError(value: unknown): value is InterfaceError {
-  return isRecord(value) && isInterfaceErrorCode(value.code) && isErrorLayer(value.layer) && typeof value.message === "string" && isUuid(value.correlationId) && (isUuid(value.commandId) || value.commandId === null) && typeof value.retryable === "boolean" && (value.retryAfterMs === null || (Number.isSafeInteger(value.retryAfterMs) && (value.retryAfterMs as number) >= 0)) && typeof value.reconciliationRequired === "boolean" && (value.requiredCapability === null || isCapability(value.requiredCapability));
+  return hasExactKeys(value, ["code", "layer", "message", "correlationId", "commandId", "retryable", "retryAfterMs", "reconciliationRequired", "requiredCapability"]) && isInterfaceErrorCode(value.code) && isErrorLayer(value.layer) && typeof value.message === "string" && isUuid(value.correlationId) && (isUuid(value.commandId) || value.commandId === null) && typeof value.retryable === "boolean" && (value.retryAfterMs === null || (Number.isSafeInteger(value.retryAfterMs) && (value.retryAfterMs as number) >= 0)) && typeof value.reconciliationRequired === "boolean" && (value.requiredCapability === null || isCapability(value.requiredCapability));
 }
 
 export function isErrorLayer(value: unknown): boolean {

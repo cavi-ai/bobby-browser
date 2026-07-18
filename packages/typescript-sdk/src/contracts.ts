@@ -117,4 +117,11 @@ export interface EventGapEnvelope { error: InterfaceError; gap: EventGap; }
 
 export interface ArtifactReference { referenceId: Id; artifactId: string; sha256: string; bytes: number; mediaType: string; }
 export interface RequestOptions { signal?: AbortSignal; deadline?: Date | string; timeoutMs?: number; correlationId?: Id; idempotencyKey?: string; }
-export interface EventOptions extends RequestOptions { limit?: number; maxTransportRetries?: number; retryDelayMs?: number; }
+export interface EventOptions extends RequestOptions {
+  /** Broker batch bound: a safe integer from 1 through 256. */
+  limit?: number;
+  /** Safe GET-only transport retries: a safe integer from 0 through 10. */
+  maxTransportRetries?: number;
+  /** Delay between safe retries: a safe integer from 0 through 60,000 milliseconds. */
+  retryDelayMs?: number;
+}
