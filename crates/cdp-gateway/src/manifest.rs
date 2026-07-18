@@ -28,6 +28,8 @@ pub(crate) enum Handler {
     RuntimeRunIfWaiting,
     TargetGetTargets,
     TargetGetTargetInfo,
+    TargetAttachToBrowserTarget,
+    TargetDetachFromTarget,
     TargetSetAutoAttach,
 }
 
@@ -36,25 +38,27 @@ impl Handler {
         match self {
             Self::BrowserGetVersion => "runtime_info",
             Self::BrowserSetDownloadBehavior => "configure_runtime_downloads",
-            Self::EmulationSetFocus => "configure_runtime_focus",
-            Self::EmulationSetMedia => "configure_runtime_media",
-            Self::LogEnable => "enable_runtime_logs",
-            Self::NetworkEnable => "enable_runtime_network_observation",
-            Self::PageAddScript => "register_runtime_init_script",
+            Self::EmulationSetFocus => "submit_runtime_focus_emulation",
+            Self::EmulationSetMedia => "submit_runtime_media_emulation",
+            Self::LogEnable => "configure_gateway_log_events",
+            Self::NetworkEnable => "configure_gateway_network_events",
+            Self::PageAddScript => "validate_empty_init_script_compatibility",
             Self::PageCreateIsolatedWorld => "create_runtime_isolated_context",
             Self::PageCaptureScreenshot => "capture_runtime_screenshot",
-            Self::PageEnable => "enable_runtime_page_observation",
+            Self::PageEnable => "configure_gateway_page_events",
             Self::PageGetFrameTree => "runtime_frame_tree",
             Self::PageGetLayoutMetrics => "runtime_layout_metrics",
             Self::PageNavigate => "submit_runtime_navigation",
-            Self::PageSetLifecycle => "configure_runtime_lifecycle_events",
-            Self::RuntimeEnable => "enable_runtime_observation",
+            Self::PageSetLifecycle => "configure_gateway_lifecycle_events",
+            Self::RuntimeEnable => "configure_gateway_runtime_events",
             Self::RuntimeCallFunctionOn => "translate_playwright_semantic_call",
             Self::RuntimeEvaluate => "recognize_playwright_runtime_bootstrap",
             Self::RuntimeReleaseObject => "release_gateway_remote_object",
-            Self::RuntimeRunIfWaiting => "resume_runtime_target",
+            Self::RuntimeRunIfWaiting => "validate_already_running_target_compatibility",
             Self::TargetGetTargets => "list_sessions",
             Self::TargetGetTargetInfo => "runtime_browser_target",
+            Self::TargetAttachToBrowserTarget => "open_gateway_browser_observer_session",
+            Self::TargetDetachFromTarget => "close_gateway_observer_session",
             Self::TargetSetAutoAttach => "attach_runtime_targets",
         }
     }
@@ -91,7 +95,7 @@ impl EventTranslator {
             Self::FrameDetached => "worker_generation_frame_detached",
             Self::BrowserContextDestroyed => "worker_generation_browser_context_destroyed",
             Self::NetworkLoadingFailed => "worker_generation_network_failed",
-            Self::DownloadProgress => "worker_generation_download_canceled",
+            Self::DownloadProgress => "verified_download_progress",
             Self::DownloadWillBegin => "runtime_download_will_begin",
         }
     }
@@ -205,6 +209,14 @@ impl MethodRegistry {
                 Handler::RuntimeRunIfWaiting,
             ),
             ("Target.getTargets".to_owned(), Handler::TargetGetTargets),
+            (
+                "Target.attachToBrowserTarget".to_owned(),
+                Handler::TargetAttachToBrowserTarget,
+            ),
+            (
+                "Target.detachFromTarget".to_owned(),
+                Handler::TargetDetachFromTarget,
+            ),
             (
                 "Target.getTargetInfo".to_owned(),
                 Handler::TargetGetTargetInfo,

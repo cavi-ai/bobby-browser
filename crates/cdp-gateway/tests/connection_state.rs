@@ -13,7 +13,7 @@ async fn all_identifier_families_are_connection_state_and_generation_events_prec
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-            [Capability::SessionRead],
+            [Capability::SessionRead, Capability::FileDownload],
             Utc::now() + Duration::minutes(5),
         )
         .await
@@ -67,7 +67,7 @@ async fn generation_replacement_keeps_mappings_when_teardown_cannot_be_queued() 
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-            [Capability::SessionRead],
+            [Capability::SessionRead, Capability::FileDownload],
             Utc::now() + Duration::minutes(5),
         )
         .await

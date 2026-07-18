@@ -11,8 +11,8 @@ use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, Evidence, InspectCommand, ListPagesCommand,
-    NavigateCommand, OpenPageCommand, PageId, SessionId, TypeTextCommand, UploadFilesCommand,
-    WaitForCommand, WorkerId,
+    NavigateCommand, OpenPageCommand, PageId, SessionId, SetEmulatedMediaCommand,
+    SetFocusEmulationCommand, TypeTextCommand, UploadFilesCommand, WaitForCommand, WorkerId,
 };
 
 pub use chromium::ChromiumWorkerFactory;
@@ -137,6 +137,20 @@ pub trait BrowserWorker: Send + Sync {
         &self,
         _page_id: &PageId,
         _command: &CaptureScreenshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn set_focus_emulation(
+        &self,
+        _page_id: &PageId,
+        _command: &SetFocusEmulationCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn set_emulated_media(
+        &self,
+        _page_id: &PageId,
+        _command: &SetEmulatedMediaCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
