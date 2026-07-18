@@ -12,6 +12,7 @@ export interface CreateSessionRequest { profile: string; proxy: string | null; }
 export interface OpenPageRequest { session_id: Id; }
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
+export type Capability = "sessionRead" | "sessionWrite" | "pageRead" | "pageWrite" | "browserMutate" | "recoveryRead" | "recoveryWrite" | "artifactRead" | "artifactCapture";
 export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "internal";
 export interface InterfaceError {
   code: InterfaceErrorCode;
@@ -22,7 +23,7 @@ export interface InterfaceError {
   retryable: boolean;
   retryAfterMs: number | null;
   reconciliationRequired: boolean;
-  requiredCapability: string | null;
+  requiredCapability: Capability | null;
 }
 
 export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven";
@@ -99,7 +100,7 @@ export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflo
 
 export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };
-export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId?: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory?: RecoveryRecord[]; createdAt: string; }
+export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory: RecoveryRecord[]; createdAt: string; }
 export interface RecoveryRecord { recordedAt: string; decision: RecoveryDecision; }
 export type RecoveryDecision =
   | { status: "resumed"; checkpointId: Id; attemptId: Id; evidence: Evidence[] }
