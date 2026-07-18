@@ -1,23 +1,10 @@
-import type { EventBatch, EventGap, InterfaceError, InterfaceEvent } from "./contracts.js";
+import type { InterfaceError } from "./contracts.js";
+import { isRecord, isUuid } from "./validators.js";
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export { isEventBatch, isEventGap, isRecord } from "./validators.js";
 
 export function isInterfaceError(value: unknown): value is InterfaceError {
-  return isRecord(value) && isInterfaceErrorCode(value.code) && isErrorLayer(value.layer) && typeof value.message === "string" && typeof value.correlationId === "string" && (typeof value.commandId === "string" || value.commandId === null) && typeof value.retryable === "boolean" && (typeof value.retryAfterMs === "number" || value.retryAfterMs === null) && typeof value.reconciliationRequired === "boolean" && (value.requiredCapability === null || isCapability(value.requiredCapability));
-}
-
-export function isEventGap(value: unknown): value is EventGap {
-  return isRecord(value) && (value.reason === "historyLost" || value.reason === "invalidLimit" || value.reason === "invalidCursor") && typeof value.earliestAvailable === "number" && Number.isSafeInteger(value.earliestAvailable) && value.earliestAvailable >= 0;
-}
-
-export function isEventBatch(value: unknown): value is EventBatch {
-  return isRecord(value) && typeof value.latestAvailable === "number" && Number.isSafeInteger(value.latestAvailable) && value.latestAvailable >= 0 && Array.isArray(value.events) && value.events.every(isInterfaceEvent);
-}
-
-function isInterfaceEvent(value: unknown): value is InterfaceEvent {
-  return isRecord(value) && typeof value.cursor === "number" && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && typeof value.kind === "string" && "payload" in value;
+  return isRecord(value) && isInterfaceErrorCode(value.code) && isErrorLayer(value.layer) && typeof value.message === "string" && isUuid(value.correlationId) && (isUuid(value.commandId) || value.commandId === null) && typeof value.retryable === "boolean" && (value.retryAfterMs === null || (Number.isSafeInteger(value.retryAfterMs) && (value.retryAfterMs as number) >= 0)) && typeof value.reconciliationRequired === "boolean" && (value.requiredCapability === null || isCapability(value.requiredCapability));
 }
 
 export function isErrorLayer(value: unknown): boolean {
@@ -29,5 +16,5 @@ export function isInterfaceErrorCode(value: unknown): boolean {
 }
 
 function isCapability(value: unknown): boolean {
-  return value === "sessionRead" || value === "sessionWrite" || value === "pageRead" || value === "pageWrite" || value === "browserMutate" || value === "recoveryRead" || value === "recoveryWrite" || value === "artifactRead" || value === "artifactCapture";
+  return value === "session:read" || value === "session:write" || value === "page:read" || value === "page:write" || value === "browser:mutate" || value === "file:upload" || value === "file:download" || value === "javascript:evaluate" || value === "recovery:read" || value === "recovery:write" || value === "artifact:read" || value === "artifact:capture";
 }

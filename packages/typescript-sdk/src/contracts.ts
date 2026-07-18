@@ -12,7 +12,7 @@ export interface CreateSessionRequest { profile: string; proxy: string | null; }
 export interface OpenPageRequest { session_id: Id; }
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
-export type Capability = "sessionRead" | "sessionWrite" | "pageRead" | "pageWrite" | "browserMutate" | "recoveryRead" | "recoveryWrite" | "artifactRead" | "artifactCapture";
+export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture";
 export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "internal";
 export interface InterfaceError {
   code: InterfaceErrorCode;
@@ -45,7 +45,7 @@ export type WaitCondition =
 
 /** Every serde(tag = "kind") Evidence variant in the committed Rust contract. */
 export type Evidence =
-  | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string | null; contentType?: string | null; status?: number | null; redirectChain?: string[] }
+  | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
   | { kind: "navigation"; url: string; title: string }
   | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null }
   | { kind: "element"; selector: string; text: string | null }
