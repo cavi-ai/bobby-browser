@@ -41,7 +41,6 @@ async fn main() {
                 Capability::FileUpload,
                 Capability::FileDownload,
                 Capability::JavascriptEvaluate,
-                Capability::ArtifactRead,
                 Capability::ArtifactCapture,
                 Capability::RecoveryRead,
                 Capability::RecoveryWrite,

@@ -83,6 +83,7 @@ async fn discovery_and_upgrade_fail_closed_without_valid_bearer() {
     assert!(version_json.get("protocolVersion").is_none());
 
     let playwright_discovery = router
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/json/version/")
@@ -93,6 +94,21 @@ async fn discovery_and_upgrade_fail_closed_without_valid_bearer() {
         .await
         .unwrap();
     assert_eq!(playwright_discovery.status(), StatusCode::OK);
+
+    let missing_download_capability = router
+        .oneshot(
+            Request::builder()
+                .uri("/v1/streams/opaque-missing")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        missing_download_capability.status(),
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]

@@ -17,14 +17,14 @@
     },
     {
       "name": "Emulation.setFocusEmulationEnabled",
-      "requiredCapability": "page:read",
+      "requiredCapability": "browser:mutate",
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "submit_runtime_focus_emulation",
       "scenarios": ["playwright-connect-over-cdp"]
     },
     {
       "name": "Emulation.setEmulatedMedia",
-      "requiredCapability": "page:read",
+      "requiredCapability": "browser:mutate",
       "parameterSchemaRevision": "cdp-1.3",
       "translationFunction": "submit_runtime_media_emulation",
       "scenarios": ["playwright-connect-over-cdp"]

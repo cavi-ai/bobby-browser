@@ -82,7 +82,7 @@ pub struct CdpGateway {
     generations: Arc<Mutex<HashMap<String, RuntimeGeneration>>>,
     artifacts: Option<artifact_store::ArtifactStore>,
     upload_staging_root: Option<PathBuf>,
-    streams: Arc<Mutex<HashMap<String, DownloadStream>>>,
+    streams: Arc<Mutex<DownloadStreamStore>>,
 }
 
 impl CdpGateway {
@@ -107,7 +107,11 @@ impl CdpGateway {
             generations: Arc::new(Mutex::new(HashMap::new())),
             artifacts: None,
             upload_staging_root: None,
-            streams: Arc::new(Mutex::new(HashMap::new())),
+            streams: Arc::new(Mutex::new(DownloadStreamStore::new(
+                128,
+                256 * 1024 * 1024,
+                std::time::Duration::from_secs(300),
+            ))),
         }
     }
 
@@ -118,6 +122,20 @@ impl CdpGateway {
 
     pub fn with_upload_staging_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.upload_staging_root = Some(root.into());
+        self
+    }
+
+    pub fn with_stream_limits(
+        mut self,
+        max_count: usize,
+        max_total_bytes: u64,
+        ttl: std::time::Duration,
+    ) -> Self {
+        self.streams = Arc::new(Mutex::new(DownloadStreamStore::new(
+            max_count,
+            max_total_bytes,
+            ttl,
+        )));
         self
     }
 
@@ -235,6 +253,7 @@ impl CdpGateway {
 }
 
 pub struct CdpConnection {
+    connection_id: String,
     handle: CapabilityHandle,
     runtime: Arc<dyn RuntimeInterface>,
     registry: MethodRegistry,
@@ -248,7 +267,7 @@ pub struct CdpConnection {
     pending_page_loads: Mutex<HashMap<String, (String, String, String)>>,
     artifacts: Option<artifact_store::ArtifactStore>,
     upload_staging_root: Option<PathBuf>,
-    streams: Arc<Mutex<HashMap<String, DownloadStream>>>,
+    streams: Arc<Mutex<DownloadStreamStore>>,
     remote_objects: Mutex<HashMap<String, RemoteObject>>,
     execution_generations: Mutex<HashMap<String, u64>>,
     enabled_domains: Mutex<HashSet<(String, &'static str)>>,
@@ -264,9 +283,121 @@ struct RemoteObject {
     generation: u64,
 }
 
+#[derive(Clone)]
 struct DownloadStream {
     principal_id: types::PrincipalId,
-    bytes: Vec<u8>,
+    connection_id: String,
+    session_id: SessionId,
+    artifact_id: String,
+    bytes: u64,
+    expires_at: std::time::Instant,
+}
+
+struct DownloadStreamStore {
+    entries: HashMap<String, DownloadStream>,
+    max_count: usize,
+    max_total_bytes: u64,
+    total_bytes: u64,
+    ttl: std::time::Duration,
+}
+
+impl DownloadStreamStore {
+    fn new(max_count: usize, max_total_bytes: u64, ttl: std::time::Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            max_count,
+            max_total_bytes,
+            total_bytes: 0,
+            ttl,
+        }
+    }
+
+    fn purge_expired(&mut self) {
+        let now = std::time::Instant::now();
+        let expired = self
+            .entries
+            .iter()
+            .filter_map(|(id, stream)| (stream.expires_at <= now).then_some(id.clone()))
+            .collect::<Vec<_>>();
+        for id in expired {
+            self.remove(&id);
+        }
+    }
+
+    fn reserve(
+        &mut self,
+        id: &str,
+        principal_id: types::PrincipalId,
+        connection_id: &str,
+        session_id: SessionId,
+        artifact_id: &str,
+        bytes: u64,
+    ) -> Result<(), ()> {
+        self.purge_expired();
+        if id.is_empty()
+            || self.entries.len() >= self.max_count
+            || bytes > self.max_total_bytes
+            || self
+                .total_bytes
+                .checked_add(bytes)
+                .is_none_or(|total| total > self.max_total_bytes)
+        {
+            return Err(());
+        }
+        self.total_bytes += bytes;
+        self.entries.insert(
+            id.to_owned(),
+            DownloadStream {
+                principal_id,
+                connection_id: connection_id.to_owned(),
+                session_id,
+                artifact_id: artifact_id.to_owned(),
+                bytes,
+                expires_at: std::time::Instant::now() + self.ttl,
+            },
+        );
+        Ok(())
+    }
+
+    fn peek_authorized(
+        &mut self,
+        id: &str,
+        principal_id: &types::PrincipalId,
+    ) -> Option<DownloadStream> {
+        self.purge_expired();
+        self.entries
+            .get(id)
+            .filter(|stream| &stream.principal_id == principal_id)
+            .cloned()
+    }
+
+    fn take_authorized(
+        &mut self,
+        id: &str,
+        principal_id: &types::PrincipalId,
+    ) -> Option<DownloadStream> {
+        self.peek_authorized(id, principal_id)?;
+        self.remove(id)
+    }
+
+    fn remove(&mut self, id: &str) -> Option<DownloadStream> {
+        let removed = self.entries.remove(id)?;
+        self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
+        Some(removed)
+    }
+
+    fn remove_connection(&mut self, connection_id: &str) {
+        let ids = self
+            .entries
+            .iter()
+            .filter_map(|(id, stream)| {
+                (stream.connection_id == connection_id).then_some(id.clone())
+            })
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.remove(&id);
+        }
+    }
 }
 
 struct ConnectionShared {
@@ -274,7 +405,7 @@ struct ConnectionShared {
     generations: Arc<Mutex<HashMap<String, RuntimeGeneration>>>,
     artifacts: Option<artifact_store::ArtifactStore>,
     upload_staging_root: Option<PathBuf>,
-    streams: Arc<Mutex<HashMap<String, DownloadStream>>>,
+    streams: Arc<Mutex<DownloadStreamStore>>,
 }
 
 struct UploadStaging {
@@ -315,7 +446,11 @@ impl CdpConnection {
                 generations: Arc::new(Mutex::new(HashMap::new())),
                 artifacts: None,
                 upload_staging_root: None,
-                streams: Arc::new(Mutex::new(HashMap::new())),
+                streams: Arc::new(Mutex::new(DownloadStreamStore::new(
+                    128,
+                    256 * 1024 * 1024,
+                    std::time::Duration::from_secs(300),
+                ))),
             },
         )
     }
@@ -327,6 +462,7 @@ impl CdpConnection {
         shared: ConnectionShared,
     ) -> Self {
         Self {
+            connection_id: Uuid::new_v4().to_string(),
             handle,
             runtime,
             registry,
@@ -750,20 +886,27 @@ impl CdpConnection {
                                     Ok(record) => record,
                                     Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import failed")),
                                 };
-                                let imported = match store.get(&session_id, &record.artifact_id).await {
-                                    Ok(imported) => imported,
+                                match store.get(&session_id, &record.artifact_id).await {
+                                    Ok(imported) if imported.len() as u64 == expected_bytes && format!("{:x}", Sha256::digest(&imported)) == expected_sha => {}
                                     Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import verification failed")),
+                                    Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import integrity check failed")),
                                 };
                                 let stream_id = Uuid::new_v4().to_string();
-                                self.streams.lock().await.insert(stream_id.clone(), DownloadStream {
-                                    principal_id: ctx.principal_id.clone(), bytes: imported,
-                                });
+                                if self.streams.lock().await.reserve(
+                                    &stream_id, ctx.principal_id.clone(), &self.connection_id,
+                                    session_id.clone(), &record.artifact_id, expected_bytes,
+                                ).is_err() {
+                                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download stream capacity exhausted"));
+                                }
                                 let guid = Uuid::new_v4().to_string();
                                 let mut events = download_events(&frame_id, &guid, &filename, expected_bytes, &stream_id, &expected_sha, None).to_vec();
                                 for observer in self.browser_observers.lock().await.iter() {
                                     events.extend(download_events(&frame_id, &guid, &filename, expected_bytes, &stream_id, &expected_sha, Some(observer.clone())));
                                 }
-                                if let Err(error) = self.queue_events(events).await { return CdpResponse::failure(&request, error); }
+                                if let Err(error) = self.queue_events(events).await {
+                                    self.streams.lock().await.remove(&stream_id);
+                                    return CdpResponse::failure(&request, error);
+                                }
                                 CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}}))
                             }
                             Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not complete")),
@@ -1140,6 +1283,13 @@ impl CdpConnection {
         self.events.lock().await.drain(..).collect()
     }
 
+    async fn cleanup_streams(&self) {
+        self.streams
+            .lock()
+            .await
+            .remove_connection(&self.connection_id);
+    }
+
     async fn issue_remote_object(&self, session_id: Option<&str>, internal: &str) -> String {
         let scope = session_id.unwrap_or("browser").to_owned();
         let generation = *self
@@ -1472,7 +1622,9 @@ fn remote_object_valid(object: &RemoteObject, scope: &str, generation: u64) -> b
 
 #[cfg(test)]
 mod security_tests {
-    use super::{download_events, remote_object_valid, RemoteObject, UploadStaging};
+    use super::{
+        download_events, remote_object_valid, DownloadStreamStore, RemoteObject, UploadStaging,
+    };
 
     #[test]
     fn remote_objects_reject_cross_context_stale_and_forged_identity() {
@@ -1526,6 +1678,94 @@ mod security_tests {
             events[1].params["streamId"],
             "550e8400-e29b-41d4-a716-446655440000"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_store_enforces_count_bytes_ttl_and_one_shot() {
+        let mut store = DownloadStreamStore::new(1, 7, std::time::Duration::from_millis(1));
+        let principal = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        assert!(store
+            .reserve(
+                "one",
+                principal.clone(),
+                "connection",
+                types::SessionId::new(),
+                "artifact",
+                7
+            )
+            .is_ok());
+        assert!(store
+            .reserve(
+                "two",
+                principal.clone(),
+                "connection",
+                types::SessionId::new(),
+                "artifact",
+                1
+            )
+            .is_err());
+        assert!(store.take_authorized("one", &principal).is_some());
+        assert!(store.take_authorized("one", &principal).is_none());
+        assert!(store
+            .reserve(
+                "ttl",
+                principal.clone(),
+                "connection",
+                types::SessionId::new(),
+                "artifact",
+                1
+            )
+            .is_ok());
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        assert!(store.peek_authorized("ttl", &principal).is_none());
+    }
+
+    #[test]
+    fn unauthorized_lookup_does_not_consume_and_connection_cleanup_reclaims() {
+        let mut store = DownloadStreamStore::new(2, 8, std::time::Duration::from_secs(60));
+        let principal_a = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let principal_b = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        store
+            .reserve(
+                "one",
+                principal_a.clone(),
+                "connection-a",
+                types::SessionId::new(),
+                "artifact",
+                4,
+            )
+            .unwrap();
+        assert!(store.take_authorized("one", &principal_b).is_none());
+        assert!(store.peek_authorized("one", &principal_a).is_some());
+        store.remove_connection("connection-a");
+        assert!(store.peek_authorized("one", &principal_a).is_none());
+    }
+
+    #[test]
+    fn failed_event_admission_rollback_releases_stream_capacity() {
+        let principal = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let mut store = DownloadStreamStore::new(1, 4, std::time::Duration::from_secs(60));
+        store
+            .reserve(
+                "rejected",
+                principal.clone(),
+                "connection",
+                types::SessionId::new(),
+                "artifact",
+                4,
+            )
+            .unwrap();
+        assert!(store.remove("rejected").is_some());
+        assert!(store
+            .reserve(
+                "replacement",
+                principal,
+                "connection",
+                types::SessionId::new(),
+                "artifact",
+                4
+            )
+            .is_ok());
     }
 }
 
@@ -1743,23 +1983,43 @@ async fn stream_route(
         Err(error) => return discovery_response(error),
     };
     let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
-    if !ctx.capabilities.contains(types::Capability::ArtifactRead) {
+    if !ctx.capabilities.contains(types::Capability::FileDownload) {
         return discovery_response(DiscoveryError::Unauthorized);
     }
-    let mut streams = gateway.streams.lock().await;
-    let authorized = streams
-        .get(&id)
-        .is_some_and(|stream| stream.principal_id == ctx.principal_id);
-    if !authorized {
+    let stream = gateway
+        .streams
+        .lock()
+        .await
+        .peek_authorized(&id, &ctx.principal_id);
+    let Some(stream) = stream else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(artifacts) = gateway.artifacts.as_ref() else {
+        gateway.streams.lock().await.remove(&id);
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let bytes = match artifacts.get(&stream.session_id, &stream.artifact_id).await {
+        Ok(bytes) if bytes.len() as u64 == stream.bytes => bytes,
+        _ => {
+            gateway.streams.lock().await.remove(&id);
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    if gateway
+        .streams
+        .lock()
+        .await
+        .take_authorized(&id, &ctx.principal_id)
+        .is_none()
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let stream = streams.remove(&id).expect("authorized stream exists");
     (
         [(
             (axum::http::header::CONTENT_TYPE),
             "application/octet-stream",
         )],
-        stream.bytes,
+        bytes,
     )
         .into_response()
 }
@@ -1884,6 +2144,7 @@ async fn serve_socket(socket: WebSocket, connection: Arc<CdpConnection>) {
         writer.abort();
         let _ = writer.await;
     }
+    connection.cleanup_streams().await;
 }
 
 async fn send_queued_events(
