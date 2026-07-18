@@ -747,10 +747,52 @@ impl CdpConnection {
                 Err(error) => Err(error),
             },
             Some(Handler::TargetGetTargetInfo) => {
-                let target_id = self.bind_identifier(
-                    IdentifierFamily::Target, "browser", "browser", RuntimeGeneration(0),
-                ).await;
-                Ok(json!({"targetInfo": {"targetId": target_id, "type": "browser", "title": "", "url": "", "attached": true, "canAccessOpener": false}}))
+                let Some(params) = request.params.as_object() else {
+                    return CdpResponse::failure(
+                        &request,
+                        CdpError::new(
+                            CdpErrorCode::InvalidParams,
+                            "Target.getTargetInfo params must be an object",
+                        ),
+                    );
+                };
+                if params.is_empty() {
+                    let target_id = self
+                        .bind_identifier(
+                            IdentifierFamily::Target,
+                            "browser",
+                            "browser",
+                            RuntimeGeneration(0),
+                        )
+                        .await;
+                    Ok(json!({"targetInfo": {"targetId": target_id, "type": "browser", "title": "", "url": "", "attached": true, "canAccessOpener": false}}))
+                } else if params.len() == 1 {
+                    let Some(target_id) = params.get("targetId").and_then(Value::as_str) else {
+                        return CdpResponse::failure(
+                            &request,
+                            CdpError::new(CdpErrorCode::InvalidParams, "invalid targetId"),
+                        );
+                    };
+                    if self
+                        .resolve_identifier(IdentifierFamily::Target, target_id)
+                        .await
+                        .is_none()
+                    {
+                        return CdpResponse::failure(
+                            &request,
+                            CdpError::new(CdpErrorCode::InvalidParams, "unknown target"),
+                        );
+                    }
+                    Ok(json!({"targetInfo": {"targetId": target_id, "type": "page", "title": "Automation Runtime", "url": "about:blank", "attached": true, "canAccessOpener": false}}))
+                } else {
+                    return CdpResponse::failure(
+                        &request,
+                        CdpError::new(
+                            CdpErrorCode::InvalidParams,
+                            "Target.getTargetInfo accepts only targetId",
+                        ),
+                    );
+                }
             }
             Some(Handler::TargetAttachToBrowserTarget) => {
                 if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
