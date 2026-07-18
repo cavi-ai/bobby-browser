@@ -117,7 +117,7 @@ export class BrowserRuntimeClient {
       failures = 0;
       const payload = await this.#readJson(response, scope);
       if (response.status === 409 && hasExactKeys(payload, ["error", "gap"])) {
-        if (!isInterfaceError(payload.error) || !isEventGap(payload.gap)) throw this.#protocol("event gap response has an unexpected shape", response.status);
+        if (!isBrokerEventGapError(payload.error) || !isEventGap(payload.gap)) throw this.#protocol("event gap response has an unexpected shape", response.status);
         throw new RuntimeClientError({ kind: "http", status: response.status, interfaceError: payload.error, eventGap: payload.gap, redactor: this.#redact });
       }
       if (response.status !== 200 || !isEventBatch(payload, after, limit)) throw this.#responseError(response.status, payload);
@@ -186,7 +186,7 @@ export class BrowserRuntimeClient {
 
   #responseError(status: number, payload: unknown): RuntimeClientError {
     if (hasExactKeys(payload, ["error"]) && isInterfaceError(payload.error)) {
-      if (interfaceErrorStatus(payload.error.code) !== status) return this.#protocol("interface error status does not match broker mapping", status);
+      if (!interfaceErrorStatusMatches(payload.error, status)) return this.#protocol("interface error status does not match broker mapping", status);
       return new RuntimeClientError({ kind: "http", status, interfaceError: payload.error, redactor: this.#redact });
     }
     return this.#protocol("response has an unexpected status or shape", status);
@@ -212,6 +212,24 @@ function interfaceErrorStatus(code: InterfaceError["code"]): number {
   if (code === "resourceExhausted") return 429;
   if (code === "internal") return 500;
   return 422;
+}
+
+function interfaceErrorStatusMatches(error: InterfaceError, status: number): boolean {
+  if (error.reconciliationRequired) return status === 409;
+  if (error.code === "invalidRequest") return status === 413 || status === 422;
+  return interfaceErrorStatus(error.code) === status;
+}
+
+function isBrokerEventGapError(value: unknown): value is InterfaceError {
+  return isInterfaceError(value)
+    && value.code === "invalidRequest"
+    && value.layer === "interface"
+    && value.message === "event history has a cursor gap"
+    && value.commandId === null
+    && value.retryable === false
+    && value.retryAfterMs === null
+    && value.reconciliationRequired === false
+    && value.requiredCapability === null;
 }
 
 function isBoundedInteger(value: unknown, minimum: number, maximum: number): value is number {

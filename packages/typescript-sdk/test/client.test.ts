@@ -118,7 +118,7 @@ test("retries safe event polling transport failures and ends on an event gap", a
       return;
     }
     writeJson(response, 409, {
-      error: { code: "invalidRequest", layer: "interface", message: "gap", correlationId: CORRELATION_ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null },
+      error: { code: "invalidRequest", layer: "interface", message: "event history has a cursor gap", correlationId: CORRELATION_ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null },
       gap: { reason: "historyLost", earliestAvailable: 9 },
     });
   }, async (baseUrl) => {
@@ -504,6 +504,85 @@ test("enforces the complete InterfaceError HTTP status table and rejects error e
   await assert.rejects(extraEnvelope.runtimeInfo(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
 });
 
+test("matches broker status precedence for reconciliation and invalidRequest body limits", async () => {
+  const error = (code: InterfaceErrorCode, reconciliationRequired = false) => ({
+    error: {
+      code,
+      layer: "interface",
+      message: "x",
+      correlationId: CORRELATION_ID,
+      commandId: null,
+      retryable: false,
+      retryAfterMs: null,
+      reconciliationRequired,
+      requiredCapability: null,
+    },
+  });
+  const cases: Array<{ code: InterfaceErrorCode; reconciliationRequired: boolean; accepted: number[]; rejected: number[] }> = [
+    { code: "authenticationFailed", reconciliationRequired: true, accepted: [409], rejected: [401] },
+    { code: "internal", reconciliationRequired: true, accepted: [409], rejected: [500] },
+    { code: "invalidRequest", reconciliationRequired: true, accepted: [409], rejected: [413, 422] },
+    { code: "invalidRequest", reconciliationRequired: false, accepted: [413, 422], rejected: [409, 500] },
+  ];
+  for (const fixture of cases) {
+    for (const status of fixture.accepted) {
+      const client = new BrowserRuntimeClient({
+        baseUrl: "https://runtime.invalid",
+        bearerToken: TOKEN,
+        fetch: async () => new Response(JSON.stringify(error(fixture.code, fixture.reconciliationRequired)), { status, headers: { "content-type": "application/json" } }),
+      });
+      await assert.rejects(client.runtimeInfo(), (caught: unknown) => caught instanceof RuntimeClientError && caught.kind === "http" && caught.code === fixture.code && caught.status === status && caught.reconciliationRequired === fixture.reconciliationRequired);
+    }
+    for (const status of fixture.rejected) {
+      const client = new BrowserRuntimeClient({
+        baseUrl: "https://runtime.invalid",
+        bearerToken: TOKEN,
+        fetch: async () => new Response(JSON.stringify(error(fixture.code, fixture.reconciliationRequired)), { status, headers: { "content-type": "application/json" } }),
+      });
+      await assert.rejects(client.runtimeInfo(), (caught: unknown) => caught instanceof RuntimeClientError && caught.kind === "protocol" && caught.code === undefined);
+    }
+  }
+});
+
+test("accepts only the broker EventGap InterfaceError envelope at 409", async () => {
+  const brokerError = {
+    code: "invalidRequest",
+    layer: "interface",
+    message: "event history has a cursor gap",
+    correlationId: CORRELATION_ID,
+    commandId: null,
+    retryable: false,
+    retryAfterMs: null,
+    reconciliationRequired: false,
+    requiredCapability: null,
+  } as const;
+  const gap = { reason: "historyLost", earliestAvailable: 9 } as const;
+  const accepted = new BrowserRuntimeClient({
+    baseUrl: "https://runtime.invalid",
+    bearerToken: TOKEN,
+    fetch: async () => new Response(JSON.stringify({ error: brokerError, gap }), { status: 409, headers: { "content-type": "application/json" } }),
+  });
+  await assert.rejects(accepted.events(0)[Symbol.asyncIterator]().next(), (caught: unknown) => caught instanceof RuntimeClientError && caught.kind === "http" && caught.code === "invalidRequest" && caught.eventGap?.earliestAvailable === 9);
+
+  const rejected = [
+    { ...brokerError, code: "idempotencyConflict" },
+    { ...brokerError, layer: "browser" },
+    { ...brokerError, message: "gap" },
+    { ...brokerError, commandId: COMMAND_ID },
+    { ...brokerError, retryable: true, retryAfterMs: 1 },
+    { ...brokerError, reconciliationRequired: true },
+    { ...brokerError, requiredCapability: "event:read" },
+  ];
+  for (const eventGapError of rejected) {
+    const client = new BrowserRuntimeClient({
+      baseUrl: "https://runtime.invalid",
+      bearerToken: TOKEN,
+      fetch: async () => new Response(JSON.stringify({ error: eventGapError, gap }), { status: 409, headers: { "content-type": "application/json" } }),
+    });
+    await assert.rejects(client.events(0)[Symbol.asyncIterator]().next(), (caught: unknown) => caught instanceof RuntimeClientError && caught.kind === "protocol" && caught.code === undefined);
+  }
+});
+
 test("redacts the bearer token from all RuntimeClientError metadata and serialization surfaces", async () => {
   const scenarios = [
     { token: CORRELATION_ID, status: 409, error: { code: "idempotencyConflict", message: `secret ${CORRELATION_ID}`, correlationId: CORRELATION_ID, commandId: CORRELATION_ID, requiredCapability: null } },
@@ -551,7 +630,7 @@ test("client rejects malformed nested fixtures from every JSON response family",
     recoveryHistory: [{ recordedAt: "not-a-time", decision: { status: "resumed", checkpointId: CHECKPOINT_ID, attemptId: ATTEMPT_ID, evidence: [] } }],
     createdAt: time,
   };
-  const validError = { code: "invalidRequest", layer: "interface", message: "gap", correlationId: CORRELATION_ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null };
+  const validError = { code: "invalidRequest", layer: "interface", message: "event history has a cursor gap", correlationId: CORRELATION_ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null };
   const cases: Array<[string, number, unknown, (client: BrowserRuntimeClient) => Promise<unknown>]> = [
     ["RuntimeInfo", 200, { version: "1", capabilities: [], active_sessions: 0.5, queued_jobs: 0, uptime_ms: 0 }, (client) => client.runtimeInfo()],
     ["SessionState", 200, { id: SESSION_ID, profile: "default", proxy: null, page_ids: ["bad"], created_at: time, last_used_at: time }, (client) => client.createSession({ profile: "default", proxy: null })],
