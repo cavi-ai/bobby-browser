@@ -78,6 +78,17 @@ impl SessionOwnershipAuthority for SessionOwnershipRegistry {
 }
 
 impl SessionOwnershipRecorder {
+    /// Checks an authenticated session boundary without exposing the registry's
+    /// contents. Runtime adapters use this before dispatching session-scoped work.
+    pub fn owns_authenticated_session(&self, principal: &PrincipalId, session: &SessionId) -> bool {
+        self.inner
+            .state
+            .read()
+            .ok()
+            .and_then(|state| state.owners.get(session).cloned())
+            .is_some_and(|owner| owner == *principal)
+    }
+
     pub fn reserve(
         &self,
         principal: PrincipalId,

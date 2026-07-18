@@ -1096,6 +1096,7 @@ name = "interface-conformance"
 version = "0.1.0"
 dependencies = [
  "artifact-store",
+ "async-trait",
  "chrono",
  "config",
  "interface-core",
@@ -1812,6 +1813,7 @@ dependencies = [
  "sdk-core",
  "serde_json",
  "session-manager",
+ "sha2",
  "tempfile",
  "test-site",
  "tokio",

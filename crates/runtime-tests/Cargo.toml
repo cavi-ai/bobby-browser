@@ -22,6 +22,7 @@ session-manager = { path = "../session-manager" }
 page-runtime = { path = "../page-runtime" }
 reqwest.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 test-site = { path = "../test-site" }
 tokio.workspace = true

@@ -17,6 +17,7 @@ test-site = { path = "../test-site" }
 types = { path = "../types" }
 
 [dev-dependencies]
+async-trait.workspace = true
 artifact-store = { path = "../artifact-store" }
 sdk-core = { path = "../sdk-core" }
 interface-core = { path = "../interface-core" }

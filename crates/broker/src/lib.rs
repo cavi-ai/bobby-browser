@@ -18,7 +18,7 @@ use interface_core::{
 };
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, RwLock, Semaphore},
 };
@@ -262,20 +262,41 @@ impl Listener for ConnectionLimitedListener {
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let permit = self
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("connection semaphore is never closed");
-        let (inner, address) = Listener::accept(&mut self.inner).await;
-        (
-            PermittedTcpStream {
-                inner,
-                _permit: permit,
-            },
-            address,
-        )
+        loop {
+            let (mut inner, address) = Listener::accept(&mut self.inner).await;
+            if let Ok(permit) = self.permits.clone().try_acquire_owned() {
+                return (
+                    PermittedTcpStream {
+                        inner,
+                        _permit: permit,
+                    },
+                    address,
+                );
+            }
+            tokio::spawn(async move {
+                let mut request_prefix = [0_u8; 1024];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    inner.read(&mut request_prefix),
+                )
+                .await;
+                let body = serde_json::to_string(&types::InterfaceError {
+                    code: types::InterfaceErrorCode::ResourceExhausted,
+                    layer: types::ErrorLayer::Interface,
+                    message: "connection capacity exhausted".into(),
+                    correlation_id: types::CorrelationId::new(),
+                    command_id: None,
+                    retryable: true,
+                    retry_after_ms: Some(1_000),
+                    reconciliation_required: false,
+                    required_capability: None,
+                })
+                .expect("typed overload serializes");
+                let response=format!("HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len());
+                let _ = inner.write_all(response.as_bytes()).await;
+                let _ = inner.shutdown().await;
+            });
+        }
     }
 
     fn local_addr(&self) -> io::Result<Self::Addr> {

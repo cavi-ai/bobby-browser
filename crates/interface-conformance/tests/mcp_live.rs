@@ -10,9 +10,12 @@ use sdk_core::AuthenticatedRuntime;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
@@ -20,8 +23,18 @@ use types::{
     ScreenshotMode, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct FixtureMetadata {
+    site_url: String,
+    upload_root: std::path::PathBuf,
+}
+
 #[tokio::test]
 async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
+    if let Some(samples) = performance_samples() {
+        run_mcp_stdio_performance(samples).await;
+        return;
+    }
     let harness = ChromeRuntimeHarness::start().await;
     let (ownership, recorder) =
         SessionOwnershipRegistry::bounded(harness.config.browser.max_active);
@@ -56,10 +69,22 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
             128,
         ),
     );
-    initialize(&server).await;
+    let denied_handle = harness
+        .authority
+        .verify(&harness.denied_token)
+        .await
+        .unwrap();
+    let denied = Server::new(Arc::new(AuthenticatedRuntime::new(
+        harness.service.clone(),
+        denied_handle,
+    )));
+    let mut server = DirectEndpoint(&server);
+    let mut denied = DirectEndpoint(&denied);
+    initialize(&mut server).await;
+    initialize(&mut denied).await;
     let mut setup_id = 2;
     let session = tool(
-        &server,
+        &mut server,
         &mut setup_id,
         "session_create",
         json!({"profile":"mcp-conformance","proxy":null}),
@@ -67,7 +92,7 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     .await;
     let session_id = session["id"].as_str().unwrap().to_owned();
     let page = tool(
-        &server,
+        &mut server,
         &mut setup_id,
         "page_open",
         json!({"sessionId":session_id}),
@@ -76,38 +101,67 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
     let page_id = page["id"].as_str().unwrap().to_owned();
     let sid = types::SessionId(uuid::Uuid::parse_str(&session_id).unwrap());
     let pid = types::PageId(uuid::Uuid::parse_str(&page_id).unwrap());
-    if let Some(samples) = performance_samples() {
-        run_mcp_sample(&harness, &server, &sid, &pid).await;
+    let metadata = FixtureMetadata {
+        site_url: harness.site_url(),
+        upload_root: harness.upload_root().to_path_buf(),
+    };
+    run_mcp_sample(&metadata, &mut server, &mut denied, &sid, &pid).await;
+}
+
+async fn run_mcp_stdio_performance(samples: usize) {
+    let control = tempfile::tempdir().unwrap();
+    let mut transport = McpStdioTransport::start("positive", control.path()).await;
+    let mut denied_transport = McpStdioTransport::start("denied", control.path()).await;
+    let metadata: FixtureMetadata =
+        serde_json::from_slice(&std::fs::read(control.path().join("positive.json")).unwrap())
+            .unwrap();
+    let mut setup_id = 2;
+    let session = tool(
+        &mut transport,
+        &mut setup_id,
+        "session_create",
+        json!({"profile":"mcp-conformance","proxy":null}),
+    )
+    .await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let page = tool(
+        &mut transport,
+        &mut setup_id,
+        "page_open",
+        json!({"sessionId":session_id}),
+    )
+    .await;
+    let page_id = page["id"].as_str().unwrap().to_owned();
+    let sid = types::SessionId(uuid::Uuid::parse_str(&session_id).unwrap());
+    let pid = types::PageId(uuid::Uuid::parse_str(&page_id).unwrap());
+    run_mcp_sample(&metadata, &mut transport, &mut denied_transport, &sid, &pid).await;
+    emit_performance_event(
+        json!({"event":"measurement-start","adapter":"mcp","samples":samples,"rootPid":std::process::id()}),
+    );
+    let mut measured = Vec::with_capacity(samples);
+    for index in 0..samples {
+        let started = Instant::now();
+        let operation =
+            run_mcp_sample(&metadata, &mut transport, &mut denied_transport, &sid, &pid).await;
+        let wall = started.elapsed();
+        let sample = json!({"adapterWallMs":duration_ms(wall),"adapterOperationMs":duration_ms(operation),"harnessEnvelopeOverheadMs":duration_ms(wall)-duration_ms(operation)});
         emit_performance_event(
-            json!({"event":"measurement-start","adapter":"mcp","samples":samples,"rootPid":std::process::id()}),
+            json!({"event":"sample","adapter":"mcp","index":index,"sample":sample,"rootPid":std::process::id()}),
         );
-        let mut measured = Vec::with_capacity(samples);
-        for index in 0..samples {
-            let started = Instant::now();
-            let operation = run_mcp_sample(&harness, &server, &sid, &pid).await;
-            let wall = started.elapsed();
-            let sample = json!({
-                "adapterWallMs": duration_ms(wall),
-                "operationMs": duration_ms(operation),
-                "adapterOverheadMs": duration_ms(wall) - duration_ms(operation),
-            });
-            emit_performance_event(
-                json!({"event":"sample","adapter":"mcp","index":index,"sample":sample,"rootPid":std::process::id()}),
-            );
-            measured.push(sample);
-        }
-        emit_performance_event(
-            json!({"event":"client-disconnected","adapter":"mcp","samples":measured,"rootPid":std::process::id()}),
-        );
-        wait_for_rss_acknowledgement();
-    } else {
-        run_mcp_sample(&harness, &server, &sid, &pid).await;
+        measured.push(sample);
     }
+    transport.close().await;
+    denied_transport.close().await;
+    emit_performance_event(
+        json!({"event":"client-disconnected","adapter":"mcp","samples":measured,"rootPid":std::process::id()}),
+    );
+    wait_for_rss_acknowledgement();
 }
 
 async fn run_mcp_sample(
-    harness: &ChromeRuntimeHarness,
-    server: &Server,
+    metadata: &FixtureMetadata,
+    server: &mut dyn McpEndpoint,
+    denied: &mut dyn McpEndpoint,
     sid: &types::SessionId,
     pid: &types::PageId,
 ) -> Duration {
@@ -138,7 +192,7 @@ async fn run_mcp_sample(
         &env(
             CommandId::new(),
             PrimitiveCommand::Navigate(NavigateCommand {
-                url: harness.site_url(),
+                url: metadata.site_url.clone(),
                 wait_until: WaitUntil::DomContentLoaded,
                 timeout_ms: 15_000,
             }),
@@ -146,7 +200,7 @@ async fn run_mcp_sample(
     )
     .await;
     event_ordering.push("navigation.completed".to_owned());
-    let fixture = harness.upload_root().join("canonical-upload.txt");
+    let fixture = metadata.upload_root.join("canonical-upload.txt");
     let fixture_bytes = b"bounded fixture\n";
     std::fs::write(&fixture, fixture_bytes).unwrap();
     observed.push("command.upload");
@@ -343,13 +397,12 @@ async fn run_mcp_sample(
         })
         .unwrap();
     let read = server
-        .handle_message(req(
+        .request(req(
             id,
             "resources/read",
             json!({"uri":format!("artifact://{}",shot.0)}),
         ))
-        .await
-        .unwrap();
+        .await;
     id += 1;
     assert!(read["result"]["contents"][0]["blob"].is_string());
     observed.push("checkpoint.save");
@@ -386,29 +439,15 @@ async fn run_mcp_sample(
     .await;
     assert!(!events["events"].as_array().unwrap().is_empty());
     event_ordering.push("events.read".to_owned());
-    let denied_handle = harness
-        .authority
-        .verify(&harness.denied_token)
-        .await
-        .unwrap();
-    let denied = Server::new(Arc::new(AuthenticatedRuntime::new(
-        harness.service.clone(),
-        denied_handle,
-    )));
-    initialize(&denied).await;
-    let listed = denied
-        .handle_message(req(89, "tools/list", json!({})))
-        .await
-        .unwrap();
+    let listed = denied.request(req(89, "tools/list", json!({}))).await;
     assert!(listed["result"]["tools"].as_array().unwrap().is_empty());
     let denial = denied
-        .handle_message(req(
+        .request(req(
             90,
             "tools/call",
             json!({"name":"runtime_info","arguments":{}}),
         ))
-        .await
-        .unwrap();
+        .await;
     assert_eq!(denial["error"]["code"], -32601);
     let operation_elapsed = operation_started.elapsed();
     let download = completed(&boundary)
@@ -424,7 +463,7 @@ async fn run_mcp_sample(
     let proof = CanonicalProof {
         outcome_status: "completed".into(),
         evidence: vec![
-            proof("navigation", harness.site_url().as_bytes()),
+            proof("navigation", metadata.site_url.as_bytes()),
             proof("upload", fixture_bytes),
             EvidenceProof {
                 kind: "screenshot".into(),
@@ -515,29 +554,187 @@ fn wait_for_rss_acknowledgement() {
     panic!("RSS acknowledgement timed out");
 }
 
-async fn initialize(server: &Server) {
-    server.handle_message(req(1,"initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"conformance","version":"1"}}))).await;
+struct McpStdioTransport {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    lines: Lines<BufReader<ChildStdout>>,
+}
+
+#[async_trait::async_trait]
+trait McpEndpoint {
+    async fn request(&mut self, value: Value) -> Value;
+}
+
+struct DirectEndpoint<'a>(&'a Server);
+
+#[async_trait::async_trait]
+impl McpEndpoint for DirectEndpoint<'_> {
+    async fn request(&mut self, value: Value) -> Value {
+        self.0.handle_message(value).await.unwrap_or(Value::Null)
+    }
+}
+
+#[async_trait::async_trait]
+impl McpEndpoint for McpStdioTransport {
+    async fn request(&mut self, value: Value) -> Value {
+        McpStdioTransport::request(self, value).await
+    }
+}
+
+impl McpStdioTransport {
+    async fn start(role: &str, control: &std::path::Path) -> Self {
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "mcp_performance_stdio_fixture_process",
+                "--nocapture",
+            ])
+            .env("CONFORMANCE_MCP_PERFORMANCE_CHILD", "1")
+            .env("CONFORMANCE_MCP_ROLE", role)
+            .env(
+                "CONFORMANCE_MCP_METADATA",
+                control.join(format!("{role}.json")),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut transport = Self {
+            child,
+            stdin: Some(stdin),
+            lines: BufReader::new(stdout).lines(),
+        };
+        transport.request(req(1,"initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"performance","version":"1"}}))).await;
+        transport
+            .notify(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
+            .await;
+        transport
+    }
+    async fn request(&mut self, value: Value) -> Value {
+        let id = value["id"].clone();
+        self.notify(value).await;
+        loop {
+            let line = self
+                .lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("MCP child EOF");
+            let Ok(response) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if response["id"] == id {
+                return response;
+            }
+        }
+    }
+    async fn notify(&mut self, value: Value) {
+        let stdin = self.stdin.as_mut().expect("MCP transport closed");
+        stdin
+            .write_all(format!("{}\n", serde_json::to_string(&value).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        stdin.flush().await.unwrap();
+    }
+    async fn close(mut self) {
+        drop(self.stdin.take());
+        let status = self.child.wait().await.unwrap();
+        assert!(
+            status.success(),
+            "MCP stdio child did not exit cleanly: {status}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "spawned as the persistent MCP stdio transport by the performance gate"]
+async fn mcp_performance_stdio_fixture_process() {
+    if std::env::var("CONFORMANCE_MCP_PERFORMANCE_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    let harness = ChromeRuntimeHarness::start().await;
+    let metadata = FixtureMetadata {
+        site_url: harness.site_url(),
+        upload_root: harness.upload_root().to_path_buf(),
+    };
+    let destination = std::path::PathBuf::from(std::env::var("CONFORMANCE_MCP_METADATA").unwrap());
+    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    std::fs::rename(temporary, destination).unwrap();
+    let role = std::env::var("CONFORMANCE_MCP_ROLE").unwrap();
+    let handle = if role == "denied" {
+        harness
+            .authority
+            .verify(&harness.denied_token)
+            .await
+            .unwrap()
+    } else {
+        harness.handle.clone()
+    };
+    let (ownership, recorder) =
+        SessionOwnershipRegistry::bounded(harness.config.browser.max_active);
+    let runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
+        harness.service.clone(),
+        handle,
+        recorder,
+    ));
+    let store = artifact_store::ArtifactStore::new(
+        &harness.config.browser.artifacts_dir,
+        harness.config.browser.max_artifact_bytes,
+        harness.config.browser.max_screenshot_dimension,
+    );
+    let reader = ArtifactReader::new(
+        store.clone(),
+        ownership,
+        harness.config.browser.max_artifact_bytes,
+        ArtifactOwnershipLimits {
+            max_records: 128,
+            max_bytes: harness.config.browser.max_artifact_bytes as u64,
+        },
+    )
+    .unwrap();
+    Server::production(
+        runtime,
+        EventStore::new(128),
+        ArtifactResources::production(
+            reader,
+            store,
+            &harness.config.browser.downloads_dir,
+            harness.config.browser.max_artifact_bytes,
+            128,
+        ),
+    )
+    .serve(tokio::io::stdin(), tokio::io::stdout())
+    .await
+    .unwrap();
+}
+
+async fn initialize(server: &mut dyn McpEndpoint) {
+    server.request(req(1,"initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"conformance","version":"1"}}))).await;
     server
-        .handle_message(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
+        .request(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
         .await;
 }
 fn req(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
 }
-async fn tool(server: &Server, id: &mut u64, name: &str, arguments: Value) -> Value {
+async fn tool(server: &mut dyn McpEndpoint, id: &mut u64, name: &str, arguments: Value) -> Value {
     let response = server
-        .handle_message(req(
+        .request(req(
             *id,
             "tools/call",
             json!({"name":name,"arguments":arguments}),
         ))
-        .await
-        .unwrap();
+        .await;
     *id += 1;
     assert!(response.get("error").is_none(), "{response}");
     response["result"]["structuredContent"].clone()
 }
-async fn command(server: &Server, id: &mut u64, envelope: &CommandEnvelope) -> Value {
+async fn command(server: &mut dyn McpEndpoint, id: &mut u64, envelope: &CommandEnvelope) -> Value {
     tool(server, id, "command_execute", json!({"envelope":envelope})).await
 }
 fn completed(outcome: &CommandOutcome) -> &Vec<Evidence> {

@@ -1,13 +1,12 @@
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
-use axum::{routing::get, Router};
 use chrono::{Duration as ChronoDuration, Utc};
 use interface_core::{
-    ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, Event, EventGapReason, EventStore,
-    SessionOwnershipRegistry,
+    ArtifactBoundaryTestObserver, ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, Event,
+    EventGapReason, EventStore, RuntimeInterface, SessionOwnershipRegistry,
 };
 use page_runtime::PageRuntime;
-use sdk_core::RuntimeService;
+use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use std::{
     path::{Path, PathBuf},
@@ -19,7 +18,7 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
     CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, OpenPageRequest, PageId,
@@ -33,6 +32,13 @@ struct CapacityFactory {
     peak: Arc<AtomicUsize>,
     released: Arc<AtomicUsize>,
     wake: Arc<Notify>,
+    started: Arc<Mutex<Vec<String>>>,
+}
+struct SlowArtifactRead;
+impl ArtifactBoundaryTestObserver for SlowArtifactRead {
+    fn before_artifact_read(&self) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 struct CapacityWorker {
     id: WorkerId,
@@ -41,6 +47,7 @@ struct CapacityWorker {
     peak: Arc<AtomicUsize>,
     released: Arc<AtomicUsize>,
     wake: Arc<Notify>,
+    started: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -53,6 +60,7 @@ impl WorkerFactory for CapacityFactory {
             peak: self.peak.clone(),
             released: self.released.clone(),
             wake: self.wake.clone(),
+            started: self.started.clone(),
         }))
     }
 }
@@ -74,6 +82,7 @@ impl BrowserWorker for CapacityWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
+        self.started.lock().await.push(command.url.clone());
         while self.released.load(Ordering::SeqCst) == 0 {
             self.wake.notified().await;
         }
@@ -101,11 +110,8 @@ impl BrowserWorker for CapacityWorker {
     }
 }
 
-async fn http_request(stream: &mut TcpStream) {
-    stream
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .unwrap();
+async fn http_request(stream: &mut TcpStream, request: &[u8]) {
+    stream.write_all(request).await.unwrap();
     let mut response = Vec::new();
     let mut chunk = [0_u8; 128];
     while !response.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -116,38 +122,100 @@ async fn http_request(stream: &mut TcpStream) {
     assert!(response.starts_with(b"HTTP/1.1 200"));
 }
 
+async fn submit_capacity(
+    runtime: RuntimeService,
+    session: SessionId,
+    page: PageId,
+    url: &str,
+) -> CommandOutcome {
+    runtime
+        .submit(CommandEnvelope {
+            schema_version: 1,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session,
+            page_id: Some(page),
+            deadline: Utc::now() + ChronoDuration::seconds(10),
+            command: PrimitiveCommand::Navigate(NavigateCommand {
+                url: url.into(),
+                wait_until: types::WaitUntil::DomContentLoaded,
+                timeout_ms: 5_000,
+            }),
+        })
+        .await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn production_listener_enforces_sixty_four_live_connections() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(broker::serve_listener(
-        listener,
-        Router::new().route("/healthz", get(|| async { "ok" })),
-        64,
+    let authority = Arc::new(AuthorityStore::in_memory());
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [Capability::SessionRead],
+            Utc::now() + ChronoDuration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let runtime = RuntimeService::default();
+    let app = broker::router(broker::AppState::new(
+        authority,
+        move |handle| {
+            Arc::new(AuthenticatedRuntime::new(runtime.clone(), handle))
+                as Arc<dyn RuntimeInterface>
+        },
+        config::InterfaceConfig::default(),
     ));
+    let server = tokio::spawn(broker::serve_listener(listener, app, 64));
+    let request=format!("GET /v1/runtime HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nx-interface-version: {}\r\nx-correlation-id: {}\r\nx-deadline: {}\r\n\r\n",types::CURRENT_INTERFACE_VERSION,uuid::Uuid::new_v4(),(Utc::now()+ChronoDuration::seconds(30)).to_rfc3339());
     let mut clients = Vec::new();
     for _ in 0..64 {
         let mut client = TcpStream::connect(address).await.unwrap();
-        http_request(&mut client).await;
+        http_request(&mut client, request.as_bytes()).await;
         clients.push(client);
     }
     let mut overflow = TcpStream::connect(address).await.unwrap();
-    overflow
-        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .unwrap();
-    let mut byte = [0_u8; 1];
+    overflow.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    overflow.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 429"), "{response}");
+    assert!(response.contains("retry-after: 1\r\n"), "{response}");
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), overflow.read(&mut byte))
-            .await
-            .is_err()
+        response.contains("\"code\":\"resourceExhausted\""),
+        "{response}"
     );
+    assert!(response.contains("\"retryable\":true"), "{response}");
+    assert!(response.contains("\"retryAfterMs\":1000"), "{response}");
     drop(clients.pop());
-    let count = tokio::time::timeout(Duration::from_secs(2), overflow.read(&mut byte))
+    let retry_started = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut admitted = TcpStream::connect(address).await.unwrap();
+    http_request(&mut admitted, request.as_bytes()).await;
+    assert!(retry_started.elapsed() >= Duration::from_millis(1_000));
+    drop(clients);
+    drop(admitted);
+    let oversized = reqwest::Client::new()
+        .post(format!("http://{address}/v1/sessions"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-interface-version", types::CURRENT_INTERFACE_VERSION)
+        .header("x-correlation-id", uuid::Uuid::new_v4().to_string())
+        .header(
+            "x-deadline",
+            (Utc::now() + ChronoDuration::seconds(30)).to_rfc3339(),
+        )
+        .header("content-type", "application/json")
+        .body(vec![
+            b'x';
+            config::InterfaceConfig::default().max_request_bytes + 1
+        ])
+        .send()
         .await
-        .expect("overflow connection was not admitted after release")
         .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(oversized.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
     server.abort();
 }
 
@@ -183,7 +251,7 @@ async fn concurrent_authenticated_artifact_readers_use_the_bounded_production_re
     recorder
         .record_authenticated_session(principal, session.clone())
         .unwrap();
-    let reader = ArtifactReader::new(
+    let reader = ArtifactReader::new_with_test_observer(
         store,
         ownership,
         4096,
@@ -191,6 +259,7 @@ async fn concurrent_authenticated_artifact_readers_use_the_bounded_production_re
             max_records: 32,
             max_bytes: 4096,
         },
+        Arc::new(SlowArtifactRead),
     )
     .unwrap();
     let reference = reader
@@ -208,16 +277,36 @@ async fn concurrent_authenticated_artifact_readers_use_the_bounded_production_re
             reference.clone(),
         );
         reads.push(tokio::spawn(async move {
-            reader
-                .read(&handle, &context, &session, &reference)
-                .await
-                .unwrap()
-                .bytes
+            reader.read(&handle, &context, &session, &reference).await
         }));
     }
+    let mut completed = 0;
+    let mut overloaded = 0;
     for read in reads {
-        assert_eq!(read.await.unwrap(), b"bounded-artifact");
+        match read.await.unwrap() {
+            Ok(content) => {
+                assert_eq!(content.bytes, b"bounded-artifact");
+                completed += 1;
+            }
+            Err(error) => {
+                assert_eq!(error.code, types::InterfaceErrorCode::ResourceExhausted);
+                assert!(error.retryable);
+                assert_eq!(error.retry_after_ms, Some(25));
+                overloaded += 1;
+            }
+        }
     }
+    assert_eq!(completed, 8);
+    assert_eq!(overloaded, 56);
+    assert_eq!(reader.peak_concurrent_reads_for_tests(), 8);
+    let retry_started = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let retried = reader
+        .read(&handle, &context, &session, &reference)
+        .await
+        .unwrap();
+    assert_eq!(retried.bytes, b"bounded-artifact");
+    assert!(retry_started.elapsed() >= Duration::from_millis(25));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -227,6 +316,7 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
     let active = Arc::new(AtomicUsize::new(0));
     let released = Arc::new(AtomicUsize::new(0));
     let wake = Arc::new(Notify::new());
+    let started = Arc::new(Mutex::new(Vec::new()));
     let workers = Arc::new(WorkerPool::new(
         8,
         Arc::new(CapacityFactory {
@@ -234,6 +324,7 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
             peak: peak.clone(),
             released: released.clone(),
             wake: wake.clone(),
+            started: started.clone(),
         }),
     ));
     let runtime = RuntimeService::new(
@@ -269,25 +360,10 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
     }
     assert_eq!(runtime.list_sessions().await.len(), 32);
     let mut workflows = Vec::new();
-    for (session, page) in targets.iter().take(9).cloned() {
+    for (session, page) in targets.iter().take(8).cloned() {
         let runtime = runtime.clone();
         workflows.push(tokio::spawn(async move {
-            runtime
-                .submit(CommandEnvelope {
-                    schema_version: 1,
-                    command_id: CommandId::new(),
-                    workflow_id: WorkflowId::new(),
-                    attempt_id: AttemptId::new(),
-                    session_id: session,
-                    page_id: Some(page),
-                    deadline: Utc::now() + ChronoDuration::seconds(10),
-                    command: PrimitiveCommand::Navigate(NavigateCommand {
-                        url: "https://capacity.test/".into(),
-                        wait_until: types::WaitUntil::DomContentLoaded,
-                        timeout_ms: 5_000,
-                    }),
-                })
-                .await
+            submit_capacity(runtime, session, page, "https://bulk.test/").await
         }));
     }
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -297,6 +373,18 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
     })
     .await
     .unwrap();
+    let (session, page) = targets[8].clone();
+    let runtime_clone = runtime.clone();
+    workflows.push(tokio::spawn(async move {
+        submit_capacity(runtime_clone, session, page, "https://interactive.test/").await
+    }));
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    for (session, page) in targets.iter().skip(9).take(8).cloned() {
+        let runtime = runtime.clone();
+        workflows.push(tokio::spawn(async move {
+            submit_capacity(runtime, session, page, "https://bulk-queued.test/").await
+        }));
+    }
     assert!(peak.load(Ordering::SeqCst) <= 8);
     tokio::time::sleep(Duration::from_millis(25)).await;
     assert_eq!(
@@ -312,6 +400,11 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
             CommandOutcome::Completed { .. }
         ));
     }
+    assert_eq!(
+        started.lock().await[8],
+        "https://interactive.test/",
+        "FIFO worker admission starved the interactive request"
+    );
     assert_eq!(active.load(Ordering::SeqCst), 0);
 }
 

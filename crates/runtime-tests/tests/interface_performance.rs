@@ -21,12 +21,10 @@ fn median_iqr(mut samples: Vec<Duration>) -> (Duration, Duration) {
 #[test]
 fn benchmark_statistics_require_seven_warmed_equivalent_samples() {
     for adapter in ADAPTERS {
-        for _ in 0..3 {
-            black_box(
-                serde_json::to_vec(&serde_json::json!({"adapter": adapter, "command": "inspect"}))
-                    .unwrap(),
-            );
-        }
+        black_box(
+            serde_json::to_vec(&serde_json::json!({"adapter": adapter, "command": "inspect"}))
+                .unwrap(),
+        );
         let samples = (0..7)
             .map(|_| {
                 let start = Instant::now();
@@ -40,7 +38,7 @@ fn benchmark_statistics_require_seven_warmed_equivalent_samples() {
             })
             .collect::<Vec<_>>();
         let (median, iqr) = median_iqr(samples);
-        println!("interface-performance adapter={adapter} warmed_samples=7 adapter_median_us={} adapter_iqr_us={}", median.as_micros(), iqr.as_micros());
+        println!("interface-performance adapter={adapter} discarded_warmups=1 measured_samples=7 adapter_operation_median_us={} adapter_operation_iqr_us={}", median.as_micros(), iqr.as_micros());
     }
 }
 
