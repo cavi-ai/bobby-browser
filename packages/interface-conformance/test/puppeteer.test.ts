@@ -5,11 +5,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { chromium } from "playwright-core";
-import { playwrightDriver } from "../src/playwright.js";
+import puppeteer from "puppeteer-core";
+import { puppeteerDriver } from "../src/puppeteer.js";
 import { runCanonicalScenario } from "../src/scenario.js";
 
-test("Playwright completes the canonical conformance workflow", { timeout: 120_000 }, async (t) => {
+test("Puppeteer completes the canonical conformance workflow", { timeout: 120_000 }, async (t) => {
   const child = spawn(process.env.CARGO ?? "cargo", ["run", "-q", "-p", "cdp-gateway", "--example", "conformance_gateway"], {
     cwd: new URL("../../../..", import.meta.url),
     stdio: ["ignore", "pipe", "pipe"],
@@ -22,27 +22,31 @@ test("Playwright completes the canonical conformance workflow", { timeout: 120_0
       child.kill("SIGTERM");
       await once(child, "exit");
     }
-    const code = child.exitCode;
-    const signal = child.signalCode;
-    if (code !== null && code !== 0) throw new Error(`gateway exited ${code}: ${stderr}`);
-    if (signal !== null && signal !== "SIGTERM") throw new Error(`gateway exited by ${signal}: ${stderr}`);
+    if (child.exitCode !== null && child.exitCode !== 0) throw new Error(`gateway exited ${child.exitCode}: ${stderr}`);
+    if (child.signalCode !== null && child.signalCode !== "SIGTERM") throw new Error(`gateway exited by ${child.signalCode}: ${stderr}`);
   });
   const line = await readLine(child.stdout).catch(error => {
     throw new Error(`gateway closed before readiness: ${stderr}`, { cause: error });
   });
   const boot = JSON.parse(line) as { endpoint: string; token: string; site: string };
-  const browser = await chromium.connectOverCDP(boot.endpoint, {
+  const discovery = await fetch(`${boot.endpoint}/json/version`, {
     headers: { Authorization: `Bearer ${boot.token}` },
   });
-  t.after(() => browser.close({ reason: "interface conformance complete" }));
-  const context = browser.contexts()[0];
-  if (!context) throw new Error("Playwright did not expose the default browser context");
-  const page = context.pages()[0] ?? await context.newPage();
-  const dir = await mkdtemp(join(tmpdir(), "interface-conformance-"));
+  assert.equal(discovery.status, 200);
+  const version = await discovery.json() as { webSocketDebuggerUrl: string };
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: version.webSocketDebuggerUrl,
+    headers: { Authorization: `Bearer ${boot.token}` },
+    defaultViewport: null,
+  });
+  t.after(() => browser.disconnect());
+  const pages = await browser.pages();
+  const page = pages[0] ?? await browser.newPage();
+  const dir = await mkdtemp(join(tmpdir(), "interface-conformance-puppeteer-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const fixture = join(dir, "resume.txt");
   await writeFile(fixture, "bounded fixture\n");
-  const proof = await runCanonicalScenario(playwrightDriver(page, boot.endpoint, boot.token), boot.site, fixture);
+  const proof = await runCanonicalScenario(puppeteerDriver(page, boot.endpoint, boot.token), boot.site, fixture);
   assert.deepEqual(proof, { submitted: true, popupObserved: true, downloadVerified: true });
 });
 

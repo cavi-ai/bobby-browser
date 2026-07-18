@@ -7,6 +7,12 @@ use crate::{CdpError, CdpErrorCode, CdpEvent};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Handler {
+    AuditsEnable,
+    PerformanceEnable,
+    NetworkSetUserAgent,
+    TargetGetBrowserContexts,
+    TargetSetDiscoverTargets,
+    TargetCreateTarget,
     BrowserGetVersion,
     BrowserSetDownloadBehavior,
     EmulationSetFocus,
@@ -36,6 +42,12 @@ pub(crate) enum Handler {
 impl Handler {
     const fn translation_function(self) -> &'static str {
         match self {
+            Self::AuditsEnable => "configure_gateway_audit_events",
+            Self::PerformanceEnable => "configure_gateway_performance_metrics",
+            Self::NetworkSetUserAgent => "validate_exact_current_user_agent_noop",
+            Self::TargetGetBrowserContexts => "list_runtime_browser_contexts",
+            Self::TargetSetDiscoverTargets => "configure_gateway_target_discovery",
+            Self::TargetCreateTarget => "open_runtime_page",
             Self::BrowserGetVersion => "runtime_info",
             Self::BrowserSetDownloadBehavior => "configure_runtime_downloads",
             Self::EmulationSetFocus => "submit_runtime_focus_emulation",
@@ -66,6 +78,7 @@ impl Handler {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum EventTranslator {
+    TargetCreated,
     TargetAttached,
     ExecutionContextCreated,
     ExecutionContextsCleared,
@@ -84,6 +97,7 @@ pub(crate) enum EventTranslator {
 impl EventTranslator {
     const fn translation_function(self) -> &'static str {
         match self {
+            Self::TargetCreated => "runtime_target_discovered",
             Self::TargetAttached => "runtime_target_attached",
             Self::ExecutionContextCreated => "runtime_execution_context_created",
             Self::ExecutionContextsCleared => "runtime_execution_contexts_cleared",
@@ -117,6 +131,10 @@ pub struct MethodMetadata {
     pub parameter_schema_revision: String,
     pub translation_function: String,
     pub scenarios: Vec<String>,
+    #[serde(skip)]
+    pub playwright_covered: bool,
+    #[serde(skip)]
+    pub puppeteer_covered: bool,
 }
 
 impl MethodMetadata {
@@ -133,6 +151,10 @@ pub struct EventMetadata {
     pub parameter_schema_revision: String,
     pub translation_function: String,
     pub scenarios: Vec<String>,
+    #[serde(skip)]
+    pub playwright_covered: bool,
+    #[serde(skip)]
+    pub puppeteer_covered: bool,
 }
 
 impl EventMetadata {
@@ -152,10 +174,47 @@ pub struct MethodRegistry {
 
 impl MethodRegistry {
     pub fn compiled() -> Self {
-        let manifest: SupportManifest =
+        let mut manifest: SupportManifest =
             serde_json::from_str(include_str!("../../../docs/cdp-support.json"))
                 .expect("compiled CDP support manifest must be valid");
+        for method in &mut manifest.methods {
+            method.playwright_covered = method
+                .scenarios
+                .iter()
+                .any(|scenario| scenario.starts_with("playwright-"));
+            method.puppeteer_covered = method
+                .scenarios
+                .iter()
+                .any(|scenario| scenario.starts_with("puppeteer-"));
+        }
+        for event in &mut manifest.events {
+            event.playwright_covered = event.scenarios.iter().any(|scenario| {
+                scenario.starts_with("playwright-") || scenario == "worker-replacement"
+            });
+            event.puppeteer_covered = event
+                .scenarios
+                .iter()
+                .any(|scenario| scenario.starts_with("puppeteer-"));
+        }
         let handlers = BTreeMap::from([
+            ("Audits.enable".to_owned(), Handler::AuditsEnable),
+            ("Performance.enable".to_owned(), Handler::PerformanceEnable),
+            (
+                "Network.setUserAgentOverride".to_owned(),
+                Handler::NetworkSetUserAgent,
+            ),
+            (
+                "Target.getBrowserContexts".to_owned(),
+                Handler::TargetGetBrowserContexts,
+            ),
+            (
+                "Target.setDiscoverTargets".to_owned(),
+                Handler::TargetSetDiscoverTargets,
+            ),
+            (
+                "Target.createTarget".to_owned(),
+                Handler::TargetCreateTarget,
+            ),
             ("Browser.getVersion".to_owned(), Handler::BrowserGetVersion),
             (
                 "Browser.setDownloadBehavior".to_owned(),
@@ -227,6 +286,10 @@ impl MethodRegistry {
             ),
         ]);
         let event_translators = BTreeMap::from([
+            (
+                "Target.targetCreated".to_owned(),
+                EventTranslator::TargetCreated,
+            ),
             (
                 "Target.attachedToTarget".to_owned(),
                 EventTranslator::TargetAttached,
@@ -398,6 +461,23 @@ impl MethodRegistry {
                 "event is not supported",
             ));
         };
+        if matches!(translator, EventTranslator::TargetCreated) {
+            return if event
+                .params
+                .get("targetInfo")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|info| info.get("targetId"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+            {
+                Ok(event)
+            } else {
+                Err(CdpError::new(
+                    CdpErrorCode::InvalidParams,
+                    "invalid event payload",
+                ))
+            };
+        }
         if matches!(
             translator,
             EventTranslator::ExecutionContextCreated | EventTranslator::FrameNavigated
@@ -443,6 +523,7 @@ impl MethodRegistry {
             };
         }
         let required = match translator {
+            EventTranslator::TargetCreated => unreachable!(),
             EventTranslator::TargetAttached => "sessionId",
             EventTranslator::ExecutionContextCreated => unreachable!(),
             EventTranslator::ExecutionContextsCleared => unreachable!(),

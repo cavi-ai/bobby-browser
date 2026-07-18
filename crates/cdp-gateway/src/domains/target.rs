@@ -9,6 +9,16 @@ pub(crate) struct AutoAttach {
     pub auto_attach: bool,
     pub wait_for_debugger_on_start: bool,
     pub flatten: bool,
+    #[serde(default)]
+    pub filter: Vec<TargetFilter>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TargetFilter {
+    #[serde(rename = "type")]
+    pub target_type: Option<String>,
+    pub exclude: Option<bool>,
 }
 
 pub(crate) fn auto_attach(params: Value) -> Result<AutoAttach, CdpError> {
@@ -20,6 +30,19 @@ pub(crate) fn auto_attach(params: Value) -> Result<AutoAttach, CdpError> {
             )
         })
         .and_then(|value: AutoAttach| {
+            if value.filter.len() > 32
+                || value.filter.iter().any(|item| {
+                    item.target_type
+                        .as_ref()
+                        .is_some_and(|kind| kind.len() > 64)
+                        || item.target_type.is_none() && item.exclude.is_some()
+                })
+            {
+                return Err(CdpError::new(
+                    CdpErrorCode::InvalidParams,
+                    "invalid bounded auto-attach filter",
+                ));
+            }
             if value.auto_attach && !value.flatten {
                 Err(CdpError::new(
                     CdpErrorCode::InvalidParams,

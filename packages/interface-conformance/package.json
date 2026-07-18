@@ -5,11 +5,15 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test:playwright": "pnpm run build && node --test dist/test/playwright.test.js"
+    "test:playwright": "pnpm run build && node --test dist/test/playwright.test.js",
+    "test:puppeteer": "pnpm run build && node --test dist/test/puppeteer.test.js",
+    "test": "pnpm run build && node --test dist/test/*.test.js"
   },
   "devDependencies": {
+    "@bobby-browser/sdk": "workspace:*",
     "@types/node": "24.10.1",
     "playwright-core": "1.61.1",
+    "puppeteer-core": "25.3.0",
     "typescript": "7.0.2"
   }
 }

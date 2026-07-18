@@ -116,6 +116,16 @@ async fn nested_auto_attach_does_not_duplicate_page_targets() {
 
 #[tokio::test]
 async fn auto_attach_rejects_malformed_params_and_missing_capability() {
+    let filtered = connection([Capability::SessionRead])
+        .await
+        .dispatch(CdpRequest::new(
+            3,
+            "Target.setAutoAttach",
+            json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true, "filter": [{"type":"page", "exclude":true}, {"type":"iframe"}]}),
+        ))
+        .await;
+    assert!(filtered.error().is_none(), "{:?}", filtered.error());
+
     let malformed = connection([Capability::SessionRead])
         .await
         .dispatch(CdpRequest::new(
@@ -166,6 +176,28 @@ async fn download_behavior_is_bounded_and_capability_checked() {
         denied.error().unwrap().code,
         CdpErrorCode::RuntimeFailure as i32
     );
+}
+
+#[tokio::test]
+async fn puppeteer_user_agent_compatibility_is_an_exact_current_value_noop() {
+    let allowed = connection([Capability::BrowserMutate])
+        .await
+        .dispatch(CdpRequest::new(
+            91,
+            "Network.setUserAgentOverride",
+            json!({"userAgent":"AutomationRuntime/0.1"}),
+        ))
+        .await;
+    assert!(allowed.error().is_none());
+    let mutation = connection([Capability::BrowserMutate])
+        .await
+        .dispatch(CdpRequest::new(
+            92,
+            "Network.setUserAgentOverride",
+            json!({"userAgent":"mutated-agent"}),
+        ))
+        .await;
+    assert_eq!(mutation.error().unwrap().code, CdpErrorCode::InvalidParams as i32);
 }
 
 #[tokio::test]

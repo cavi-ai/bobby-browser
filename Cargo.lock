@@ -1090,6 +1090,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "interface-conformance"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "interface-core",
+ "mcp-gateway",
+ "sdk-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "types",
+ "uuid",
+]
+
+[[package]]
 name = "interface-core"
 version = "0.1.0"
 dependencies = [
