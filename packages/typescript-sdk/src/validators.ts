@@ -23,6 +23,12 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function hasExactKeys(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.has(key));
+}
+
 function isString(value: unknown): value is string { return typeof value === "string"; }
 function isNullableString(value: unknown): value is string | null { return value === null || isString(value); }
 function isStringArray(value: unknown): value is string[] { return Array.isArray(value) && value.every(isString); }
@@ -78,7 +84,7 @@ function isJsonValue(value: unknown, depth = 0): value is JsonValue {
 }
 
 export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
-  return isRecord(value)
+  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"])
     && isString(value.version)
     && isStringArray(value.capabilities)
     && isSafeUnsigned(value.active_sessions)
@@ -87,7 +93,7 @@ export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
 }
 
 export function isSessionState(value: unknown): value is SessionState {
-  return isRecord(value)
+  return hasExactKeys(value, ["id", "profile", "proxy", "page_ids", "created_at", "last_used_at"])
     && isUuid(value.id)
     && isString(value.profile)
     && isNullableString(value.proxy)
@@ -97,7 +103,7 @@ export function isSessionState(value: unknown): value is SessionState {
 }
 
 export function isPageState(value: unknown): value is PageState {
-  return isRecord(value)
+  return hasExactKeys(value, ["id", "session_id", "url", "mode", "ready_state", "pending_requests"])
     && isUuid(value.id)
     && isUuid(value.session_id)
     && isNullableString(value.url)
@@ -107,13 +113,13 @@ export function isPageState(value: unknown): value is PageState {
 }
 
 function isTextMatch(value: unknown): value is TextMatch {
-  return isRecord(value)
+  return hasExactKeys(value, ["kind", "value"])
     && (value.kind === "exact" || value.kind === "contains" || value.kind === "regex")
     && isString(value.value);
 }
 
 function isTargetSpec(value: unknown, depth = 0): value is TargetSpec {
-  if (!isRecord(value) || depth >= 64) return false;
+  if (!hasExactKeys(value, ["css", "testId", "role", "accessibleName", "label", "text", "attributes", "framePath", "shadowPath", "ordinal", "allowBestMatch"]) || depth >= 64) return false;
   return isNullableString(value.css)
     && isNullableString(value.testId)
     && isNullableString(value.role)
@@ -128,7 +134,7 @@ function isTargetSpec(value: unknown, depth = 0): value is TargetSpec {
 }
 
 function isTargetFingerprint(value: unknown): value is TargetFingerprint {
-  return isRecord(value)
+  return hasExactKeys(value, ["pageId", "frame", "role", "name", "stableAttributes"])
     && isUuid(value.pageId)
     && isNullableString(value.frame)
     && isNullableString(value.role)
@@ -137,7 +143,7 @@ function isTargetFingerprint(value: unknown): value is TargetFingerprint {
 }
 
 function isCandidateEvidence(value: unknown): value is CandidateEvidence {
-  return isRecord(value)
+  return hasExactKeys(value, ["role", "name", "score", "reasons"])
     && isNullableString(value.role)
     && isNullableString(value.name)
     && isSafeSigned(value.score, -2_147_483_648, 2_147_483_647)
@@ -145,16 +151,16 @@ function isCandidateEvidence(value: unknown): value is CandidateEvidence {
 }
 
 function isPageEvidence(value: unknown): value is PageEvidence {
-  return isRecord(value) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
+  return hasExactKeys(value, ["pageId", "url", "title"]) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
 }
 
 function isWaitCondition(value: unknown): value is WaitCondition {
   if (!isRecord(value)) return false;
-  if (value.kind === "element") return isTargetSpec(value.target) && (value.state === "attached" || value.state === "detached" || value.state === "visible" || value.state === "hidden" || value.state === "enabled" || value.state === "disabled");
-  if (value.kind === "text" || value.kind === "value") return isTargetSpec(value.target) && isTextMatch(value.matcher);
-  if (value.kind === "url") return isTextMatch(value.matcher);
-  if (value.kind === "document") return value.ready === "commit" || value.ready === "domContentLoaded" || value.ready === "interactive" || value.ready === "networkIdle";
-  return value.kind === "networkQuiet" && isSafeUnsigned(value.idleMs) && isSafeUnsigned(value.maxInFlight);
+  if (value.kind === "element") return hasExactKeys(value, ["kind", "target", "state"]) && isTargetSpec(value.target) && (value.state === "attached" || value.state === "detached" || value.state === "visible" || value.state === "hidden" || value.state === "enabled" || value.state === "disabled");
+  if (value.kind === "text" || value.kind === "value") return hasExactKeys(value, ["kind", "target", "matcher"]) && isTargetSpec(value.target) && isTextMatch(value.matcher);
+  if (value.kind === "url") return hasExactKeys(value, ["kind", "matcher"]) && isTextMatch(value.matcher);
+  if (value.kind === "document") return hasExactKeys(value, ["kind", "ready"]) && (value.ready === "commit" || value.ready === "domContentLoaded" || value.ready === "interactive" || value.ready === "networkIdle");
+  return value.kind === "networkQuiet" && hasExactKeys(value, ["kind", "idleMs", "maxInFlight"]) && isSafeUnsigned(value.idleMs) && isSafeUnsigned(value.maxInFlight);
 }
 
 function validExecutionPathOptionalFields(value: Record<string, unknown>): boolean {
@@ -168,7 +174,8 @@ export function isEvidence(value: unknown): value is Evidence {
   if (!isRecord(value)) return false;
   switch (value.kind) {
     case "executionPath":
-      return (value.path === "directHttp" || value.path === "chromium" || value.path === "chromiumFallback")
+      return hasExactKeys(value, ["kind", "path", "reason", "stateVersion", "elapsedMs", "bytes", "sha256"], ["finalUrl", "contentType", "status", "redirectChain"])
+        && (value.path === "directHttp" || value.path === "chromium" || value.path === "chromiumFallback")
         && (value.reason === "eligibleStaticDocument" || value.reason === "eligibleExplicitDownload" || value.reason === "ineligibleCommand" || value.reason === "semanticTargetRequired" || value.reason === "javascriptRequired" || value.reason === "unsupportedContentType" || value.reason === "stateConflict" || value.reason === "policyRequired")
         && isSafeUnsigned(value.stateVersion)
         && isSafeUnsigned(value.elapsedMs)
@@ -176,17 +183,17 @@ export function isEvidence(value: unknown): value is Evidence {
         && (value.sha256 === null || isLowerSha256(value.sha256))
         && ((value.bytes === null) === (value.sha256 === null))
         && validExecutionPathOptionalFields(value);
-    case "navigation": return isString(value.url) && isString(value.title);
-    case "inspection": return isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
-    case "element": return isString(value.selector) && isNullableString(value.text);
-    case "upload": return isString(value.selector) && isStringArray(value.paths);
-    case "page": return isUuid(value.pageId) && isString(value.url) && isString(value.title);
-    case "pages": return Array.isArray(value.pages) && value.pages.every(isPageEvidence);
-    case "popup": return isUuid(value.openerPageId) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
-    case "download": return isString(value.filename) && isString(value.path) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
-    case "resolution": return isTargetSpec(value.target) && isTargetFingerprint(value.fingerprint) && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence) && typeof value.bestMatchAuthorized === "boolean";
-    case "wait": return isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations);
-    case "screenshot": return isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.width, 4_294_967_295) && isSafeUnsigned(value.height, 4_294_967_295) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
+    case "navigation": return hasExactKeys(value, ["kind", "url", "title"]) && isString(value.url) && isString(value.title);
+    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"]) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
+    case "element": return hasExactKeys(value, ["kind", "selector", "text"]) && isString(value.selector) && isNullableString(value.text);
+    case "upload": return hasExactKeys(value, ["kind", "selector", "paths"]) && isString(value.selector) && isStringArray(value.paths);
+    case "page": return hasExactKeys(value, ["kind", "pageId", "url", "title"]) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
+    case "pages": return hasExactKeys(value, ["kind", "pages"]) && Array.isArray(value.pages) && value.pages.every(isPageEvidence);
+    case "popup": return hasExactKeys(value, ["kind", "openerPageId", "pageId", "url", "title"]) && isUuid(value.openerPageId) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
+    case "download": return hasExactKeys(value, ["kind", "filename", "path", "bytes", "sha256"]) && isString(value.filename) && isString(value.path) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
+    case "resolution": return hasExactKeys(value, ["kind", "target", "fingerprint", "candidates", "bestMatchAuthorized"]) && isTargetSpec(value.target) && isTargetFingerprint(value.fingerprint) && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence) && typeof value.bestMatchAuthorized === "boolean";
+    case "wait": return hasExactKeys(value, ["kind", "condition", "elapsedMs", "observations"]) && isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations);
+    case "screenshot": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "width", "height", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.width, 4_294_967_295) && isSafeUnsigned(value.height, 4_294_967_295) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     default: return false;
   }
 }
@@ -194,7 +201,7 @@ export function isEvidence(value: unknown): value is Evidence {
 function isEvidenceArray(value: unknown): value is Evidence[] { return Array.isArray(value) && value.every(isEvidence); }
 
 export function isCommandError(value: unknown): value is CommandError {
-  return isRecord(value)
+  return hasExactKeys(value, ["code", "message", "layer", "retryable"])
     && (value.code === "invalidRequest" || value.code === "notFound" || value.code === "deadlineExceeded" || value.code === "browserLaunchFailed" || value.code === "browserCommandFailed" || value.code === "verificationFailed" || value.code === "journalFailed" || value.code === "resourceExhausted" || value.code === "policyDenied" || value.code === "internal" || value.code === "targetNotFound" || value.code === "targetAmbiguous" || value.code === "frameNotFound" || value.code === "shadowRootUnavailable" || value.code === "targetDetached" || value.code === "waitConditionTimedOut" || value.code === "screenshotCaptureFailed" || value.code === "networkPolicyDenied" || value.code === "httpResponseTooLarge" || value.code === "httpTransferFailed" || value.code === "httpStateConflict" || value.code === "httpEquivalenceUnproven")
     && isString(value.message)
     && (value.layer === "interface" || value.layer === "broker" || value.layer === "workflow" || value.layer === "page" || value.layer === "driver" || value.layer === "browser" || value.layer === "network" || value.layer === "site" || value.layer === "journal")
@@ -204,29 +211,30 @@ export function isCommandError(value: unknown): value is CommandError {
 export function isCommandOutcome(value: unknown): value is CommandOutcome {
   if (!isRecord(value) || !isUuid(value.commandId)) return false;
   switch (value.status) {
-    case "completed": return isEvidenceArray(value.evidence);
+    case "completed": return hasExactKeys(value, ["status", "commandId", "evidence"]) && isEvidenceArray(value.evidence);
     case "retryableFailure":
     case "policyDenied":
-    case "failed": return isCommandError(value.error);
-    case "needsReconciliation": return isCommandError(value.error) && isEvidenceArray(value.evidence);
-    case "resourceExhausted": return isCommandError(value.error) && isSafeUnsigned(value.retryAfterMs);
-    case "restarted": return isUuid(value.priorAttemptId) && isUuid(value.attemptId) && isString(value.reason);
+    case "failed": return hasExactKeys(value, ["status", "commandId", "error"]) && isCommandError(value.error);
+    case "needsReconciliation": return hasExactKeys(value, ["status", "commandId", "error", "evidence"]) && isCommandError(value.error) && isEvidenceArray(value.evidence);
+    case "resourceExhausted": return hasExactKeys(value, ["status", "commandId", "error", "retryAfterMs"]) && isCommandError(value.error) && isSafeUnsigned(value.retryAfterMs);
+    case "restarted": return hasExactKeys(value, ["status", "commandId", "priorAttemptId", "attemptId", "reason"]) && isUuid(value.priorAttemptId) && isUuid(value.attemptId) && isString(value.reason);
     default: return false;
   }
 }
 
 function isCheckpointInvariant(value: unknown): boolean {
-  return isRecord(value) && ((value.kind === "url" || value.kind === "title")
-    ? isString(value.value)
-    : value.kind === "text" && isString(value.selector) && isString(value.value));
+  if (!isRecord(value)) return false;
+  if (value.kind === "url" || value.kind === "title") return hasExactKeys(value, ["kind", "value"]) && isString(value.value);
+  return value.kind === "text" && hasExactKeys(value, ["kind", "selector", "value"]) && isString(value.selector) && isString(value.value);
 }
 
 export function isRecoveryDecision(value: unknown): value is RecoveryDecision {
   if (!isRecord(value) || !isUuid(value.checkpointId)) return false;
-  if (value.status === "resumed") return isUuid(value.attemptId) && isEvidenceArray(value.evidence);
-  if (value.status === "needsReconciliation") return isUuid(value.attemptId) && isString(value.reason) && isEvidenceArray(value.evidence);
+  if (value.status === "resumed") return hasExactKeys(value, ["status", "checkpointId", "attemptId", "evidence"]) && isUuid(value.attemptId) && isEvidenceArray(value.evidence);
+  if (value.status === "needsReconciliation") return hasExactKeys(value, ["status", "checkpointId", "attemptId", "reason", "evidence"]) && isUuid(value.attemptId) && isString(value.reason) && isEvidenceArray(value.evidence);
   return value.status === "restarted"
-    && isRecord(value.lineage)
+    && hasExactKeys(value, ["status", "checkpointId", "lineage"])
+    && hasExactKeys(value.lineage, ["workflowId", "abandonedAttemptId", "attemptId", "reason"])
     && isUuid(value.lineage.workflowId)
     && isUuid(value.lineage.abandonedAttemptId)
     && isUuid(value.lineage.attemptId)
@@ -234,7 +242,7 @@ export function isRecoveryDecision(value: unknown): value is RecoveryDecision {
 }
 
 export function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoint {
-  return isRecord(value)
+  return hasExactKeys(value, ["schemaVersion", "checkpointId", "workflowId", "attemptId", "sessionId", "pageId", "restartUrl", "currentUrl", "cursor", "boundaryCommandId", "recoveryClass", "invariants", "replayableInputs", "evidence", "recoveryHistory", "createdAt"])
     && value.schemaVersion === 1
     && isUuid(value.checkpointId)
     && isUuid(value.workflowId)
@@ -249,21 +257,21 @@ export function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoin
     && Array.isArray(value.invariants) && value.invariants.every(isCheckpointInvariant)
     && isStringArray(value.replayableInputs)
     && isEvidenceArray(value.evidence)
-    && Array.isArray(value.recoveryHistory) && value.recoveryHistory.every((record) => isRecord(record) && isIsoTimestamp(record.recordedAt) && isRecoveryDecision(record.decision))
+    && Array.isArray(value.recoveryHistory) && value.recoveryHistory.every((record) => hasExactKeys(record, ["recordedAt", "decision"]) && isIsoTimestamp(record.recordedAt) && isRecoveryDecision(record.decision))
     && isIsoTimestamp(value.createdAt);
 }
 
 function isInterfaceEvent(value: unknown): value is InterfaceEvent {
-  return isRecord(value)
+  return hasExactKeys(value, ["cursor", "kind", "payload"])
     && isSafeUnsigned(value.cursor)
     && isString(value.kind)
     && "payload" in value
     && isJsonValue(value.payload);
 }
 
-export function isEventBatch(value: unknown): value is EventBatch {
-  if (!isRecord(value) || !isSafeUnsigned(value.latestAvailable) || !Array.isArray(value.events) || value.events.length === 0 || !value.events.every(isInterfaceEvent)) return false;
-  let previous = -1;
+export function isEventBatch(value: unknown, after: number, limit: number): value is EventBatch {
+  if (!isSafeUnsigned(after) || !isSafeUnsigned(limit) || !hasExactKeys(value, ["events", "latestAvailable"]) || !isSafeUnsigned(value.latestAvailable) || value.latestAvailable < after || !Array.isArray(value.events) || value.events.length === 0 || value.events.length > limit || !value.events.every(isInterfaceEvent)) return false;
+  let previous = after;
   for (const event of value.events) {
     if (event.cursor <= previous || event.cursor > value.latestAvailable) return false;
     previous = event.cursor;
@@ -272,7 +280,7 @@ export function isEventBatch(value: unknown): value is EventBatch {
 }
 
 export function isEventGap(value: unknown): value is EventGap {
-  return isRecord(value)
+  return hasExactKeys(value, ["reason", "earliestAvailable"])
     && (value.reason === "historyLost" || value.reason === "invalidLimit" || value.reason === "invalidCursor")
     && isSafeUnsigned(value.earliestAvailable);
 }
