@@ -151,4 +151,79 @@ fn manifest_and_handlers_are_bijective_and_have_no_wildcards() {
         .events()
         .all(|event| registry.has_event_translator(&event.name)));
     assert_eq!(registry.event_count(), registry.event_translator_count());
+    for emitted in [
+        "Target.attachedToTarget",
+        "Runtime.executionContextCreated",
+        "Runtime.executionContextsCleared",
+        "Page.frameNavigated",
+        "Page.lifecycleEvent",
+        "Target.detachedFromTarget",
+        "Target.targetDestroyed",
+        "Runtime.executionContextDestroyed",
+        "Page.frameDetached",
+        "Target.browserContextDestroyed",
+        "Network.loadingFailed",
+        "Browser.downloadWillBegin",
+        "Browser.downloadProgress",
+    ] {
+        assert!(
+            registry.events().any(|event| event.name == emitted),
+            "missing emitted event {emitted}"
+        );
+    }
+    let progress = registry
+        .events()
+        .find(|event| event.name == "Browser.downloadProgress")
+        .unwrap();
+    assert!(progress
+        .scenarios
+        .iter()
+        .any(|scenario| scenario == "playwright-download"));
+    assert_eq!(
+        progress.parameter_schema_revision,
+        "playwright-1.61.1-download-stream"
+    );
+}
+
+#[tokio::test]
+async fn every_manifest_method_rejects_malformed_params_and_missing_capability_before_dispatch() {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [],
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let runtime = Arc::new(RecordingRuntime::default());
+    let connection = CdpConnection::new(
+        authority.verify(&token).await.unwrap(),
+        runtime.clone(),
+        MethodRegistry::compiled(),
+    );
+    let methods = MethodRegistry::compiled()
+        .methods()
+        .map(|method| method.name.clone())
+        .collect::<Vec<_>>();
+    for (index, method) in methods.iter().enumerate() {
+        let malformed = connection
+            .dispatch(CdpRequest::new((index * 2 + 1) as u64, method, json!([])))
+            .await;
+        assert_eq!(
+            malformed.error().unwrap().code,
+            CdpErrorCode::InvalidParams as i32,
+            "{method}"
+        );
+        let denied = connection
+            .dispatch(CdpRequest::new((index * 2 + 2) as u64, method, json!({})))
+            .await;
+        assert_eq!(
+            denied.error().unwrap().code,
+            CdpErrorCode::RuntimeFailure as i32,
+            "{method}"
+        );
+    }
+    assert_eq!(runtime.0.load(Ordering::SeqCst), 0);
 }

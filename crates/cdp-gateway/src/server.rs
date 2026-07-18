@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::{Arc, Weak},
 };
 
@@ -31,8 +32,9 @@ use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, InspectCommand, InterfaceError, NavigateCommand,
-    PageId, PrimitiveCommand, RequestContext, ScreenshotMode, SessionId, SessionState, TargetSpec,
-    TextMatch, TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    PageId, PrimitiveCommand, RequestContext, ScreenshotMode, SessionId, SessionState,
+    SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch, TypeTextCommand,
+    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -79,6 +81,8 @@ pub struct CdpGateway {
     connections: Mutex<Vec<Weak<CdpConnection>>>,
     generations: Arc<Mutex<HashMap<String, RuntimeGeneration>>>,
     artifacts: Option<artifact_store::ArtifactStore>,
+    upload_staging_root: Option<PathBuf>,
+    streams: Arc<Mutex<HashMap<String, DownloadStream>>>,
 }
 
 impl CdpGateway {
@@ -102,11 +106,18 @@ impl CdpGateway {
             connections: Mutex::new(Vec::new()),
             generations: Arc::new(Mutex::new(HashMap::new())),
             artifacts: None,
+            upload_staging_root: None,
+            streams: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_artifacts(mut self, artifacts: artifact_store::ArtifactStore) -> Self {
         self.artifacts = Some(artifacts);
+        self
+    }
+
+    pub fn with_upload_staging_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.upload_staging_root = Some(root.into());
         self
     }
 
@@ -169,9 +180,13 @@ impl CdpGateway {
             handle,
             self.runtime.clone(),
             self.registry.clone(),
-            self.targets.clone(),
-            self.generations.clone(),
-            self.artifacts.clone(),
+            ConnectionShared {
+                targets: self.targets.clone(),
+                generations: self.generations.clone(),
+                artifacts: self.artifacts.clone(),
+                upload_staging_root: self.upload_staging_root.clone(),
+                streams: self.streams.clone(),
+            },
         ));
         let mut connections = self.connections.lock().await;
         connections.retain(|existing| existing.strong_count() > 0);
@@ -213,6 +228,7 @@ impl CdpGateway {
             .route("/json/version/", get(version_route))
             .route("/json/list", get(list_route))
             .route("/json/list/", get(list_route))
+            .route("/v1/streams/{id}", get(stream_route))
             .route("/devtools/browser/{id}", get(websocket_route))
             .with_state(self)
     }
@@ -231,6 +247,57 @@ pub struct CdpConnection {
     isolated_worlds: Mutex<HashMap<String, String>>,
     pending_page_loads: Mutex<HashMap<String, (String, String, String)>>,
     artifacts: Option<artifact_store::ArtifactStore>,
+    upload_staging_root: Option<PathBuf>,
+    streams: Arc<Mutex<HashMap<String, DownloadStream>>>,
+    remote_objects: Mutex<HashMap<String, RemoteObject>>,
+    execution_generations: Mutex<HashMap<String, u64>>,
+    enabled_domains: Mutex<HashSet<(String, &'static str)>>,
+    lifecycle_events: Mutex<HashSet<String>>,
+    download_events_enabled: Mutex<bool>,
+    browser_observers: Mutex<HashSet<String>>,
+}
+
+#[derive(Clone)]
+struct RemoteObject {
+    internal: String,
+    scope: String,
+    generation: u64,
+}
+
+struct DownloadStream {
+    principal_id: types::PrincipalId,
+    bytes: Vec<u8>,
+}
+
+struct ConnectionShared {
+    targets: Arc<Mutex<TargetCatalog>>,
+    generations: Arc<Mutex<HashMap<String, RuntimeGeneration>>>,
+    artifacts: Option<artifact_store::ArtifactStore>,
+    upload_staging_root: Option<PathBuf>,
+    streams: Arc<Mutex<HashMap<String, DownloadStream>>>,
+}
+
+struct UploadStaging {
+    dir: tempfile::TempDir,
+}
+
+impl UploadStaging {
+    fn new(root: &std::path::Path) -> std::io::Result<Self> {
+        tempfile::Builder::new()
+            .prefix("request-")
+            .tempdir_in(root)
+            .map(|dir| Self { dir })
+    }
+
+    fn stage(&self, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+        let path = self.dir.path().join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, bytes)?;
+        Ok(path)
+    }
 }
 
 impl CdpConnection {
@@ -243,9 +310,13 @@ impl CdpConnection {
             handle,
             runtime,
             registry,
-            Arc::new(Mutex::new(TargetCatalog::default())),
-            Arc::new(Mutex::new(HashMap::new())),
-            None,
+            ConnectionShared {
+                targets: Arc::new(Mutex::new(TargetCatalog::default())),
+                generations: Arc::new(Mutex::new(HashMap::new())),
+                artifacts: None,
+                upload_staging_root: None,
+                streams: Arc::new(Mutex::new(HashMap::new())),
+            },
         )
     }
 
@@ -253,9 +324,7 @@ impl CdpConnection {
         handle: CapabilityHandle,
         runtime: Arc<dyn RuntimeInterface>,
         registry: MethodRegistry,
-        targets: Arc<Mutex<TargetCatalog>>,
-        generations: Arc<Mutex<HashMap<String, RuntimeGeneration>>>,
-        artifacts: Option<artifact_store::ArtifactStore>,
+        shared: ConnectionShared,
     ) -> Self {
         Self {
             handle,
@@ -265,11 +334,19 @@ impl CdpConnection {
             events: Mutex::new(VecDeque::new()),
             event_notify: Notify::new(),
             identifiers: Mutex::new(IdentifierMap::new()),
-            targets,
-            generations,
+            targets: shared.targets,
+            generations: shared.generations,
             isolated_worlds: Mutex::new(HashMap::new()),
             pending_page_loads: Mutex::new(HashMap::new()),
-            artifacts,
+            artifacts: shared.artifacts,
+            upload_staging_root: shared.upload_staging_root,
+            streams: shared.streams,
+            remote_objects: Mutex::new(HashMap::new()),
+            execution_generations: Mutex::new(HashMap::new()),
+            enabled_domains: Mutex::new(HashSet::new()),
+            lifecycle_events: Mutex::new(HashSet::new()),
+            download_events_enabled: Mutex::new(false),
+            browser_observers: Mutex::new(HashSet::new()),
         }
     }
 
@@ -343,6 +420,23 @@ impl CdpConnection {
                 ).await;
                 Ok(json!({"targetInfo": {"targetId": target_id, "type": "browser", "title": "", "url": "", "attached": true, "canAccessOpener": false}}))
             }
+            Some(Handler::TargetAttachToBrowserTarget) => {
+                if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.attachToBrowserTarget takes no parameters"));
+                }
+                let session_id = Uuid::new_v4().to_string();
+                self.browser_observers.lock().await.insert(session_id.clone());
+                Ok(json!({"sessionId": session_id}))
+            }
+            Some(Handler::TargetDetachFromTarget) => {
+                let Some(session_id) = request.params.get("sessionId").and_then(Value::as_str) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "missing observer session"));
+                };
+                if !self.browser_observers.lock().await.remove(session_id) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown observer session"));
+                }
+                Ok(json!({}))
+            }
             Some(Handler::TargetSetAutoAttach) => match domains::target::auto_attach(request.params.clone()) {
                 Ok(options) => {
                     match self.runtime.list_sessions(ctx).await {
@@ -360,9 +454,12 @@ impl CdpConnection {
                 Err(error) => return CdpResponse::failure(&request, error),
             },
             Some(Handler::BrowserSetDownloadBehavior) => {
-                if let Err(error) = domains::browser::validate_download_behavior(request.params.clone()) {
-                    return CdpResponse::failure(&request, error);
-                }
+                let behavior = match domains::browser::validate_download_behavior(request.params.clone()) {
+                    Ok(behavior) => behavior,
+                    Err(error) => return CdpResponse::failure(&request, error),
+                };
+                *self.download_events_enabled.lock().await = behavior.events_enabled
+                    && behavior.behavior != "deny";
                 Ok(json!({}))
             }
             Some(Handler::PageGetFrameTree) => {
@@ -460,6 +557,7 @@ impl CdpConnection {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Runtime.enable takes no parameters"));
                 }
                 let scope = request.session_id.as_deref().unwrap_or("browser");
+                self.enable_domain(request.session_id.as_deref(), "Runtime").await;
                 let frame_id = if let Some(session_id) = request.session_id.as_deref() {
                     match self.resolve_identifier(IdentifierFamily::CdpSession, session_id).await {
                         Some(target_id) => target_id,
@@ -479,33 +577,39 @@ impl CdpConnection {
                 Ok(json!({}))
             }
             Some(Handler::RuntimeEvaluate) => match domains::runtime::bootstrap_injected_script(&request.params) {
-                Ok(result) => Ok(result),
+                Ok(mut result) => {
+                    let class_name = result["result"]["className"].as_str().unwrap_or_default();
+                    let internal = if class_name == "InjectedScript" { "playwright-injected-script" } else { "playwright-utility-script" };
+                    let opaque = self.issue_remote_object(request.session_id.as_deref(), internal).await;
+                    result["result"]["objectId"] = Value::String(opaque);
+                    Ok(result)
+                }
                 Err(error) => return CdpResponse::failure(&request, error),
             },
             Some(Handler::RuntimeReleaseObject) => {
-                let known = request.params.get("objectId").and_then(Value::as_str).is_some_and(|id| {
-                    matches!(id, "playwright-injected-script" | "playwright-utility-script")
-                        || id == "viewport-poller" || id.starts_with("semantic-locator:") || id.starts_with("semantic-element:")
-                });
-                if !known { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown gateway remote object")); }
+                let Some(id) = request.params.get("objectId").and_then(Value::as_str) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "missing gateway remote object")); };
+                if self.take_remote_object(request.session_id.as_deref(), id).await.is_none() { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown or stale gateway remote object")); }
                 Ok(json!({}))
             }
             Some(Handler::RuntimeCallFunctionOn) => {
+                let Some(utility_id) = request.params.get("objectId").and_then(Value::as_str) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "missing gateway remote object")); };
+                let utility = self.resolve_remote_object(request.session_id.as_deref(), utility_id).await;
                 let valid_shape = request.params.get("functionDeclaration").and_then(Value::as_str)
                     == Some("(utilityScript, ...args) => utilityScript.evaluate(...args)")
-                    && request.params.get("objectId").and_then(Value::as_str) == Some("playwright-utility-script")
+                    && utility.as_deref() == Some("playwright-utility-script")
                     && request.params.get("arguments").and_then(Value::as_array).is_some_and(|args| args.len() <= 16);
                 if !valid_shape { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unrecognized semantic runtime call")); }
                 let serialized = &request.params["arguments"];
-                let locator_handle = find_object_id_with_prefix(serialized, "semantic-locator:");
-                let element_handle = find_object_id_with_prefix(serialized, "semantic-element:");
-                let viewport_poller = find_object_id_with_prefix(serialized, "viewport-poller");
+                let locator_handle = self.resolve_serialized_object(serialized, request.session_id.as_deref(), "semantic-locator:").await;
+                let element_handle = self.resolve_serialized_object(serialized, request.session_id.as_deref(), "semantic-element:").await;
+                let viewport_poller = self.resolve_serialized_object(serialized, request.session_id.as_deref(), "viewport-poller").await;
                 let expression = request.params["arguments"].as_array().and_then(|args| args.get(3))
                     .and_then(|arg| arg.get("value")).and_then(Value::as_str).unwrap_or("");
                 let evaluated_expression = find_serialized_string(serialized, "expression");
                 if expression.contains("globalThis.eval(expression3)")
                     && evaluated_expression.is_some_and(|value| value.contains("window.innerWidth") && value.contains("window.innerHeight")) {
-                    return CdpResponse::success(&request, json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":"viewport-poller"}}));
+                    let object_id = self.issue_remote_object(request.session_id.as_deref(), "viewport-poller").await;
+                    return CdpResponse::success(&request, json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":object_id}}));
                 }
                 if viewport_poller.is_some() && expression.trim() == "(h) => h.result" {
                     return CdpResponse::success(&request, json!({"result":{"type":"string","value":"{\"width\":1280,\"height\":720}"}}));
@@ -519,23 +623,24 @@ impl CdpConnection {
                 if locator_handle.is_some() && expression.contains("visible: r.visible") {
                     return CdpResponse::success(&request, json!({"result":{"type":"object","value":{"o":[{"k":"log","v":"semantic target visible"},{"k":"visible","v":true},{"k":"attached","v":true}],"id":1}}}));
                 }
-                if let Some(handle) = locator_handle.filter(|_| expression.trim() == "(r) => r.element") {
+                if let Some(handle) = locator_handle.as_deref().filter(|_| expression.trim() == "(r) => r.element") {
                     let label = handle.trim_start_matches("semantic-locator:");
-                    return CdpResponse::success(&request, json!({"result":{"type":"object","subtype":"node","className":"HTMLInputElement","description":"input","objectId":format!("semantic-element:{}", label)}}));
+                    let object_id = self.issue_remote_object(request.session_id.as_deref(), &format!("semantic-element:{}", label)).await;
+                    return CdpResponse::success(&request, json!({"result":{"type":"object","subtype":"node","className":"HTMLInputElement","description":"input","objectId":object_id}}));
                 }
                 if element_handle.is_some() && expression.contains("injected.previewNode(e)") {
                     return CdpResponse::success(&request, json!({"result":{"type":"string","value":"JSHandle@input"}}));
                 }
-                if let Some(handle) = element_handle.filter(|_| {
+                if let Some(handle) = element_handle.as_deref().filter(|_| {
                     expression.contains("injected.retarget(node, \"follow-label\")")
                         && expression.contains("HTMLInputElement")
                 }) {
                     return CdpResponse::success(&request, json!({"result":{
                         "type":"object", "subtype":"node", "className":"HTMLInputElement",
-                        "description":"input", "objectId":handle
+                        "description":"input", "objectId":self.issue_remote_object(request.session_id.as_deref(), handle).await
                     }}));
                 }
-                if let Some(handle) = element_handle.filter(|_| {
+                if let Some(handle) = element_handle.as_deref().filter(|_| {
                     expression.trim() == "([injected, node, files]) => injected.setInputFiles(node, files)"
                 }) {
                     let descriptor = handle.trim_start_matches("semantic-element:");
@@ -546,17 +651,24 @@ impl CdpConnection {
                         Ok(payloads) => payloads,
                         Err(error) => return CdpResponse::failure(&request, error),
                     };
+                    let Some(staging_root) = self.upload_staging_root.as_ref() else {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "upload staging root is not configured"));
+                    };
+                    let request_dir = match UploadStaging::new(staging_root) {
+                        Ok(dir) => dir,
+                        Err(error) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, format!("failed to create confined upload staging: {error}"))),
+                    };
                     let mut staged = Vec::with_capacity(payloads.len());
                     for (name, bytes) in payloads {
-                        let path = std::env::temp_dir().join(format!("cdp-upload-{}-{name}", Uuid::new_v4().simple()));
-                        if let Err(error) = std::fs::write(&path, bytes) {
-                            for staged_path in &staged { let _ = std::fs::remove_file(staged_path); }
+                        let path = match request_dir.stage(&name, &bytes) {
+                            Ok(path) => path,
+                            Err(error) => {
                             return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, format!("failed to stage bounded upload: {error}")));
-                        }
+                            }
+                        };
                         staged.push(path);
                     }
                     let Some((session_id, page_id)) = self.runtime_identity(request.session_id.as_deref()).await else {
-                        for path in &staged { let _ = std::fs::remove_file(path); }
                         return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown runtime page"));
                     };
                     let paths = staged.iter().map(|path| path.to_string_lossy().into_owned()).collect();
@@ -565,7 +677,7 @@ impl CdpConnection {
                         session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
                         command:PrimitiveCommand::UploadFiles(UploadFilesCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), paths }) };
                     let outcome = self.runtime.submit(ctx, envelope).await;
-                    for path in &staged { let _ = std::fs::remove_file(path); }
+                    drop(request_dir);
                     return match outcome {
                         Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Upload { .. })) =>
                             CdpResponse::success(&request, json!({"result":{"type":"undefined"}})),
@@ -573,7 +685,7 @@ impl CdpConnection {
                         Err(error) => CdpResponse::failure(&request, runtime_error(error)),
                     };
                 }
-                if let Some(handle) = element_handle.filter(|_| expression.contains("injected.fill(node")) {
+                if let Some(handle) = element_handle.as_deref().filter(|_| expression.contains("injected.fill(node")) {
                     let Some(value) = find_serialized_string(serialized, "value").filter(|value| value.len() <= 64 * 1024) else {
                         return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "missing bounded fill value"));
                     };
@@ -594,7 +706,7 @@ impl CdpConnection {
                         Err(error) => CdpResponse::failure(&request, runtime_error(error)),
                     };
                 }
-                if let Some(handle) = element_handle.filter(|_| expression.contains("checkElementStates")) {
+                if let Some(handle) = element_handle.as_deref().filter(|_| expression.contains("checkElementStates")) {
                     let descriptor = handle.trim_start_matches("semantic-element:");
                     let Some(rest) = descriptor.strip_prefix("role:") else {
                         return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "click requires a verified role target"));
@@ -614,20 +726,44 @@ impl CdpConnection {
                         let command = PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
                             selector:String::new(), target:Some(target), timeout_ms:30_000,
                         });
-                        return match self.submit_boundary(ctx, session_id, page_id, command).await {
+                        return match self.submit_boundary(ctx.clone(), session_id.clone(), page_id.clone(), command).await {
                             Ok(CommandOutcome::Completed { evidence, .. }) => {
                                 let download = evidence.iter().find_map(|item| match item {
-                                    types::Evidence::Download { filename, path, bytes, .. } => Some((filename.clone(), path.clone(), *bytes)),
+                                    types::Evidence::Download { filename, path, bytes, sha256 } => Some((filename.clone(), path.clone(), *bytes, sha256.clone())),
                                     _ => None,
                                 });
-                                let Some((filename, path, bytes)) = download else {
+                                let Some((filename, path, expected_bytes, expected_sha)) = download else {
                                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not produce download evidence"));
                                 };
+                                let Some(store) = self.artifacts.as_ref() else {
+                                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "artifact reader is not configured"));
+                                };
+                                let data = match std::fs::read(&path) {
+                                    Ok(data) => data,
+                                    Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "verified download was unavailable")),
+                                };
+                                let actual_sha = format!("{:x}", Sha256::digest(&data));
+                                if data.len() as u64 != expected_bytes || actual_sha != expected_sha {
+                                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download evidence integrity check failed"));
+                                }
+                                let record = match store.put(&session_id, &page_id, "application/octet-stream", "bin", &data, data.len()).await {
+                                    Ok(record) => record,
+                                    Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import failed")),
+                                };
+                                let imported = match store.get(&session_id, &record.artifact_id).await {
+                                    Ok(imported) => imported,
+                                    Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import verification failed")),
+                                };
+                                let stream_id = Uuid::new_v4().to_string();
+                                self.streams.lock().await.insert(stream_id.clone(), DownloadStream {
+                                    principal_id: ctx.principal_id.clone(), bytes: imported,
+                                });
                                 let guid = Uuid::new_v4().to_string();
-                                for event in [
-                                    CdpEvent { method:"Browser.downloadWillBegin".into(), params:json!({"frameId":frame_id,"guid":guid,"url":"about:blank","suggestedFilename":filename}), session_id:None },
-                                    CdpEvent { method:"Browser.downloadProgress".into(), params:json!({"guid":guid,"totalBytes":bytes,"receivedBytes":bytes,"state":"completed","filePath":path}), session_id:None },
-                                ] { if let Err(error) = self.queue_event(event).await { return CdpResponse::failure(&request, error); } }
+                                let mut events = download_events(&frame_id, &guid, &filename, expected_bytes, &stream_id, &expected_sha, None).to_vec();
+                                for observer in self.browser_observers.lock().await.iter() {
+                                    events.extend(download_events(&frame_id, &guid, &filename, expected_bytes, &stream_id, &expected_sha, Some(observer.clone())));
+                                }
+                                if let Err(error) = self.queue_events(events).await { return CdpResponse::failure(&request, error); }
                                 CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}}))
                             }
                             Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not complete")),
@@ -708,7 +844,7 @@ impl CdpConnection {
                     command:PrimitiveCommand::Inspect(InspectCommand { selector:None, target:Some(target), include_html:false }) };
                 match self.runtime.submit(ctx, envelope).await {
                     Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Element { .. } | types::Evidence::Inspection { .. })) =>
-                        Ok(json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":format!("semantic-locator:{}", descriptor)}})),
+                        Ok(json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":self.issue_remote_object(request.session_id.as_deref(), &format!("semantic-locator:{}", descriptor)).await}})),
                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "semantic target was not verified")),
                     Err(error) => Err(error),
                 }
@@ -773,6 +909,7 @@ impl CdpConnection {
                             types::Evidence::Navigation { url, title } => Some((url.clone(), title.clone())),
                             _ => None,
                         }) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "navigation returned no verified evidence")); };
+                        self.advance_execution_generation(request.session_id.as_deref()).await;
                         let world_name = self.isolated_worlds.lock().await.get(cdp_session).cloned();
                         let mut events = vec![
                             CdpEvent { method:"Page.frameNavigated".into(), params:json!({"frame":{"id":target_id,"loaderId":loader_id,"url":final_url,"domainAndRegistry":"","securityOrigin":"","mimeType":"text/html","secureContextType":"SecureLocalhost","crossOriginIsolatedContextType":"NotIsolated","gatedAPIFeatures":[]},"type":"Navigation"}), session_id:request.session_id.clone() },
@@ -784,7 +921,7 @@ impl CdpConnection {
                         if let Some(world_name) = world_name {
                             events.insert(3, CdpEvent { method:"Runtime.executionContextCreated".into(), params:json!({"context":{"id":4,"origin":final_url,"name":world_name,"uniqueId":Uuid::new_v4().simple().to_string(),"auxData":{"isDefault":false,"type":"isolated","frameId":target_id}}}), session_id:request.session_id.clone() });
                         }
-                        for event in events { if let Err(error) = self.queue_event(event).await { return CdpResponse::failure(&request, error); } }
+                        if let Err(error) = self.queue_events(events).await { return CdpResponse::failure(&request, error); }
                         let _ = title;
                         Ok(json!({"frameId":target_id,"loaderId":loader_id,"isDownload":false}))
                     }
@@ -793,27 +930,67 @@ impl CdpConnection {
                 }
             }
             Some(Handler::PageSetLifecycle) => {
-                if request.params.get("enabled").and_then(Value::as_bool).is_none() {
+                let Some(enabled) = request.params.get("enabled").and_then(Value::as_bool) else {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid lifecycle event configuration"));
-                }
+                };
+                let scope = request.session_id.clone().unwrap_or_else(|| "browser".into());
+                if enabled { self.lifecycle_events.lock().await.insert(scope); }
+                else { self.lifecycle_events.lock().await.remove(&scope); }
                 Ok(json!({}))
             }
             Some(Handler::EmulationSetFocus) => {
-                if request.params.get("enabled").and_then(Value::as_bool).is_none() {
+                let Some(enabled) = request.params.get("enabled").and_then(Value::as_bool) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid focus emulation configuration"));
+                };
+                if request.params.as_object().is_none_or(|params| params.len() != 1) {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid focus emulation configuration"));
                 }
-                Ok(json!({}))
+                let Some((session_id, page_id)) = self.runtime_identity(request.session_id.as_deref()).await else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown runtime page"));
+                };
+                let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
+                    command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
+                    session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
+                    command:PrimitiveCommand::SetFocusEmulation(SetFocusEmulationCommand { enabled }) };
+                match self.runtime.submit(ctx, envelope).await {
+                    Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Configuration { name, value } if name == "focusEmulation" && value == &enabled.to_string())) => Ok(json!({})),
+                    Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "focus emulation produced no verified evidence")),
+                    Err(error) => Err(error),
+                }
             }
             Some(Handler::EmulationSetMedia) => {
-                let valid = request.params.get("media").and_then(Value::as_str).is_some_and(|value| value.len() <= 32)
-                    && request.params.get("features").and_then(Value::as_array).is_some_and(|items| items.len() <= 16);
-                if !valid { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid media emulation configuration")); }
-                Ok(json!({}))
+                let Some(media) = request.params.get("media").and_then(Value::as_str).filter(|value| value.len() <= 32) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid media emulation configuration"));
+                };
+                let Some(items) = request.params.get("features").and_then(Value::as_array).filter(|items| items.len() <= 16) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid media emulation configuration"));
+                };
+                if request.params.as_object().is_none_or(|params| params.len() != 2) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid media emulation configuration"));
+                }
+                let mut features = BTreeMap::new();
+                for item in items {
+                    let Some(name) = item.get("name").and_then(Value::as_str).filter(|value| !value.is_empty() && value.len() <= 64) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid media feature")); };
+                    let Some(value) = item.get("value").and_then(Value::as_str).filter(|value| value.len() <= 64) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid media feature")); };
+                    if item.as_object().is_none_or(|fields| fields.len() != 2) || features.insert(name.to_owned(), value.to_owned()).is_some() { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid media feature")); }
+                }
+                let Some((session_id, page_id)) = self.runtime_identity(request.session_id.as_deref()).await else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown runtime page")); };
+                let command = SetEmulatedMediaCommand { media: media.to_owned(), features };
+                let expected = serde_json::to_string(&command).expect("bounded media command serializes");
+                let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
+                    command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(), session_id, page_id:Some(page_id),
+                    deadline:Utc::now()+Duration::seconds(30), command:PrimitiveCommand::SetEmulatedMedia(command) };
+                match self.runtime.submit(ctx, envelope).await {
+                    Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Configuration { name, value } if name == "emulatedMedia" && value == &expected)) => Ok(json!({})),
+                    Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "media emulation produced no verified evidence")),
+                    Err(error) => Err(error),
+                }
             }
             Some(Handler::PageEnable) => {
                 if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Page.enable takes no parameters"));
                 }
+                self.enable_domain(request.session_id.as_deref(), "Page").await;
                 if let Some(cdp_session) = request.session_id.as_deref() {
                     if let Some((frame_id, url, loader_id)) = self.pending_page_loads.lock().await.get(cdp_session).cloned() {
                         for event in [
@@ -828,6 +1005,11 @@ impl CdpConnection {
             Some(Handler::LogEnable | Handler::NetworkEnable | Handler::RuntimeRunIfWaiting) => {
                 if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "method takes no parameters"));
+                }
+                match self.registry.handler(&request.method) {
+                    Some(Handler::LogEnable) => self.enable_domain(request.session_id.as_deref(), "Log").await,
+                    Some(Handler::NetworkEnable) => self.enable_domain(request.session_id.as_deref(), "Network").await,
+                    _ => {}
                 }
                 Ok(json!({}))
             }
@@ -870,38 +1052,84 @@ impl CdpConnection {
     }
 
     pub async fn queue_event(&self, event: CdpEvent) -> Result<(), CdpError> {
-        let Some(metadata) = self.registry.event(&event.method) else {
-            return Err(CdpError::new(
-                CdpErrorCode::MethodNotFound,
-                "event is not supported",
-            ));
-        };
-        let ctx = self
-            .handle
-            .context(Utc::now() + Duration::seconds(30), None);
-        if AuthorizationGuard::new(self.handle.clone())
-            .validate(&ctx)
-            .is_err()
-            || metadata
-                .capability()
-                .is_none_or(|capability| !ctx.capabilities.contains(capability))
-        {
-            return Err(CdpError::new(
-                CdpErrorCode::RuntimeFailure,
-                "event authorization failed",
-            ));
+        self.queue_events(vec![event]).await
+    }
+
+    async fn queue_events(&self, pending: Vec<CdpEvent>) -> Result<(), CdpError> {
+        let mut translated = Vec::with_capacity(pending.len());
+        for event in pending {
+            if !self.event_enabled(&event).await {
+                continue;
+            }
+            let Some(metadata) = self.registry.event(&event.method) else {
+                return Err(CdpError::new(
+                    CdpErrorCode::MethodNotFound,
+                    "event is not supported",
+                ));
+            };
+            let ctx = self
+                .handle
+                .context(Utc::now() + Duration::seconds(30), None);
+            if AuthorizationGuard::new(self.handle.clone())
+                .validate(&ctx)
+                .is_err()
+                || metadata
+                    .capability()
+                    .is_none_or(|capability| !ctx.capabilities.contains(capability))
+            {
+                return Err(CdpError::new(
+                    CdpErrorCode::RuntimeFailure,
+                    "event authorization failed",
+                ));
+            }
+            translated.push(self.registry.translate_event(event)?);
         }
-        let event = self.registry.translate_event(event)?;
         let mut events = self.events.lock().await;
-        if events.len() >= MAX_QUEUED_EVENTS {
+        if events.len() + translated.len() > MAX_QUEUED_EVENTS {
             return Err(CdpError::new(
                 CdpErrorCode::RuntimeFailure,
                 "event queue exhausted",
             ));
         }
-        events.push_back(event);
+        events.extend(translated);
         self.event_notify.notify_one();
         Ok(())
+    }
+
+    async fn enable_domain(&self, session_id: Option<&str>, domain: &'static str) {
+        self.enabled_domains
+            .lock()
+            .await
+            .insert((session_id.unwrap_or("browser").to_owned(), domain));
+    }
+
+    async fn event_enabled(&self, event: &CdpEvent) -> bool {
+        let Some((domain, _)) = event.method.split_once('.') else {
+            return false;
+        };
+        if domain == "Target" {
+            return true;
+        }
+        if domain == "Browser" {
+            return *self.download_events_enabled.lock().await;
+        }
+        let scope = event.session_id.as_deref().unwrap_or("browser");
+        if domain == "Page"
+            && event.method == "Page.lifecycleEvent"
+            && !self.lifecycle_events.lock().await.contains(scope)
+        {
+            return false;
+        }
+        self.enabled_domains.lock().await.contains(&(
+            scope.to_owned(),
+            match domain {
+                "Page" => "Page",
+                "Runtime" => "Runtime",
+                "Network" => "Network",
+                "Log" => "Log",
+                _ => return false,
+            },
+        ))
     }
 
     pub async fn next_event(&self) -> Option<CdpEvent> {
@@ -910,6 +1138,85 @@ impl CdpConnection {
 
     pub async fn drain_events(&self) -> Vec<CdpEvent> {
         self.events.lock().await.drain(..).collect()
+    }
+
+    async fn issue_remote_object(&self, session_id: Option<&str>, internal: &str) -> String {
+        let scope = session_id.unwrap_or("browser").to_owned();
+        let generation = *self
+            .execution_generations
+            .lock()
+            .await
+            .get(&scope)
+            .unwrap_or(&0);
+        let opaque = Uuid::new_v4().to_string();
+        self.remote_objects.lock().await.insert(
+            opaque.clone(),
+            RemoteObject {
+                internal: internal.to_owned(),
+                scope,
+                generation,
+            },
+        );
+        opaque
+    }
+
+    async fn resolve_remote_object(
+        &self,
+        session_id: Option<&str>,
+        opaque: &str,
+    ) -> Option<String> {
+        let scope = session_id.unwrap_or("browser");
+        let generation = *self
+            .execution_generations
+            .lock()
+            .await
+            .get(scope)
+            .unwrap_or(&0);
+        self.remote_objects
+            .lock()
+            .await
+            .get(opaque)
+            .filter(|object| remote_object_valid(object, scope, generation))
+            .map(|object| object.internal.clone())
+    }
+
+    async fn take_remote_object(&self, session_id: Option<&str>, opaque: &str) -> Option<String> {
+        self.resolve_remote_object(session_id, opaque).await?;
+        self.remote_objects
+            .lock()
+            .await
+            .remove(opaque)
+            .map(|object| object.internal)
+    }
+
+    async fn resolve_serialized_object(
+        &self,
+        serialized: &Value,
+        session_id: Option<&str>,
+        prefix: &str,
+    ) -> Option<String> {
+        for opaque in find_object_ids(serialized) {
+            if let Some(internal) = self
+                .resolve_remote_object(session_id, opaque)
+                .await
+                .filter(|internal| internal.starts_with(prefix))
+            {
+                return Some(internal);
+            }
+        }
+        None
+    }
+
+    async fn advance_execution_generation(&self, session_id: Option<&str>) {
+        let scope = session_id.unwrap_or("browser").to_owned();
+        let mut generations = self.execution_generations.lock().await;
+        let generation = generations.entry(scope.clone()).or_default();
+        *generation = generation.saturating_add(1);
+        drop(generations);
+        self.remote_objects
+            .lock()
+            .await
+            .retain(|_, object| object.scope != scope);
     }
 
     pub async fn bind_identifier(
@@ -1136,6 +1443,92 @@ impl CdpConnection {
     }
 }
 
+fn download_events(
+    frame_id: &str,
+    guid: &str,
+    filename: &str,
+    bytes: u64,
+    stream_id: &str,
+    sha256: &str,
+    session_id: Option<String>,
+) -> [CdpEvent; 2] {
+    [
+        CdpEvent {
+            method: "Browser.downloadWillBegin".into(),
+            params: json!({"frameId":frame_id,"guid":guid,"url":"about:blank","suggestedFilename":filename}),
+            session_id: session_id.clone(),
+        },
+        CdpEvent {
+            method: "Browser.downloadProgress".into(),
+            params: json!({"guid":guid,"totalBytes":bytes,"receivedBytes":bytes,"state":"completed","streamId":stream_id,"sha256":sha256}),
+            session_id,
+        },
+    ]
+}
+
+fn remote_object_valid(object: &RemoteObject, scope: &str, generation: u64) -> bool {
+    object.scope == scope && object.generation == generation
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::{download_events, remote_object_valid, RemoteObject, UploadStaging};
+
+    #[test]
+    fn remote_objects_reject_cross_context_stale_and_forged_identity() {
+        let issued = RemoteObject {
+            internal: "semantic-element:label:Resume".into(),
+            scope: "session-a".into(),
+            generation: 7,
+        };
+        assert!(remote_object_valid(&issued, "session-a", 7));
+        assert!(!remote_object_valid(&issued, "session-b", 7));
+        assert!(!remote_object_valid(&issued, "session-a", 8));
+        let issued_ids = std::collections::HashMap::from([("opaque-issued", issued)]);
+        assert!(!issued_ids.contains_key("semantic-element:label:Resume"));
+        assert!(!issued_ids.contains_key("opaque-forged"));
+    }
+
+    #[tokio::test]
+    async fn aborted_upload_task_leaves_zero_staging_residue() {
+        let root = tempfile::tempdir().unwrap();
+        let staging_root = root.path().to_owned();
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let entered_task = entered.clone();
+        let task = tokio::spawn(async move {
+            let staging = UploadStaging::new(&staging_root).unwrap();
+            staging.stage("resume.txt", b"bounded").unwrap();
+            entered_task.notify_one();
+            std::future::pending::<()>().await;
+            drop(staging);
+        });
+        entered.notified().await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn download_completion_exposes_only_opaque_stream_identity() {
+        let events = download_events(
+            "frame",
+            "guid",
+            "fixture.bin",
+            7,
+            "550e8400-e29b-41d4-a716-446655440000",
+            "abcd",
+            None,
+        );
+        let serialized = serde_json::to_string(&events).unwrap();
+        assert!(!serialized.contains("filePath"));
+        assert!(!serialized.contains("/private/"));
+        assert_eq!(
+            events[1].params["streamId"],
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+}
+
 #[derive(Clone)]
 struct CatalogTarget {
     opaque: String,
@@ -1209,20 +1602,28 @@ fn find_serialized_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     }
 }
 
-fn find_object_id_with_prefix<'a>(value: &'a Value, prefix: &str) -> Option<&'a str> {
+fn find_object_ids(value: &Value) -> Vec<&str> {
+    let mut found = Vec::new();
+    collect_object_ids(value, &mut found);
+    found
+}
+
+fn collect_object_ids<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
     match value {
-        Value::Object(map) => map
-            .get("objectId")
-            .and_then(Value::as_str)
-            .filter(|id| id.starts_with(prefix))
-            .or_else(|| {
-                map.values()
-                    .find_map(|value| find_object_id_with_prefix(value, prefix))
-            }),
-        Value::Array(items) => items
-            .iter()
-            .find_map(|value| find_object_id_with_prefix(value, prefix)),
-        _ => None,
+        Value::Object(map) => {
+            if let Some(id) = map.get("objectId").and_then(Value::as_str) {
+                found.push(id);
+            }
+            for nested in map.values() {
+                collect_object_ids(nested, found);
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                collect_object_ids(nested, found);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1326,6 +1727,41 @@ async fn list_route(State(gateway): State<Arc<CdpGateway>>, headers: HeaderMap) 
         Ok(targets) => Json(targets).into_response(),
         Err(error) => discovery_response(error),
     }
+}
+
+async fn stream_route(
+    State(gateway): State<Arc<CdpGateway>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if id.is_empty() || id.len() > 64 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let token = bearer(&headers);
+    let handle = match gateway.authenticate(token.as_deref()).await {
+        Ok(handle) => handle,
+        Err(error) => return discovery_response(error),
+    };
+    let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
+    if !ctx.capabilities.contains(types::Capability::ArtifactRead) {
+        return discovery_response(DiscoveryError::Unauthorized);
+    }
+    let mut streams = gateway.streams.lock().await;
+    let authorized = streams
+        .get(&id)
+        .is_some_and(|stream| stream.principal_id == ctx.principal_id);
+    if !authorized {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let stream = streams.remove(&id).expect("authorized stream exists");
+    (
+        [(
+            (axum::http::header::CONTENT_TYPE),
+            "application/octet-stream",
+        )],
+        stream.bytes,
+    )
+        .into_response()
 }
 
 async fn websocket_route(

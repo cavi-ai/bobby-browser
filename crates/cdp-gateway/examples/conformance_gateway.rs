@@ -17,7 +17,9 @@ async fn main() {
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ));
     config.browser.profiles_dir = root.path().join("profiles");
-    config.browser.upload_roots = vec![std::env::temp_dir()];
+    let upload_staging = root.path().join("uploads");
+    std::fs::create_dir_all(&upload_staging).unwrap();
+    config.browser.upload_roots = vec![upload_staging.clone()];
     config.browser.downloads_dir = root.path().join("downloads");
     config.browser.artifacts_dir = root.path().join("artifacts");
     config.storage.journal_path = root.path().join("commands.jsonl");
@@ -84,7 +86,8 @@ async fn main() {
             MethodRegistry::compiled(),
             format!("ws://{address}"),
         )
-        .with_artifacts(artifact_store),
+        .with_artifacts(artifact_store)
+        .with_upload_staging_root(upload_staging),
     );
     println!(
         "{}",

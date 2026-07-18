@@ -5,17 +5,17 @@ use crate::{CdpError, CdpErrorCode};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DownloadBehavior {
-    behavior: String,
+pub(crate) struct DownloadBehavior {
+    pub(crate) behavior: String,
     #[serde(default)]
-    events_enabled: bool,
+    pub(crate) events_enabled: bool,
     #[serde(default)]
     download_path: Option<String>,
     #[serde(default)]
     browser_context_id: Option<String>,
 }
 
-pub(crate) fn validate_download_behavior(params: Value) -> Result<(), CdpError> {
+pub(crate) fn validate_download_behavior(params: Value) -> Result<DownloadBehavior, CdpError> {
     let value: DownloadBehavior = serde_json::from_value(params)
         .map_err(|_| CdpError::new(CdpErrorCode::InvalidParams, "invalid download behavior"))?;
     if !matches!(value.behavior.as_str(), "deny" | "allow" | "allowAndName")
@@ -33,6 +33,5 @@ pub(crate) fn validate_download_behavior(params: Value) -> Result<(), CdpError> 
             "invalid download behavior",
         ));
     }
-    let _ = value.events_enabled;
-    Ok(())
+    Ok(value)
 }

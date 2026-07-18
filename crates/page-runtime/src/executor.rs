@@ -503,6 +503,21 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::SetFocusEmulation(command) => {
+                if evidence.iter().any(|item| matches!(item, Evidence::Configuration { name, value } if name == "focusEmulation" && value == &command.enabled.to_string())) {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("focus emulation returned no matching configuration evidence"))
+                }
+            }
+            PrimitiveCommand::SetEmulatedMedia(command) => {
+                let expected = serde_json::to_string(command).map_err(|_| verification_error("media configuration serialization failed"))?;
+                if evidence.iter().any(|item| matches!(item, Evidence::Configuration { name, value } if name == "emulatedMedia" && value == &expected)) {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("media emulation returned no matching configuration evidence"))
+                }
+            }
         }
     }
 

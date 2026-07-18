@@ -45,6 +45,8 @@ pub enum PrimitiveCommand {
     ClickAndWaitForDownload(ClickAndWaitForDownloadCommand),
     WaitFor(WaitForCommand),
     CaptureScreenshot(CaptureScreenshotCommand),
+    SetFocusEmulation(SetFocusEmulationCommand),
+    SetEmulatedMedia(SetEmulatedMediaCommand),
 }
 
 impl PrimitiveCommand {
@@ -94,6 +96,8 @@ impl PrimitiveCommand {
             }
             Self::Click(command) if command.boundary => CommandClass::Boundary,
             Self::Click(_) => CommandClass::Reconciliable,
+            Self::SetFocusEmulation(_) => CommandClass::Reconciliable,
+            Self::SetEmulatedMedia(_) => CommandClass::Reconciliable,
         }
     }
 }
@@ -289,6 +293,19 @@ pub enum ScreenshotMode {
 #[serde(rename_all = "camelCase")]
 pub struct CaptureScreenshotCommand {
     pub mode: ScreenshotMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetFocusEmulationCommand {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetEmulatedMediaCommand {
+    pub media: String,
+    pub features: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

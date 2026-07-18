@@ -2,7 +2,7 @@ mod support;
 
 use std::sync::Arc;
 
-use cdp_gateway::{CdpConnection, CdpErrorCode, CdpRequest, MethodRegistry};
+use cdp_gateway::{CdpConnection, CdpErrorCode, CdpEvent, CdpRequest, MethodRegistry};
 use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
 use serde_json::json;
@@ -165,5 +165,92 @@ async fn download_behavior_is_bounded_and_capability_checked() {
     assert_eq!(
         denied.error().unwrap().code,
         CdpErrorCode::RuntimeFailure as i32
+    );
+}
+
+#[tokio::test]
+async fn runtime_and_network_events_are_suppressed_until_each_domain_is_enabled() {
+    let connection = connection([
+        Capability::JavascriptEvaluate,
+        Capability::PageRead,
+        Capability::SessionRead,
+    ])
+    .await;
+    connection
+        .queue_event(CdpEvent {
+            method: "Runtime.executionContextCreated".into(),
+            params: json!({"context":{"uniqueId":"before-enable"}}),
+            session_id: None,
+        })
+        .await
+        .unwrap();
+    connection
+        .queue_event(CdpEvent {
+            method: "Network.loadingFailed".into(),
+            params: json!({"requestId":"before-enable","errorText":"suppressed","canceled":true}),
+            session_id: None,
+        })
+        .await
+        .unwrap();
+    assert!(connection.next_event().await.is_none());
+
+    assert!(connection
+        .dispatch(CdpRequest::new(1, "Runtime.enable", json!({})))
+        .await
+        .error()
+        .is_none());
+    assert_eq!(
+        connection.next_event().await.unwrap().method,
+        "Runtime.executionContextCreated"
+    );
+    assert!(connection
+        .dispatch(CdpRequest::new(2, "Network.enable", json!({})))
+        .await
+        .error()
+        .is_none());
+    connection
+        .queue_event(CdpEvent {
+            method: "Network.loadingFailed".into(),
+            params: json!({"requestId":"enabled","errorText":"observed","canceled":true}),
+            session_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        connection.next_event().await.unwrap().method,
+        "Network.loadingFailed"
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_events_require_page_and_lifecycle_configuration() {
+    let connection = connection([Capability::PageRead]).await;
+    let event = || CdpEvent {
+        method: "Page.lifecycleEvent".into(),
+        params: json!({"frameId":"frame","loaderId":"loader","name":"load","timestamp":0}),
+        session_id: None,
+    };
+    connection.queue_event(event()).await.unwrap();
+    assert!(connection.next_event().await.is_none());
+    assert!(connection
+        .dispatch(CdpRequest::new(1, "Page.enable", json!({})))
+        .await
+        .error()
+        .is_none());
+    connection.queue_event(event()).await.unwrap();
+    assert!(connection.next_event().await.is_none());
+    assert!(connection
+        .dispatch(CdpRequest::new(
+            2,
+            "Page.setLifecycleEventsEnabled",
+            json!({"enabled":true})
+        ))
+        .await
+        .error()
+        .is_none());
+    connection.queue_event(event()).await.unwrap();
+    assert_eq!(
+        connection.next_event().await.unwrap().method,
+        "Page.lifecycleEvent"
     );
 }

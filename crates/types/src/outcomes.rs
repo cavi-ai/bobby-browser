@@ -98,6 +98,10 @@ pub enum Evidence {
         bytes: u64,
         sha256: String,
     },
+    Configuration {
+        name: String,
+        value: String,
+    },
     Resolution {
         target: Box<crate::TargetSpec>,
         fingerprint: Box<TargetFingerprint>,

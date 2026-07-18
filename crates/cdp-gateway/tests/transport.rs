@@ -17,7 +17,7 @@ async fn websocket_dispatches_multiple_requests_concurrently_and_preserves_ids()
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-            [Capability::SessionRead],
+            [Capability::SessionRead, Capability::FileDownload],
             Utc::now() + Duration::minutes(5),
         )
         .await
@@ -91,7 +91,7 @@ async fn websocket_drains_generation_teardown_events_before_target_disappears() 
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-            [Capability::SessionRead],
+            [Capability::SessionRead, Capability::FileDownload],
             now + Duration::minutes(5),
         )
         .await

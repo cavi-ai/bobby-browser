@@ -11,6 +11,9 @@ use chromiumoxide::cdp::browser_protocol::browser::{
     DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
 };
+use chromiumoxide::cdp::browser_protocol::emulation::{
+    MediaFeature, SetEmulatedMediaParams, SetFocusEmulationEnabledParams,
+};
 use chromiumoxide::cdp::browser_protocol::network::{
     Cookie, CookieParam, CookiePartitionKey, CookiePriority, CookieSameSite, CookieSourceScheme,
     SetCookiesParams, TimeSinceEpoch,
@@ -31,8 +34,8 @@ use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand,
     ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode,
-    SessionId, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
-    WorkerId,
+    SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 
 use crate::{
@@ -660,6 +663,48 @@ impl BrowserWorker for ChromiumWorker {
             evidence.push(resolution);
         }
         Ok(evidence)
+    }
+
+    async fn set_focus_emulation(
+        &self,
+        page_id: &PageId,
+        command: &SetFocusEmulationCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        page.execute(SetFocusEmulationEnabledParams::new(command.enabled))
+            .await
+            .map_err(command_failed)?;
+        Ok(vec![Evidence::Configuration {
+            name: "focusEmulation".into(),
+            value: command.enabled.to_string(),
+        }])
+    }
+
+    async fn set_emulated_media(
+        &self,
+        page_id: &PageId,
+        command: &SetEmulatedMediaCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let features = command
+            .features
+            .iter()
+            .map(|(name, value)| MediaFeature::new(name, value));
+        page.execute(
+            SetEmulatedMediaParams::builder()
+                .media(&command.media)
+                .features(features)
+                .build(),
+        )
+        .await
+        .map_err(command_failed)?;
+        Ok(vec![Evidence::Configuration {
+            name: "emulatedMedia".into(),
+            value: serde_json::to_string(&command)
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
+        }])
     }
 
     async fn http_state(&self, page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
