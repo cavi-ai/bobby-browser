@@ -264,6 +264,19 @@ impl IdentifierMap {
         }
     }
 
+    pub fn runtime_session_for(&self, family: IdentifierFamily, opaque: &str) -> Option<&str> {
+        let map = match family {
+            IdentifierFamily::BrowserContext => &self.browser_contexts,
+            IdentifierFamily::Target => &self.targets,
+            IdentifierFamily::CdpSession => &self.cdp_sessions,
+            IdentifierFamily::ExecutionContext => &self.execution_contexts,
+            IdentifierFamily::Frame => &self.frames,
+            IdentifierFamily::NetworkRequest => &self.network_requests,
+            IdentifierFamily::Download => &self.downloads,
+        };
+        map.get(opaque)?.runtime_session.as_deref()
+    }
+
     pub fn generation_events(
         &self,
         runtime_session: &str,
