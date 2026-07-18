@@ -1,3 +1,4 @@
+mod domains;
 mod manifest;
 mod mapping;
 mod protocol;

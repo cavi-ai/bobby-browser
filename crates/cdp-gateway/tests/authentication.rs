@@ -65,6 +65,7 @@ async fn discovery_and_upgrade_fail_closed_without_valid_bearer() {
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(unauthorized.headers()["www-authenticate"], "Bearer");
     let authorized = router
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/json/version")
@@ -80,6 +81,18 @@ async fn discovery_and_upgrade_fail_closed_without_valid_bearer() {
     assert_eq!(version_json["Protocol-Version"], "1.3");
     assert!(version_json.get("Browser").is_some());
     assert!(version_json.get("protocolVersion").is_none());
+
+    let playwright_discovery = router
+        .oneshot(
+            Request::builder()
+                .uri("/json/version/")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(playwright_discovery.status(), StatusCode::OK);
 }
 
 #[tokio::test]

@@ -8,20 +8,65 @@ use crate::{CdpError, CdpErrorCode, CdpEvent};
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Handler {
     BrowserGetVersion,
+    BrowserSetDownloadBehavior,
+    EmulationSetFocus,
+    EmulationSetMedia,
+    LogEnable,
+    NetworkEnable,
+    PageAddScript,
+    PageCreateIsolatedWorld,
+    PageCaptureScreenshot,
+    PageEnable,
+    PageGetFrameTree,
+    PageGetLayoutMetrics,
+    PageNavigate,
+    PageSetLifecycle,
+    RuntimeEnable,
+    RuntimeCallFunctionOn,
+    RuntimeEvaluate,
+    RuntimeReleaseObject,
+    RuntimeRunIfWaiting,
     TargetGetTargets,
+    TargetGetTargetInfo,
+    TargetSetAutoAttach,
 }
 
 impl Handler {
     const fn translation_function(self) -> &'static str {
         match self {
             Self::BrowserGetVersion => "runtime_info",
+            Self::BrowserSetDownloadBehavior => "configure_runtime_downloads",
+            Self::EmulationSetFocus => "configure_runtime_focus",
+            Self::EmulationSetMedia => "configure_runtime_media",
+            Self::LogEnable => "enable_runtime_logs",
+            Self::NetworkEnable => "enable_runtime_network_observation",
+            Self::PageAddScript => "register_runtime_init_script",
+            Self::PageCreateIsolatedWorld => "create_runtime_isolated_context",
+            Self::PageCaptureScreenshot => "capture_runtime_screenshot",
+            Self::PageEnable => "enable_runtime_page_observation",
+            Self::PageGetFrameTree => "runtime_frame_tree",
+            Self::PageGetLayoutMetrics => "runtime_layout_metrics",
+            Self::PageNavigate => "submit_runtime_navigation",
+            Self::PageSetLifecycle => "configure_runtime_lifecycle_events",
+            Self::RuntimeEnable => "enable_runtime_observation",
+            Self::RuntimeCallFunctionOn => "translate_playwright_semantic_call",
+            Self::RuntimeEvaluate => "recognize_playwright_runtime_bootstrap",
+            Self::RuntimeReleaseObject => "release_gateway_remote_object",
+            Self::RuntimeRunIfWaiting => "resume_runtime_target",
             Self::TargetGetTargets => "list_sessions",
+            Self::TargetGetTargetInfo => "runtime_browser_target",
+            Self::TargetSetAutoAttach => "attach_runtime_targets",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum EventTranslator {
+    TargetAttached,
+    ExecutionContextCreated,
+    ExecutionContextsCleared,
+    FrameNavigated,
+    LifecycleEvent,
     TargetDetached,
     TargetDestroyed,
     ExecutionContextDestroyed,
@@ -29,11 +74,17 @@ pub(crate) enum EventTranslator {
     BrowserContextDestroyed,
     NetworkLoadingFailed,
     DownloadProgress,
+    DownloadWillBegin,
 }
 
 impl EventTranslator {
     const fn translation_function(self) -> &'static str {
         match self {
+            Self::TargetAttached => "runtime_target_attached",
+            Self::ExecutionContextCreated => "runtime_execution_context_created",
+            Self::ExecutionContextsCleared => "runtime_execution_contexts_cleared",
+            Self::FrameNavigated => "runtime_navigation_committed",
+            Self::LifecycleEvent => "runtime_lifecycle_observed",
             Self::TargetDetached => "worker_generation_detached",
             Self::TargetDestroyed => "worker_generation_destroyed",
             Self::ExecutionContextDestroyed => "worker_generation_execution_context_destroyed",
@@ -41,6 +92,7 @@ impl EventTranslator {
             Self::BrowserContextDestroyed => "worker_generation_browser_context_destroyed",
             Self::NetworkLoadingFailed => "worker_generation_network_failed",
             Self::DownloadProgress => "worker_generation_download_canceled",
+            Self::DownloadWillBegin => "runtime_download_will_begin",
         }
     }
 }
@@ -101,9 +153,88 @@ impl MethodRegistry {
                 .expect("compiled CDP support manifest must be valid");
         let handlers = BTreeMap::from([
             ("Browser.getVersion".to_owned(), Handler::BrowserGetVersion),
+            (
+                "Browser.setDownloadBehavior".to_owned(),
+                Handler::BrowserSetDownloadBehavior,
+            ),
+            (
+                "Emulation.setFocusEmulationEnabled".to_owned(),
+                Handler::EmulationSetFocus,
+            ),
+            (
+                "Emulation.setEmulatedMedia".to_owned(),
+                Handler::EmulationSetMedia,
+            ),
+            ("Log.enable".to_owned(), Handler::LogEnable),
+            ("Network.enable".to_owned(), Handler::NetworkEnable),
+            (
+                "Page.addScriptToEvaluateOnNewDocument".to_owned(),
+                Handler::PageAddScript,
+            ),
+            (
+                "Page.createIsolatedWorld".to_owned(),
+                Handler::PageCreateIsolatedWorld,
+            ),
+            (
+                "Page.captureScreenshot".to_owned(),
+                Handler::PageCaptureScreenshot,
+            ),
+            ("Page.enable".to_owned(), Handler::PageEnable),
+            ("Page.getFrameTree".to_owned(), Handler::PageGetFrameTree),
+            (
+                "Page.getLayoutMetrics".to_owned(),
+                Handler::PageGetLayoutMetrics,
+            ),
+            ("Page.navigate".to_owned(), Handler::PageNavigate),
+            (
+                "Page.setLifecycleEventsEnabled".to_owned(),
+                Handler::PageSetLifecycle,
+            ),
+            ("Runtime.enable".to_owned(), Handler::RuntimeEnable),
+            (
+                "Runtime.callFunctionOn".to_owned(),
+                Handler::RuntimeCallFunctionOn,
+            ),
+            ("Runtime.evaluate".to_owned(), Handler::RuntimeEvaluate),
+            (
+                "Runtime.releaseObject".to_owned(),
+                Handler::RuntimeReleaseObject,
+            ),
+            (
+                "Runtime.runIfWaitingForDebugger".to_owned(),
+                Handler::RuntimeRunIfWaiting,
+            ),
             ("Target.getTargets".to_owned(), Handler::TargetGetTargets),
+            (
+                "Target.getTargetInfo".to_owned(),
+                Handler::TargetGetTargetInfo,
+            ),
+            (
+                "Target.setAutoAttach".to_owned(),
+                Handler::TargetSetAutoAttach,
+            ),
         ]);
         let event_translators = BTreeMap::from([
+            (
+                "Target.attachedToTarget".to_owned(),
+                EventTranslator::TargetAttached,
+            ),
+            (
+                "Runtime.executionContextCreated".to_owned(),
+                EventTranslator::ExecutionContextCreated,
+            ),
+            (
+                "Runtime.executionContextsCleared".to_owned(),
+                EventTranslator::ExecutionContextsCleared,
+            ),
+            (
+                "Page.frameNavigated".to_owned(),
+                EventTranslator::FrameNavigated,
+            ),
+            (
+                "Page.lifecycleEvent".to_owned(),
+                EventTranslator::LifecycleEvent,
+            ),
             (
                 "Target.detachedFromTarget".to_owned(),
                 EventTranslator::TargetDetached,
@@ -131,6 +262,10 @@ impl MethodRegistry {
             (
                 "Browser.downloadProgress".to_owned(),
                 EventTranslator::DownloadProgress,
+            ),
+            (
+                "Browser.downloadWillBegin".to_owned(),
+                EventTranslator::DownloadWillBegin,
             ),
         ]);
         let registry = Self {
@@ -251,7 +386,56 @@ impl MethodRegistry {
                 "event is not supported",
             ));
         };
+        if matches!(
+            translator,
+            EventTranslator::ExecutionContextCreated | EventTranslator::FrameNavigated
+        ) {
+            let container = if matches!(translator, EventTranslator::ExecutionContextCreated) {
+                "context"
+            } else {
+                "frame"
+            };
+            let id = if matches!(translator, EventTranslator::ExecutionContextCreated) {
+                "uniqueId"
+            } else {
+                "id"
+            };
+            let valid = event
+                .params
+                .get(container)
+                .and_then(serde_json::Value::as_object)
+                .and_then(|value| value.get(id))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty());
+            return if valid {
+                Ok(event)
+            } else {
+                Err(CdpError::new(
+                    CdpErrorCode::InvalidParams,
+                    "invalid event payload",
+                ))
+            };
+        }
+        if matches!(translator, EventTranslator::ExecutionContextsCleared) {
+            return if event
+                .params
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+            {
+                Ok(event)
+            } else {
+                Err(CdpError::new(
+                    CdpErrorCode::InvalidParams,
+                    "invalid event payload",
+                ))
+            };
+        }
         let required = match translator {
+            EventTranslator::TargetAttached => "sessionId",
+            EventTranslator::ExecutionContextCreated => unreachable!(),
+            EventTranslator::ExecutionContextsCleared => unreachable!(),
+            EventTranslator::FrameNavigated => unreachable!(),
+            EventTranslator::LifecycleEvent => "frameId",
             EventTranslator::TargetDetached => "sessionId",
             EventTranslator::TargetDestroyed => "targetId",
             EventTranslator::ExecutionContextDestroyed => "executionContextUniqueId",
@@ -259,6 +443,7 @@ impl MethodRegistry {
             EventTranslator::BrowserContextDestroyed => "browserContextId",
             EventTranslator::NetworkLoadingFailed => "requestId",
             EventTranslator::DownloadProgress => "guid",
+            EventTranslator::DownloadWillBegin => "guid",
         };
         if event
             .params

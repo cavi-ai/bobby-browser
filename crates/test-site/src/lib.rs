@@ -17,6 +17,7 @@ const INDEX: &str = r#"<!doctype html>
       <label for="name">Name</label>
       <input id="name" autocomplete="off">
       <button id="continue" type="button">Continue</button>
+      <label for="resume">Resume</label>
       <input id="resume" type="file">
     </main>
     <a id="root-popup" href="/popup" target="_blank">Open details</a>

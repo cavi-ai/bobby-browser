@@ -141,7 +141,13 @@ async fn websocket_drains_generation_teardown_events_before_target_disappears() 
         ))
         .await
         .unwrap();
-    let _ = socket.next().await.unwrap().unwrap();
+    loop {
+        let message = socket.next().await.unwrap().unwrap().into_text().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+        if value["id"] == 2 {
+            break;
+        }
+    }
     gateway
         .replace_worker_generation(&runtime_session, cdp_gateway::RuntimeGeneration(2))
         .await

@@ -1,6 +1,7 @@
 /target
 node_modules/
 /packages/typescript-sdk/dist
+/packages/interface-conformance/dist
 /data/cache
 /data/storage
 .DS_Store
