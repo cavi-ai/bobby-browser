@@ -1,0 +1,999 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    io,
+    pin::Pin,
+    sync::Arc,
+};
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chrono::{Duration, Utc};
+use futures_util::{stream::FuturesUnordered, StreamExt};
+use interface_core::{AuthorizationGuard, CapabilityHandle, EventStore, RuntimeInterface};
+use serde::{de::DeserializeOwned, Deserialize};
+use serde_json::{json, Value};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sync::{Mutex, Notify},
+};
+
+use crate::protocol::{
+    error, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
+    MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MCP_PROTOCOL_VERSION, METHOD_NOT_FOUND,
+    NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
+};
+use crate::ArtifactResources;
+
+const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lifecycle {
+    AwaitingInitialize,
+    AwaitingInitializedNotification,
+    Ready,
+}
+
+pub struct Server {
+    runtime: Arc<dyn RuntimeInterface>,
+    handle: CapabilityHandle,
+    authorization: AuthorizationGuard,
+    events: EventStore,
+    resources: ArtifactResources,
+    lifecycle: Mutex<Lifecycle>,
+    in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
+}
+
+impl Server {
+    pub fn new(runtime: Arc<dyn RuntimeInterface>, handle: CapabilityHandle) -> Self {
+        Self {
+            runtime,
+            handle: handle.clone(),
+            authorization: AuthorizationGuard::new(handle),
+            events: EventStore::new(16_384),
+            resources: ArtifactResources::default(),
+            lifecycle: Mutex::new(Lifecycle::AwaitingInitialize),
+            in_flight: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn with_boundaries(mut self, events: EventStore, resources: ArtifactResources) -> Self {
+        self.events = events;
+        self.resources = resources;
+        self
+    }
+
+    pub async fn handle_message(&self, message: Value) -> Option<Value> {
+        let Some(object) = message.as_object() else {
+            return Some(error(Value::Null, INVALID_REQUEST, "Invalid Request", None));
+        };
+        let id = object.get("id").cloned();
+        let response_id = id.clone().unwrap_or(Value::Null);
+        if id
+            .as_ref()
+            .is_some_and(|id| !id.is_string() && !id.is_number())
+        {
+            return Some(error(Value::Null, INVALID_REQUEST, "Invalid Request", None));
+        }
+        if object.get("jsonrpc") != Some(&Value::String("2.0".to_owned())) {
+            return Some(error(response_id, INVALID_REQUEST, "Invalid Request", None));
+        }
+        let Some(method) = object.get("method").and_then(Value::as_str) else {
+            return Some(error(response_id, INVALID_REQUEST, "Invalid Request", None));
+        };
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "jsonrpc" | "id" | "method" | "params"))
+        {
+            return id.map(|id| error(id, INVALID_REQUEST, "Invalid Request", None));
+        }
+        let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+        let mut lifecycle = self.lifecycle.lock().await;
+
+        if method == "initialize" {
+            id.as_ref()?;
+            if *lifecycle != Lifecycle::AwaitingInitialize {
+                return id.map(|id| error(id, INVALID_REQUEST, "Invalid Request", None));
+            }
+            let parsed = serde_json::from_value::<InitializeParams>(params);
+            let Ok(parsed) = parsed else {
+                return id.map(|id| error(id, INVALID_PARAMS, "Invalid params", None));
+            };
+            if parsed.protocol_version != MCP_PROTOCOL_VERSION {
+                return id.map(|id| {
+                    error(
+                        id,
+                        INVALID_PARAMS,
+                        "Invalid params",
+                        Some(json!({"supportedProtocolVersion": MCP_PROTOCOL_VERSION})),
+                    )
+                });
+            }
+            *lifecycle = Lifecycle::AwaitingInitializedNotification;
+            return id.map(|id| {
+                success(
+                    id,
+                    json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {
+                            "tools": {"listChanged": false},
+                            "resources": {"subscribe": false, "listChanged": false}
+                        },
+                        "serverInfo": {
+                            "name": "automation-runtime",
+                            "version": env!("CARGO_PKG_VERSION")
+                        }
+                    }),
+                )
+            });
+        }
+
+        if *lifecycle == Lifecycle::AwaitingInitialize {
+            return id.map(|id| error(id, NOT_INITIALIZED, "Server not initialized", None));
+        }
+        if method == "notifications/initialized" {
+            if id.is_some()
+                || *lifecycle != Lifecycle::AwaitingInitializedNotification
+                || bounded_parse::<NotificationParams>(params).is_err()
+            {
+                return id.map(|id| error(id, INVALID_REQUEST, "Invalid Request", None));
+            }
+            *lifecycle = Lifecycle::Ready;
+            return None;
+        }
+        if *lifecycle != Lifecycle::Ready {
+            return id.map(|id| error(id, NOT_INITIALIZED, "Server not initialized", None));
+        }
+
+        drop(lifecycle);
+
+        if method == "notifications/cancelled" && id.is_none() {
+            let cancellation: Cancellation = match bounded_parse(params) {
+                Ok(cancellation) => cancellation,
+                Err(()) => return None,
+            };
+            if let Some(notification) = self
+                .in_flight
+                .lock()
+                .await
+                .get(&request_key(&cancellation.request_id))
+                .cloned()
+            {
+                notification.notify_one();
+            }
+            return None;
+        }
+
+        id.as_ref()?;
+        let id = id.expect("request id checked above");
+        let key = request_key(&id);
+        let cancelled = Arc::new(Notify::new());
+        {
+            let mut in_flight = self.in_flight.lock().await;
+            if in_flight.contains_key(&key) {
+                return Some(error(id, INVALID_REQUEST, "Invalid Request", None));
+            }
+            in_flight.insert(key.clone(), cancelled.clone());
+        }
+        let response = tokio::select! {
+            response = self.dispatch_request(id.clone(), method, params) => response,
+            () = cancelled.notified() => error(
+                id,
+                REQUEST_CANCELLED,
+                "Request cancelled",
+                None,
+            ),
+        };
+        self.in_flight.lock().await.remove(&key);
+        Some(response)
+    }
+
+    async fn dispatch_request(&self, id: Value, method: &str, params: Value) -> Value {
+        match method {
+            "ping" if empty_object(&params) => success(id, json!({})),
+            "ping" => error(id, INVALID_PARAMS, "Invalid params", None),
+            "tools/list" => self.list_tools(id, params),
+            "tools/call" => self.call_tool(id, params).await,
+            "resources/list" => self.list_resources(id, params).await,
+            "resources/read" => self.read_resource(id, params).await,
+            "resources/templates/list" if valid_initial_list_params(&params) => {
+                success(id, json!({"resourceTemplates": []}))
+            }
+            "resources/templates/list" => error(id, INVALID_PARAMS, "Invalid params", None),
+            _ => error(id, METHOD_NOT_FOUND, "Method not found", None),
+        }
+    }
+
+    pub async fn serve<R, W>(&self, input: R, output: W) -> io::Result<()>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
+        let mut input = BufReader::new(input);
+        let output = Arc::new(Mutex::new(output));
+        let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> =
+            FuturesUnordered::new();
+        let mut frame = Vec::new();
+        loop {
+            tokio::select! {
+                status = read_bounded_frame(&mut input, &mut frame) => {
+                    let response = match status? {
+                        FrameStatus::Eof => break,
+                        FrameStatus::Oversized => Some(error(
+                            Value::Null,
+                            INVALID_REQUEST,
+                            "Invalid Request",
+                            Some(json!({"reason":"frameTooLarge","maxBytes":MAX_FRAME_BYTES})),
+                        )),
+                        FrameStatus::Complete => match serde_json::from_slice::<Value>(&frame) {
+                            Ok(message) => {
+                                let output = output.clone();
+                                pending.push(Box::pin(async move {
+                                    let response = self.handle_message(message).await;
+                                    write_response(&output, response).await
+                                }));
+                                None
+                            }
+                            Err(_) => Some(error(Value::Null, PARSE_ERROR, "Parse error", None)),
+                        },
+                    };
+                    if response.is_some() {
+                        let output = output.clone();
+                        pending.push(Box::pin(async move {
+                            write_response(&output, response).await
+                        }));
+                    }
+                }
+                Some(result) = pending.next(), if !pending.is_empty() => result?,
+            }
+        }
+        for notification in self.in_flight.lock().await.values() {
+            notification.notify_one();
+        }
+        while let Some(result) = pending.next().await {
+            result?;
+        }
+        let result = output.lock().await.flush().await;
+        result
+    }
+
+    fn list_tools(&self, id: Value, params: Value) -> Value {
+        if !valid_initial_list_params(&params) {
+            return error(id, INVALID_PARAMS, "Invalid params", None);
+        }
+        let capabilities = self
+            .handle
+            .context(chrono::Utc::now() + chrono::Duration::minutes(1), None)
+            .capabilities;
+        let mut tools = Vec::new();
+        for (name, required) in [
+            ("checkpoint_save", types::Capability::RecoveryWrite),
+            ("command_execute", types::Capability::BrowserMutate),
+            ("events_read", types::Capability::SessionRead),
+            ("page_open", types::Capability::PageWrite),
+            ("runtime_info", types::Capability::SessionRead),
+            ("session_create", types::Capability::SessionWrite),
+            ("session_list", types::Capability::SessionRead),
+            ("workflow_recover", types::Capability::RecoveryWrite),
+        ] {
+            if capabilities.contains(required) {
+                tools.push(json!({
+                    "name": name,
+                    "description": tool_description(name),
+                    "inputSchema": tool_schema(name)
+                }));
+            }
+        }
+        success(id, json!({"tools":tools}))
+    }
+
+    async fn list_resources(&self, id: Value, params: Value) -> Value {
+        let valid_params = valid_initial_list_params(&params);
+        if !valid_params || !self.has_capability(types::Capability::ArtifactRead) {
+            return if valid_params {
+                success(id, json!({"resources":[]}))
+            } else {
+                error(id, INVALID_PARAMS, "Invalid params", None)
+            };
+        }
+        let resources = self
+            .resources
+            .list()
+            .await
+            .into_iter()
+            .map(|artifact_id| {
+                json!({
+                    "uri":format!("artifact://{artifact_id}"),
+                    "name":format!("artifact-{artifact_id}"),
+                    "description":"Authenticated runtime artifact"
+                })
+            })
+            .collect::<Vec<_>>();
+        success(id, json!({"resources":resources}))
+    }
+
+    async fn read_resource(&self, id: Value, params: Value) -> Value {
+        let input: ResourceReadArgs = match bounded_parse(params) {
+            Ok(input) => input,
+            Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+        };
+        let Some(artifact_id) = parse_artifact_uri(&input.uri) else {
+            return error(id, INVALID_PARAMS, "Invalid params", None);
+        };
+        let context = self.handle.context(Utc::now() + Duration::minutes(1), None);
+        if let Err(interface_error) = self
+            .authorization
+            .authorize(&context, types::InterfaceOperation::ReadArtifact)
+        {
+            return interface_error_response(id, interface_error);
+        }
+        let content = match self
+            .resources
+            .read(&self.handle, &context, artifact_id)
+            .await
+        {
+            Ok(Some(content)) => content,
+            Ok(None) => {
+                return error(
+                    id,
+                    INTERFACE_ERROR,
+                    "Runtime interface error",
+                    Some(json!({
+                        "interfaceError":not_found_error(&context),
+                        "resource":{"uri":input.uri}
+                    })),
+                )
+            }
+            Err(interface_error) => return interface_error_response(id, interface_error),
+        };
+        if content.bytes.len() > MAX_RESOURCE_ENCODED_BYTES {
+            return error(
+                id,
+                INTERFACE_ERROR,
+                "Runtime interface error",
+                Some(json!({
+                    "resource":{"uri":input.uri},
+                    "reason":"resourceTooLarge",
+                    "maxEncodedBytes":MAX_RESOURCE_ENCODED_BYTES
+                })),
+            );
+        }
+        let body = if textual_media_type(&content.media_type) {
+            match String::from_utf8(content.bytes) {
+                Ok(text) => json!({
+                    "uri":input.uri,"mimeType":content.media_type,"text":text
+                }),
+                Err(error) => {
+                    let bytes = error.into_bytes();
+                    let blob = BASE64.encode(bytes);
+                    if blob.len() > MAX_RESOURCE_ENCODED_BYTES {
+                        return resource_too_large(id, input.uri);
+                    }
+                    json!({"uri":input.uri,"mimeType":content.media_type,"blob":blob})
+                }
+            }
+        } else {
+            let blob = BASE64.encode(content.bytes);
+            if blob.len() > MAX_RESOURCE_ENCODED_BYTES {
+                return resource_too_large(id, input.uri);
+            }
+            json!({"uri":input.uri,"mimeType":content.media_type,"blob":blob})
+        };
+        let response = success(id.clone(), json!({"contents":[body]}));
+        if serde_json::to_vec(&response).map_or(true, |bytes| bytes.len() > MAX_FRAME_BYTES) {
+            return resource_too_large(id, input.uri);
+        }
+        response
+    }
+
+    async fn call_tool(&self, id: Value, params: Value) -> Value {
+        let call: ToolCall = match bounded_parse(params) {
+            Ok(call) => call,
+            Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+        };
+        if call.name.len() > 64 || !self.tool_available(&call.name) {
+            return error(id, METHOD_NOT_FOUND, "Method not found", None);
+        }
+        let mut context = self.handle.context(Utc::now() + Duration::minutes(1), None);
+        let result = match call.name.as_str() {
+            "runtime_info" => {
+                if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
+                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                }
+                self.runtime.runtime_info(context).await.and_then(to_json)
+            }
+            "session_list" => {
+                if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
+                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                }
+                self.runtime.list_sessions(context).await.and_then(to_json)
+            }
+            "session_create" => {
+                let input: SessionCreateArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                if input.profile.is_empty()
+                    || input.profile.len() > 128
+                    || input.proxy.as_ref().is_some_and(|proxy| proxy.len() > 2048)
+                {
+                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                }
+                self.runtime
+                    .create_session(
+                        context,
+                        types::CreateSessionRequest {
+                            profile: input.profile,
+                            proxy: input.proxy,
+                        },
+                    )
+                    .await
+                    .and_then(to_json)
+            }
+            "page_open" => {
+                let input: PageOpenArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                self.runtime
+                    .open_page(
+                        context,
+                        types::OpenPageRequest {
+                            session_id: input.session_id,
+                        },
+                    )
+                    .await
+                    .and_then(to_json)
+            }
+            "command_execute" => {
+                let input: CommandExecuteArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                if input.envelope.deadline <= Utc::now()
+                    || input.envelope.deadline > context.deadline
+                {
+                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                }
+                context.idempotency_key = match input.idempotency_key {
+                    Some(key) => match types::IdempotencyKey::try_from(key) {
+                        Ok(key) => Some(key),
+                        Err(_) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    },
+                    None => None,
+                };
+                match self.runtime.submit(context, input.envelope).await {
+                    Ok(outcome) => match to_json(outcome) {
+                        Ok(value) => {
+                            self.events
+                                .append(interface_core::Event::new(
+                                    "command.outcome",
+                                    value.clone(),
+                                ))
+                                .await;
+                            Ok(value)
+                        }
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                }
+            }
+            "checkpoint_save" => {
+                let input: CheckpointSaveArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                self.runtime
+                    .checkpoint(context, input.checkpoint, input.evidence)
+                    .await
+                    .and_then(to_json)
+            }
+            "workflow_recover" => {
+                let input: WorkflowRecoverArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                self.runtime
+                    .recover(context, input.workflow_id)
+                    .await
+                    .and_then(to_json)
+            }
+            "events_read" => {
+                let input: EventsReadArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                if input.limit == 0 || input.limit > MAX_EVENT_LIMIT {
+                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                }
+                if let Err(interface_error) = self
+                    .authorization
+                    .authorize(&context, types::InterfaceOperation::SubscribeEvents)
+                {
+                    return interface_error_response(id, interface_error);
+                }
+                let remaining = match (context.deadline - Utc::now()).to_std() {
+                    Ok(remaining) => remaining,
+                    Err(_) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                match tokio::time::timeout(
+                    remaining,
+                    self.events.read_after(input.cursor.into(), input.limit),
+                )
+                .await
+                {
+                    Ok(Ok(batch)) => to_json(batch),
+                    Ok(Err(gap)) => {
+                        return error(
+                            id,
+                            INTERFACE_ERROR,
+                            "Runtime interface error",
+                            Some(json!({"eventGap": gap})),
+                        )
+                    }
+                    Err(_) => {
+                        return error(
+                            id,
+                            INTERFACE_ERROR,
+                            "Runtime interface error",
+                            Some(json!({
+                                "interfaceError": {
+                                    "code":"deadlineExceeded",
+                                    "layer":"interface",
+                                    "message":"runtime interface request failed",
+                                    "correlationId":context.correlation_id,
+                                    "commandId":null,
+                                    "retryable":false,
+                                    "retryAfterMs":null,
+                                    "reconciliationRequired":false,
+                                    "requiredCapability":null
+                                }
+                            })),
+                        )
+                    }
+                }
+            }
+            _ => unreachable!("availability checked above"),
+        };
+        match result {
+            Ok(value) => self.tool_success(id, value).await,
+            Err(interface_error) => interface_error_response(id, interface_error),
+        }
+    }
+
+    async fn tool_success(&self, id: Value, value: Value) -> Value {
+        let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
+        let trusted = self
+            .resources
+            .list()
+            .await
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut referenced = BTreeSet::new();
+        collect_artifact_ids(&value, &mut referenced);
+        let mut content = vec![json!({"type":"text","text":text})];
+        for artifact_id in referenced.intersection(&trusted) {
+            content.push(json!({
+                "type":"resource_link",
+                "uri":format!("artifact://{artifact_id}"),
+                "name":format!("artifact-{artifact_id}"),
+                "description":"Authenticated runtime artifact"
+            }));
+        }
+        success(
+            id,
+            json!({
+                "content":content,
+                "structuredContent":value,
+                "isError":false
+            }),
+        )
+    }
+
+    fn tool_available(&self, name: &str) -> bool {
+        let capabilities = self
+            .handle
+            .context(Utc::now() + Duration::minutes(1), None)
+            .capabilities;
+        required_capability(name).is_some_and(|required| capabilities.contains(required))
+    }
+
+    fn has_capability(&self, capability: types::Capability) -> bool {
+        self.handle
+            .context(Utc::now() + Duration::minutes(1), None)
+            .capabilities
+            .contains(capability)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InitializeParams {
+    protocol_version: String,
+    #[serde(rename = "capabilities")]
+    _capabilities: Value,
+    #[serde(rename = "clientInfo")]
+    _client_info: Implementation,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Implementation {
+    #[serde(rename = "name")]
+    _name: String,
+    #[serde(rename = "version")]
+    _version: String,
+    #[serde(default)]
+    #[serde(rename = "title")]
+    _title: Option<String>,
+    #[serde(default, rename = "websiteUrl")]
+    _website_url: Option<String>,
+    #[serde(default, rename = "icons")]
+    _icons: Vec<Icon>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Icon {
+    #[serde(rename = "src")]
+    _src: String,
+    #[serde(default, rename = "mimeType")]
+    _mime_type: Option<String>,
+    #[serde(default, rename = "sizes")]
+    _sizes: Vec<String>,
+    #[serde(default, rename = "theme")]
+    _theme: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolCall {
+    name: String,
+    #[serde(default = "empty_arguments")]
+    arguments: Value,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyArgs {}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionCreateArgs {
+    profile: String,
+    #[serde(default)]
+    proxy: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PageOpenArgs {
+    session_id: types::SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CommandExecuteArgs {
+    envelope: types::CommandEnvelope,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CheckpointSaveArgs {
+    checkpoint: types::WorkflowCheckpoint,
+    #[serde(default)]
+    evidence: Vec<types::Evidence>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkflowRecoverArgs {
+    workflow_id: types::WorkflowId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EventsReadArgs {
+    #[serde(default)]
+    cursor: u64,
+    limit: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceReadArgs {
+    uri: String,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Cancellation {
+    request_id: Value,
+    #[serde(default, rename = "reason")]
+    _reason: Option<String>,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotificationParams {
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListParams {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+fn empty_object(value: &Value) -> bool {
+    value.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+fn valid_initial_list_params(value: &Value) -> bool {
+    bounded_parse::<ListParams>(value.clone()).is_ok_and(|params| params.cursor.is_none())
+}
+
+fn empty_arguments() -> Value {
+    json!({})
+}
+
+fn request_key(id: &Value) -> String {
+    serde_json::to_string(id).unwrap_or_else(|_| "null".to_owned())
+}
+
+fn bounded_parse<T: DeserializeOwned>(value: Value) -> Result<T, ()> {
+    if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > MAX_INPUT_BYTES) {
+        return Err(());
+    }
+    serde_json::from_value(value).map_err(|_| ())
+}
+
+fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Value> {
+    serde_json::to_value(value).map_err(|_| types::InterfaceError {
+        code: types::InterfaceErrorCode::Internal,
+        layer: types::ErrorLayer::Interface,
+        message: "runtime interface request failed".to_owned(),
+        correlation_id: types::CorrelationId::new(),
+        command_id: None,
+        retryable: false,
+        retry_after_ms: None,
+        reconciliation_required: false,
+        required_capability: None,
+    })
+}
+
+fn interface_error_response(id: Value, mut interface_error: types::InterfaceError) -> Value {
+    interface_error.message = "runtime interface request failed".to_owned();
+    error(
+        id,
+        INTERFACE_ERROR,
+        "Runtime interface error",
+        Some(json!({"interfaceError":interface_error})),
+    )
+}
+
+fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_artifact_ids(value, found);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                if matches!(key.as_str(), "artifactId" | "artifact_id") {
+                    if let Some(artifact_id) = value.as_str() {
+                        found.insert(artifact_id.to_owned());
+                    }
+                }
+                collect_artifact_ids(value, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn required_capability(name: &str) -> Option<types::Capability> {
+    match name {
+        "checkpoint_save" | "workflow_recover" => Some(types::Capability::RecoveryWrite),
+        "command_execute" => Some(types::Capability::BrowserMutate),
+        "events_read" | "runtime_info" | "session_list" => Some(types::Capability::SessionRead),
+        "page_open" => Some(types::Capability::PageWrite),
+        "session_create" => Some(types::Capability::SessionWrite),
+        _ => None,
+    }
+}
+
+fn tool_schema(name: &str) -> Value {
+    let properties = match name {
+        "runtime_info" | "session_list" => json!({}),
+        "session_create" => json!({
+            "profile":{"type":"string","minLength":1,"maxLength":128},
+            "proxy":{"type":["string","null"],"maxLength":2048}
+        }),
+        "page_open" => json!({
+            "sessionId":{"type":"string","format":"uuid","maxLength":36}
+        }),
+        "command_execute" => json!({
+            "envelope":{"type":"object","maxProperties":8},
+            "idempotencyKey":{"type":"string","minLength":1,"maxLength":128}
+        }),
+        "checkpoint_save" => json!({
+            "checkpoint":{"type":"object","maxProperties":18},
+            "evidence":{"type":"array","maxItems":256}
+        }),
+        "workflow_recover" => json!({
+            "workflowId":{"type":"string","format":"uuid","maxLength":36}
+        }),
+        "events_read" => json!({
+            "cursor":{"type":"integer","minimum":0},
+            "limit":{"type":"integer","minimum":1,"maximum":MAX_EVENT_LIMIT}
+        }),
+        _ => json!({}),
+    };
+    let required = match name {
+        "session_create" => json!(["profile"]),
+        "page_open" => json!(["sessionId"]),
+        "command_execute" => json!(["envelope"]),
+        "checkpoint_save" => json!(["checkpoint"]),
+        "workflow_recover" => json!(["workflowId"]),
+        "events_read" => json!(["limit"]),
+        _ => json!([]),
+    };
+    json!({
+        "$schema":"https://json-schema.org/draft/2020-12/schema",
+        "type":"object",
+        "properties":properties,
+        "required":required,
+        "additionalProperties":false
+    })
+}
+
+fn tool_description(name: &str) -> &'static str {
+    match name {
+        "checkpoint_save" => "Persist a verified workflow checkpoint.",
+        "command_execute" => "Execute one bounded browser command envelope.",
+        "events_read" => "Read retained runtime events after a cursor.",
+        "page_open" => "Open a page in an owned session.",
+        "runtime_info" => "Read runtime capability and health information.",
+        "session_create" => "Create a browser session.",
+        "session_list" => "List browser sessions visible to the principal.",
+        "workflow_recover" => "Recover a workflow from its verified checkpoint.",
+        _ => "Runtime operation.",
+    }
+}
+
+fn parse_artifact_uri(uri: &str) -> Option<&str> {
+    let artifact_id = uri.strip_prefix("artifact://")?;
+    if artifact_id.is_empty()
+        || artifact_id.len() > 128
+        || !artifact_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return None;
+    }
+    Some(artifact_id)
+}
+
+fn textual_media_type(media_type: &str) -> bool {
+    media_type.starts_with("text/")
+        || matches!(
+            media_type,
+            "application/json" | "application/xml" | "application/javascript"
+        )
+}
+
+fn resource_too_large(id: Value, uri: String) -> Value {
+    error(
+        id,
+        INTERFACE_ERROR,
+        "Runtime interface error",
+        Some(json!({
+            "resource":{"uri":uri},
+            "reason":"resourceTooLarge",
+            "maxEncodedBytes":MAX_RESOURCE_ENCODED_BYTES
+        })),
+    )
+}
+
+fn not_found_error(context: &types::RequestContext) -> types::InterfaceError {
+    types::InterfaceError {
+        code: types::InterfaceErrorCode::NotFound,
+        layer: types::ErrorLayer::Interface,
+        message: "runtime interface request failed".to_owned(),
+        correlation_id: context.correlation_id.clone(),
+        command_id: None,
+        retryable: false,
+        retry_after_ms: None,
+        reconciliation_required: false,
+        required_capability: None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameStatus {
+    Eof,
+    Complete,
+    Oversized,
+}
+
+async fn read_bounded_frame<R>(input: &mut R, frame: &mut Vec<u8>) -> io::Result<FrameStatus>
+where
+    R: AsyncBufRead + Unpin,
+{
+    frame.clear();
+    let mut oversized = false;
+    loop {
+        let available = input.fill_buf().await?;
+        if available.is_empty() {
+            return if oversized {
+                Ok(FrameStatus::Oversized)
+            } else if frame.is_empty() {
+                Ok(FrameStatus::Eof)
+            } else {
+                Ok(FrameStatus::Complete)
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let payload_len = newline.unwrap_or(available.len());
+        if !oversized {
+            if frame.len().saturating_add(payload_len) > MAX_FRAME_BYTES {
+                oversized = true;
+                frame.clear();
+            } else {
+                frame.extend_from_slice(&available[..payload_len]);
+            }
+        }
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        input.consume(consumed);
+        if newline.is_some() {
+            if !oversized && frame.last() == Some(&b'\r') {
+                frame.pop();
+            }
+            return Ok(if oversized {
+                FrameStatus::Oversized
+            } else {
+                FrameStatus::Complete
+            });
+        }
+    }
+}
+
+async fn write_response<W>(output: &Mutex<W>, response: Option<Value>) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(response) = response else {
+        return Ok(());
+    };
+    let serialized = serde_json::to_vec(&response).map_err(io::Error::other)?;
+    let serialized = if serialized.len() <= MAX_FRAME_BYTES {
+        serialized
+    } else {
+        serde_json::to_vec(&error(
+            response.get("id").cloned().unwrap_or(Value::Null),
+            INTERNAL_ERROR,
+            "Internal error",
+            Some(json!({"reason":"resultTooLarge","maxBytes":MAX_FRAME_BYTES})),
+        ))
+        .map_err(io::Error::other)?
+    };
+    let mut output = output.lock().await;
+    output.write_all(&serialized).await?;
+    output.write_all(b"\n").await?;
+    output.flush().await
+}
