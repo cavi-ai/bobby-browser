@@ -1,0 +1,11 @@
+{
+  "name": "bobby-browser-interface",
+  "private": true,
+  "packageManager": "pnpm@10.15.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

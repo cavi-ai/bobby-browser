@@ -44,6 +44,7 @@ fn config(root: &tempfile::TempDir) -> AppConfig {
             request_timeout_ms: 5_000,
             ..HttpConfig::default()
         },
+        interface: config::InterfaceConfig::default(),
     }
 }
 

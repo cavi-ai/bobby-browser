@@ -85,6 +85,28 @@ impl PageRuntime {
                 evidence: prepared.evidence,
             };
         }
+        let envelope = scan
+            .records
+            .iter()
+            .find_map(|record| record.envelope.as_ref());
+        let latest_phase = scan.records.last().map(|record| record.phase);
+        if envelope.is_some_and(|envelope| envelope.command.class() != CommandClass::Replayable)
+            && matches!(
+                latest_phase,
+                Some(CommandPhase::Executing | CommandPhase::Verifying)
+            )
+        {
+            return CommandOutcome::NeedsReconciliation {
+                command_id,
+                error: CommandError {
+                    code: ErrorCode::Internal,
+                    message: "durable non-replayable command may have reached the browser".into(),
+                    layer: ErrorLayer::Workflow,
+                    retryable: false,
+                },
+                evidence: Vec::new(),
+            };
+        }
         CommandOutcome::RetryableFailure {
             command_id,
             error: internal_error("no durable prepared result exists"),
@@ -120,18 +142,21 @@ impl PageRuntime {
         {
             return journal_failure(&envelope, error, false);
         }
+        self.observe_durable_phase(CommandPhase::Accepted).await;
         if let Err(error) = journal
             .append(record(&envelope, CommandPhase::Prepared, None, None))
             .await
         {
             return journal_failure(&envelope, error, false);
         }
+        self.observe_durable_phase(CommandPhase::Prepared).await;
         if let Err(error) = journal
             .append(record(&envelope, CommandPhase::Executing, None, None))
             .await
         {
             return journal_failure(&envelope, error, false);
         }
+        self.observe_durable_phase(CommandPhase::Executing).await;
 
         let lease = match workers.lease(envelope.session_id.clone()).await {
             Ok(lease) => lease,
@@ -186,11 +211,17 @@ impl PageRuntime {
             let journal = Arc::clone(journal);
             let prepared_record = prepared_record(&envelope, prepared_result);
             let pending = prepared.artifact.take();
+            let observer = self.phase_observer.clone();
             let durable_prepare = tokio::spawn(async move {
                 journal
                     .append(prepared_record)
                     .await
                     .map_err(journal_error)?;
+                if let Some(observer) = observer {
+                    observer
+                        .durable_phase_reached(CommandPhase::ResultPrepared)
+                        .await;
+                }
                 if let Some(pending) = pending {
                     pending.commit().map_err(|error| {
                         internal_error(format!("prepared artifact publication failed: {error}"))
@@ -260,6 +291,7 @@ impl PageRuntime {
         {
             return journal_failure(&envelope, error, true);
         }
+        self.observe_durable_phase(CommandPhase::Verifying).await;
         match self.verify(&envelope, &lease, evidence).await {
             Ok(evidence) => {
                 if let PrimitiveCommand::Navigate(_) = &envelope.command {
@@ -501,6 +533,21 @@ impl PageRuntime {
                     Err(verification_error(
                         "screenshot returned no artifact evidence",
                     ))
+                }
+            }
+            PrimitiveCommand::SetFocusEmulation(command) => {
+                if evidence.iter().any(|item| matches!(item, Evidence::Configuration { name, value } if name == "focusEmulation" && value == &command.enabled.to_string())) {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("focus emulation returned no matching configuration evidence"))
+                }
+            }
+            PrimitiveCommand::SetEmulatedMedia(command) => {
+                let expected = serde_json::to_string(command).map_err(|_| verification_error("media configuration serialization failed"))?;
+                if evidence.iter().any(|item| matches!(item, Evidence::Configuration { name, value } if name == "emulatedMedia" && value == &expected)) {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("media emulation returned no matching configuration evidence"))
                 }
             }
         }

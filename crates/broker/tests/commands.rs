@@ -3,52 +3,64 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use broker::{router, AppState, RuntimeApi};
-use chrono::{Duration, Utc};
+use broker::{router, AppState};
+use chrono::{Duration, SecondsFormat, Utc};
+use config::InterfaceConfig;
+use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
 use tower::ServiceExt;
 use types::{
-    AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CreateSessionRequest,
-    ErrorCode, ErrorLayer, InspectCommand, NavigationRequest, OpenPageRequest, PageState,
-    PrimitiveCommand, RuntimeError, RuntimeInfo, SessionState, WorkflowId,
+    AttemptId, Capability, CommandEnvelope, CommandError, CommandId, CommandOutcome, ErrorCode,
+    ErrorLayer, Evidence, InspectCommand, OpenPageRequest, PageState, PrimitiveCommand,
+    PrincipalId, RecoveryDecision, RequestContext, RuntimeInfo, SessionState, WorkflowCheckpoint,
+    WorkflowId, CURRENT_INTERFACE_VERSION,
 };
+use uuid::Uuid;
 
 struct FakeRuntime {
     outcome: CommandOutcome,
 }
 
 #[async_trait]
-impl RuntimeApi for FakeRuntime {
-    async fn runtime_info(&self) -> RuntimeInfo {
-        RuntimeInfo {
-            version: "test".into(),
-            capabilities: vec![],
-            active_sessions: 0,
-            queued_jobs: 0,
-            uptime_ms: 0,
-        }
+impl RuntimeInterface for FakeRuntime {
+    async fn runtime_info(&self, _: RequestContext) -> InterfaceResult<RuntimeInfo> {
+        unreachable!()
     }
 
-    async fn list_sessions(&self) -> Vec<SessionState> {
-        vec![]
+    async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
+        unreachable!()
     }
 
-    async fn create_session(&self, _: CreateSessionRequest) -> Result<SessionState, RuntimeError> {
-        Err(RuntimeError::Internal("not used by command test".into()))
-    }
-
-    async fn open_page(&self, _: OpenPageRequest) -> Result<PageState, RuntimeError> {
-        Err(RuntimeError::Internal("not used by command test".into()))
-    }
-
-    async fn navigate(
+    async fn create_session(
         &self,
-        _: NavigationRequest,
-    ) -> Result<types::NavigationResult, RuntimeError> {
-        Err(RuntimeError::Internal("not used by command test".into()))
+        _: RequestContext,
+        _: types::CreateSessionRequest,
+    ) -> InterfaceResult<SessionState> {
+        unreachable!()
     }
 
-    async fn submit(&self, _: CommandEnvelope) -> CommandOutcome {
-        self.outcome.clone()
+    async fn open_page(&self, _: RequestContext, _: OpenPageRequest) -> InterfaceResult<PageState> {
+        unreachable!()
+    }
+
+    async fn submit(
+        &self,
+        _: RequestContext,
+        _: CommandEnvelope,
+    ) -> InterfaceResult<CommandOutcome> {
+        Ok(self.outcome.clone())
+    }
+
+    async fn checkpoint(
+        &self,
+        _: RequestContext,
+        _: WorkflowCheckpoint,
+        _: Vec<Evidence>,
+    ) -> InterfaceResult<WorkflowCheckpoint> {
+        unreachable!()
+    }
+
+    async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {
+        unreachable!()
     }
 }
 
@@ -75,10 +87,36 @@ fn envelope() -> CommandEnvelope {
 }
 
 async fn response_for(outcome: CommandOutcome) -> (StatusCode, serde_json::Value) {
-    let app = router(AppState::new(Arc::new(FakeRuntime { outcome })));
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(Uuid::from_u128(99)),
+            [Capability::BrowserMutate],
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let app = router(AppState::new(
+        Arc::new(authority),
+        move |_| {
+            Arc::new(FakeRuntime {
+                outcome: outcome.clone(),
+            })
+        },
+        InterfaceConfig::default(),
+    ));
     let response = app
         .oneshot(
-            Request::post("/commands")
+            Request::post("/v1/commands")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-interface-version", CURRENT_INTERFACE_VERSION)
+                .header("x-correlation-id", "10000000-0000-0000-0000-000000000099")
+                .header(
+                    "x-deadline",
+                    (Utc::now() + Duration::minutes(2))
+                        .to_rfc3339_opts(SecondsFormat::Millis, true),
+                )
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_vec(&envelope()).unwrap()))
                 .unwrap(),

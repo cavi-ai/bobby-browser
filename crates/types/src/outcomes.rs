@@ -4,7 +4,11 @@ use thiserror::Error;
 use crate::{AttemptId, CommandId, PageId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum CommandOutcome {
     Completed {
         command_id: CommandId,
@@ -41,7 +45,11 @@ pub enum CommandOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Evidence {
     ExecutionPath {
         path: ExecutionPath,
@@ -97,6 +105,10 @@ pub enum Evidence {
         path: String,
         bytes: u64,
         sha256: String,
+    },
+    Configuration {
+        name: String,
+        value: String,
     },
     Resolution {
         target: Box<crate::TargetSpec>,

@@ -1,6 +1,14 @@
 /target
+node_modules/
+/packages/typescript-sdk/dist
+/packages/interface-conformance/dist
 /data/cache
 /data/storage
+/benchmarks/raw/
+**/*.bench.json
+**/*.benchmark.jsonl
+**/*.heapprofile
+**/*.cpuprofile
 .DS_Store
 .env
 # Added by code-review-graph

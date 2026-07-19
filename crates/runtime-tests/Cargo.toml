@@ -5,17 +5,30 @@ edition.workspace = true
 
 [dependencies]
 artifact-store = { path = "../artifact-store" }
+async-trait.workspace = true
+axum.workspace = true
+broker = { path = "../broker" }
 checkpoint-store = { path = "../checkpoint-store" }
+cdp-gateway = { path = "../cdp-gateway" }
 chrono.workspace = true
 config = { path = "../config" }
+futures-util.workspace = true
+interface-conformance = { path = "../interface-conformance" }
+interface-core = { path = "../interface-core" }
+mcp-gateway = { path = "../mcp-gateway" }
 network-engine = { path = "../network-engine" }
 sdk-core = { path = "../sdk-core" }
 session-manager = { path = "../session-manager" }
 page-runtime = { path = "../page-runtime" }
+reqwest.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 test-site = { path = "../test-site" }
 tokio.workspace = true
+tokio-tungstenite = "0.29"
+tower.workspace = true
 types = { path = "../types" }
+uuid.workspace = true
 workflow-journal = { path = "../workflow-journal" }
 worker-pool = { path = "../worker-pool" }
