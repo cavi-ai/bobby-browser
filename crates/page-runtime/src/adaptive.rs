@@ -325,6 +325,12 @@ async fn browser_execute(
         PrimitiveCommand::CaptureScreenshot(command) => {
             lease.worker().capture_screenshot(page_id, command).await?
         }
+        PrimitiveCommand::SetFocusEmulation(command) => {
+            lease.worker().set_focus_emulation(page_id, command).await?
+        }
+        PrimitiveCommand::SetEmulatedMedia(command) => {
+            lease.worker().set_emulated_media(page_id, command).await?
+        }
         PrimitiveCommand::DownloadUrl(_) => return Err(equivalence_unproven(reason)),
     };
     let (bytes, sha256) = evidence

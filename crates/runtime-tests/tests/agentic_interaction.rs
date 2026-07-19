@@ -72,6 +72,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
         },
+        interface: config::InterfaceConfig::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
     let session = runtime

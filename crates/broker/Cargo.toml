@@ -7,12 +7,21 @@ edition.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+chrono.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
 types = { path = "../types" }
 sdk-core = { path = "../sdk-core" }
 config = { path = "../config" }
+interface-core = { path = "../interface-core" }
+artifact-store = { path = "../artifact-store" }
 
 [dev-dependencies]
-chrono.workspace = true
+futures-util.workspace = true
+interface-conformance = { path = "../interface-conformance" }
 tower.workspace = true
+tempfile.workspace = true
