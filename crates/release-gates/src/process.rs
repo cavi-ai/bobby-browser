@@ -554,6 +554,30 @@ async fn finalize_completed_process(
     cleanup_timeout: Duration,
 ) -> Result<std::process::ExitStatus, ProcessFailure> {
     let process_group_id = process_group.process_group_id;
+    match wait_for_live_process_group_members_to_exit(
+        process_group_id,
+        process_group_id,
+        cleanup_timeout,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::TimedOut => {
+            cleanup_completed_process_group(child, process_group, cleanup_timeout).await?;
+            return Err(ProcessFailure::ResidualProcessGroup { process_group_id });
+        }
+        Err(source) => {
+            let kind = source.kind();
+            cleanup_completed_process_group(child, process_group, cleanup_timeout).await?;
+            return Err(cleanup_failure(
+                kind,
+                format!(
+                    "could not inspect process group {process_group_id} during bounded natural-exit grace while its leader was unreaped: {source}"
+                ),
+            ));
+        }
+    }
+
     let stop_result = stop_process_group(process_group_id);
     let live_members = match live_process_group_members(process_group_id, process_group_id) {
         Ok(live_members) => live_members,
@@ -569,6 +593,9 @@ async fn finalize_completed_process(
         }
     };
 
+    // The unreaped leader pins the process-group identifier throughout the
+    // grace period and final inspection. A new same-PGID member admitted in
+    // that narrow interval is still treated as residual and terminated.
     if !live_members.is_empty() {
         cleanup_completed_process_group(child, process_group, cleanup_timeout).await?;
         return Err(ProcessFailure::ResidualProcessGroup { process_group_id });

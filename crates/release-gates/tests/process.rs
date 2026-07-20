@@ -95,6 +95,21 @@ mod unix {
     }
 
     #[tokio::test]
+    async fn redirected_short_lived_descendants_get_a_bounded_natural_exit_grace() {
+        let spec = ProcessSpec::new(
+            "/bin/sh",
+            ["-c", "sleep 0.05 </dev/null >/dev/null 2>&1 &"],
+            Duration::from_secs(1),
+            16,
+        );
+
+        let outcome = run_process(&spec).await.unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.stdout.is_empty());
+        assert!(outcome.stderr.is_empty());
+    }
+
+    #[tokio::test]
     async fn successful_exit_rejects_and_terminates_a_redirected_residual_child() {
         let temp = tempfile::tempdir().unwrap();
         let shell_pid_path = temp.path().join("shell.pid");
