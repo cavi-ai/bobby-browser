@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "security": {
+    "required": true,
+    "timeoutSecs": 900,
+    "maxOutputBytes": 1048576
+  },
+  "secretCanaries": [
+    "release-gate-secret-that-must-never-escape"
+  ]
+}
