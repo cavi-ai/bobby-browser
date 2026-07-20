@@ -167,11 +167,12 @@ cargo run -p release-gates -- security \
 ```
 
 This command requires an installed Chromium browser and permission to use its
-local loopback fixtures. It records a bounded, integrity-checked JSON bundle
-containing the manifest digest, all required check results, and the release
-verdict. Any deterministic check failure blocks the release. Health and smoke
-tests are preliminary signals and are not substitutes for this live security
-certification.
+local loopback fixtures. Certification persistence is supported on Unix only;
+other platforms fail closed before running checks or creating output. It records
+a bounded, integrity-checked JSON bundle containing the manifest digest, all
+required check results, and the release verdict. Any deterministic check failure
+blocks the release. Health and smoke tests are preliminary signals and are not
+substitutes for this live security certification.
 
 ## Adaptive HTTP execution
 
