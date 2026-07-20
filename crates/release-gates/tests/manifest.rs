@@ -39,6 +39,11 @@ fn rejects_unknown_fields_versions_empty_canaries_and_zero_bounds() {
             r#""secretCanaries":[]"#,
             "secretCanaries must not be empty",
         ),
+        (
+            r#""secretCanaries":["release-gate-secret-that-must-never-escape"]"#,
+            r#""secretCanaries":[""]"#,
+            "secretCanaries entries must not be empty",
+        ),
     ] {
         let input = String::from_utf8(valid())
             .unwrap()
