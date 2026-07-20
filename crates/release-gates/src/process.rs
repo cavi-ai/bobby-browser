@@ -157,21 +157,21 @@ pub async fn run_process(spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessFa
     let completed = tokio::time::timeout(spec.timeout, completion).await;
     match completed {
         Err(_) => {
-            kill_and_reap(&mut child, &mut process_group).await?;
+            cleanup_process_tree(&mut child, &mut process_group, CLEANUP_TIMEOUT).await?;
             Err(ProcessFailure::Timeout)
         }
         Ok(Err(InternalFailure::OutputLimit)) => {
-            kill_and_reap(&mut child, &mut process_group).await?;
+            cleanup_process_tree(&mut child, &mut process_group, CLEANUP_TIMEOUT).await?;
             Err(ProcessFailure::OutputLimit {
                 limit: spec.max_output_bytes,
             })
         }
         Ok(Err(InternalFailure::Wait { source })) => {
-            kill_and_reap(&mut child, &mut process_group).await?;
+            cleanup_process_tree(&mut child, &mut process_group, CLEANUP_TIMEOUT).await?;
             Err(ProcessFailure::Wait { source })
         }
         Ok(Err(InternalFailure::Read { stream, source })) => {
-            kill_and_reap(&mut child, &mut process_group).await?;
+            cleanup_process_tree(&mut child, &mut process_group, CLEANUP_TIMEOUT).await?;
             Err(ProcessFailure::Read { stream, source })
         }
         Ok(Ok((stdout, stderr, status))) => {
@@ -186,6 +186,9 @@ pub async fn run_process(spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessFa
         }
     }
 }
+
+#[cfg(unix)]
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(unix)]
 enum InternalFailure {
@@ -237,28 +240,118 @@ where
 }
 
 #[cfg(unix)]
-async fn kill_and_reap(
-    child: &mut tokio::process::Child,
-    process_group: &mut ProcessGroupGuard,
-) -> Result<(), ProcessFailure> {
-    let initial_group_result = process_group.kill();
-    if initial_group_result.is_err() {
-        let _ = child.start_kill();
+async fn cleanup_process_tree<C, G>(
+    child: &mut C,
+    process_group: &mut G,
+    cleanup_timeout: Duration,
+) -> Result<(), ProcessFailure>
+where
+    C: CleanupChild,
+    G: CleanupGroup,
+{
+    let initial_group_error = process_group.kill().err();
+    let direct_kill_error = if initial_group_error.is_some() {
+        child.start_kill().err()
+    } else {
+        None
+    };
+
+    let reap = tokio::time::timeout(cleanup_timeout, child.wait()).await;
+    match reap {
+        Err(_) => {
+            return Err(cleanup_failure(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "direct child reap timed out after {cleanup_timeout:?}; {}",
+                    cleanup_attempts(&initial_group_error, &direct_kill_error)
+                ),
+            ));
+        }
+        Ok(Err(wait_error)) => {
+            return Err(cleanup_failure(
+                wait_error.kind(),
+                format!(
+                    "direct child reap failed: {wait_error}; {}",
+                    cleanup_attempts(&initial_group_error, &direct_kill_error)
+                ),
+            ));
+        }
+        Ok(Ok(())) => {}
     }
-    child
-        .wait()
-        .await
-        .map_err(|source| ProcessFailure::Cleanup { source })?;
 
     // Darwin may report EPERM when the only remaining group member is an
     // exited child awaiting reap. Retry after reaping: ESRCH then proves the
     // group is gone, while a live group still must accept SIGKILL.
-    if initial_group_result.is_err() {
-        process_group
-            .kill()
-            .map_err(|source| ProcessFailure::Cleanup { source })?;
+    if let Some(initial_group_error) = initial_group_error {
+        if let Err(retry_error) = process_group.kill() {
+            return Err(cleanup_failure(
+                retry_error.kind(),
+                format!(
+                    "process-group signal failed before reap: {initial_group_error}; \
+                     process-group signal retry after reap failed: {retry_error}; {}",
+                    direct_kill_attempt(&direct_kill_error)
+                ),
+            ));
+        }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn cleanup_attempts(
+    group_error: &Option<std::io::Error>,
+    direct_kill_error: &Option<std::io::Error>,
+) -> String {
+    let group = match group_error {
+        Some(error) => format!("process-group signal failed: {error}"),
+        None => "process-group signal succeeded".to_owned(),
+    };
+    let direct = match group_error {
+        Some(_) => direct_kill_attempt(direct_kill_error),
+        None => "direct child kill not required".to_owned(),
+    };
+    format!("{group}; {direct}")
+}
+
+#[cfg(unix)]
+fn direct_kill_attempt(error: &Option<std::io::Error>) -> String {
+    match error {
+        Some(error) => format!("direct child kill failed: {error}"),
+        None => "direct child kill succeeded".to_owned(),
+    }
+}
+
+#[cfg(unix)]
+fn cleanup_failure(kind: std::io::ErrorKind, message: String) -> ProcessFailure {
+    ProcessFailure::Cleanup {
+        source: std::io::Error::new(kind, message),
+    }
+}
+
+#[cfg(unix)]
+trait CleanupChild {
+    fn start_kill(&mut self) -> std::io::Result<()>;
+    fn wait(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + '_>>;
+}
+
+#[cfg(unix)]
+impl CleanupChild for tokio::process::Child {
+    fn start_kill(&mut self) -> std::io::Result<()> {
+        tokio::process::Child::start_kill(self)
+    }
+
+    fn wait(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + '_>> {
+        Box::pin(async move { tokio::process::Child::wait(self).await.map(|_| ()) })
+    }
+}
+
+#[cfg(unix)]
+trait CleanupGroup {
+    fn kill(&mut self) -> std::io::Result<()>;
 }
 
 #[cfg(unix)]
@@ -282,6 +375,13 @@ impl ProcessGroupGuard {
             self.armed = false;
         }
         result
+    }
+}
+
+#[cfg(unix)]
+impl CleanupGroup for ProcessGroupGuard {
+    fn kill(&mut self) -> std::io::Result<()> {
+        ProcessGroupGuard::kill(self)
     }
 }
 
@@ -313,5 +413,180 @@ fn signal_process_group(process_group_id: i32) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(error)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{cleanup_process_tree, CleanupChild, CleanupGroup, ProcessFailure};
+    use std::collections::VecDeque;
+    use std::future::{pending, ready, Future};
+    use std::io::{self, ErrorKind};
+    use std::pin::Pin;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn cleanup_reap_is_explicitly_bounded() {
+        let mut child = FakeChild::pending();
+        let mut group = FakeGroup::success();
+        let started = Instant::now();
+
+        let failure = cleanup_process_tree(&mut child, &mut group, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        match failure {
+            ProcessFailure::Cleanup { source } => {
+                assert_eq!(source.kind(), ErrorKind::TimedOut);
+                assert!(source.to_string().contains("reap timed out"));
+            }
+            other => panic!("unexpected cleanup failure: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_group_signal_and_direct_kill_failures() {
+        let mut child = FakeChild::pending_with_kill_error(ErrorKind::BrokenPipe);
+        let mut group =
+            FakeGroup::errors([ErrorKind::PermissionDenied, ErrorKind::PermissionDenied]);
+
+        let failure = cleanup_process_tree(&mut child, &mut group, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        match failure {
+            ProcessFailure::Cleanup { source } => {
+                let message = source.to_string();
+                assert_eq!(source.kind(), ErrorKind::TimedOut);
+                assert!(message.contains("process-group signal failed"));
+                assert!(message.contains("direct child kill failed"));
+                assert!(message.contains("reap timed out"));
+            }
+            other => panic!("unexpected cleanup failure: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_retries_group_signal_after_reaping_an_exited_child() {
+        let mut child = FakeChild::ready_with_kill_error(ErrorKind::InvalidInput);
+        let mut group = FakeGroup::error_then_success(ErrorKind::PermissionDenied);
+
+        cleanup_process_tree(&mut child, &mut group, Duration::from_millis(10))
+            .await
+            .unwrap();
+
+        assert_eq!(group.calls, 2);
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_a_failed_group_signal_retry_after_reap() {
+        let mut child = FakeChild::ready();
+        let mut group =
+            FakeGroup::errors([ErrorKind::PermissionDenied, ErrorKind::PermissionDenied]);
+
+        let failure = cleanup_process_tree(&mut child, &mut group, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        match failure {
+            ProcessFailure::Cleanup { source } => {
+                let message = source.to_string();
+                assert_eq!(source.kind(), ErrorKind::PermissionDenied);
+                assert!(message.contains("signal failed before reap"));
+                assert!(message.contains("signal retry after reap failed"));
+            }
+            other => panic!("unexpected cleanup failure: {other:?}"),
+        }
+    }
+
+    struct FakeChild {
+        pending_wait: bool,
+        kill_error: Option<ErrorKind>,
+    }
+
+    impl FakeChild {
+        fn ready() -> Self {
+            Self {
+                pending_wait: false,
+                kill_error: None,
+            }
+        }
+
+        fn pending() -> Self {
+            Self {
+                pending_wait: true,
+                kill_error: None,
+            }
+        }
+
+        fn pending_with_kill_error(kind: ErrorKind) -> Self {
+            Self {
+                pending_wait: true,
+                kill_error: Some(kind),
+            }
+        }
+
+        fn ready_with_kill_error(kind: ErrorKind) -> Self {
+            Self {
+                pending_wait: false,
+                kill_error: Some(kind),
+            }
+        }
+    }
+
+    impl CleanupChild for FakeChild {
+        fn start_kill(&mut self) -> io::Result<()> {
+            match self.kill_error {
+                Some(kind) => Err(io::Error::from(kind)),
+                None => Ok(()),
+            }
+        }
+
+        fn wait(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            if self.pending_wait {
+                Box::pin(pending())
+            } else {
+                Box::pin(ready(Ok(())))
+            }
+        }
+    }
+
+    struct FakeGroup {
+        results: VecDeque<Option<ErrorKind>>,
+        calls: usize,
+    }
+
+    impl FakeGroup {
+        fn success() -> Self {
+            Self {
+                results: VecDeque::from([None]),
+                calls: 0,
+            }
+        }
+
+        fn errors<const N: usize>(errors: [ErrorKind; N]) -> Self {
+            Self {
+                results: errors.into_iter().map(Some).collect(),
+                calls: 0,
+            }
+        }
+
+        fn error_then_success(error: ErrorKind) -> Self {
+            Self {
+                results: VecDeque::from([Some(error), None]),
+                calls: 0,
+            }
+        }
+    }
+
+    impl CleanupGroup for FakeGroup {
+        fn kill(&mut self) -> io::Result<()> {
+            self.calls += 1;
+            match self.results.pop_front().flatten() {
+                Some(kind) => Err(io::Error::from(kind)),
+                None => Ok(()),
+            }
+        }
     }
 }
