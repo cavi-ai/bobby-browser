@@ -4,29 +4,35 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::{
-    ffi::{OsStr, OsString},
-    fs::File,
-    io::Write,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{ffi::OsString, fs::File, io::Read, os::unix::fs::MetadataExt};
 
 #[cfg(unix)]
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{Mode, OFlags};
 
 use serde::{de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::security::security_catalog;
 use crate::{
-    evaluate, CertificationVerdict, GateResult, GateStatus, ManifestError, PolicyError,
-    ProcessRunner, ReleaseManifest, SecurityGate,
+    evaluate, security_catalog_sha256, CertificationVerdict, GateResult, GateStatus, ManifestError,
+    PolicyError, ProcessRunner, ReleaseManifest, SecurityGate,
 };
 
-pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
-
 #[cfg(unix)]
-static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+use crate::persistence::{
+    open_directory, persist_bytes, relative_identity, validated_file_name,
+    AtomicPersistenceIo as BundlePersistenceIo, FileIdentity,
+    OsAtomicPersistenceIo as OsBundlePersistenceIo, OutputTarget,
+};
+
+#[cfg(all(test, unix))]
+use crate::persistence::file_identity;
+
+pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
+/// Maximum accepted manifest size. The manifest descriptor is checked against
+/// this 64 KiB bound before any buffer allocation and again while reading.
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -38,6 +44,12 @@ pub struct Cli {
     pub command: Command,
     pub manifest: PathBuf,
     pub output: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliFailureStage {
+    PreExecution,
+    PostExecution,
 }
 
 #[derive(Debug, Error)]
@@ -58,6 +70,10 @@ pub enum CliError {
     UnsupportedPlatform,
     #[error("failed to read release manifest: {0}")]
     ReadManifest(#[source] io::Error),
+    #[error("release manifest must be a regular file")]
+    ManifestNotRegular,
+    #[error("release manifest is {actual_bytes} bytes; exceeds {max_bytes} byte limit")]
+    ManifestTooLarge { actual_bytes: u64, max_bytes: usize },
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     #[error("failed to create output directory: {0}")]
@@ -68,15 +84,36 @@ pub enum CliError {
     Bundle(#[from] BundleError),
 }
 
+impl CliError {
+    pub const fn failure_stage(&self) -> CliFailureStage {
+        match self {
+            Self::Policy(_) | Self::Bundle(_) => CliFailureStage::PostExecution,
+            Self::Usage
+            | Self::DuplicateOption(_)
+            | Self::UnknownOption(_)
+            | Self::ParentTraversal { .. }
+            | Self::PathConflict
+            | Self::PathResolution(_)
+            | Self::UnsupportedPlatform
+            | Self::ReadManifest(_)
+            | Self::ManifestNotRegular
+            | Self::ManifestTooLarge { .. }
+            | Self::Manifest(_)
+            | Self::CreateOutputDirectory(_) => CliFailureStage::PreExecution,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificationBundle {
     schema_version: u32,
+    pub catalog_sha256: String,
     pub manifest_sha256: String,
     pub results: Vec<GateResult>,
     pub verdict: CertificationVerdict,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum BundleVerdict {
     Passed,
@@ -108,6 +145,7 @@ impl From<BundleVerdict> for CertificationVerdict {
 #[serde(rename_all = "camelCase")]
 struct BundleEvidence<'a> {
     schema_version: u32,
+    catalog_sha256: &'a str,
     manifest_sha256: &'a str,
     results: &'a [GateResult],
     verdict: BundleVerdict,
@@ -117,6 +155,7 @@ struct BundleEvidence<'a> {
 #[serde(rename_all = "camelCase")]
 struct BundleEnvelope<'a> {
     schema_version: u32,
+    catalog_sha256: &'a str,
     manifest_sha256: &'a str,
     results: &'a [GateResult],
     verdict: BundleVerdict,
@@ -127,6 +166,7 @@ struct BundleEnvelope<'a> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BundleEnvelopeOwned {
     schema_version: u32,
+    catalog_sha256: String,
     manifest_sha256: String,
     results: Vec<GateResult>,
     verdict: BundleVerdict,
@@ -135,6 +175,8 @@ struct BundleEnvelopeOwned {
 
 #[derive(Debug, Error)]
 pub enum BundleError {
+    #[error("invalid certification bundle: {0}")]
+    Invalid(String),
     #[error("failed to serialize certification bundle: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("certification bundle is {actual_bytes} bytes; exceeds {max_bytes} byte limit")]
@@ -149,17 +191,20 @@ pub enum BundleError {
 }
 
 impl CertificationBundle {
-    pub fn new(
+    pub fn try_new(
         manifest_sha256: String,
         results: Vec<GateResult>,
         verdict: CertificationVerdict,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, BundleError> {
+        let bundle = Self {
             schema_version: BUNDLE_SCHEMA_VERSION,
+            catalog_sha256: security_catalog_sha256(),
             manifest_sha256,
             results,
             verdict,
-        }
+        };
+        bundle.validate_semantics()?;
+        Ok(bundle)
     }
 
     pub fn schema_version(&self) -> u32 {
@@ -169,11 +214,69 @@ impl CertificationBundle {
     pub fn bundle_sha256(&self) -> Result<String, BundleError> {
         let bytes = serde_json::to_vec(&BundleEvidence {
             schema_version: self.schema_version,
+            catalog_sha256: &self.catalog_sha256,
             manifest_sha256: &self.manifest_sha256,
             results: &self.results,
             verdict: self.verdict.into(),
         })?;
         Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    fn validate_semantics(&self) -> Result<(), BundleError> {
+        if self.schema_version != BUNDLE_SCHEMA_VERSION {
+            return Err(BundleError::Invalid(format!(
+                "unsupported schema version {}; expected {BUNDLE_SCHEMA_VERSION}",
+                self.schema_version
+            )));
+        }
+        validate_sha256("manifestSha256", &self.manifest_sha256)?;
+        validate_sha256("catalogSha256", &self.catalog_sha256)?;
+        let compiled_catalog_sha256 = security_catalog_sha256();
+        if self.catalog_sha256 != compiled_catalog_sha256 {
+            return Err(BundleError::Invalid(
+                "catalogSha256 does not match the compiled security catalog".into(),
+            ));
+        }
+
+        let catalog = security_catalog();
+        if self.results.len() != catalog.len() {
+            return Err(BundleError::Invalid(format!(
+                "security catalog requires exactly {} results; observed {}",
+                catalog.len(),
+                self.results.len()
+            )));
+        }
+        let mut observed = std::collections::BTreeSet::new();
+        for (index, (result, check)) in self.results.iter().zip(catalog).enumerate() {
+            if !observed.insert((result.suite.as_str(), result.check.as_str())) {
+                return Err(BundleError::Invalid(format!(
+                    "duplicate result identity {}/{}",
+                    result.suite, result.check
+                )));
+            }
+            if result.suite != "security" || result.check != check.name {
+                return Err(BundleError::Invalid(format!(
+                    "catalog result {index} must be security/{}; observed {}/{}",
+                    check.name, result.suite, result.check
+                )));
+            }
+            if check.required && !result.required {
+                return Err(BundleError::Invalid(format!(
+                    "required catalog result security/{} is not marked required",
+                    check.name
+                )));
+            }
+        }
+
+        let recomputed = evaluate(&["security"], &self.results)
+            .map_err(|error| BundleError::Invalid(format!("policy evaluation failed: {error}")))?;
+        if self.verdict != recomputed {
+            return Err(BundleError::Invalid(format!(
+                "stored verdict {:?} does not match recomputed verdict {recomputed:?}",
+                self.verdict
+            )));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -204,6 +307,7 @@ impl CertificationBundle {
         max_bytes: usize,
         persistence: &impl BundlePersistenceIo,
     ) -> Result<(), BundleError> {
+        self.validate_semantics()?;
         let bytes = serde_json::to_vec(self)?;
         if bytes.len() > max_bytes {
             return Err(BundleError::TooLarge {
@@ -212,198 +316,22 @@ impl CertificationBundle {
             });
         }
 
-        let mut temporary = OwnedTemporaryFile::create(target, persistence)?;
-        persistence.write_all(&mut temporary.file, &bytes)?;
-        persistence.sync_file(&temporary.file)?;
-        persistence.rename(&target.directory, &temporary.name, &target.file_name)?;
-        temporary.disarm();
-        persistence.sync_directory(&target.directory)?;
+        persist_bytes(target, &bytes, persistence)?;
         Ok(())
     }
 }
 
-#[cfg(unix)]
-trait BundlePersistenceIo {
-    fn create(&self, directory: &File, name: &OsStr) -> io::Result<File>;
-    fn metadata(&self, file: &File) -> io::Result<FileIdentity>;
-    fn write_all(&self, file: &mut File, bytes: &[u8]) -> io::Result<()>;
-    fn sync_file(&self, file: &File) -> io::Result<()>;
-    fn rename(&self, directory: &File, source: &OsStr, destination: &OsStr) -> io::Result<()>;
-    fn sync_directory(&self, directory: &File) -> io::Result<()>;
-}
-
-#[cfg(unix)]
-struct OsBundlePersistenceIo;
-
-#[cfg(unix)]
-impl BundlePersistenceIo for OsBundlePersistenceIo {
-    fn create(&self, directory: &File, name: &OsStr) -> io::Result<File> {
-        let fd = rustix::fs::openat(
-            directory,
-            name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::RUSR | Mode::WUSR,
-        )?;
-        Ok(File::from(fd))
+fn validate_sha256(name: &str, value: &str) -> Result<(), BundleError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(BundleError::Invalid(format!(
+            "{name} must be 64 lowercase hexadecimal characters"
+        )));
     }
-
-    fn metadata(&self, file: &File) -> io::Result<FileIdentity> {
-        file_identity(file)
-    }
-
-    fn write_all(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
-        file.write_all(bytes)
-    }
-
-    fn sync_file(&self, file: &File) -> io::Result<()> {
-        rustix::fs::fsync(file).map_err(Into::into)
-    }
-
-    fn rename(&self, directory: &File, source: &OsStr, destination: &OsStr) -> io::Result<()> {
-        rustix::fs::renameat(directory, source, directory, destination).map_err(Into::into)
-    }
-
-    fn sync_directory(&self, directory: &File) -> io::Result<()> {
-        rustix::fs::fsync(directory).map_err(Into::into)
-    }
-}
-
-#[cfg(unix)]
-struct OutputTarget {
-    directory: File,
-    file_name: OsString,
-}
-
-#[cfg(unix)]
-impl OutputTarget {
-    fn open(path: &Path) -> io::Result<Self> {
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let file_name = validated_file_name(path)?;
-        let canonical_parent = fs::canonicalize(parent)?;
-        Ok(Self {
-            directory: open_directory(&canonical_parent)?,
-            file_name,
-        })
-    }
-}
-
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(unix)]
-struct OwnedTemporaryFile<'a> {
-    directory: &'a File,
-    name: OsString,
-    file: File,
-    identity: Option<FileIdentity>,
-    armed: bool,
-}
-
-#[cfg(unix)]
-impl<'a> OwnedTemporaryFile<'a> {
-    fn create(
-        target: &'a OutputTarget,
-        persistence: &impl BundlePersistenceIo,
-    ) -> io::Result<Self> {
-        for _ in 0..128 {
-            let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let mut temporary_name = OsString::from(".");
-            temporary_name.push(&target.file_name);
-            temporary_name.push(format!(
-                ".release-gates-{}-{sequence}.tmp",
-                std::process::id()
-            ));
-            match persistence.create(&target.directory, &temporary_name) {
-                Ok(file) => {
-                    // Ownership begins immediately after openat succeeds. If
-                    // the following identity probe fails, Drop still compares
-                    // the open fd to the directory entry before cleanup.
-                    let mut temporary = Self {
-                        directory: &target.directory,
-                        name: temporary_name,
-                        file,
-                        identity: None,
-                        armed: true,
-                    };
-                    temporary.identity = Some(persistence.metadata(&temporary.file)?);
-                    return Ok(temporary);
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate a unique certification temporary file",
-        ))
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-#[cfg(unix)]
-impl Drop for OwnedTemporaryFile<'_> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let expected = self.identity.or_else(|| file_identity(&self.file).ok());
-        let actual = relative_identity(self.directory, &self.name, true).ok();
-        let owned = expected.is_some() && expected == actual;
-        if owned {
-            let _ = rustix::fs::unlinkat(self.directory, &self.name, AtFlags::empty());
-        }
-    }
-}
-
-#[cfg(unix)]
-fn validated_file_name(path: &Path) -> io::Result<OsString> {
-    path.file_name()
-        .map(OsStr::to_owned)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing output filename"))
-}
-
-#[cfg(unix)]
-fn open_directory(path: &Path) -> io::Result<File> {
-    let fd = rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )?;
-    Ok(File::from(fd))
-}
-
-#[cfg(unix)]
-fn file_identity(file: &File) -> io::Result<FileIdentity> {
-    let stat = rustix::fs::fstat(file)?;
-    Ok(FileIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-    })
-}
-
-#[cfg(unix)]
-fn relative_identity(directory: &File, name: &OsStr, no_follow: bool) -> io::Result<FileIdentity> {
-    let flags = if no_follow {
-        AtFlags::SYMLINK_NOFOLLOW
-    } else {
-        AtFlags::empty()
-    };
-    let stat = rustix::fs::statat(directory, name, flags)?;
-    Ok(FileIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-    })
+    Ok(())
 }
 
 impl Serialize for CertificationBundle {
@@ -411,11 +339,14 @@ impl Serialize for CertificationBundle {
     where
         S: Serializer,
     {
+        self.validate_semantics()
+            .map_err(|error| S::Error::custom(error.to_string()))?;
         let bundle_sha256 = self
             .bundle_sha256()
             .map_err(|error| S::Error::custom(error.to_string()))?;
         BundleEnvelope {
             schema_version: self.schema_version,
+            catalog_sha256: &self.catalog_sha256,
             manifest_sha256: &self.manifest_sha256,
             results: &self.results,
             verdict: self.verdict.into(),
@@ -431,18 +362,16 @@ impl<'de> Deserialize<'de> for CertificationBundle {
         D: Deserializer<'de>,
     {
         let envelope = BundleEnvelopeOwned::deserialize(deserializer)?;
-        if envelope.schema_version != BUNDLE_SCHEMA_VERSION {
-            return Err(D::Error::custom(format!(
-                "unsupported certification bundle schema version {}; expected {}",
-                envelope.schema_version, BUNDLE_SCHEMA_VERSION
-            )));
-        }
         let bundle = Self {
             schema_version: envelope.schema_version,
+            catalog_sha256: envelope.catalog_sha256,
             manifest_sha256: envelope.manifest_sha256,
             results: envelope.results,
             verdict: envelope.verdict.into(),
         };
+        bundle
+            .validate_semantics()
+            .map_err(|error| D::Error::custom(error.to_string()))?;
         let expected = bundle
             .bundle_sha256()
             .map_err(|error| D::Error::custom(error.to_string()))?;
@@ -507,38 +436,89 @@ pub const fn exit_code(verdict: CertificationVerdict) -> i32 {
     }
 }
 
+pub const fn failure_exit_code(error: &CliError) -> i32 {
+    match error.failure_stage() {
+        CliFailureStage::PreExecution => 2,
+        CliFailureStage::PostExecution => 1,
+    }
+}
+
 struct ValidatedPaths {
-    manifest: PathBuf,
-    output: PathBuf,
     #[cfg(unix)]
-    manifest_identity: FileIdentity,
+    manifest: OpenedManifest,
+    output: PathBuf,
+}
+
+#[cfg(unix)]
+struct OpenedManifest {
+    file: File,
+    identity: FileIdentity,
+    size_hint: usize,
+}
+
+#[cfg(unix)]
+impl OpenedManifest {
+    fn open(path: &Path) -> Result<Self, CliError> {
+        let fd = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|error| CliError::ReadManifest(error.into()))?;
+        let file = File::from(fd);
+        let metadata = file.metadata().map_err(CliError::ReadManifest)?;
+        if !metadata.file_type().is_file() {
+            return Err(CliError::ManifestNotRegular);
+        }
+        if metadata.len() > MAX_MANIFEST_BYTES as u64 {
+            return Err(CliError::ManifestTooLarge {
+                actual_bytes: metadata.len(),
+                max_bytes: MAX_MANIFEST_BYTES,
+            });
+        }
+        Ok(Self {
+            identity: FileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            },
+            size_hint: metadata.len() as usize,
+            file,
+        })
+    }
+
+    fn read_bounded(&mut self) -> Result<Vec<u8>, CliError> {
+        let mut bytes = Vec::with_capacity(self.size_hint);
+        (&mut self.file)
+            .take((MAX_MANIFEST_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(CliError::ReadManifest)?;
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(CliError::ManifestTooLarge {
+                actual_bytes: bytes.len() as u64,
+                max_bytes: MAX_MANIFEST_BYTES,
+            });
+        }
+        Ok(bytes)
+    }
 }
 
 #[cfg(unix)]
 fn validate_distinct_paths(cli: &Cli, repo_root: &Path) -> Result<ValidatedPaths, CliError> {
-    use std::os::unix::fs::MetadataExt;
-
     let canonical_root = fs::canonicalize(repo_root).map_err(CliError::PathResolution)?;
     let manifest_path = absolute_path(&cli.manifest, &canonical_root);
+    let manifest = OpenedManifest::open(&manifest_path)?;
     let output_path = absolute_path(&cli.output, &canonical_root);
-    if manifest_path == output_path {
-        return Err(CliError::PathConflict);
-    }
-    let canonical_manifest = fs::canonicalize(&manifest_path).map_err(CliError::PathResolution)?;
     let canonical_output =
         canonicalize_allow_missing(&output_path).map_err(CliError::PathResolution)?;
-
-    if canonical_manifest == canonical_output {
-        return Err(CliError::PathConflict);
-    }
-
-    let manifest_metadata = fs::metadata(&canonical_manifest).map_err(CliError::PathResolution)?;
-    match fs::metadata(&output_path) {
+    match fs::metadata(&canonical_output) {
         Ok(output_metadata)
-            if manifest_metadata.dev() == output_metadata.dev()
-                && manifest_metadata.ino() == output_metadata.ino() =>
+            if manifest.identity
+                == (FileIdentity {
+                    device: output_metadata.dev(),
+                    inode: output_metadata.ino(),
+                }) =>
         {
-            return Err(CliError::PathConflict);
+            return Err(CliError::PathConflict)
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -546,12 +526,8 @@ fn validate_distinct_paths(cli: &Cli, repo_root: &Path) -> Result<ValidatedPaths
     }
 
     Ok(ValidatedPaths {
-        manifest: canonical_manifest,
+        manifest,
         output: canonical_output,
-        manifest_identity: FileIdentity {
-            device: manifest_metadata.dev(),
-            inode: manifest_metadata.ino(),
-        },
     })
 }
 
@@ -626,7 +602,7 @@ fn prepare_output_target(paths: &ValidatedPaths) -> Result<OutputTarget, CliErro
     };
 
     match relative_identity(&target.directory, &target.file_name, false) {
-        Ok(identity) if identity == paths.manifest_identity => Err(CliError::PathConflict),
+        Ok(identity) if identity == paths.manifest.identity => Err(CliError::PathConflict),
         Ok(_) => Ok(target),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(target),
         Err(error) => Err(CliError::PathResolution(error)),
@@ -641,8 +617,11 @@ pub async fn run_security<R>(
 where
     R: ProcessRunner,
 {
-    let paths = validate_distinct_paths(cli, repo_root)?;
-    let manifest_bytes = fs::read(&paths.manifest).map_err(CliError::ReadManifest)?;
+    let mut paths = validate_distinct_paths(cli, repo_root)?;
+    #[cfg(unix)]
+    let manifest_bytes = paths.manifest.read_bounded()?;
+    #[cfg(not(unix))]
+    return Err(CliError::UnsupportedPlatform);
     let manifest = ReleaseManifest::from_slice(&manifest_bytes)?;
     let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
     #[cfg(unix)]
@@ -650,7 +629,7 @@ where
 
     let results = gate.run(repo_root, &manifest).await;
     let verdict = evaluate(&["security"], &results)?;
-    let bundle = CertificationBundle::new(manifest_sha256, results, verdict);
+    let bundle = CertificationBundle::try_new(manifest_sha256, results, verdict)?;
     #[cfg(unix)]
     bundle.write_json_to_target_with_io(
         &output_target,
@@ -703,6 +682,26 @@ fn validate_path(option: &'static str, path: &Path) -> Result<(), CliError> {
         });
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod manifest_descriptor_tests {
+    use super::OpenedManifest;
+
+    #[test]
+    fn opened_manifest_descriptor_survives_path_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+        let moved = dir.path().join("opened-manifest.json");
+        let original = br#"{"schemaVersion":1}"#.to_vec();
+        std::fs::write(&path, &original).unwrap();
+
+        let mut opened = OpenedManifest::open(&path).unwrap();
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, br#"{"schemaVersion":999}"#).unwrap();
+
+        assert_eq!(opened.read_bounded().unwrap(), original);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -797,18 +796,17 @@ mod persistence_tests {
     }
 
     fn bundle() -> CertificationBundle {
-        CertificationBundle::new(
+        CertificationBundle::try_new(
             "0".repeat(64),
-            vec![GateResult::new(
-                "security",
-                "check",
-                true,
-                GateStatus::Passed,
-                1,
-                vec![],
-            )],
+            super::security_catalog()
+                .iter()
+                .map(|check| {
+                    GateResult::new("security", check.name, true, GateStatus::Passed, 1, vec![])
+                })
+                .collect(),
             CertificationVerdict::Passed,
         )
+        .unwrap()
     }
 
     fn owned_temporary_files(dir: &Path) -> Vec<std::path::PathBuf> {

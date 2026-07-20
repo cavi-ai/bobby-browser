@@ -1,12 +1,11 @@
-use std::{
-    fs::{self, File, OpenOptions},
-    io::{self, Write},
-    path::Path,
-};
+use std::{io, path::Path};
 
 use serde::{de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+#[cfg(unix)]
+use crate::persistence::{persist_bytes, AtomicPersistenceIo, OsAtomicPersistenceIo, OutputTarget};
 
 pub const RESULT_SCHEMA_VERSION: u32 = 1;
 
@@ -96,6 +95,8 @@ pub enum ResultError {
         actual_bytes: usize,
         max_bytes: usize,
     },
+    #[error("atomic gate result persistence is unsupported on this platform")]
+    UnsupportedPlatform,
     #[error("failed to persist gate result: {0}")]
     Io(#[from] io::Error),
 }
@@ -145,8 +146,23 @@ impl GateResult {
         Ok(hex_digest(&serde_json::to_vec(self)?))
     }
 
+    #[cfg(unix)]
     pub fn write_json(&self, path: impl AsRef<Path>, max_bytes: usize) -> Result<(), ResultError> {
-        let path = path.as_ref();
+        self.write_json_with_io(path.as_ref(), max_bytes, &OsAtomicPersistenceIo)
+    }
+
+    #[cfg(not(unix))]
+    pub fn write_json(&self, _: impl AsRef<Path>, _: usize) -> Result<(), ResultError> {
+        Err(ResultError::UnsupportedPlatform)
+    }
+
+    #[cfg(unix)]
+    fn write_json_with_io(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+        persistence: &impl AtomicPersistenceIo,
+    ) -> Result<(), ResultError> {
         let bytes = serde_json::to_vec(self)?;
         if bytes.len() > max_bytes {
             return Err(ResultError::TooLarge {
@@ -155,15 +171,8 @@ impl GateResult {
             });
         }
 
-        let temporary_path = path.with_extension("json.tmp");
-        let mut temporary_file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary_path)?;
-        temporary_file.write_all(&bytes)?;
-        temporary_file.sync_all()?;
-        fs::rename(&temporary_path, path)?;
-        sync_parent_directory(path)?;
+        let target = OutputTarget::open(path)?;
+        persist_bytes(&target, &bytes, persistence)?;
         Ok(())
     }
 
@@ -243,16 +252,234 @@ fn hex_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    File::open(parent)?.sync_all()
-}
+#[cfg(all(test, unix))]
+mod persistence_tests {
+    use std::{
+        ffi::OsStr,
+        fs, io,
+        path::Path,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
-#[cfg(not(unix))]
-fn sync_parent_directory(_: &Path) -> io::Result<()> {
-    Ok(())
+    use super::{GateResult, GateStatus};
+    use crate::persistence::{
+        AtomicPersistenceIo, FileIdentity, OsAtomicPersistenceIo, MAX_TEMPORARY_ATTEMPTS,
+    };
+
+    #[derive(Clone, Copy)]
+    enum FailurePoint {
+        Metadata,
+        Write,
+        FileSync,
+        Rename,
+    }
+
+    struct InjectedFailureIo(FailurePoint);
+
+    struct CollisionIo {
+        collisions: usize,
+        attempts: AtomicUsize,
+    }
+
+    struct ForeignReplacementIo;
+
+    impl AtomicPersistenceIo for InjectedFailureIo {
+        fn create(&self, directory: &fs::File, name: &OsStr) -> io::Result<fs::File> {
+            OsAtomicPersistenceIo.create(directory, name)
+        }
+
+        fn metadata(&self, file: &fs::File) -> io::Result<FileIdentity> {
+            if matches!(self.0, FailurePoint::Metadata) {
+                return Err(io::Error::other("injected metadata"));
+            }
+            crate::persistence::file_identity(file)
+        }
+
+        fn write_all(&self, file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
+            if matches!(self.0, FailurePoint::Write) {
+                return Err(io::Error::other("injected write"));
+            }
+            std::io::Write::write_all(file, bytes)
+        }
+
+        fn sync_file(&self, file: &fs::File) -> io::Result<()> {
+            if matches!(self.0, FailurePoint::FileSync) {
+                return Err(io::Error::other("injected sync"));
+            }
+            file.sync_all()
+        }
+
+        fn rename(
+            &self,
+            directory: &fs::File,
+            source: &OsStr,
+            destination: &OsStr,
+        ) -> io::Result<()> {
+            if matches!(self.0, FailurePoint::Rename) {
+                return Err(io::Error::other("injected rename"));
+            }
+            OsAtomicPersistenceIo.rename(directory, source, destination)
+        }
+
+        fn sync_directory(&self, directory: &fs::File) -> io::Result<()> {
+            OsAtomicPersistenceIo.sync_directory(directory)
+        }
+    }
+
+    impl AtomicPersistenceIo for CollisionIo {
+        fn create(&self, directory: &fs::File, name: &OsStr) -> io::Result<fs::File> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.collisions {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "injected name collision",
+                ));
+            }
+            OsAtomicPersistenceIo.create(directory, name)
+        }
+
+        fn metadata(&self, file: &fs::File) -> io::Result<FileIdentity> {
+            crate::persistence::file_identity(file)
+        }
+
+        fn write_all(&self, file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
+            std::io::Write::write_all(file, bytes)
+        }
+
+        fn sync_file(&self, file: &fs::File) -> io::Result<()> {
+            file.sync_all()
+        }
+
+        fn rename(
+            &self,
+            directory: &fs::File,
+            source: &OsStr,
+            destination: &OsStr,
+        ) -> io::Result<()> {
+            OsAtomicPersistenceIo.rename(directory, source, destination)
+        }
+
+        fn sync_directory(&self, directory: &fs::File) -> io::Result<()> {
+            OsAtomicPersistenceIo.sync_directory(directory)
+        }
+    }
+
+    impl AtomicPersistenceIo for ForeignReplacementIo {
+        fn create(&self, directory: &fs::File, name: &OsStr) -> io::Result<fs::File> {
+            OsAtomicPersistenceIo.create(directory, name)
+        }
+
+        fn metadata(&self, file: &fs::File) -> io::Result<FileIdentity> {
+            crate::persistence::file_identity(file)
+        }
+
+        fn write_all(&self, file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
+            std::io::Write::write_all(file, bytes)
+        }
+
+        fn sync_file(&self, file: &fs::File) -> io::Result<()> {
+            file.sync_all()
+        }
+
+        fn rename(&self, directory: &fs::File, source: &OsStr, _: &OsStr) -> io::Result<()> {
+            rustix::fs::unlinkat(directory, source, rustix::fs::AtFlags::empty())?;
+            let mut replacement = OsAtomicPersistenceIo.create(directory, source)?;
+            std::io::Write::write_all(&mut replacement, b"foreign replacement")?;
+            Err(io::Error::other("injected rename after replacement"))
+        }
+
+        fn sync_directory(&self, directory: &fs::File) -> io::Result<()> {
+            OsAtomicPersistenceIo.sync_directory(directory)
+        }
+    }
+
+    fn gate_result() -> GateResult {
+        GateResult::new("security", "check", true, GateStatus::Passed, 1, vec![])
+    }
+
+    fn owned_temporary_files(dir: &Path) -> Vec<std::path::PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(".release-gates-") && name.ends_with(".tmp"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gate_result_cleans_owned_temporary_files_after_post_create_failures() {
+        for (name, point) in [
+            ("metadata", FailurePoint::Metadata),
+            ("write", FailurePoint::Write),
+            ("sync", FailurePoint::FileSync),
+            ("rename", FailurePoint::Rename),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let output = dir.path().join(format!("result-{name}.json"));
+
+            assert!(gate_result()
+                .write_json_with_io(&output, 4096, &InjectedFailureIo(point))
+                .is_err());
+            assert!(!output.exists());
+            assert!(owned_temporary_files(dir.path()).is_empty());
+
+            gate_result().write_json(&output, 4096).unwrap();
+            assert!(output.exists());
+            assert!(owned_temporary_files(dir.path()).is_empty());
+        }
+    }
+
+    #[test]
+    fn gate_result_retries_collisions_and_bounds_temporary_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("result.json");
+        let retrying = CollisionIo {
+            collisions: 3,
+            attempts: AtomicUsize::new(0),
+        };
+
+        gate_result()
+            .write_json_with_io(&output, 4096, &retrying)
+            .unwrap();
+        assert_eq!(retrying.attempts.load(Ordering::SeqCst), 4);
+        assert!(owned_temporary_files(dir.path()).is_empty());
+
+        let exhausted_output = dir.path().join("exhausted.json");
+        let exhausted = CollisionIo {
+            collisions: usize::MAX,
+            attempts: AtomicUsize::new(0),
+        };
+        let error = gate_result()
+            .write_json_with_io(&exhausted_output, 4096, &exhausted)
+            .unwrap_err();
+        assert!(
+            matches!(error, super::ResultError::Io(ref source) if source.kind() == io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            exhausted.attempts.load(Ordering::SeqCst),
+            MAX_TEMPORARY_ATTEMPTS
+        );
+        assert!(!exhausted_output.exists());
+        assert!(owned_temporary_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn gate_result_cleanup_never_removes_a_foreign_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("result.json");
+
+        assert!(gate_result()
+            .write_json_with_io(&output, 4096, &ForeignReplacementIo)
+            .is_err());
+        assert!(!output.exists());
+        let temporary_files = owned_temporary_files(dir.path());
+        assert_eq!(temporary_files.len(), 1);
+        assert_eq!(
+            fs::read(&temporary_files[0]).unwrap(),
+            b"foreign replacement"
+        );
+    }
 }

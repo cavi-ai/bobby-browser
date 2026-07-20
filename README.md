@@ -168,11 +168,29 @@ cargo run -p release-gates -- security \
 
 This command requires an installed Chromium browser and permission to use its
 local loopback fixtures. Certification persistence is supported on Unix only;
-other platforms fail closed before running checks or creating output. It records
-a bounded, integrity-checked JSON bundle containing the manifest digest, all
-required check results, and the release verdict. Any deterministic check failure
-blocks the release. Health and smoke tests are preliminary signals and are not
-substitutes for this live security certification.
+other platforms fail closed before running checks or creating output. The
+manifest must be a regular file no larger than 64 KiB; it is opened once,
+bounded, hashed, and parsed through that same descriptor. The immutable catalog
+requires exact Cargo test counts and one unique proof marker per check, including
+the installed-Chromium capacity fixture. Zero-test, filtered/missing expected
+proof, ignored required proof, malformed receipt, or count/marker mismatch blocks
+the release.
+
+The bounded JSON bundle contains the manifest digest, compiled-catalog digest,
+the complete ordered required result set, the policy-recomputed verdict, and a
+canonical bundle digest. These SHA-256 values detect corruption and prove
+internal content consistency; they are not signatures and do not authenticate a
+bundle against an actor who can rewrite and rehash it. Key management and signed
+attestation are outside this certification phase. Health and smoke tests remain
+preliminary signals and are not substitutes for the live certification.
+
+The deterministic policy fixtures cover IPv4/IPv6 link-local and cloud-metadata
+destinations, mixed-address DNS rebinding, and redirect/navigation re-evaluation.
+CDP target admission proves popup pages remain page-scoped while worker and
+service-worker target families are not exposed through the gateway. The catalog
+also runs the authenticated interface boundary matrix and connection/workflow
+capacity proofs; certification cannot pass when any required family receipt is
+missing or ignored.
 
 ## Adaptive HTTP execution
 
