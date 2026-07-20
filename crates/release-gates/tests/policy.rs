@@ -30,6 +30,17 @@ fn policy_is_fail_closed_and_degradation_is_distinct() {
         .unwrap(),
         CertificationVerdict::Blocked
     );
+    assert_eq!(
+        evaluate(
+            &["security"],
+            &[
+                result("security", "availability", true, GateStatus::Degraded),
+                result("security", "confidentiality", true, GateStatus::Blocked),
+            ]
+        )
+        .unwrap(),
+        CertificationVerdict::Blocked
+    );
     assert!(matches!(
         evaluate(&["security"], &[]),
         Err(PolicyError::MissingRequiredSuite(name)) if name == "security"
@@ -42,8 +53,24 @@ fn policy_is_fail_closed_and_degradation_is_distinct() {
                 result("security", "one", true, GateStatus::Passed),
             ]
         ),
-        Err(PolicyError::DuplicateCheck { .. })
+        Err(PolicyError::DuplicateCheck { suite, check })
+            if suite == "security" && check == "one"
     ));
+}
+
+#[test]
+fn policy_allows_distinct_checks_in_the_same_suite() {
+    assert_eq!(
+        evaluate(
+            &["security"],
+            &[
+                result("security", "availability", true, GateStatus::Passed),
+                result("security", "confidentiality", true, GateStatus::Passed),
+            ]
+        )
+        .unwrap(),
+        CertificationVerdict::Passed
+    );
 }
 
 #[test]
