@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod manifest;
 pub mod policy;
 pub mod process;

@@ -3,6 +3,10 @@ name = "release-gates"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "release-gates"
+path = "src/main.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
