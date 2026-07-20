@@ -195,7 +195,17 @@ mod unix {
                 })
             })
             .collect::<BTreeMap<_, _>>();
-        let spec = ProcessSpec::new("/usr/bin/env", ["-0"], Duration::from_secs(1), 16_384);
+        let expected_output_bytes = expected
+            .iter()
+            .map(|(name, value)| name.len() + 1 + value.len() + 1)
+            .sum::<usize>()
+            .max(1);
+        let spec = ProcessSpec::new(
+            "/usr/bin/env",
+            ["-0"],
+            Duration::from_secs(1),
+            expected_output_bytes,
+        );
 
         let outcome = run_process(&spec).await.unwrap();
         assert_eq!(outcome.exit_code, Some(0));

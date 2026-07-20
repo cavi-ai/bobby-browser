@@ -174,6 +174,7 @@ async fn failed_exit_blocks_and_remaining_checks_still_execute() {
     assert_eq!(results[0].status, GateStatus::Blocked);
     assert_eq!(results[1].status, GateStatus::Passed);
     assert_eq!(results[2].status, GateStatus::Passed);
+    assert_eq!(results[0].diagnostics, "cargo exited with status code 7");
     let specs = trace.specs.lock().expect("spec lock");
     assert_eq!(specs.len(), 3);
     assert!(specs.iter().all(|spec| spec.program == "cargo"));
