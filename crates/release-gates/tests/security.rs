@@ -17,6 +17,7 @@ fn security_catalog_names_every_authoritative_production_suite() {
             "interface-boundaries",
             "adaptive-http-policy",
             "connection-and-workflow-capacity",
+            "cdp-target-context-policy",
         ]
     );
     assert!(checks.iter().all(|check| check.required));
@@ -56,9 +57,30 @@ fn security_catalog_names_every_authoritative_production_suite() {
             "--test",
             "interface_capacity",
             "--",
+            "--include-ignored",
             "--nocapture",
         ]
     );
+    assert_eq!(
+        checks[3].args,
+        &[
+            "test",
+            "-p",
+            "cdp-gateway",
+            "--test",
+            "playwright_domains",
+            "--",
+            "--nocapture",
+        ]
+    );
+    assert_eq!(checks[0].proof.passed, 1);
+    assert_eq!(checks[0].proof.filtered_out, 3);
+    assert_eq!(checks[1].proof.passed, 4);
+    assert_eq!(checks[2].proof.passed, 5);
+    assert_eq!(checks[3].proof.passed, 12);
+    assert!(checks.iter().all(|check| check.proof.failed == 0
+        && check.proof.ignored == 0
+        && check.proof.measured == 0));
 }
 
 enum StubOutcome {
@@ -66,6 +88,7 @@ enum StubOutcome {
     Timeout,
     OutputLimit,
     SpawnFailure,
+    ProofSuccess,
     DelayedSuccess(Duration),
 }
 
@@ -123,11 +146,16 @@ impl ProcessRunner for StubRunner {
             StubOutcome::SpawnFailure => Err(ProcessFailure::Spawn {
                 source: std::io::Error::new(std::io::ErrorKind::NotFound, "canary binary missing"),
             }),
+            StubOutcome::ProofSuccess => Ok(ProcessOutcome {
+                exit_code: Some(0),
+                stdout: valid_proof_receipt(spec),
+                stderr: Vec::new(),
+            }),
             StubOutcome::DelayedSuccess(delay) => {
                 tokio::time::sleep(delay).await;
                 Ok(ProcessOutcome {
                     exit_code: Some(0),
-                    stdout: Vec::new(),
+                    stdout: valid_proof_receipt(spec),
                     stderr: Vec::new(),
                 })
             }
@@ -154,13 +182,147 @@ fn manifest_with_required(canaries: &[&str], required: bool) -> ReleaseManifest 
 }
 
 fn success() -> StubOutcome {
-    StubOutcome::Exit(Some(0), Vec::new(), Vec::new())
+    StubOutcome::ProofSuccess
+}
+
+fn valid_proof_receipt(spec: &ProcessSpec) -> Vec<u8> {
+    let gate = SecurityGate::default();
+    let check = gate
+        .checks()
+        .iter()
+        .find(|check| {
+            check.args.len() == spec.args.len()
+                && check
+                    .args
+                    .iter()
+                    .zip(&spec.args)
+                    .all(|(expected, actual)| actual == expected)
+        })
+        .expect("stub spec must match immutable catalog");
+    format!(
+        "{}\ntest result: ok. {} passed; {} failed; {} ignored; {} measured; {} filtered out; finished in 0.00s\n",
+        check.proof.marker,
+        check.proof.passed,
+        check.proof.failed,
+        check.proof.ignored,
+        check.proof.measured,
+        check.proof.filtered_out,
+    )
+    .into_bytes()
+}
+
+fn first_outcome_then_successes(first: StubOutcome) -> Vec<StubOutcome> {
+    let mut outcomes = vec![first];
+    outcomes.extend((1..SecurityGate::default().checks().len()).map(|_| success()));
+    outcomes
+}
+
+#[tokio::test]
+async fn exit_zero_with_zero_executed_tests_blocks_required_proof() {
+    let gate = SecurityGate::new(StubRunner::new(first_outcome_then_successes(
+        StubOutcome::Exit(
+            Some(0),
+            b"test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s\n"
+                .to_vec(),
+            Vec::new(),
+        ),
+    )));
+
+    let results = gate
+        .run(std::path::Path::new("/repository"), &manifest(&["canary"]))
+        .await;
+
+    assert_eq!(results[0].status, GateStatus::Blocked);
+    assert!(results[0].diagnostics.contains("proof"));
+}
+
+#[tokio::test]
+async fn exit_zero_with_ignored_required_test_blocks_proof() {
+    let gate = SecurityGate::new(StubRunner::new(first_outcome_then_successes(
+        StubOutcome::Exit(
+            Some(0),
+            b"test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+                .to_vec(),
+            Vec::new(),
+        ),
+    )));
+
+    let results = gate
+        .run(std::path::Path::new("/repository"), &manifest(&["canary"]))
+        .await;
+
+    assert_eq!(results[0].status, GateStatus::Blocked);
+    assert!(results[0].diagnostics.contains("proof"));
+}
+
+#[tokio::test]
+async fn exit_zero_with_mismatched_counts_blocks_proof() {
+    let gate = SecurityGate::new(StubRunner::new(first_outcome_then_successes(
+        StubOutcome::Exit(
+            Some(0),
+            b"test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+                .to_vec(),
+            Vec::new(),
+        ),
+    )));
+
+    let results = gate
+        .run(std::path::Path::new("/repository"), &manifest(&["canary"]))
+        .await;
+
+    assert_eq!(results[0].status, GateStatus::Blocked);
+    assert!(results[0].diagnostics.contains("proof"));
+}
+
+#[tokio::test]
+async fn cargo_summary_without_exact_unique_marker_blocks_proof() {
+    let gate = SecurityGate::new(StubRunner::new(first_outcome_then_successes(
+        StubOutcome::Exit(
+            Some(0),
+            b"prefix AUTOMATION_RUNTIME_SECURITY_PROOF:v1:interface-boundaries suffix\n\
+              test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+                .to_vec(),
+            Vec::new(),
+        ),
+    )));
+
+    let results = gate
+        .run(std::path::Path::new("/repository"), &manifest(&["canary"]))
+        .await;
+
+    assert_eq!(results[0].status, GateStatus::Blocked);
+    assert!(results[0].diagnostics.contains("proof"));
+}
+
+#[tokio::test]
+async fn malformed_or_duplicated_cargo_receipt_blocks_proof() {
+    for stdout in [
+        b"AUTOMATION_RUNTIME_SECURITY_PROOF:v1:interface-boundaries\n\
+          test result: ok. one passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n"
+            .to_vec(),
+        b"AUTOMATION_RUNTIME_SECURITY_PROOF:v1:interface-boundaries\n\
+          AUTOMATION_RUNTIME_SECURITY_PROOF:v1:interface-boundaries\n\
+          test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n"
+            .to_vec(),
+    ] {
+        let gate = SecurityGate::new(StubRunner::new(first_outcome_then_successes(
+            StubOutcome::Exit(Some(0), stdout, Vec::new()),
+        )));
+
+        let results = gate
+            .run(std::path::Path::new("/repository"), &manifest(&["canary"]))
+            .await;
+
+        assert_eq!(results[0].status, GateStatus::Blocked);
+        assert!(results[0].diagnostics.contains("proof"));
+    }
 }
 
 #[tokio::test]
 async fn failed_exit_blocks_and_remaining_checks_still_execute() {
     let (runner, trace) = StubRunner::recording([
         StubOutcome::Exit(Some(7), b"failed".to_vec(), b"details".to_vec()),
+        success(),
         success(),
         success(),
     ]);
@@ -170,13 +332,13 @@ async fn failed_exit_blocks_and_remaining_checks_still_execute() {
         .run(std::path::Path::new("/repository"), &manifest(&["canary"]))
         .await;
 
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.len(), 4);
     assert_eq!(results[0].status, GateStatus::Blocked);
     assert_eq!(results[1].status, GateStatus::Passed);
     assert_eq!(results[2].status, GateStatus::Passed);
     assert_eq!(results[0].diagnostics, "cargo exited with status code 7");
     let specs = trace.specs.lock().expect("spec lock");
-    assert_eq!(specs.len(), 3);
+    assert_eq!(specs.len(), 4);
     assert!(specs.iter().all(|spec| spec.program == "cargo"));
     assert!(specs
         .iter()
@@ -189,7 +351,12 @@ async fn failed_exit_blocks_and_remaining_checks_still_execute() {
 
 #[tokio::test]
 async fn optional_manifest_marks_catalog_results_not_required() {
-    let gate = SecurityGate::new(StubRunner::new([success(), success(), success()]));
+    let gate = SecurityGate::new(StubRunner::new([
+        success(),
+        success(),
+        success(),
+        success(),
+    ]));
     let manifest = manifest_with_required(&["canary"], false);
 
     let results = gate
@@ -205,6 +372,7 @@ async fn optional_manifest_marks_catalog_results_not_required() {
 #[tokio::test]
 async fn runner_calls_are_sequential_and_follow_catalog_order() {
     let (runner, trace) = StubRunner::recording([
+        StubOutcome::DelayedSuccess(Duration::from_millis(5)),
         StubOutcome::DelayedSuccess(Duration::from_millis(5)),
         StubOutcome::DelayedSuccess(Duration::from_millis(5)),
         StubOutcome::DelayedSuccess(Duration::from_millis(5)),
@@ -226,6 +394,7 @@ async fn runner_calls_are_sequential_and_follow_catalog_order() {
             "interface_security",
             "adaptive_http_security",
             "interface_capacity",
+            "playwright_domains",
         ]
     );
 }
@@ -234,6 +403,7 @@ async fn runner_calls_are_sequential_and_follow_catalog_order() {
 async fn timeout_blocks() {
     let gate = SecurityGate::new(StubRunner::new([
         StubOutcome::Timeout,
+        success(),
         success(),
         success(),
     ]));
@@ -253,6 +423,7 @@ async fn stdout_and_stderr_canaries_are_redacted_before_results_are_returned() {
             b"stdout alpha-secret".to_vec(),
             b"stderr alpha-secret".to_vec(),
         ),
+        success(),
         success(),
         success(),
     ]));
@@ -276,6 +447,7 @@ async fn every_non_success_outcome_blocks() {
         StubOutcome::Exit(None, Vec::new(), Vec::new()),
         StubOutcome::Exit(Some(0), vec![0xff], Vec::new()),
         StubOutcome::Exit(Some(0), Vec::new(), vec![0xff]),
+        StubOutcome::Exit(None, Vec::new(), Vec::new()),
     ]));
     let results = gate
         .run(std::path::Path::new("/repository"), &manifest(&["canary"]))
@@ -290,6 +462,7 @@ async fn every_non_success_outcome_blocks() {
     let gate = SecurityGate::new(StubRunner::new([
         StubOutcome::SpawnFailure,
         StubOutcome::OutputLimit,
+        StubOutcome::Timeout,
         StubOutcome::Timeout,
     ]));
     let results = gate
@@ -318,6 +491,7 @@ async fn records_each_check_duration() {
         StubOutcome::DelayedSuccess(Duration::from_millis(5)),
         StubOutcome::DelayedSuccess(Duration::from_millis(5)),
         StubOutcome::DelayedSuccess(Duration::from_millis(5)),
+        StubOutcome::DelayedSuccess(Duration::from_millis(5)),
     ]));
 
     let results = gate
@@ -330,7 +504,7 @@ async fn records_each_check_duration() {
 #[test]
 fn default_gate_uses_the_trusted_process_runner() {
     let gate: SecurityGate<TokioProcessRunner> = SecurityGate::default();
-    assert_eq!(gate.checks().len(), 3);
+    assert_eq!(gate.checks().len(), 4);
 }
 
 #[cfg(unix)]

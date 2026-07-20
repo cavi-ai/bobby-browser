@@ -1,7 +1,7 @@
 use std::{env, process};
 
 use release_gates::{
-    cli::{exit_code, parse_args, run_security, summary_lines, Command},
+    cli::{exit_code, failure_exit_code, parse_args, run_security, summary_lines, Command},
     SecurityGate,
 };
 
@@ -15,7 +15,7 @@ async fn run() -> i32 {
         Ok(cli) => cli,
         Err(error) => {
             eprintln!("release-gates: {error}");
-            return 2;
+            return failure_exit_code(&error);
         }
     };
     let repo_root = match env::current_dir() {
@@ -36,7 +36,7 @@ async fn run() -> i32 {
             }
             Err(error) => {
                 eprintln!("release-gates: {error}");
-                2
+                failure_exit_code(&error)
             }
         },
     }

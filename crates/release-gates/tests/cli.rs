@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use release_gates::{
     cli::{
-        exit_code, parse_args, run_security, summary_lines, CertificationBundle, CliError, Command,
+        exit_code, failure_exit_code, parse_args, run_security, summary_lines, BundleError,
+        CertificationBundle, CliError, CliFailureStage, Command, MAX_MANIFEST_BYTES,
     },
-    CertificationVerdict, GateResult, GateStatus, ProcessFailure, ProcessOutcome, ProcessRunner,
-    ProcessSpec, SecurityGate,
+    CertificationVerdict, GateResult, GateStatus, PolicyError, ProcessFailure, ProcessOutcome,
+    ProcessRunner, ProcessSpec, SecurityGate,
 };
 use sha2::{Digest, Sha256};
 
@@ -26,6 +27,36 @@ fn security_cli_requires_explicit_paths_and_has_stable_exit_codes() {
     assert_eq!(exit_code(CertificationVerdict::Degraded), 3);
     assert_eq!(exit_code(CertificationVerdict::Blocked), 1);
     assert!(parse_args(["security", "--manifest", "config/release-gates.json"]).is_err());
+}
+
+#[test]
+fn cli_failures_have_typed_stages_and_exact_exit_codes() {
+    let usage = CliError::Usage;
+    assert_eq!(usage.failure_stage(), CliFailureStage::PreExecution);
+    assert_eq!(failure_exit_code(&usage), 2);
+
+    let policy = CliError::Policy(PolicyError::MissingRequiredSuite("security".into()));
+    assert_eq!(policy.failure_stage(), CliFailureStage::PostExecution);
+    assert_eq!(failure_exit_code(&policy), 1);
+
+    let evidence = CliError::Bundle(BundleError::Serialize(
+        serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+    ));
+    assert_eq!(evidence.failure_stage(), CliFailureStage::PostExecution);
+    assert_eq!(failure_exit_code(&evidence), 1);
+
+    let bundle_size = CliError::Bundle(BundleError::TooLarge {
+        actual_bytes: 2,
+        max_bytes: 1,
+    });
+    assert_eq!(bundle_size.failure_stage(), CliFailureStage::PostExecution);
+    assert_eq!(failure_exit_code(&bundle_size), 1);
+
+    let persistence = CliError::Bundle(BundleError::Io(std::io::Error::other(
+        "injected persistence failure",
+    )));
+    assert_eq!(persistence.failure_stage(), CliFailureStage::PostExecution);
+    assert_eq!(failure_exit_code(&persistence), 1);
 }
 
 #[test]
@@ -86,14 +117,41 @@ struct StubRunner {
 }
 
 impl ProcessRunner for StubRunner {
-    async fn run(&self, _: &ProcessSpec) -> Result<ProcessOutcome, ProcessFailure> {
+    async fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ProcessOutcome {
             exit_code: Some(0),
-            stdout: self.canary.clone().unwrap_or_default().into_bytes(),
+            stdout: valid_proof_receipt(spec, self.canary.as_deref()),
             stderr: Vec::new(),
         })
     }
+}
+
+fn valid_proof_receipt(spec: &ProcessSpec, extra: Option<&str>) -> Vec<u8> {
+    let gate = SecurityGate::default();
+    let check = gate
+        .checks()
+        .iter()
+        .find(|check| {
+            check.args.len() == spec.args.len()
+                && check
+                    .args
+                    .iter()
+                    .zip(&spec.args)
+                    .all(|(expected, actual)| actual == expected)
+        })
+        .expect("stub spec must match immutable catalog");
+    format!(
+        "{}\n{}\ntest result: ok. {} passed; {} failed; {} ignored; {} measured; {} filtered out; finished in 0.00s\n",
+        extra.unwrap_or_default(),
+        check.proof.marker,
+        check.proof.passed,
+        check.proof.failed,
+        check.proof.ignored,
+        check.proof.measured,
+        check.proof.filtered_out,
+    )
+    .into_bytes()
 }
 
 fn manifest(max_output_bytes: usize) -> String {
@@ -104,6 +162,154 @@ fn manifest(max_output_bytes: usize) -> String {
           "secretCanaries":["cli-secret-canary"]
         }}"#
     )
+}
+
+fn catalog_results(status: GateStatus) -> Vec<GateResult> {
+    SecurityGate::default()
+        .checks()
+        .iter()
+        .map(|check| GateResult::new("security", check.name, true, status.clone(), 1, vec![]))
+        .collect()
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForgedBundleEvidence<'a> {
+    schema_version: u32,
+    catalog_sha256: &'a str,
+    manifest_sha256: &'a str,
+    results: &'a [GateResult],
+    verdict: &'a str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForgedBundleEnvelope<'a> {
+    schema_version: u32,
+    catalog_sha256: &'a str,
+    manifest_sha256: &'a str,
+    results: &'a [GateResult],
+    verdict: &'a str,
+    bundle_sha256: &'a str,
+}
+
+fn forged_bundle_value(
+    schema_version: u32,
+    catalog_sha256: &str,
+    manifest_sha256: &str,
+    results: &[GateResult],
+    verdict: &str,
+) -> serde_json::Value {
+    let evidence = ForgedBundleEvidence {
+        schema_version,
+        catalog_sha256,
+        manifest_sha256,
+        results,
+        verdict,
+    };
+    let bundle_sha256 = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&evidence).unwrap())
+    );
+    serde_json::to_value(ForgedBundleEnvelope {
+        schema_version,
+        catalog_sha256,
+        manifest_sha256,
+        results,
+        verdict,
+        bundle_sha256: &bundle_sha256,
+    })
+    .unwrap()
+}
+
+fn assert_forged_bundle_rejected(results: &[GateResult], verdict: &str, catalog_sha256: &str) {
+    let value = forged_bundle_value(1, catalog_sha256, &"0".repeat(64), results, verdict);
+    assert!(serde_json::from_value::<CertificationBundle>(value).is_err());
+}
+
+fn security_cli(
+    manifest_path: &std::path::Path,
+    output: &std::path::Path,
+) -> release_gates::cli::Cli {
+    parse_args([
+        "security".into(),
+        "--manifest".into(),
+        manifest_path.display().to_string(),
+        "--output".into(),
+        output.display().to_string(),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn certification_bundle_try_new_rejects_missing_catalog_results() {
+    let error =
+        CertificationBundle::try_new("0".repeat(64), Vec::new(), CertificationVerdict::Passed)
+            .unwrap_err();
+
+    assert!(error.to_string().contains("catalog"));
+}
+
+#[test]
+fn certification_bundle_rejects_empty_and_missing_catalog_results_even_when_rehashed() {
+    let catalog_sha256 = release_gates::security_catalog_sha256();
+    assert_forged_bundle_rejected(&[], "passed", &catalog_sha256);
+    let mut missing = catalog_results(GateStatus::Passed);
+    missing.pop();
+    assert_forged_bundle_rejected(&missing, "passed", &catalog_sha256);
+}
+
+#[test]
+fn certification_bundle_rejects_reordered_extra_and_duplicate_catalog_results() {
+    let catalog_sha256 = release_gates::security_catalog_sha256();
+
+    let mut reordered = catalog_results(GateStatus::Passed);
+    reordered.swap(0, 1);
+    assert_forged_bundle_rejected(&reordered, "passed", &catalog_sha256);
+
+    let mut extra = catalog_results(GateStatus::Passed);
+    extra.push(extra[0].clone());
+    assert_forged_bundle_rejected(&extra, "passed", &catalog_sha256);
+
+    let mut duplicate = catalog_results(GateStatus::Passed);
+    duplicate[1] = duplicate[0].clone();
+    assert_forged_bundle_rejected(&duplicate, "passed", &catalog_sha256);
+}
+
+#[test]
+fn certification_bundle_rejects_blocked_as_passed_and_nonrequired_results_when_rehashed() {
+    let catalog_sha256 = release_gates::security_catalog_sha256();
+    let mut blocked = catalog_results(GateStatus::Passed);
+    blocked[0].status = GateStatus::Blocked;
+    assert_forged_bundle_rejected(&blocked, "passed", &catalog_sha256);
+
+    let mut nonrequired = catalog_results(GateStatus::Passed);
+    nonrequired[0].required = false;
+    assert_forged_bundle_rejected(&nonrequired, "passed", &catalog_sha256);
+}
+
+#[test]
+fn certification_bundle_rejects_forged_catalog_manifest_and_schema_identity_when_rehashed() {
+    let results = catalog_results(GateStatus::Passed);
+    assert_forged_bundle_rejected(&results, "passed", &"1".repeat(64));
+
+    let invalid_manifest = forged_bundle_value(
+        1,
+        &release_gates::security_catalog_sha256(),
+        "not-a-digest",
+        &results,
+        "passed",
+    );
+    assert!(serde_json::from_value::<CertificationBundle>(invalid_manifest).is_err());
+
+    let invalid_schema = forged_bundle_value(
+        2,
+        &release_gates::security_catalog_sha256(),
+        &"0".repeat(64),
+        &results,
+        "passed",
+    );
+    assert!(serde_json::from_value::<CertificationBundle>(invalid_schema).is_err());
 }
 
 #[tokio::test]
@@ -131,6 +337,81 @@ async fn invalid_manifest_is_rejected_before_output_or_checks() {
     assert!(!output.parent().unwrap().exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn manifest_descriptor_rejects_oversize_and_nonregular_inputs_before_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("security.json");
+    let runner = StubRunner::default();
+    let calls = Arc::clone(&runner.calls);
+
+    let oversized = dir.path().join("oversized.json");
+    std::fs::write(&oversized, vec![b' '; MAX_MANIFEST_BYTES + 1]).unwrap();
+    assert!(matches!(
+        run_security(
+            &security_cli(&oversized, &output),
+            dir.path(),
+            &SecurityGate::new(runner.clone())
+        )
+        .await,
+        Err(CliError::ManifestTooLarge { .. })
+    ));
+
+    let directory = dir.path().join("manifest-directory");
+    std::fs::create_dir(&directory).unwrap();
+    assert!(matches!(
+        run_security(
+            &security_cli(&directory, &output),
+            dir.path(),
+            &SecurityGate::new(runner.clone())
+        )
+        .await,
+        Err(CliError::ManifestNotRegular)
+    ));
+
+    assert!(matches!(
+        run_security(
+            &security_cli(std::path::Path::new("/dev/null"), &output),
+            dir.path(),
+            &SecurityGate::new(runner)
+        )
+        .await,
+        Err(CliError::ManifestNotRegular)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(!output.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fifo_manifest_is_rejected_without_blocking() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("manifest.fifo");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+    let output = dir.path().join("security.json");
+    let runner = StubRunner::default();
+    let calls = Arc::clone(&runner.calls);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        run_security(
+            &security_cli(&fifo, &output),
+            dir.path(),
+            &SecurityGate::new(runner),
+        ),
+    )
+    .await
+    .expect("nonblocking manifest open must not wait for a FIFO writer");
+
+    assert!(matches!(result, Err(CliError::ManifestNotRegular)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(!output.exists());
+}
+
 #[tokio::test]
 async fn successful_security_run_persists_a_bounded_integrity_checked_bundle() {
     let dir = tempfile::tempdir().unwrap();
@@ -156,9 +437,13 @@ async fn successful_security_run_persists_a_bounded_integrity_checked_bundle() {
         .await
         .unwrap();
 
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert_eq!(bundle.verdict, CertificationVerdict::Passed);
-    assert_eq!(bundle.results.len(), 3);
+    assert_eq!(bundle.results.len(), 4);
+    assert_eq!(
+        bundle.catalog_sha256,
+        release_gates::security_catalog_sha256()
+    );
     assert!(bundle
         .results
         .iter()
@@ -177,7 +462,8 @@ async fn successful_security_run_persists_a_bounded_integrity_checked_bundle() {
         decoded.bundle_sha256().unwrap(),
         bundle.bundle_sha256().unwrap()
     );
-    assert_eq!(decoded.results.len(), 3);
+    assert_eq!(decoded.results.len(), 4);
+    assert_eq!(decoded.catalog_sha256, bundle.catalog_sha256);
 }
 
 #[tokio::test]
@@ -318,7 +604,7 @@ async fn successful_security_run_atomically_replaces_an_existing_output() {
     let decoded: CertificationBundle =
         serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
     assert_eq!(decoded.verdict, CertificationVerdict::Passed);
-    assert_eq!(decoded.results.len(), 3);
+    assert_eq!(decoded.results.len(), 4);
 }
 
 #[cfg(unix)]
@@ -369,7 +655,7 @@ async fn output_directory_is_pinned_before_checks_when_parent_is_retargeted_and_
     }
 
     impl ProcessRunner for RetargetingRunner {
-        async fn run(&self, _: &ProcessSpec) -> Result<ProcessOutcome, ProcessFailure> {
+        async fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessFailure> {
             if !self.mutated.swap(true, Ordering::SeqCst) {
                 std::fs::rename(&self.safe_parent, &self.pinned_parent).unwrap();
                 std::fs::create_dir(&self.safe_parent).unwrap();
@@ -378,7 +664,7 @@ async fn output_directory_is_pinned_before_checks_when_parent_is_retargeted_and_
             }
             Ok(ProcessOutcome {
                 exit_code: Some(0),
-                stdout: Vec::new(),
+                stdout: valid_proof_receipt(spec, None),
                 stderr: Vec::new(),
             })
         }
@@ -426,34 +712,21 @@ async fn output_directory_is_pinned_before_checks_when_parent_is_retargeted_and_
 
 #[test]
 fn concise_summary_has_one_line_per_check_and_a_final_verdict() {
-    let bundle = CertificationBundle::new(
-        "0".repeat(64),
-        vec![
-            GateResult::new(
-                "security",
-                "interface-boundaries",
-                true,
-                GateStatus::Passed,
-                7,
-                vec![],
-            ),
-            GateResult::new(
-                "security",
-                "adaptive-http-policy",
-                true,
-                GateStatus::Blocked,
-                11,
-                vec![],
-            ),
-        ],
-        CertificationVerdict::Blocked,
-    );
+    let mut results = catalog_results(GateStatus::Passed);
+    results[0].duration_ms = 7;
+    results[1].duration_ms = 11;
+    results[1].status = GateStatus::Blocked;
+    let bundle =
+        CertificationBundle::try_new("0".repeat(64), results, CertificationVerdict::Blocked)
+            .unwrap();
 
     assert_eq!(
         summary_lines(&bundle),
         vec![
             "security/interface-boundaries: passed",
             "security/adaptive-http-policy: blocked",
+            "security/connection-and-workflow-capacity: passed",
+            "security/cdp-target-context-policy: passed",
             "release verdict: blocked",
         ]
     );
@@ -512,19 +785,63 @@ fn binary_path_conflicts_exit_two_without_replacing_the_manifest() {
 }
 
 #[test]
-fn certification_bundle_rejects_tampering_and_preserves_foreign_temporary_files() {
-    let bundle = CertificationBundle::new(
-        "0".repeat(64),
-        vec![GateResult::new(
+fn binary_bundle_size_failure_exits_one_after_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = dir.path().join("manifest.json");
+    let output = dir.path().join("security.json");
+    std::fs::write(&manifest_path, manifest(1)).unwrap();
+
+    let command_output = std::process::Command::new(env!("CARGO_BIN_EXE_release-gates"))
+        .current_dir(dir.path())
+        .args([
             "security",
-            "check",
-            true,
-            GateStatus::Passed,
-            1,
-            vec![],
-        )],
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(command_output.status.code(), Some(1));
+    assert!(command_output.stdout.is_empty());
+    assert!(!output.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn binary_persistence_failure_exits_one_after_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = dir.path().join("manifest.json");
+    let output = dir.path().join("security.json");
+    std::fs::write(&manifest_path, manifest(64 * 1024)).unwrap();
+    std::fs::create_dir(&output).unwrap();
+
+    let command_output = std::process::Command::new(env!("CARGO_BIN_EXE_release-gates"))
+        .current_dir(dir.path())
+        .args([
+            "security",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(command_output.status.code(), Some(1));
+    assert!(command_output.stdout.is_empty());
+    assert!(output.is_dir());
+}
+
+#[test]
+fn certification_bundle_rejects_tampering_and_preserves_foreign_temporary_files() {
+    let bundle = CertificationBundle::try_new(
+        "0".repeat(64),
+        catalog_results(GateStatus::Passed),
         CertificationVerdict::Passed,
-    );
+    )
+    .unwrap();
     let mut forged = serde_json::to_value(&bundle).unwrap();
     forged["manifestSha256"] = serde_json::Value::String("1".repeat(64));
     assert!(serde_json::from_value::<CertificationBundle>(forged)

@@ -95,6 +95,44 @@ mod unix {
     }
 
     #[tokio::test]
+    async fn successful_exit_rejects_and_terminates_a_redirected_residual_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell_pid_path = temp.path().join("shell.pid");
+        let residual_pid_path = temp.path().join("residual.pid");
+        let trigger_path = temp.path().join("trigger");
+        let args = vec![
+            OsString::from("-c"),
+            OsString::from(
+                "printf '%s' \"$$\" > \"$1\"; sleep 30 </dev/null >/dev/null 2>&1 & child=$!; printf '%s' \"$child\" > \"$2\"; while [ ! -f \"$3\" ]; do sleep 0.01; done",
+            ),
+            OsString::from("process-tree-fixture"),
+            shell_pid_path.as_os_str().to_owned(),
+            residual_pid_path.as_os_str().to_owned(),
+            trigger_path.as_os_str().to_owned(),
+        ];
+        let spec = ProcessSpec::new("/bin/sh", args, Duration::from_secs(2), 1_024);
+        let process = tokio::spawn(async move { run_process(&spec).await });
+        let (shell_pid, residual_pid) =
+            wait_for_pid_fixtures(&shell_pid_path, &residual_pid_path).await;
+        let mut residual_guard = ProcessGuard::new(residual_pid, shell_pid);
+
+        assert_eq!(process_group_id(shell_pid), shell_pid);
+        assert_eq!(process_group_id(residual_pid), shell_pid);
+        fs::write(&trigger_path, b"go").unwrap();
+
+        let result = process.await.unwrap();
+        let failure = result.expect_err("residual process group was accepted as successful");
+        match failure {
+            ProcessFailure::ResidualProcessGroup { process_group_id } => {
+                assert_eq!(process_group_id, shell_pid);
+            }
+            other => panic!("unexpected residual-process failure: {other:?}"),
+        }
+        assert_process_gone(residual_pid);
+        residual_guard.disarm();
+    }
+
+    #[tokio::test]
     async fn timeout_kills_the_shell_and_its_background_grandchild() {
         let temp = tempfile::tempdir().unwrap();
         let shell_pid_path = temp.path().join("shell.pid");
@@ -290,6 +328,47 @@ mod unix {
                 "process {pid} survived process-runner failure"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn process_group_id(pid: i32) -> i32 {
+        let process_group_id = unsafe { libc::getpgid(pid) };
+        assert_ne!(
+            process_group_id,
+            -1,
+            "failed to read process group for {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        process_group_id
+    }
+
+    struct ProcessGuard {
+        pid: i32,
+        process_group_id: i32,
+        armed: bool,
+    }
+
+    impl ProcessGuard {
+        fn new(pid: i32, process_group_id: i32) -> Self {
+            Self {
+                pid,
+                process_group_id,
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            if self.armed && unsafe { libc::getpgid(self.pid) } == self.process_group_id {
+                unsafe {
+                    libc::kill(self.pid, libc::SIGKILL);
+                }
+            }
         }
     }
 

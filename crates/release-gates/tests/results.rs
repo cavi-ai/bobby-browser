@@ -124,21 +124,44 @@ fn write_json_rejects_oversized_results_without_creating_a_destination() {
     assert!(!path.exists());
 }
 
+#[cfg(unix)]
 #[test]
-fn write_json_does_not_replace_an_existing_temporary_file() {
+fn write_json_uses_a_unique_temporary_file_and_preserves_foreign_collisions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("result.json");
     let temporary_path = path.with_extension("json.tmp");
     std::fs::write(&temporary_path, b"existing temporary result").unwrap();
     let result = GateResult::new("security", "ok", true, GateStatus::Passed, 1, vec![]);
 
-    assert!(matches!(
-        result.write_json(&path, 4096),
-        Err(ResultError::Io(_))
-    ));
+    result.write_json(&path, 4096).unwrap();
     assert_eq!(
         std::fs::read(&temporary_path).unwrap(),
         b"existing temporary result"
     );
-    assert!(!path.exists());
+    let decoded: GateResult = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(decoded.status, GateStatus::Passed);
+}
+
+#[cfg(unix)]
+#[test]
+fn write_json_cleans_its_temporary_file_after_rename_failure_and_can_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("result.json");
+    std::fs::create_dir(&path).unwrap();
+    let result = GateResult::new("security", "ok", true, GateStatus::Passed, 1, vec![]);
+
+    assert!(matches!(
+        result.write_json(&path, 4096),
+        Err(ResultError::Io(_))
+    ));
+    let entries = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(entries, vec![path.clone()]);
+
+    std::fs::remove_dir(&path).unwrap();
+    result.write_json(&path, 4096).unwrap();
+    let decoded: GateResult = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(decoded.status, GateStatus::Passed);
 }
