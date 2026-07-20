@@ -21,6 +21,7 @@ members = [
   "crates/test-site",
   "crates/runtime-tests",
   "crates/interface-conformance",
+  "crates/release-gates",
 ]
 resolver = "2"
 
