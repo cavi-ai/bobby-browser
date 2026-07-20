@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -34,10 +34,9 @@ impl GateObservation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateResult {
-    pub schema_version: u32,
+    schema_version: u32,
     pub suite: String,
     pub check: String,
     pub required: bool,
@@ -45,7 +44,6 @@ pub struct GateResult {
     pub duration_ms: u64,
     pub observations: Vec<GateObservation>,
     pub diagnostics: String,
-    pub evidence_sha256: String,
 }
 
 #[derive(Serialize)]
@@ -59,6 +57,34 @@ struct GateEvidence<'a> {
     duration_ms: u64,
     observations: &'a [GateObservation],
     diagnostics: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GateEnvelope<'a> {
+    schema_version: u32,
+    suite: &'a str,
+    check: &'a str,
+    required: bool,
+    status: &'a GateStatus,
+    duration_ms: u64,
+    observations: &'a [GateObservation],
+    diagnostics: &'a str,
+    evidence_sha256: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GateEnvelopeOwned {
+    schema_version: u32,
+    suite: String,
+    check: String,
+    required: bool,
+    status: GateStatus,
+    duration_ms: u64,
+    observations: Vec<GateObservation>,
+    diagnostics: String,
+    evidence_sha256: String,
 }
 
 #[derive(Debug, Error)]
@@ -83,7 +109,7 @@ impl GateResult {
         duration_ms: u64,
         observations: Vec<GateObservation>,
     ) -> Self {
-        let mut result = Self {
+        Self {
             schema_version: RESULT_SCHEMA_VERSION,
             suite: suite.into(),
             check: check.into(),
@@ -92,25 +118,31 @@ impl GateResult {
             duration_ms,
             observations,
             diagnostics: String::new(),
-            evidence_sha256: String::new(),
-        };
-        result.recompute_evidence_sha256();
-        result
+        }
+    }
+
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    pub fn evidence_sha256(&self) -> Result<String, ResultError> {
+        Ok(hex_digest(&self.canonical_evidence_bytes()?))
     }
 
     pub fn redact(&mut self, canaries: &[String]) {
         for canary in canaries.iter().filter(|canary| !canary.is_empty()) {
+            self.suite = self.suite.replace(canary, "[REDACTED]");
+            self.check = self.check.replace(canary, "[REDACTED]");
             for observation in &mut self.observations {
                 observation.name = observation.name.replace(canary, "[REDACTED]");
                 observation.value = observation.value.replace(canary, "[REDACTED]");
             }
             self.diagnostics = self.diagnostics.replace(canary, "[REDACTED]");
         }
-        self.recompute_evidence_sha256();
     }
 
-    pub fn digest_hex(&self) -> String {
-        hex_digest(&serde_json::to_vec(self).expect("GateResult serialization must succeed"))
+    pub fn digest_hex(&self) -> Result<String, ResultError> {
+        Ok(hex_digest(&serde_json::to_vec(self)?))
     }
 
     pub fn write_json(&self, path: impl AsRef<Path>, max_bytes: usize) -> Result<(), ResultError> {
@@ -135,20 +167,75 @@ impl GateResult {
         Ok(())
     }
 
-    fn recompute_evidence_sha256(&mut self) {
-        self.evidence_sha256 = hex_digest(
-            &serde_json::to_vec(&GateEvidence {
-                schema_version: self.schema_version,
-                suite: &self.suite,
-                check: &self.check,
-                required: self.required,
-                status: &self.status,
-                duration_ms: self.duration_ms,
-                observations: &self.observations,
-                diagnostics: &self.diagnostics,
-            })
-            .expect("gate evidence serialization must succeed"),
-        );
+    fn canonical_evidence_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(&GateEvidence {
+            schema_version: self.schema_version,
+            suite: &self.suite,
+            check: &self.check,
+            required: self.required,
+            status: &self.status,
+            duration_ms: self.duration_ms,
+            observations: &self.observations,
+            diagnostics: &self.diagnostics,
+        })
+    }
+}
+
+impl Serialize for GateResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let evidence_sha256 = self
+            .evidence_sha256()
+            .map_err(|error| S::Error::custom(error.to_string()))?;
+        GateEnvelope {
+            schema_version: self.schema_version,
+            suite: &self.suite,
+            check: &self.check,
+            required: self.required,
+            status: &self.status,
+            duration_ms: self.duration_ms,
+            observations: &self.observations,
+            diagnostics: &self.diagnostics,
+            evidence_sha256: &evidence_sha256,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GateResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let envelope = GateEnvelopeOwned::deserialize(deserializer)?;
+        if envelope.schema_version != RESULT_SCHEMA_VERSION {
+            return Err(D::Error::custom(format!(
+                "unsupported gate result schema version {}; expected {}",
+                envelope.schema_version, RESULT_SCHEMA_VERSION
+            )));
+        }
+
+        let result = Self {
+            schema_version: envelope.schema_version,
+            suite: envelope.suite,
+            check: envelope.check,
+            required: envelope.required,
+            status: envelope.status,
+            duration_ms: envelope.duration_ms,
+            observations: envelope.observations,
+            diagnostics: envelope.diagnostics,
+        };
+        let expected = result
+            .evidence_sha256()
+            .map_err(|error| D::Error::custom(error.to_string()))?;
+        if envelope.evidence_sha256 != expected {
+            return Err(D::Error::custom(
+                "evidenceSha256 does not match canonical evidence",
+            ));
+        }
+        Ok(result)
     }
 }
 

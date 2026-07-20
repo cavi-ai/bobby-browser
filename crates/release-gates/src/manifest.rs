@@ -63,6 +63,15 @@ impl ReleaseManifest {
                 "secretCanaries entries must not be empty",
             ));
         }
+        if self
+            .secret_canaries
+            .iter()
+            .any(|value| "[REDACTED]".contains(value))
+        {
+            return Err(ManifestError::Invalid(
+                "secretCanaries entries must not be substrings of [REDACTED]",
+            ));
+        }
         Ok(())
     }
 }
