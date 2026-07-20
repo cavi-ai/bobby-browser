@@ -73,7 +73,7 @@ pub enum ProcessFailure {
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to terminate or reap process tree")]
+    #[error("failed to terminate or reap process tree: {source}")]
     Cleanup {
         #[source]
         source: std::io::Error,
@@ -175,9 +175,12 @@ pub async fn run_process(spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessFa
             Err(ProcessFailure::Read { stream, source })
         }
         Ok(Ok((stdout, stderr, status))) => {
-            process_group
-                .kill()
-                .map_err(|source| ProcessFailure::Cleanup { source })?;
+            // The direct child has been reaped and both inherited pipes reached
+            // EOF. Under the trusted catalog contract, any process that has
+            // deliberately detached from those pipes is outside containment
+            // scope. Do not signal a PGID that may now name only a disappearing
+            // zombie: Darwin reports EPERM for that normal completion race.
+            process_group.disarm();
             Ok(ProcessOutcome {
                 exit_code: status.code(),
                 stdout,
@@ -376,6 +379,10 @@ impl ProcessGroupGuard {
         }
         result
     }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
 }
 
 #[cfg(unix)]
@@ -498,6 +505,20 @@ mod tests {
             }
             other => panic!("unexpected cleanup failure: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cleanup_display_preserves_the_underlying_cause() {
+        let failure = ProcessFailure::Cleanup {
+            source: io::Error::new(
+                ErrorKind::PermissionDenied,
+                "process-group signal failed after successful completion",
+            ),
+        };
+
+        let diagnostic = failure.to_string();
+        assert!(diagnostic.contains("failed to terminate or reap process tree"));
+        assert!(diagnostic.contains("process-group signal failed after successful completion"));
     }
 
     struct FakeChild {

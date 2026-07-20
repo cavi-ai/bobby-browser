@@ -76,6 +76,25 @@ mod unix {
     }
 
     #[tokio::test]
+    async fn quickly_exiting_process_groups_do_not_fail_successful_completion_cleanup() {
+        for iteration in 0..64 {
+            let spec = ProcessSpec::new(
+                "/bin/sh",
+                ["-c", "sleep 0.01 &"],
+                Duration::from_secs(1),
+                16,
+            );
+
+            let outcome = run_process(&spec).await.unwrap_or_else(|error| {
+                panic!("quick-exit iteration {iteration} failed: {error:?}")
+            });
+            assert_eq!(outcome.exit_code, Some(0));
+            assert!(outcome.stdout.is_empty());
+            assert!(outcome.stderr.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn timeout_kills_the_shell_and_its_background_grandchild() {
         let temp = tempfile::tempdir().unwrap();
         let shell_pid_path = temp.path().join("shell.pid");
