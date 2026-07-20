@@ -194,7 +194,12 @@ fn result_from_outcome(
                     GateObservation::new("stderr", ""),
                 ],
             );
-            result.diagnostics = error.to_string();
+            result.diagnostics = match error {
+                ProcessFailure::Spawn { source } => {
+                    format!("failed to spawn process: {source}")
+                }
+                error => error.to_string(),
+            };
             result
         }
     }
