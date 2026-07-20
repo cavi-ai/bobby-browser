@@ -61,3 +61,17 @@ fn rejects_unknown_fields_versions_empty_canaries_and_zero_bounds() {
         Err(ManifestError::Decode(_))
     ));
 }
+
+#[test]
+fn rejects_canaries_that_collide_with_the_redaction_marker() {
+    let input = String::from_utf8(valid())
+        .unwrap()
+        .replace("release-gate-secret-that-must-never-escape", "REDACTED");
+
+    assert_eq!(
+        ReleaseManifest::from_slice(input.as_bytes())
+            .unwrap_err()
+            .to_string(),
+        "invalid release manifest: secretCanaries entries must not be substrings of [REDACTED]"
+    );
+}
