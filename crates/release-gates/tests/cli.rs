@@ -353,6 +353,77 @@ async fn missing_output_under_a_symlinked_parent_is_resolved_and_persisted_safel
     assert_eq!(decoded.verdict, CertificationVerdict::Passed);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn output_directory_is_pinned_before_checks_when_parent_is_retargeted_and_replaced() {
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+
+    struct RetargetingRunner {
+        mutated: AtomicBool,
+        safe_parent: PathBuf,
+        pinned_parent: PathBuf,
+        parent_alias: PathBuf,
+        manifest_parent: PathBuf,
+    }
+
+    impl ProcessRunner for RetargetingRunner {
+        async fn run(&self, _: &ProcessSpec) -> Result<ProcessOutcome, ProcessFailure> {
+            if !self.mutated.swap(true, Ordering::SeqCst) {
+                std::fs::rename(&self.safe_parent, &self.pinned_parent).unwrap();
+                std::fs::create_dir(&self.safe_parent).unwrap();
+                std::fs::remove_file(&self.parent_alias).unwrap();
+                symlink(&self.manifest_parent, &self.parent_alias).unwrap();
+            }
+            Ok(ProcessOutcome {
+                exit_code: Some(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_parent = dir.path().join("manifest-parent");
+    let safe_parent = dir.path().join("safe-parent");
+    let pinned_parent = dir.path().join("pinned-parent");
+    let parent_alias = dir.path().join("output-parent");
+    std::fs::create_dir(&manifest_parent).unwrap();
+    std::fs::create_dir(&safe_parent).unwrap();
+    symlink(&safe_parent, &parent_alias).unwrap();
+
+    let manifest_path = manifest_parent.join("manifest.json");
+    let output = parent_alias.join("manifest.json");
+    let manifest_bytes = manifest(64 * 1024).into_bytes();
+    std::fs::write(&manifest_path, &manifest_bytes).unwrap();
+    let cli = parse_args([
+        "security".into(),
+        "--manifest".into(),
+        manifest_path.display().to_string(),
+        "--output".into(),
+        output.display().to_string(),
+    ])
+    .unwrap();
+    let runner = RetargetingRunner {
+        mutated: AtomicBool::new(false),
+        safe_parent: safe_parent.clone(),
+        pinned_parent: pinned_parent.clone(),
+        parent_alias,
+        manifest_parent,
+    };
+
+    run_security(&cli, dir.path(), &SecurityGate::new(runner))
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_bytes);
+    assert!(!safe_parent.join("manifest.json").exists());
+    let persisted = std::fs::read(pinned_parent.join("manifest.json")).unwrap();
+    let decoded: CertificationBundle = serde_json::from_slice(&persisted).unwrap();
+    assert_eq!(decoded.verdict, CertificationVerdict::Passed);
+}
+
 #[test]
 fn concise_summary_has_one_line_per_check_and_a_final_verdict() {
     let bundle = CertificationBundle::new(

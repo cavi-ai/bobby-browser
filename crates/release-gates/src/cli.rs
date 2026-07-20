@@ -5,11 +5,14 @@ use std::{
 
 #[cfg(unix)]
 use std::{
-    ffi::OsString,
-    fs::{File, OpenOptions},
+    ffi::{OsStr, OsString},
+    fs::File,
     io::Write,
     sync::atomic::{AtomicU64, Ordering},
 };
+
+#[cfg(unix)]
+use rustix::fs::{AtFlags, Mode, OFlags};
 
 use serde::{de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -190,6 +193,17 @@ impl CertificationBundle {
         max_bytes: usize,
         persistence: &impl BundlePersistenceIo,
     ) -> Result<(), BundleError> {
+        let target = OutputTarget::open(path)?;
+        self.write_json_to_target_with_io(&target, max_bytes, persistence)
+    }
+
+    #[cfg(unix)]
+    fn write_json_to_target_with_io(
+        &self,
+        target: &OutputTarget,
+        max_bytes: usize,
+        persistence: &impl BundlePersistenceIo,
+    ) -> Result<(), BundleError> {
         let bytes = serde_json::to_vec(self)?;
         if bytes.len() > max_bytes {
             return Err(BundleError::TooLarge {
@@ -198,22 +212,24 @@ impl CertificationBundle {
             });
         }
 
-        let mut temporary = OwnedTemporaryFile::create(path)?;
+        let mut temporary = OwnedTemporaryFile::create(target, persistence)?;
         persistence.write_all(&mut temporary.file, &bytes)?;
         persistence.sync_file(&temporary.file)?;
-        persistence.rename(&temporary.path, path)?;
+        persistence.rename(&target.directory, &temporary.name, &target.file_name)?;
         temporary.disarm();
-        persistence.sync_parent(path)?;
+        persistence.sync_directory(&target.directory)?;
         Ok(())
     }
 }
 
 #[cfg(unix)]
 trait BundlePersistenceIo {
+    fn create(&self, directory: &File, name: &OsStr) -> io::Result<File>;
+    fn metadata(&self, file: &File) -> io::Result<FileIdentity>;
     fn write_all(&self, file: &mut File, bytes: &[u8]) -> io::Result<()>;
     fn sync_file(&self, file: &File) -> io::Result<()>;
-    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()>;
-    fn sync_parent(&self, path: &Path) -> io::Result<()>;
+    fn rename(&self, directory: &File, source: &OsStr, destination: &OsStr) -> io::Result<()>;
+    fn sync_directory(&self, directory: &File) -> io::Result<()>;
 }
 
 #[cfg(unix)]
@@ -221,66 +237,103 @@ struct OsBundlePersistenceIo;
 
 #[cfg(unix)]
 impl BundlePersistenceIo for OsBundlePersistenceIo {
+    fn create(&self, directory: &File, name: &OsStr) -> io::Result<File> {
+        let fd = rustix::fs::openat(
+            directory,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        )?;
+        Ok(File::from(fd))
+    }
+
+    fn metadata(&self, file: &File) -> io::Result<FileIdentity> {
+        file_identity(file)
+    }
+
     fn write_all(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)
     }
 
     fn sync_file(&self, file: &File) -> io::Result<()> {
-        file.sync_all()
+        rustix::fs::fsync(file).map_err(Into::into)
     }
 
-    fn rename(&self, source: &Path, destination: &Path) -> io::Result<()> {
-        // Both paths share a parent directory. Unix rename atomically replaces
-        // an existing non-directory destination without an unlink window.
-        fs::rename(source, destination)
+    fn rename(&self, directory: &File, source: &OsStr, destination: &OsStr) -> io::Result<()> {
+        rustix::fs::renameat(directory, source, directory, destination).map_err(Into::into)
     }
 
-    fn sync_parent(&self, path: &Path) -> io::Result<()> {
-        sync_parent_directory(path)
+    fn sync_directory(&self, directory: &File) -> io::Result<()> {
+        rustix::fs::fsync(directory).map_err(Into::into)
     }
 }
 
 #[cfg(unix)]
-struct OwnedTemporaryFile {
-    path: PathBuf,
-    file: File,
+struct OutputTarget {
+    directory: File,
+    file_name: OsString,
+}
+
+#[cfg(unix)]
+impl OutputTarget {
+    fn open(path: &Path) -> io::Result<Self> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let file_name = validated_file_name(path)?;
+        let canonical_parent = fs::canonicalize(parent)?;
+        Ok(Self {
+            directory: open_directory(&canonical_parent)?,
+            file_name,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
     device: u64,
     inode: u64,
+}
+
+#[cfg(unix)]
+struct OwnedTemporaryFile<'a> {
+    directory: &'a File,
+    name: OsString,
+    file: File,
+    identity: Option<FileIdentity>,
     armed: bool,
 }
 
 #[cfg(unix)]
-impl OwnedTemporaryFile {
-    fn create(destination: &Path) -> io::Result<Self> {
-        use std::os::unix::fs::MetadataExt;
-
-        let parent = destination
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let destination_name = destination.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "missing output filename")
-        })?;
-
+impl<'a> OwnedTemporaryFile<'a> {
+    fn create(
+        target: &'a OutputTarget,
+        persistence: &impl BundlePersistenceIo,
+    ) -> io::Result<Self> {
         for _ in 0..128 {
             let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let mut temporary_name = OsString::from(".");
-            temporary_name.push(destination_name);
+            temporary_name.push(&target.file_name);
             temporary_name.push(format!(
                 ".release-gates-{}-{sequence}.tmp",
                 std::process::id()
             ));
-            let path = parent.join(temporary_name);
-            match OpenOptions::new().create_new(true).write(true).open(&path) {
+            match persistence.create(&target.directory, &temporary_name) {
                 Ok(file) => {
-                    let metadata = file.metadata()?;
-                    return Ok(Self {
-                        path,
+                    // Ownership begins immediately after openat succeeds. If
+                    // the following identity probe fails, Drop still compares
+                    // the open fd to the directory entry before cleanup.
+                    let mut temporary = Self {
+                        directory: &target.directory,
+                        name: temporary_name,
                         file,
-                        device: metadata.dev(),
-                        inode: metadata.ino(),
+                        identity: None,
                         armed: true,
-                    });
+                    };
+                    temporary.identity = Some(persistence.metadata(&temporary.file)?);
+                    return Ok(temporary);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
@@ -299,20 +352,58 @@ impl OwnedTemporaryFile {
 }
 
 #[cfg(unix)]
-impl Drop for OwnedTemporaryFile {
+impl Drop for OwnedTemporaryFile<'_> {
     fn drop(&mut self) {
-        use std::os::unix::fs::MetadataExt;
-
         if !self.armed {
             return;
         }
-        let owned = fs::symlink_metadata(&self.path)
-            .map(|metadata| metadata.dev() == self.device && metadata.ino() == self.inode)
-            .unwrap_or(false);
+        let expected = self.identity.or_else(|| file_identity(&self.file).ok());
+        let actual = relative_identity(self.directory, &self.name, true).ok();
+        let owned = expected.is_some() && expected == actual;
         if owned {
-            let _ = fs::remove_file(&self.path);
+            let _ = rustix::fs::unlinkat(self.directory, &self.name, AtFlags::empty());
         }
     }
+}
+
+#[cfg(unix)]
+fn validated_file_name(path: &Path) -> io::Result<OsString> {
+    path.file_name()
+        .map(OsStr::to_owned)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing output filename"))
+}
+
+#[cfg(unix)]
+fn open_directory(path: &Path) -> io::Result<File> {
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    Ok(File::from(fd))
+}
+
+#[cfg(unix)]
+fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    let stat = rustix::fs::fstat(file)?;
+    Ok(FileIdentity {
+        device: stat.st_dev as u64,
+        inode: stat.st_ino as u64,
+    })
+}
+
+#[cfg(unix)]
+fn relative_identity(directory: &File, name: &OsStr, no_follow: bool) -> io::Result<FileIdentity> {
+    let flags = if no_follow {
+        AtFlags::SYMLINK_NOFOLLOW
+    } else {
+        AtFlags::empty()
+    };
+    let stat = rustix::fs::statat(directory, name, flags)?;
+    Ok(FileIdentity {
+        device: stat.st_dev as u64,
+        inode: stat.st_ino as u64,
+    })
 }
 
 impl Serialize for CertificationBundle {
@@ -419,6 +510,8 @@ pub const fn exit_code(verdict: CertificationVerdict) -> i32 {
 struct ValidatedPaths {
     manifest: PathBuf,
     output: PathBuf,
+    #[cfg(unix)]
+    manifest_identity: FileIdentity,
 }
 
 #[cfg(unix)]
@@ -454,7 +547,11 @@ fn validate_distinct_paths(cli: &Cli, repo_root: &Path) -> Result<ValidatedPaths
 
     Ok(ValidatedPaths {
         manifest: canonical_manifest,
-        output: output_path,
+        output: canonical_output,
+        manifest_identity: FileIdentity {
+            device: manifest_metadata.dev(),
+            inode: manifest_metadata.ino(),
+        },
     })
 }
 
@@ -509,6 +606,33 @@ fn canonicalize_allow_missing(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+#[cfg(unix)]
+fn prepare_output_target(paths: &ValidatedPaths) -> Result<OutputTarget, CliError> {
+    let parent = paths
+        .output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            CliError::PathResolution(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "missing output parent directory",
+            ))
+        })?;
+    fs::create_dir_all(parent).map_err(CliError::CreateOutputDirectory)?;
+    let canonical_parent = fs::canonicalize(parent).map_err(CliError::PathResolution)?;
+    let target = OutputTarget {
+        directory: open_directory(&canonical_parent).map_err(CliError::PathResolution)?,
+        file_name: validated_file_name(&paths.output).map_err(CliError::PathResolution)?,
+    };
+
+    match relative_identity(&target.directory, &target.file_name, false) {
+        Ok(identity) if identity == paths.manifest_identity => Err(CliError::PathConflict),
+        Ok(_) => Ok(target),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(target),
+        Err(error) => Err(CliError::PathResolution(error)),
+    }
+}
+
 pub async fn run_security<R>(
     cli: &Cli,
     repo_root: &Path,
@@ -521,19 +645,20 @@ where
     let manifest_bytes = fs::read(&paths.manifest).map_err(CliError::ReadManifest)?;
     let manifest = ReleaseManifest::from_slice(&manifest_bytes)?;
     let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
-
-    if let Some(parent) = paths
-        .output
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(CliError::CreateOutputDirectory)?;
-    }
+    #[cfg(unix)]
+    let output_target = prepare_output_target(&paths)?;
 
     let results = gate.run(repo_root, &manifest).await;
     let verdict = evaluate(&["security"], &results)?;
     let bundle = CertificationBundle::new(manifest_sha256, results, verdict);
-    bundle.write_json(&paths.output, manifest.security.max_output_bytes)?;
+    #[cfg(unix)]
+    bundle.write_json_to_target_with_io(
+        &output_target,
+        manifest.security.max_output_bytes,
+        &OsBundlePersistenceIo,
+    )?;
+    #[cfg(not(unix))]
+    return Err(CliError::UnsupportedPlatform);
     Ok(bundle)
 }
 
@@ -580,24 +705,16 @@ fn validate_path(option: &'static str, path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    File::open(parent)?.sync_all()
-}
-
 #[cfg(all(test, unix))]
 mod persistence_tests {
-    use std::{fs, io, path::Path};
+    use std::{ffi::OsStr, fs, io, path::Path};
 
-    use super::{BundlePersistenceIo, CertificationBundle};
+    use super::{BundlePersistenceIo, CertificationBundle, FileIdentity};
     use crate::{CertificationVerdict, GateResult, GateStatus};
 
     #[derive(Clone, Copy)]
     enum FailurePoint {
+        Metadata,
         Write,
         FileSync,
         Rename,
@@ -608,6 +725,17 @@ mod persistence_tests {
     struct ForeignReplacementIo;
 
     impl BundlePersistenceIo for InjectedFailureIo {
+        fn create(&self, directory: &fs::File, name: &OsStr) -> io::Result<fs::File> {
+            super::OsBundlePersistenceIo.create(directory, name)
+        }
+
+        fn metadata(&self, file: &fs::File) -> io::Result<FileIdentity> {
+            if matches!(self.0, FailurePoint::Metadata) {
+                return Err(io::Error::other("injected metadata"));
+            }
+            super::file_identity(file)
+        }
+
         fn write_all(&self, file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
             if matches!(self.0, FailurePoint::Write) {
                 return Err(io::Error::other("injected write"));
@@ -622,19 +750,32 @@ mod persistence_tests {
             file.sync_all()
         }
 
-        fn rename(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        fn rename(
+            &self,
+            directory: &fs::File,
+            source: &OsStr,
+            destination: &OsStr,
+        ) -> io::Result<()> {
             if matches!(self.0, FailurePoint::Rename) {
                 return Err(io::Error::other("injected rename"));
             }
-            fs::rename(source, destination)
+            super::OsBundlePersistenceIo.rename(directory, source, destination)
         }
 
-        fn sync_parent(&self, path: &Path) -> io::Result<()> {
-            super::sync_parent_directory(path)
+        fn sync_directory(&self, directory: &fs::File) -> io::Result<()> {
+            super::OsBundlePersistenceIo.sync_directory(directory)
         }
     }
 
     impl BundlePersistenceIo for ForeignReplacementIo {
+        fn create(&self, directory: &fs::File, name: &OsStr) -> io::Result<fs::File> {
+            super::OsBundlePersistenceIo.create(directory, name)
+        }
+
+        fn metadata(&self, file: &fs::File) -> io::Result<FileIdentity> {
+            super::file_identity(file)
+        }
+
         fn write_all(&self, file: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
             std::io::Write::write_all(file, bytes)
         }
@@ -643,14 +784,15 @@ mod persistence_tests {
             file.sync_all()
         }
 
-        fn rename(&self, source: &Path, _: &Path) -> io::Result<()> {
-            fs::remove_file(source)?;
-            fs::write(source, b"foreign replacement")?;
+        fn rename(&self, directory: &fs::File, source: &OsStr, _: &OsStr) -> io::Result<()> {
+            rustix::fs::unlinkat(directory, source, rustix::fs::AtFlags::empty())?;
+            let mut replacement = super::OsBundlePersistenceIo.create(directory, source)?;
+            std::io::Write::write_all(&mut replacement, b"foreign replacement")?;
             Err(io::Error::other("injected rename after replacement"))
         }
 
-        fn sync_parent(&self, path: &Path) -> io::Result<()> {
-            super::sync_parent_directory(path)
+        fn sync_directory(&self, directory: &fs::File) -> io::Result<()> {
+            super::OsBundlePersistenceIo.sync_directory(directory)
         }
     }
 
@@ -684,6 +826,7 @@ mod persistence_tests {
     #[test]
     fn owned_temporary_file_is_cleaned_after_every_post_create_failure_and_retry_succeeds() {
         for (name, point) in [
+            ("metadata", FailurePoint::Metadata),
             ("write", FailurePoint::Write),
             ("sync", FailurePoint::FileSync),
             ("rename", FailurePoint::Rename),
