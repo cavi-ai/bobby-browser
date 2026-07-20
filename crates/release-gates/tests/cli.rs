@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use release_gates::{
     cli::{
-        exit_code, parse_args, run_security, summary_lines, BundleError, CertificationBundle,
-        Command,
+        exit_code, parse_args, run_security, summary_lines, CertificationBundle, CliError, Command,
     },
     CertificationVerdict, GateResult, GateStatus, ProcessFailure, ProcessOutcome, ProcessRunner,
     ProcessSpec, SecurityGate,
@@ -204,6 +203,156 @@ async fn bundle_output_bound_is_enforced_without_a_partial_destination() {
     assert!(!output.exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn manifest_and_output_aliases_are_rejected_before_checks_or_side_effects() {
+    use std::os::unix::fs::symlink;
+
+    async fn assert_rejected(
+        repo_root: &std::path::Path,
+        manifest_arg: String,
+        output_arg: String,
+        manifest_target: &std::path::Path,
+    ) {
+        let before = std::fs::read(manifest_target).unwrap();
+        let cli = parse_args([
+            "security".into(),
+            "--manifest".into(),
+            manifest_arg,
+            "--output".into(),
+            output_arg,
+        ])
+        .unwrap();
+        let runner = StubRunner::default();
+        let calls = Arc::clone(&runner.calls);
+
+        assert!(matches!(
+            run_security(&cli, repo_root, &SecurityGate::new(runner)).await,
+            Err(CliError::PathConflict)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(manifest_target).unwrap(), before);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let lexical = dir.path().join("lexical.json");
+    std::fs::write(&lexical, manifest(64 * 1024)).unwrap();
+    assert_rejected(
+        dir.path(),
+        lexical.display().to_string(),
+        lexical.display().to_string(),
+        &lexical,
+    )
+    .await;
+
+    let relative = dir.path().join("relative.json");
+    std::fs::write(&relative, manifest(64 * 1024)).unwrap();
+    assert_rejected(
+        dir.path(),
+        "relative.json".into(),
+        relative.display().to_string(),
+        &relative,
+    )
+    .await;
+
+    let hardlink_manifest = dir.path().join("hardlink-manifest.json");
+    let hardlink_output = dir.path().join("hardlink-output.json");
+    std::fs::write(&hardlink_manifest, manifest(64 * 1024)).unwrap();
+    std::fs::hard_link(&hardlink_manifest, &hardlink_output).unwrap();
+    assert_rejected(
+        dir.path(),
+        hardlink_manifest.display().to_string(),
+        hardlink_output.display().to_string(),
+        &hardlink_manifest,
+    )
+    .await;
+
+    let symlink_target = dir.path().join("symlink-target.json");
+    let manifest_symlink = dir.path().join("manifest-symlink.json");
+    std::fs::write(&symlink_target, manifest(64 * 1024)).unwrap();
+    symlink(&symlink_target, &manifest_symlink).unwrap();
+    assert_rejected(
+        dir.path(),
+        manifest_symlink.display().to_string(),
+        symlink_target.display().to_string(),
+        &symlink_target,
+    )
+    .await;
+
+    let real_parent = dir.path().join("real-parent");
+    let parent_alias = dir.path().join("parent-alias");
+    std::fs::create_dir(&real_parent).unwrap();
+    let parent_manifest = real_parent.join("manifest.json");
+    std::fs::write(&parent_manifest, manifest(64 * 1024)).unwrap();
+    symlink(&real_parent, &parent_alias).unwrap();
+    assert_rejected(
+        dir.path(),
+        parent_manifest.display().to_string(),
+        parent_alias.join("manifest.json").display().to_string(),
+        &parent_manifest,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn successful_security_run_atomically_replaces_an_existing_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = dir.path().join("manifest.json");
+    let output = dir.path().join("security.json");
+    std::fs::write(&manifest_path, manifest(64 * 1024)).unwrap();
+    std::fs::write(&output, b"stale certification").unwrap();
+    let cli = parse_args([
+        "security".into(),
+        "--manifest".into(),
+        manifest_path.display().to_string(),
+        "--output".into(),
+        output.display().to_string(),
+    ])
+    .unwrap();
+
+    run_security(&cli, dir.path(), &SecurityGate::new(StubRunner::default()))
+        .await
+        .unwrap();
+
+    let decoded: CertificationBundle =
+        serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+    assert_eq!(decoded.verdict, CertificationVerdict::Passed);
+    assert_eq!(decoded.results.len(), 3);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn missing_output_under_a_symlinked_parent_is_resolved_and_persisted_safely() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let real_parent = dir.path().join("real-parent");
+    let parent_alias = dir.path().join("parent-alias");
+    std::fs::create_dir(&real_parent).unwrap();
+    symlink(&real_parent, &parent_alias).unwrap();
+    let manifest_path = dir.path().join("manifest.json");
+    let output = parent_alias.join("security.json");
+    let canonical_output = real_parent.join("security.json");
+    std::fs::write(&manifest_path, manifest(64 * 1024)).unwrap();
+    let cli = parse_args([
+        "security".into(),
+        "--manifest".into(),
+        manifest_path.display().to_string(),
+        "--output".into(),
+        output.display().to_string(),
+    ])
+    .unwrap();
+
+    run_security(&cli, dir.path(), &SecurityGate::new(StubRunner::default()))
+        .await
+        .unwrap();
+
+    let decoded: CertificationBundle =
+        serde_json::from_slice(&std::fs::read(canonical_output).unwrap()).unwrap();
+    assert_eq!(decoded.verdict, CertificationVerdict::Passed);
+}
+
 #[test]
 fn concise_summary_has_one_line_per_check_and_a_final_verdict() {
     let bundle = CertificationBundle::new(
@@ -265,7 +414,34 @@ fn binary_configuration_errors_exit_two_without_certification_output() {
 }
 
 #[test]
-fn certification_bundle_rejects_tampering_and_preserves_existing_temporary_files() {
+fn binary_path_conflicts_exit_two_without_replacing_the_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = dir.path().join("manifest.json");
+    let manifest_bytes = manifest(64 * 1024);
+    std::fs::write(&manifest_path, &manifest_bytes).unwrap();
+
+    let command_output = std::process::Command::new(env!("CARGO_BIN_EXE_release-gates"))
+        .current_dir(dir.path())
+        .args([
+            "security",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--output",
+            manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(command_output.status.code(), Some(2));
+    assert!(command_output.stdout.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(manifest_path).unwrap(),
+        manifest_bytes
+    );
+}
+
+#[test]
+fn certification_bundle_rejects_tampering_and_preserves_foreign_temporary_files() {
     let bundle = CertificationBundle::new(
         "0".repeat(64),
         vec![GateResult::new(
@@ -288,14 +464,19 @@ fn certification_bundle_rejects_tampering_and_preserves_existing_temporary_files
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("security.json");
     let temporary = output.with_extension("json.tmp");
+    let foreign_temporary = dir.path().join(".security.json.release-gates-foreign.tmp");
     std::fs::write(&temporary, b"existing temporary bundle").unwrap();
-    assert!(matches!(
-        bundle.write_json(&output, 4096),
-        Err(BundleError::Io(_))
-    ));
+    std::fs::write(&foreign_temporary, b"foreign temporary bundle").unwrap();
+    bundle.write_json(&output, 4096).unwrap();
     assert_eq!(
         std::fs::read(&temporary).unwrap(),
         b"existing temporary bundle"
     );
-    assert!(!output.exists());
+    assert_eq!(
+        std::fs::read(&foreign_temporary).unwrap(),
+        b"foreign temporary bundle"
+    );
+    let decoded: CertificationBundle =
+        serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    assert_eq!(decoded.verdict, CertificationVerdict::Passed);
 }
