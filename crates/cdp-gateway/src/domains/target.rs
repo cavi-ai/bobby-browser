@@ -22,6 +22,9 @@ pub(crate) struct TargetFilter {
 }
 
 pub(crate) fn filter_matches(filters: &[TargetFilter], target_type: &str) -> bool {
+    if !target_type_is_supported(target_type) {
+        return false;
+    }
     if filters.is_empty() {
         return true;
     }
@@ -34,6 +37,10 @@ pub(crate) fn filter_matches(filters: &[TargetFilter], target_type: &str) -> boo
                 .is_none_or(|kind| kind == target_type)
         })
         .is_some_and(|filter| !filter.exclude.unwrap_or(false))
+}
+
+pub(crate) fn target_type_is_supported(target_type: &str) -> bool {
+    matches!(target_type, "browser" | "tab" | "page")
 }
 
 pub(crate) fn auto_attach(params: Value) -> Result<AutoAttach, CdpError> {

@@ -164,6 +164,7 @@ async fn real_security_release_matrix_executes_every_production_boundary() {
     }
     assert_eq!(executed, REQUIRED_SECURITY_CASES);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    println!("AUTOMATION_RUNTIME_SECURITY_PROOF:v1:interface-boundaries");
 }
 
 fn runtime_app(harness: &ChromeRuntimeHarness, interface: InterfaceConfig) -> axum::Router {

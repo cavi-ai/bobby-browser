@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, HttpConfig, ServerConfig, StorageConfig};
 use network_engine::state::HttpStateSnapshot;
-use network_engine::{DirectHttpExecutor, NetworkPolicy};
+use network_engine::{DestinationPolicy, DirectHttpExecutor, NetworkPolicy};
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
@@ -137,6 +137,41 @@ async fn production_denial_and_explicit_fixture_grant_are_enforced_per_hop() {
     )
     .await;
     assert!(matches!(redirect, Err(error) if error.code == ErrorCode::NetworkPolicyDenied));
+}
+
+#[test]
+fn production_destination_policy_rejects_metadata_link_local_and_dns_rebinding_families() {
+    let policy = DestinationPolicy::new(NetworkPolicy::default());
+    let url = reqwest::Url::parse("https://public.example/").unwrap();
+
+    for denied in [
+        "169.254.169.254:443",
+        "[fe80::1]:443",
+        "[fd00:ec2::254]:443",
+    ] {
+        let result = policy.validate_resolved(url.clone(), vec![denied.parse().unwrap()]);
+        assert!(
+            matches!(result, Err(error) if error.code == ErrorCode::NetworkPolicyDenied),
+            "metadata or link-local destination {denied} crossed the production policy boundary"
+        );
+    }
+
+    let initially_public = policy
+        .validate_resolved(url.clone(), vec!["93.184.216.34:443".parse().unwrap()])
+        .unwrap();
+    assert_eq!(initially_public.addresses().len(), 1);
+    let rebound = policy.validate_resolved(
+        url,
+        vec![
+            "93.184.216.34:443".parse().unwrap(),
+            "169.254.169.254:443".parse().unwrap(),
+        ],
+    );
+    assert!(
+        matches!(rebound, Err(error) if error.code == ErrorCode::NetworkPolicyDenied),
+        "a later mixed DNS answer must be reevaluated and denied"
+    );
+    println!("AUTOMATION_RUNTIME_SECURITY_PROOF:v1:adaptive-http-policy");
 }
 
 #[tokio::test]
