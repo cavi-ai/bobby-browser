@@ -4,7 +4,10 @@ import { JSDOM } from "jsdom";
 
 import {
   MAX_CONTROL_COUNT,
+  MAX_CONTROL_VISITED_NODES,
+  MAX_ELEMENT_TEXT_VISITED_NODES,
   MAX_VISIBLE_TEXT_LENGTH,
+  MAX_VISIBLE_TEXT_VISITED_NODES,
   executeContentAction,
   observeDocument,
 } from "../src/content.js";
@@ -19,6 +22,24 @@ function documentFor(body: string, url = "https://example.test/login"): Document
     `<!doctype html><html><head><title>Example</title></head><body>${body}</body></html>`,
     { url },
   ).window.document;
+}
+
+function countWalkerVisits(document: Document): Map<number, number> {
+  const visits = new Map<number, number>();
+  const createTreeWalker = document.createTreeWalker.bind(document);
+  Object.defineProperty(document, "createTreeWalker", {
+    configurable: true,
+    value(root: Node, whatToShow: number) {
+      const walker = createTreeWalker(root, whatToShow);
+      const nextNode = walker.nextNode.bind(walker);
+      walker.nextNode = () => {
+        visits.set(whatToShow, (visits.get(whatToShow) ?? 0) + 1);
+        return nextNode();
+      };
+      return walker;
+    },
+  });
+  return visits;
 }
 
 test("observeDocument returns page identity, visible text, labels, roles, and stable targets", () => {
@@ -182,6 +203,33 @@ test("adversarial 512-control observations stay below the native ceiling", () =>
       assert.ok((value?.length ?? 0) <= EXPECTED_MAX_CONTROL_FIELD_LENGTH);
     }
   }
+});
+
+test("huge hidden text cannot exhaust the visible-text walker budget", () => {
+  const hidden = '<span hidden>ignored hidden payload</span>'.repeat(
+    MAX_VISIBLE_TEXT_VISITED_NODES + 256,
+  );
+  const document = documentFor(`<p>kept text</p>${hidden}`);
+  const visits = countWalkerVisits(document);
+
+  const observed = observeDocument(document);
+
+  assert.match(observed.visibleText, /kept text/);
+  assert.doesNotMatch(observed.visibleText, /ignored hidden payload/);
+  assert.ok((visits.get(4) ?? 0) <= MAX_VISIBLE_TEXT_VISITED_NODES);
+  assert.ok(new TextEncoder().encode(JSON.stringify(observed)).byteLength < MAX_COMPANION_PAYLOAD_BYTES);
+});
+
+test("huge nonmatching DOM cannot exhaust the control walker budget", () => {
+  const document = documentFor("<div></div>".repeat(MAX_CONTROL_VISITED_NODES + 256));
+  const visits = countWalkerVisits(document);
+
+  const observed = observeDocument(document);
+
+  assert.deepEqual(observed.controls, []);
+  assert.ok((visits.get(1) ?? 0) <= MAX_CONTROL_VISITED_NODES);
+  assert.ok(MAX_ELEMENT_TEXT_VISITED_NODES < MAX_CONTROL_VISITED_NODES);
+  assert.ok(new TextEncoder().encode(JSON.stringify(observed)).byteLength < MAX_COMPANION_PAYLOAD_BYTES);
 });
 
 test("content fallback actions resolve stable targets inside the isolated document", () => {

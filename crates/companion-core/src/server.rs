@@ -1,6 +1,7 @@
 use crate::{
     registry::{ConnectionAuthentication, PairingCodeClaim},
-    CompanionRegistry, PairingInput,
+    session::SessionCoordinator,
+    CompanionRegistry, CompanionSessionError, PairingInput,
 };
 use axum::{
     extract::{
@@ -15,7 +16,10 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use companion_protocol::{CompanionEvent, CompanionRequest, PROTOCOL_VERSION};
+use companion_protocol::{
+    ActionRequest, AttachmentGrant, BrowserTarget, CompanionEvent, CompanionRequest,
+    PROTOCOL_VERSION,
+};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use serde::{
     de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor},
@@ -73,9 +77,11 @@ impl CompanionServer {
             config.pairing_code_ttl,
             config.attachment_ttl,
         ));
+        let coordinator = Arc::new(SessionCoordinator::new(Arc::clone(&registry)));
         let (disconnect, _) = watch::channel(0_u64);
         let state = Arc::new(ServerState {
             registry: Arc::clone(&registry),
+            coordinator: Arc::clone(&coordinator),
             disconnect: disconnect.clone(),
         });
         let router = Router::new()
@@ -90,6 +96,7 @@ impl CompanionServer {
         Ok(CompanionServerHandle {
             local_addr,
             registry,
+            coordinator,
             disconnect,
             task,
         })
@@ -100,6 +107,7 @@ impl CompanionServer {
 pub struct CompanionServerHandle {
     local_addr: SocketAddr,
     registry: Arc<CompanionRegistry>,
+    coordinator: Arc<SessionCoordinator>,
     disconnect: watch::Sender<u64>,
     task: JoinHandle<()>,
 }
@@ -116,6 +124,49 @@ impl CompanionServerHandle {
     pub fn disconnect_clients(&self) {
         self.disconnect.send_modify(|generation| *generation += 1);
     }
+
+    pub async fn send_request(
+        &self,
+        profile_id: &types::ProfileId,
+        request: CompanionRequest,
+    ) -> Result<(), CompanionSessionError> {
+        self.coordinator.send_request(profile_id, request).await
+    }
+
+    pub async fn wait_for_discovery(
+        &self,
+        profile_id: &types::ProfileId,
+        timeout: Duration,
+    ) -> Result<Vec<BrowserTarget>, CompanionSessionError> {
+        self.coordinator
+            .wait_for_discovery(profile_id, timeout)
+            .await
+    }
+
+    pub async fn active_grant(&self, profile_id: &types::ProfileId) -> Option<AttachmentGrant> {
+        self.coordinator.active_grant(profile_id).await
+    }
+
+    pub async fn grant_discovered_targets(
+        &self,
+        profile_id: &types::ProfileId,
+    ) -> Result<AttachmentGrant, CompanionSessionError> {
+        self.coordinator.grant_discovered_targets(profile_id).await
+    }
+
+    pub async fn renew_grant(
+        &self,
+        attachment_id: &types::AttachmentId,
+    ) -> Result<AttachmentGrant, CompanionSessionError> {
+        self.coordinator.renew_grant(attachment_id).await
+    }
+
+    pub async fn dispatch_action(
+        &self,
+        action: ActionRequest,
+    ) -> Result<CompanionEvent, CompanionSessionError> {
+        self.coordinator.dispatch_action(action).await
+    }
 }
 
 impl Drop for CompanionServerHandle {
@@ -127,6 +178,7 @@ impl Drop for CompanionServerHandle {
 #[derive(Debug)]
 struct ServerState {
     registry: Arc<CompanionRegistry>,
+    coordinator: Arc<SessionCoordinator>,
     disconnect: watch::Sender<u64>,
 }
 
@@ -148,7 +200,6 @@ async fn companion_upgrade(
     let Ok(authentication) = state.registry.authenticate_bearer(&pairing_code).await else {
         return unauthorized_response();
     };
-    let registry = Arc::clone(&state.registry);
     let disconnect = state.disconnect.subscribe();
 
     upgrade
@@ -156,7 +207,7 @@ async fn companion_upgrade(
         // typed 1 MiB limit error before closing the connection.
         .max_frame_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
         .max_message_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
-        .on_upgrade(move |socket| serve_socket(socket, registry, authentication, disconnect))
+        .on_upgrade(move |socket| serve_socket(socket, state, authentication, disconnect))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -188,7 +239,7 @@ fn unauthorized_response() -> Response {
 
 async fn serve_socket(
     socket: WebSocket,
-    registry: Arc<CompanionRegistry>,
+    state: Arc<ServerState>,
     authentication: ConnectionAuthentication,
     mut disconnect: watch::Receiver<u64>,
 ) {
@@ -196,21 +247,29 @@ async fn serve_socket(
     let (outbound, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let writer = tokio::spawn(write_socket(sink, receiver));
 
-    match authentication {
+    let (profile_id, connection_id) = match authentication {
         ConnectionAuthentication::Pairing(claim) => {
-            let Some(session) = complete_pairing(&mut stream, &outbound, &registry, claim).await
+            let Some(session) =
+                complete_pairing(&mut stream, &outbound, &state.registry, claim).await
             else {
                 drop(outbound);
                 let _ = writer.await;
                 return;
             };
+            let profile_id = session.companion.profile_id.clone();
             if send_initial_paired(&outbound, &session).await.is_err() {
                 drop(outbound);
                 let _ = writer.await;
                 return;
             }
+            let connection_id = state
+                .coordinator
+                .register(session.companion, outbound.clone())
+                .await;
+            (profile_id, connection_id)
         }
         ConnectionAuthentication::Reconnect(paired) => {
+            let profile_id = paired.profile_id.clone();
             if send_event(
                 &outbound,
                 &CompanionEvent::Paired {
@@ -225,8 +284,10 @@ async fn serve_socket(
                 let _ = writer.await;
                 return;
             }
+            let connection_id = state.coordinator.register(paired, outbound.clone()).await;
+            (profile_id, connection_id)
         }
-    }
+    };
 
     loop {
         tokio::select! {
@@ -236,30 +297,32 @@ async fn serve_socket(
                 }
                 break;
             }
-            request = next_request(&mut stream, &outbound) => {
-                let Some(request) = request else {
+            event = next_event(&mut stream, &outbound) => {
+                let Some(event) = event else {
                     break;
                 };
-                match request {
-                    CompanionRequest::Ping => {
-                        if send_event(&outbound, &CompanionEvent::Pong).await.is_err() {
-                            break;
-                        }
-                    }
-                    CompanionRequest::Pair(_) | CompanionRequest::Action(_) => {
-                        send_error_and_close(
-                            &outbound,
-                            "invalidRequest",
-                            "request is not valid in the current state",
-                        )
-                        .await;
-                        break;
-                    }
+                if state
+                    .coordinator
+                    .consume_event(&profile_id, connection_id, event)
+                    .await
+                    .is_err()
+                {
+                    send_error_and_close(
+                        &outbound,
+                        "invalidEvent",
+                        "event is not valid for the active connection",
+                    )
+                    .await;
+                    break;
                 }
             }
         }
     }
 
+    state
+        .coordinator
+        .unregister(&profile_id, connection_id)
+        .await;
     drop(outbound);
     let _ = writer.await;
 }
@@ -354,7 +417,7 @@ async fn next_request(
                     .await;
                     return None;
                 }
-                match strict_decode(text.as_str()) {
+                match strict_decode::<CompanionRequest>(text.as_str()) {
                     Ok(request) => return Some(request),
                     Err(()) => {
                         send_error_and_close(
@@ -392,7 +455,82 @@ async fn next_request(
     }
 }
 
-fn strict_decode(text: &str) -> Result<CompanionRequest, ()> {
+async fn next_event(
+    stream: &mut futures_util::stream::SplitStream<WebSocket>,
+    outbound: &mpsc::Sender<Message>,
+) -> Option<CompanionEvent> {
+    loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(text))) => {
+                if text.len() > MAX_FRAME_BYTES {
+                    send_error_and_close(
+                        outbound,
+                        "frameTooLarge",
+                        "frame exceeds the 1 MiB limit",
+                    )
+                    .await;
+                    return None;
+                }
+                match strict_decode::<CompanionEvent>(text.as_str()) {
+                    Ok(event)
+                        if serde_json::to_value(&event)
+                            .ok()
+                            .and_then(|value| {
+                                crate::native_host::validate_extension_message(value).ok()
+                            })
+                            .is_some() =>
+                    {
+                        return Some(event)
+                    }
+                    Err(()) => {
+                        send_error_and_close(
+                            outbound,
+                            "invalidEvent",
+                            "event must be strict companion JSON",
+                        )
+                        .await;
+                        return None;
+                    }
+                    Ok(_) => {
+                        send_error_and_close(
+                            outbound,
+                            "invalidEvent",
+                            "event must be strict companion JSON",
+                        )
+                        .await;
+                        return None;
+                    }
+                }
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                if outbound.send(Message::Pong(payload)).await.is_err() {
+                    return None;
+                }
+            }
+            Some(Ok(Message::Pong(_))) => {}
+            Some(Ok(Message::Close(_))) | None => return None,
+            Some(Ok(Message::Binary(_))) => {
+                send_error_and_close(
+                    outbound,
+                    "invalidEvent",
+                    "event must be strict companion JSON",
+                )
+                .await;
+                return None;
+            }
+            Some(Err(_)) => {
+                send_error_and_close(outbound, "frameTooLarge", "frame exceeds the 1 MiB limit")
+                    .await;
+                return None;
+            }
+        }
+    }
+}
+
+fn strict_decode<T>(text: &str) -> Result<T, ()>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+{
     let mut deserializer = serde_json::Deserializer::from_str(text);
     DuplicateKeyRejector
         .deserialize(&mut deserializer)
@@ -400,12 +538,12 @@ fn strict_decode(text: &str) -> Result<CompanionRequest, ()> {
     deserializer.end().map_err(|_| ())?;
 
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
-    let request: CompanionRequest = serde_json::from_value(value.clone()).map_err(|_| ())?;
-    let canonical = serde_json::to_value(&request).map_err(|_| ())?;
+    let decoded: T = serde_json::from_value(value.clone()).map_err(|_| ())?;
+    let canonical = serde_json::to_value(&decoded).map_err(|_| ())?;
     if value != canonical {
         return Err(());
     }
-    Ok(request)
+    Ok(decoded)
 }
 
 struct DuplicateKeyRejector;

@@ -75,6 +75,44 @@ async fn attachment_resolves_before_expiry() {
 }
 
 #[tokio::test]
+async fn attachment_renewal_preserves_identity_and_extends_the_bound() {
+    let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::from_secs(300));
+    let code = registry.issue_pairing_code().await;
+    let paired = registry.pair(PairingInput::firefox(code)).await.unwrap();
+    let lease = registry.attach(paired.profile_id).await.unwrap();
+
+    let renewed = registry
+        .renew_attachment(&lease.attachment_id)
+        .await
+        .unwrap();
+
+    assert_eq!(renewed.attachment_id, lease.attachment_id);
+    assert_eq!(renewed.profile_id, lease.profile_id);
+    assert_eq!(renewed.companion_id, lease.companion_id);
+    assert!(renewed.expires_at > lease.expires_at);
+    assert_eq!(
+        registry
+            .resolve_attachment(&renewed.attachment_id)
+            .await
+            .unwrap(),
+        renewed
+    );
+}
+
+#[tokio::test]
+async fn expired_attachment_cannot_be_renewed() {
+    let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::ZERO);
+    let code = registry.issue_pairing_code().await;
+    let paired = registry.pair(PairingInput::firefox(code)).await.unwrap();
+    let lease = registry.attach(paired.profile_id).await.unwrap();
+
+    assert_eq!(
+        registry.renew_attachment(&lease.attachment_id).await,
+        Err(RegistryError::AttachmentExpired)
+    );
+}
+
+#[tokio::test]
 async fn expired_attachment_is_rejected() {
     let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::ZERO);
     let code = registry.issue_pairing_code().await;

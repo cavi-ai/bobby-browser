@@ -63,10 +63,50 @@ pub struct ActionRequest {
     pub deadline_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TargetKind {
+    Page,
+    Frame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserTarget {
+    pub target_id: String,
+    pub kind: TargetKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TargetDiscovery {
+    pub protocol_version: u16,
+    pub profile_id: ProfileId,
+    pub targets: Vec<BrowserTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GrantedPage {
+    pub target_id: String,
+    pub page_id: PageId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentGrant {
+    pub protocol_version: u16,
+    pub attachment_id: AttachmentId,
+    pub profile_id: ProfileId,
+    pub expires_at_unix_ms: i64,
+    pub pages: Vec<GrantedPage>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "input", rename_all = "camelCase")]
 pub enum CompanionRequest {
     Pair(PairRequest),
+    Grant(AttachmentGrant),
     Action(ActionRequest),
     Ping,
 }
@@ -97,5 +137,6 @@ pub enum CompanionEvent {
         #[serde(rename = "effectUncertain")]
         effect_uncertain: bool,
     },
+    TargetsDiscovered(TargetDiscovery),
     Pong,
 }
