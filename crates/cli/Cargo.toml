@@ -20,6 +20,7 @@ config = { path = "../config" }
 companion-protocol = { path = "../companion-protocol" }
 companion-core = { path = "../companion-core" }
 firefox-companion = { path = "../firefox-companion" }
+libc = "0.2"
 serde_json.workspace = true
 serde.workspace = true
 types = { path = "../types" }

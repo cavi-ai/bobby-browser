@@ -422,6 +422,7 @@ dependencies = [
  "companion-protocol",
  "config",
  "firefox-companion",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

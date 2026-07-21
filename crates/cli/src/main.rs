@@ -59,6 +59,14 @@ struct NativeHostDescriptor {
     ownership_id: String,
 }
 
+#[derive(Clone)]
+pub struct NativeHostInstallConfig {
+    pub wrapper_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub cli_path: PathBuf,
+    pub descriptor_path: PathBuf,
+}
+
 impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
     type Error = anyhow::Error;
 
@@ -471,6 +479,7 @@ pub async fn run() -> Result<()> {
             broker::serve_with_worker_factory(config, startup, factory).await?
         }
         "firefox-native-host" => run_configured_native_host().await?,
+        "install-firefox-native-host" => install_configured_native_host()?,
         "doctor" => println!("ok"),
         other => {
             eprintln!("unknown command: {other}");
@@ -481,8 +490,253 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+fn install_configured_native_host() -> Result<()> {
+    let values = std::env::args().skip(2).collect::<Vec<_>>();
+    if values.len() != 8 {
+        anyhow::bail!(
+            "install-firefox-native-host requires --wrapper, --manifest, --cli, and --descriptor"
+        );
+    }
+    let value = |flag: &str| -> Result<PathBuf> {
+        values
+            .chunks_exact(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| PathBuf::from(&pair[1]))
+            .ok_or_else(|| anyhow::anyhow!("missing {flag}"))
+    };
+    install_native_host(NativeHostInstallConfig {
+        wrapper_path: value("--wrapper")?,
+        manifest_path: value("--manifest")?,
+        cli_path: value("--cli")?,
+        descriptor_path: value("--descriptor")?,
+    })?;
+    Ok(())
+}
+
+pub fn install_native_host(config: NativeHostInstallConfig) -> Result<()> {
+    for path in [
+        &config.wrapper_path,
+        &config.manifest_path,
+        &config.cli_path,
+        &config.descriptor_path,
+    ] {
+        if !path.is_absolute() {
+            anyhow::bail!("native-host installation paths must be absolute");
+        }
+    }
+    let _install_lock = NativeHostInstallLock::acquire(&config.manifest_path)?;
+    let wrapper = format!(
+        "#!/bin/sh\nexec {} firefox-native-host --descriptor {}\n",
+        shell_quote(&config.cli_path),
+        shell_quote(&config.descriptor_path),
+    );
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "name": "com.bobby_browser.companion",
+        "description": "Bobby Browser Firefox companion native host",
+        "path": config.wrapper_path,
+        "type": "stdio",
+        "allowed_extensions": ["firefox-companion@bobby-browser.local"],
+    }))?;
+    preflight_exact_file(&config.wrapper_path, wrapper.as_bytes(), 0o700)?;
+    preflight_exact_file(&config.manifest_path, &manifest, 0o600)?;
+    let wrapper_install = install_exact_file(&config.wrapper_path, wrapper.as_bytes(), 0o700)?;
+    if let Err(error) = install_exact_file(&config.manifest_path, &manifest, 0o600) {
+        if let Some(created) = wrapper_install {
+            created.rollback(&config.wrapper_path);
+        }
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+struct NativeHostInstallLock {
+    _file: std::fs::File,
+}
+
+impl NativeHostInstallLock {
+    fn acquire(manifest_path: &Path) -> std::io::Result<Self> {
+        let lock_path = manifest_path.with_extension("install.lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(&lock_path) {
+            if !metadata.file_type().is_file() {
+                return Err(unsafe_install_lock());
+            }
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(&lock_path)?;
+        verify_install_lock_identity(&lock_path, &file)?;
+        file.lock()?;
+        verify_install_lock_identity(&lock_path, &file)?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn unsafe_install_lock() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "native-host installer lock path is unsafe",
+    )
+}
+
+fn verify_install_lock_identity(path: &Path, file: &std::fs::File) -> std::io::Result<()> {
+    let path_metadata = std::fs::symlink_metadata(path)?;
+    let file_metadata = file.metadata()?;
+    if !path_metadata.file_type().is_file() || !file_metadata.file_type().is_file() {
+        return Err(unsafe_install_lock());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if path_metadata.dev() != file_metadata.dev()
+            || path_metadata.ino() != file_metadata.ino()
+            || file_metadata.permissions().mode() & 0o777 != 0o600
+        {
+            return Err(unsafe_install_lock());
+        }
+    }
+    Ok(())
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+fn preflight_exact_file(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(_) => verify_exact_file(path, contents, mode),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn verify_exact_file(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    #[cfg(unix)]
+    let mode_matches = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777 == mode
+    };
+    #[cfg(not(unix))]
+    let mode_matches = true;
+    if metadata.file_type().is_file() && std::fs::read(path)? == contents && mode_matches {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "native-host installation destination already exists",
+        ))
+    }
+}
+
+struct CreatedInstallFile {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl CreatedInstallFile {
+    fn from_metadata(metadata: std::fs::Metadata) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        Ok(Self {})
+    }
+
+    fn rollback(self, path: &Path) {
+        self.rollback_ref(path);
+    }
+
+    fn rollback_ref(&self, path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(metadata) = std::fs::symlink_metadata(path) {
+                if metadata.dev() == self.device && metadata.ino() == self.inode {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn install_exact_file(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+) -> std::io::Result<Option<CreatedInstallFile>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if path.symlink_metadata().is_ok() {
+        verify_exact_file(path, contents, mode)?;
+        return Ok(None);
+    }
+    let pending = path.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    let result = (|| {
+        use std::io::Write;
+        let mut file = options.open(&pending)?;
+        file.write_all(contents)?;
+        file.flush()?;
+        file.sync_all()?;
+        let created = CreatedInstallFile::from_metadata(file.metadata()?)?;
+        match std::fs::hard_link(&pending, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                verify_exact_file(path, contents, mode)?;
+                std::fs::remove_file(&pending)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+        if let Err(error) = std::fs::remove_file(&pending) {
+            created.rollback(path);
+            return Err(error);
+        }
+        Ok(Some(created))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(pending);
+    }
+    result
+}
+
 async fn run_configured_native_host() -> Result<()> {
-    let path = std::env::var("AUTOMATION_RUNTIME_FIREFOX_DESCRIPTOR")?;
+    let mut args = std::env::args().skip(2);
+    let flag = args.next();
+    let path = args.next();
+    if flag.as_deref() != Some("--descriptor") || path.is_none() || args.next().is_some() {
+        anyhow::bail!("firefox-native-host requires --descriptor <absolute-path>");
+    }
+    let path = path.expect("validated descriptor argument");
+    if !Path::new(&path).is_absolute() {
+        anyhow::bail!("firefox native-host descriptor path must be absolute");
+    }
     let descriptor: NativeHostDescriptor = serde_json::from_slice(&std::fs::read(path)?)?;
     run_native_host(
         tokio::io::stdin(),
@@ -701,6 +955,151 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_native_host_wrapper_passes_descriptor_without_environment_injection() {
+        let root = std::fs::canonicalize("target")
+            .unwrap()
+            .join(format!("native-host-install-{}", uuid::Uuid::new_v4()));
+        let wrapper = root.join("firefox-native-host");
+        let manifest = root.join("com.bobby_browser.companion.json");
+        let descriptor = root.join("dynamic-descriptor.json");
+        let config = NativeHostInstallConfig {
+            wrapper_path: wrapper.clone(),
+            manifest_path: manifest.clone(),
+            cli_path: PathBuf::from("/bin/echo"),
+            descriptor_path: descriptor.clone(),
+        };
+        install_native_host(config.clone()).unwrap();
+        install_native_host(config).unwrap();
+        let output = std::process::Command::new(&wrapper)
+            .env_remove("AUTOMATION_RUNTIME_FIREFOX_DESCRIPTOR")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("firefox-native-host --descriptor"));
+        assert!(stdout.contains(descriptor.to_str().unwrap()));
+        assert!(!stdout.contains("AUTOMATION_RUNTIME_FIREFOX_DESCRIPTOR"));
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(installed["path"], wrapper.to_string_lossy().as_ref());
+        assert!(!String::from_utf8_lossy(&std::fs::read(&wrapper).unwrap()).contains("pairing"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&manifest).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_file(wrapper).unwrap();
+        std::fs::remove_file(manifest).unwrap();
+        std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn native_host_installation_never_clobbers_operator_owned_files() {
+        let root = std::fs::canonicalize("target")
+            .unwrap()
+            .join(format!("native-host-no-clobber-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let wrapper = root.join("firefox-native-host");
+        let manifest = root.join("com.bobby_browser.companion.json");
+        let original = b"operator-owned";
+        std::fs::write(&wrapper, original).unwrap();
+        let result = install_native_host(NativeHostInstallConfig {
+            wrapper_path: wrapper.clone(),
+            manifest_path: manifest.clone(),
+            cli_path: PathBuf::from("/bin/echo"),
+            descriptor_path: root.join("dynamic-descriptor.json"),
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&wrapper).unwrap(), original);
+        assert!(!manifest.exists());
+        std::fs::remove_file(wrapper).unwrap();
+        std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn native_host_manifest_conflict_rolls_back_wrapper_created_by_attempt() {
+        let root = std::fs::canonicalize("target").unwrap().join(format!(
+            "native-host-manifest-conflict-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let wrapper = root.join("firefox-native-host");
+        let manifest = root.join("com.bobby_browser.companion.json");
+        let original = b"operator-owned-manifest";
+        std::fs::write(&manifest, original).unwrap();
+
+        let result = install_native_host(NativeHostInstallConfig {
+            wrapper_path: wrapper.clone(),
+            manifest_path: manifest.clone(),
+            cli_path: PathBuf::from("/bin/echo"),
+            descriptor_path: root.join("dynamic-descriptor.json"),
+        });
+
+        assert!(result.is_err());
+        assert!(!wrapper.exists());
+        assert_eq!(std::fs::read(&manifest).unwrap(), original);
+        std::fs::remove_file(manifest).unwrap();
+        std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_identical_native_host_installers_are_both_successful() {
+        let root = std::fs::canonicalize("target")
+            .unwrap()
+            .join(format!("native-host-concurrent-{}", uuid::Uuid::new_v4()));
+        let config = NativeHostInstallConfig {
+            wrapper_path: root.join("firefox-native-host"),
+            manifest_path: root.join("com.bobby_browser.companion.json"),
+            cli_path: PathBuf::from("/bin/echo"),
+            descriptor_path: root.join("dynamic-descriptor.json"),
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let attempts = (0..2)
+            .map(|_| {
+                let config = config.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    install_native_host(config)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for attempt in attempts {
+            attempt.join().unwrap().unwrap();
+        }
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&config.wrapper_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&config.manifest_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        std::fs::remove_file(config.wrapper_path).unwrap();
+        std::fs::remove_file(config.manifest_path).unwrap();
+        std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]
