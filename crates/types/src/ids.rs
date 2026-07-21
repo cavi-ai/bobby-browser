@@ -31,3 +31,6 @@ uuid_id!(WorkerId);
 uuid_id!(JobId);
 uuid_id!(ArtifactId);
 uuid_id!(CheckpointId);
+uuid_id!(CompanionId);
+uuid_id!(ProfileId);
+uuid_id!(AttachmentId);

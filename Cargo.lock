@@ -422,6 +422,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "companion-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "types",
+]
+
+[[package]]
 name = "compression-codecs"
 version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
