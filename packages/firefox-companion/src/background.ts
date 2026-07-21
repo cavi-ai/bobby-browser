@@ -6,7 +6,9 @@ import {
 } from "./native-transport.js";
 import {
   PROTOCOL_VERSION,
+  type AttachmentGrant,
   type BrowserIdentity,
+  type BrowserTarget,
   type CompanionCapabilities,
   type CompanionEvent,
 } from "./protocol.js";
@@ -31,6 +33,7 @@ type RuntimeSender = {
   id?: string;
   tab?: { id?: number };
   frameId?: number;
+  url?: string;
 };
 
 type PageLease = {
@@ -54,6 +57,7 @@ export type BackgroundDependencies = {
   discoverTargets?: () => Promise<readonly DiscoveredTarget[]>;
   sendTabMessage(tabId: number, message: unknown, frameId: number): Promise<unknown>;
   navigateTab(tabId: number, url: string): Promise<void>;
+  createTargetId?: (target: DiscoveredTarget) => string;
   now?: () => number;
 };
 
@@ -61,12 +65,8 @@ function routeKey(attachmentId: string, pageId: string): string {
   return `${attachmentId}\u0000${pageId}`;
 }
 
-function attachmentId(options: BackgroundConnectOptions): string {
-  return `attachment:${options.companionId}:${options.profileId}`;
-}
-
-function pageId(tabId: number, frameId: number): string {
-  return `page:${tabId}:${frameId}`;
+function browserRouteKey(tabId: number, frameId: number): string {
+  return `${tabId}\u0000${frameId}`;
 }
 
 function byteLength(value: string): number {
@@ -122,6 +122,16 @@ function validBrowserId(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
+function supportedFrameUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 function navigationUrl(input: unknown): string {
   if (
     typeof input !== "object" ||
@@ -141,6 +151,8 @@ function navigationUrl(input: unknown): string {
 export class CompanionBackground {
   readonly #dependencies: BackgroundDependencies;
   readonly #leases = new Map<string, PageLease>();
+  readonly #targets = new Map<string, DiscoveredTarget & { kind: BrowserTarget["kind"] }>();
+  readonly #targetIdsByRoute = new Map<string, string>();
   #options: BackgroundConnectOptions | undefined;
   #paired = false;
   #started = false;
@@ -158,6 +170,8 @@ export class CompanionBackground {
     this.#options = structuredClone(options);
     this.#paired = false;
     this.#leases.clear();
+    this.#targets.clear();
+    this.#targetIdsByRoute.clear();
     const request: NativePairRequest = {
       kind: "pair",
       input: {
@@ -174,6 +188,8 @@ export class CompanionBackground {
   stop(): void {
     this.#paired = false;
     this.#leases.clear();
+    this.#targets.clear();
+    this.#targetIdsByRoute.clear();
     this.#dependencies.transport.stop();
   }
 
@@ -188,11 +204,14 @@ export class CompanionBackground {
       message.type !== "companionFrameReady" ||
       sender.id !== extensionId ||
       !validBrowserId(sender.tab?.id) ||
-      !validBrowserId(sender.frameId)
+      !validBrowserId(sender.frameId) ||
+      !supportedFrameUrl(sender.url)
     ) {
       return;
     }
-    this.#leaseTarget({ tabId: sender.tab.id, frameId: sender.frameId });
+    if (this.#registerTarget({ tabId: sender.tab.id, frameId: sender.frameId })) {
+      this.#sendDiscovery();
+    }
   }
 
   async receive(message: unknown): Promise<void> {
@@ -205,6 +224,11 @@ export class CompanionBackground {
       this.#dependencies.transport.send({ kind: "pong" });
       return;
     }
+    if (incoming.kind === "grant") {
+      this.#acceptGrant(incoming.input);
+      return;
+    }
+    if (incoming.kind === "nativeStatus") return;
 
     const { input } = incoming;
     const now = (this.#dependencies.now ?? Date.now)();
@@ -273,32 +297,76 @@ export class CompanionBackground {
     }
     this.#paired = true;
     this.#leases.clear();
+    this.#targets.clear();
+    this.#targetIdsByRoute.clear();
     const targets = (await this.#dependencies.discoverTargets?.()) ?? [];
     for (const target of targets) {
-      if (this.#leases.size >= MAX_PAGE_LEASES) break;
-      this.#leaseTarget(target);
+      if (this.#targets.size >= MAX_PAGE_LEASES) break;
+      this.#registerTarget(target);
     }
+    this.#sendDiscovery();
   }
 
-  #leaseTarget(target: DiscoveredTarget): void {
+  #registerTarget(target: DiscoveredTarget): boolean {
+    if (!this.#paired || !this.#options) return false;
+    if (!object(target) || !exactKeys(target, ["tabId", "frameId"])) return false;
+    if (!validBrowserId(target.tabId) || !validBrowserId(target.frameId)) return false;
+    const browserKey = browserRouteKey(target.tabId, target.frameId);
+    if (this.#targetIdsByRoute.has(browserKey)) return false;
+    if (this.#targets.size >= MAX_PAGE_LEASES) return false;
+    const targetId =
+      this.#dependencies.createTargetId?.(target) ?? globalThis.crypto?.randomUUID?.();
+    if (!boundedNonempty(targetId, 256) || this.#targets.has(targetId)) return false;
+    this.#targetIdsByRoute.set(browserKey, targetId);
+    this.#targets.set(targetId, {
+      ...target,
+      kind: target.frameId === 0 ? "page" : "frame",
+    });
+    return true;
+  }
+
+  #sendDiscovery(): void {
     if (!this.#paired || !this.#options) return;
-    if (!object(target) || !exactKeys(target, ["tabId", "frameId"])) return;
-    if (!validBrowserId(target.tabId) || !validBrowserId(target.frameId)) return;
+    const event: CompanionEvent = {
+      kind: "targetsDiscovered",
+      output: {
+        protocolVersion: PROTOCOL_VERSION,
+        profileId: this.#options.profileId,
+        targets: [...this.#targets.entries()].map(([targetId, target]) => ({
+          targetId,
+          kind: target.kind,
+        })),
+      },
+    };
+    this.#dependencies.transport.send(event);
+  }
+
+  #acceptGrant(grant: AttachmentGrant): void {
+    if (!this.#paired || !this.#options || grant.profileId !== this.#options.profileId) {
+      throw new Error("attachment grant profile does not match the paired profile");
+    }
     const now = (this.#dependencies.now ?? Date.now)();
     this.#removeExpired(now);
-    const id = attachmentId(this.#options);
-    const page = pageId(target.tabId, target.frameId);
-    const key = routeKey(id, page);
-    if (!this.#leases.has(key) && this.#leases.size >= MAX_PAGE_LEASES) return;
-    this.#leases.set(key, {
-      companionId: this.#options.companionId,
-      profileId: this.#options.profileId,
-      attachmentId: id,
-      pageId: page,
-      tabId: target.tabId,
-      frameId: target.frameId,
-      expiresAtUnixMs: now + PAGE_LEASE_TTL_MS,
-    });
+    if (grant.expiresAtUnixMs <= now) {
+      throw new Error("attachment grant is expired");
+    }
+    const leases = new Map<string, PageLease>();
+    for (const page of grant.pages) {
+      const target = this.#targets.get(page.targetId);
+      if (!target) throw new Error("attachment grant names an undiscovered browser target");
+      const lease: PageLease = {
+        companionId: this.#options.companionId,
+        profileId: this.#options.profileId,
+        attachmentId: grant.attachmentId,
+        pageId: page.pageId,
+        tabId: target.tabId,
+        frameId: target.frameId,
+        expiresAtUnixMs: grant.expiresAtUnixMs,
+      };
+      leases.set(routeKey(lease.attachmentId, lease.pageId), lease);
+    }
+    this.#leases.clear();
+    for (const [key, lease] of leases) this.#leases.set(key, lease);
   }
 
   #removeExpired(now: number): void {
@@ -390,16 +458,21 @@ export async function startProductionBackground(
       for (const tab of tabs) {
         if (targets.length >= MAX_PAGE_LEASES) break;
         if (!validBrowserId(tab.id)) continue;
-        let frames: Array<{ frameId: number }> | null = null;
+        let frames: Array<{ frameId: number; url: string }> | null = null;
         try {
           frames = await browserApi.webNavigation.getAllFrames({ tabId: tab.id });
         } catch {
           frames = null;
         }
-        if (!frames?.length) frames = [{ frameId: 0 }];
+        if (!frames?.length) {
+          if (!supportedFrameUrl(tab.url)) continue;
+          frames = [{ frameId: 0, url: tab.url }];
+        }
         for (const frame of frames) {
           if (targets.length >= MAX_PAGE_LEASES) break;
-          if (validBrowserId(frame.frameId)) targets.push({ tabId: tab.id, frameId: frame.frameId });
+          if (validBrowserId(frame.frameId) && supportedFrameUrl(frame.url)) {
+            targets.push({ tabId: tab.id, frameId: frame.frameId });
+          }
         }
       }
       return targets;

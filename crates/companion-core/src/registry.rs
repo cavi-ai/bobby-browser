@@ -82,7 +82,7 @@ pub struct AttachmentLease {
     pub expires_at: Instant,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RegistryError {
     #[error("pairing code is invalid or expired")]
     PairingCodeInvalid,
@@ -392,5 +392,35 @@ impl CompanionRegistry {
             return Err(RegistryError::AttachmentExpired);
         }
         Ok(lease.clone())
+    }
+
+    pub async fn renew_attachment(
+        &self,
+        attachment_id: &AttachmentId,
+    ) -> Result<AttachmentLease, RegistryError> {
+        let mut state = self.state.write().await;
+        let lease = state
+            .attachments
+            .get(attachment_id)
+            .cloned()
+            .ok_or(RegistryError::ProfileNotFound)?;
+        let record = state
+            .companions
+            .get(&lease.companion_id)
+            .ok_or(RegistryError::ProfileNotFound)?;
+        if record.revoked {
+            return Err(RegistryError::Revoked);
+        }
+        if Instant::now() >= lease.expires_at {
+            return Err(RegistryError::AttachmentExpired);
+        }
+        let renewed = AttachmentLease {
+            expires_at: Instant::now() + self.attachment_ttl,
+            ..lease
+        };
+        state
+            .attachments
+            .insert(renewed.attachment_id.clone(), renewed.clone());
+        Ok(renewed)
     }
 }

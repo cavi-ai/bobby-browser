@@ -223,3 +223,56 @@ test("native transport reconnects after a native host disconnect", () => {
   assert.deepEqual(connected, ports);
   assert.deepEqual(connected[1]?.sent, [pairRequest]);
 });
+
+test("terminal invalid-auth status prevents native host respawn", () => {
+  const port = new FakePort();
+  const delays: number[] = [];
+  const transport = new NativeCompanionTransport({
+    connectNative: () => port,
+    scheduleReconnect(_callback, delayMs) {
+      delays.push(delayMs);
+      return 1;
+    },
+    cancelReconnect() {},
+  });
+  transport.start(() => {});
+
+  port.onMessage.emit({
+    kind: "nativeStatus",
+    output: { state: "invalidAuth" },
+  });
+  port.onDisconnect.emit();
+  transport.start(() => {});
+
+  assert.deepEqual(delays, []);
+});
+
+test("failed native launches use bounded exponential backoff and reset after success", () => {
+  const delays: number[] = [];
+  const scheduled: Array<() => void> = [];
+  const successfulPort = new FakePort();
+  let attempts = 0;
+  const transport = new NativeCompanionTransport({
+    connectNative() {
+      attempts += 1;
+      if (attempts <= 7) throw new Error("host offline");
+      return successfulPort;
+    },
+    scheduleReconnect(callback, delayMs) {
+      delays.push(delayMs);
+      scheduled.push(callback);
+      return attempts;
+    },
+    cancelReconnect() {},
+  });
+  transport.start(() => {});
+  while (attempts <= 7) {
+    const callback = scheduled.shift();
+    assert.ok(callback);
+    callback();
+  }
+
+  assert.deepEqual(delays, [100, 200, 400, 800, 1_600, 3_200, 5_000]);
+  successfulPort.onDisconnect.emit();
+  assert.equal(delays.at(-1), 100);
+});

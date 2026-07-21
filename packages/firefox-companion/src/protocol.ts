@@ -6,6 +6,8 @@ const MAX_PAIRING_CODE_BYTES = 512;
 const MAX_OPERATION_BYTES = 64;
 const MAX_ERROR_CODE_BYTES = 128;
 const MAX_ERROR_MESSAGE_BYTES = 4 * 1024;
+const MAX_TARGET_COUNT = 256;
+const MAX_TARGET_ID_BYTES = 256;
 const textEncoder = new TextEncoder();
 
 export type BrowserEngine = "firefox" | "chromium" | "webKit";
@@ -46,8 +48,35 @@ export type ActionRequest = {
   deadlineUnixMs: number;
 };
 
+export type TargetKind = "page" | "frame";
+
+export type BrowserTarget = {
+  targetId: string;
+  kind: TargetKind;
+};
+
+export type TargetDiscovery = {
+  protocolVersion: typeof PROTOCOL_VERSION;
+  profileId: string;
+  targets: BrowserTarget[];
+};
+
+export type GrantedPage = {
+  targetId: string;
+  pageId: string;
+};
+
+export type AttachmentGrant = {
+  protocolVersion: typeof PROTOCOL_VERSION;
+  attachmentId: string;
+  profileId: string;
+  expiresAtUnixMs: number;
+  pages: GrantedPage[];
+};
+
 export type CompanionRequest =
   | { kind: "pair"; input: PairRequest }
+  | { kind: "grant"; input: AttachmentGrant }
   | { kind: "action"; input: ActionRequest }
   | { kind: "ping" };
 
@@ -75,6 +104,7 @@ export type CompanionEvent =
         effectUncertain: boolean;
       };
     }
+  | { kind: "targetsDiscovered"; output: TargetDiscovery }
   | { kind: "pong" };
 
 type JsonObject = Record<string, unknown>;
@@ -131,6 +161,14 @@ function boolean(value: unknown, name: string): boolean {
     throw new CompanionProtocolError(`${name} must be a boolean`);
   }
   return value;
+}
+
+function uuid(value: unknown, name: string): string {
+  const parsed = string(value, name, MAX_ID_BYTES);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed)) {
+    throw new CompanionProtocolError(`${name} must be a UUID`);
+  }
+  return parsed;
 }
 
 function protocolVersion(value: unknown): typeof PROTOCOL_VERSION {
@@ -237,6 +275,54 @@ function actionRequest(value: unknown): ActionRequest {
   };
 }
 
+function browserTarget(value: unknown, name: string): BrowserTarget {
+  const target = object(value, name);
+  exactKeys(target, ["targetId", "kind"], name);
+  if (!(target.kind === "page" || target.kind === "frame")) {
+    throw new CompanionProtocolError(`${name} kind is invalid`);
+  }
+  return {
+    targetId: string(target.targetId, `${name} targetId`, MAX_TARGET_ID_BYTES),
+    kind: target.kind,
+  };
+}
+
+function attachmentGrant(value: unknown): AttachmentGrant {
+  const input = object(value, "grant input");
+  exactKeys(
+    input,
+    ["protocolVersion", "attachmentId", "profileId", "expiresAtUnixMs", "pages"],
+    "grant input",
+  );
+  if (!Number.isSafeInteger(input.expiresAtUnixMs) || (input.expiresAtUnixMs as number) < 0) {
+    throw new CompanionProtocolError("expiresAtUnixMs must be a nonnegative safe integer");
+  }
+  if (!Array.isArray(input.pages) || input.pages.length > MAX_TARGET_COUNT) {
+    throw new CompanionProtocolError(`grant pages must contain at most ${MAX_TARGET_COUNT} entries`);
+  }
+  const targetIds = new Set<string>();
+  const pageIds = new Set<string>();
+  const pages = input.pages.map((value, index) => {
+    const page = object(value, `grant page ${index}`);
+    exactKeys(page, ["targetId", "pageId"], `grant page ${index}`);
+    const targetId = string(page.targetId, `grant page ${index} targetId`, MAX_TARGET_ID_BYTES);
+    const pageId = uuid(page.pageId, `grant page ${index} pageId`);
+    if (targetIds.has(targetId) || pageIds.has(pageId)) {
+      throw new CompanionProtocolError("grant pages must be unique");
+    }
+    targetIds.add(targetId);
+    pageIds.add(pageId);
+    return { targetId, pageId };
+  });
+  return {
+    protocolVersion: protocolVersion(input.protocolVersion),
+    attachmentId: uuid(input.attachmentId, "attachmentId"),
+    profileId: uuid(input.profileId, "profileId"),
+    expiresAtUnixMs: input.expiresAtUnixMs as number,
+    pages,
+  };
+}
+
 export function parseCompanionRequest(payload: string): CompanionRequest {
   const message = object(parsePayload(payload), "companion request");
   rejectUnknownProtocolVersion(message);
@@ -247,6 +333,9 @@ export function parseCompanionRequest(payload: string): CompanionRequest {
     case "action":
       exactKeys(message, ["kind", "input"], "action request");
       return { kind: "action", input: actionRequest(message.input) };
+    case "grant":
+      exactKeys(message, ["kind", "input"], "grant request");
+      return { kind: "grant", input: attachmentGrant(message.input) };
     case "ping":
       exactKeys(message, ["kind"], "ping request");
       return { kind: "ping" };
@@ -316,6 +405,30 @@ export function parseCompanionEvent(payload: string): CompanionEvent {
           code: string(output.code, "code", MAX_ERROR_CODE_BYTES),
           message: string(output.message, "message", MAX_ERROR_MESSAGE_BYTES),
           effectUncertain: boolean(output.effectUncertain, "effectUncertain"),
+        },
+      };
+    }
+    case "targetsDiscovered": {
+      exactKeys(message, ["kind", "output"], "targetsDiscovered event");
+      const output = parseEventOutput(message.output, "targetsDiscovered");
+      exactKeys(output, ["protocolVersion", "profileId", "targets"], "targetsDiscovered output");
+      if (!Array.isArray(output.targets) || output.targets.length > MAX_TARGET_COUNT) {
+        throw new CompanionProtocolError(
+          `targetsDiscovered targets must contain at most ${MAX_TARGET_COUNT} entries`,
+        );
+      }
+      const targets = output.targets.map((value, index) =>
+        browserTarget(value, `discovered target ${index}`),
+      );
+      if (new Set(targets.map((target) => target.targetId)).size !== targets.length) {
+        throw new CompanionProtocolError("discovered target IDs must be unique");
+      }
+      return {
+        kind: "targetsDiscovered",
+        output: {
+          protocolVersion: protocolVersion(output.protocolVersion),
+          profileId: uuid(output.profileId, "profileId"),
+          targets,
         },
       };
     }

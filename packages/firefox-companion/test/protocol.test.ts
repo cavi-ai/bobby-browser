@@ -54,6 +54,49 @@ test("protocol version 1 action requests preserve the Rust JSON shape", () => {
   });
 });
 
+test("browser-neutral discovery events and explicit UUID grants preserve the Rust JSON shape", () => {
+  const discovery = parseCompanionEvent(
+    JSON.stringify({
+      kind: "targetsDiscovered",
+      output: {
+        protocolVersion: 1,
+        profileId: "8ec6d155-8d88-4107-87a5-744660228b65",
+        targets: [{ targetId: "opaque-target-handle", kind: "frame" }],
+      },
+    }),
+  );
+  assert.deepEqual(discovery, {
+    kind: "targetsDiscovered",
+    output: {
+      protocolVersion: 1,
+      profileId: "8ec6d155-8d88-4107-87a5-744660228b65",
+      targets: [{ targetId: "opaque-target-handle", kind: "frame" }],
+    },
+  });
+
+  const grant = parseCompanionRequest(
+    JSON.stringify({
+      kind: "grant",
+      input: {
+        protocolVersion: 1,
+        attachmentId: "af4e851e-630a-4a28-8fae-4cd56a9df787",
+        profileId: "8ec6d155-8d88-4107-87a5-744660228b65",
+        expiresAtUnixMs: 1_800_000_000_000,
+        pages: [
+          {
+            targetId: "opaque-target-handle",
+            pageId: "1531e810-2d39-4902-a0c8-6f635d3d4730",
+          },
+        ],
+      },
+    }),
+  );
+  assert.equal(grant.kind, "grant");
+  assert.equal(grant.input.pages[0]?.targetId, "opaque-target-handle");
+  assert.match(grant.input.attachmentId, /^[0-9a-f-]{36}$/);
+  assert.match(grant.input.pages[0]?.pageId ?? "", /^[0-9a-f-]{36}$/);
+});
+
 test("action request identifiers and deadlines are strictly bounded", () => {
   const request = {
     kind: "action",
@@ -206,11 +249,16 @@ test("the background connects through the native host without receiving pairing 
 });
 
 test("leased page actions route only to the matching tab and frame", async () => {
+  const companionId = "dbb47eb5-e32f-41f7-812d-24b051fbac52";
+  const profileId = "8ec6d155-8d88-4107-87a5-744660228b65";
+  const attachmentId = "af4e851e-630a-4a28-8fae-4cd56a9df787";
+  const pageId = "1531e810-2d39-4902-a0c8-6f635d3d4730";
   const transport = new FakeTransport();
   const routed: unknown[] = [];
   const background = new CompanionBackground({
     transport,
     discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: () => "opaque-frame-target",
     async sendTabMessage(tabId, message, frameId) {
       routed.push({ tabId, message, frameId });
       return { url: "https://example.test/", title: "Example", visibleText: "Hi", controls: [] };
@@ -219,8 +267,8 @@ test("leased page actions route only to the matching tab and frame", async () =>
     now: () => 1_000,
   });
   background.connect({
-    companionId: "companion-1",
-    profileId: "profile-1",
+    companionId,
+    profileId,
     identity: {
       engine: "firefox",
       browserName: "Firefox",
@@ -239,7 +287,17 @@ test("leased page actions route only to the matching tab and frame", async () =>
   });
   await background.receive({
     kind: "paired",
-    output: { companionId: "companion-1", profileId: "profile-1" },
+    output: { companionId, profileId },
+  });
+  await background.receive({
+    kind: "grant",
+    input: {
+      protocolVersion: 1,
+      attachmentId,
+      profileId,
+      expiresAtUnixMs: 2_000,
+      pages: [{ targetId: "opaque-frame-target", pageId }],
+    },
   });
 
   await background.receive(
@@ -247,9 +305,9 @@ test("leased page actions route only to the matching tab and frame", async () =>
       kind: "action",
       input: {
         protocolVersion: 1,
-        attachmentId: "attachment:companion-1:profile-1",
+        attachmentId,
         commandId: "command-1",
-        pageId: "page:9:4",
+        pageId,
         operation: "observe",
         input: {},
         deadlineUnixMs: 1_500,
@@ -280,12 +338,17 @@ test("leased page actions route only to the matching tab and frame", async () =>
 });
 
 test("expired page leases cannot route commands", async () => {
+  const companionId = "dbb47eb5-e32f-41f7-812d-24b051fbac52";
+  const profileId = "8ec6d155-8d88-4107-87a5-744660228b65";
+  const attachmentId = "af4e851e-630a-4a28-8fae-4cd56a9df787";
+  const pageId = "1531e810-2d39-4902-a0c8-6f635d3d4730";
   const transport = new FakeTransport();
   let routed = false;
   let now = 1_000;
   const background = new CompanionBackground({
     transport,
     discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: () => "opaque-frame-target",
     async sendTabMessage() {
       routed = true;
       return {};
@@ -294,8 +357,8 @@ test("expired page leases cannot route commands", async () => {
     now: () => now,
   });
   background.connect({
-    companionId: "companion-1",
-    profileId: "profile-1",
+    companionId,
+    profileId,
     identity: {
       engine: "firefox",
       browserName: "Firefox",
@@ -314,7 +377,17 @@ test("expired page leases cannot route commands", async () => {
   });
   await background.receive({
     kind: "paired",
-    output: { companionId: "companion-1", profileId: "profile-1" },
+    output: { companionId, profileId },
+  });
+  await background.receive({
+    kind: "grant",
+    input: {
+      protocolVersion: 1,
+      attachmentId,
+      profileId,
+      expiresAtUnixMs: 61_000,
+      pages: [{ targetId: "opaque-frame-target", pageId }],
+    },
   });
   now = 61_001;
 
@@ -323,9 +396,9 @@ test("expired page leases cannot route commands", async () => {
       kind: "action",
       input: {
         protocolVersion: 1,
-        attachmentId: "attachment:companion-1:profile-1",
+        attachmentId,
         commandId: "command-1",
-        pageId: "page:9:4",
+        pageId,
         operation: "observe",
         input: {},
         deadlineUnixMs: 120_000,

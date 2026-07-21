@@ -1,10 +1,13 @@
 use companion_core::{
     encode_native_message, read_native_message, run_native_host, validate_extension_message,
     validate_server_message, write_native_message, CompanionServer, CompanionServerConfig,
-    NativeConnectRequest, NativeHostConfig, NativeHostError, MAX_NATIVE_MESSAGE_BYTES,
+    NativeConnectRequest, NativeHostConfig, NativeHostError, NativeReconnectBackoff,
+    MAX_NATIVE_MESSAGE_BYTES,
 };
 use companion_protocol::{
-    BrowserEngine, BrowserIdentity, CompanionCapabilities, CompanionRequest, PROTOCOL_VERSION,
+    ActionRequest, ActionResult, BrowserEngine, BrowserIdentity, BrowserTarget,
+    CompanionCapabilities, CompanionEvent, CompanionRequest, InteractionPath, TargetDiscovery,
+    TargetKind, PROTOCOL_VERSION,
 };
 use serde_json::json;
 use std::{
@@ -14,7 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{duplex, split, AsyncRead, ReadBuf};
-use types::{CompanionId, ProfileId};
+use types::{CommandId, CompanionId, ProfileId};
 
 struct ChunkedReader {
     bytes: Vec<u8>,
@@ -184,6 +187,19 @@ fn native_host_enforces_exact_directional_schemas() {
     assert!(validate_server_message(json!({"kind": "pong"})).is_err());
 }
 
+#[test]
+fn native_reconnect_backoff_is_exponential_bounded_and_resettable() {
+    let mut backoff = NativeReconnectBackoff::default();
+    let delays: Vec<_> = (0..8).map(|_| backoff.next_delay()).collect();
+
+    assert_eq!(
+        delays,
+        [100, 200, 400, 800, 1_600, 3_200, 5_000, 5_000].map(Duration::from_millis)
+    );
+    backoff.reset();
+    assert_eq!(backoff.next_delay(), Duration::from_millis(100));
+}
+
 #[tokio::test]
 async fn native_host_keeps_pairing_material_out_of_the_extension_channel() {
     let server = CompanionServer::bind_loopback(CompanionServerConfig {
@@ -239,6 +255,132 @@ async fn native_host_keeps_pairing_material_out_of_the_extension_channel() {
 }
 
 #[tokio::test]
+async fn rust_request_crosses_server_native_and_extension_and_event_returns_without_close() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let connect_request = connect_request();
+    let profile_id = connect_request.profile_id.clone();
+    let connect = json!({"kind": "pair", "input": connect_request});
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(host_reader, host_writer, config));
+
+    write_native_message(&mut extension_stream, &connect)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_native_message(&mut extension_stream)
+            .await
+            .unwrap()
+            .unwrap()["kind"],
+        "paired"
+    );
+
+    let target = BrowserTarget {
+        target_id: "opaque-simulated-subframe".into(),
+        kind: TargetKind::Frame,
+    };
+    let discovery = CompanionEvent::TargetsDiscovered(TargetDiscovery {
+        protocol_version: PROTOCOL_VERSION,
+        profile_id: profile_id.clone(),
+        targets: vec![target.clone()],
+    });
+    write_native_message(
+        &mut extension_stream,
+        &serde_json::to_value(discovery).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        server
+            .wait_for_discovery(&profile_id, Duration::from_secs(1))
+            .await
+            .unwrap(),
+        vec![target]
+    );
+
+    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let wire_grant: CompanionRequest = serde_json::from_value(
+        read_native_message(&mut extension_stream)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(wire_grant, CompanionRequest::Grant(grant.clone()));
+
+    let command_id = CommandId::new();
+    let action = ActionRequest {
+        protocol_version: PROTOCOL_VERSION,
+        attachment_id: grant.attachment_id,
+        command_id: command_id.clone(),
+        page_id: grant.pages[0].page_id.clone(),
+        operation: "observe".into(),
+        input: json!({}),
+        deadline_unix_ms: 4_102_444_800_000,
+    };
+    let expected_action = action.clone();
+    let completed = CompanionEvent::ActionCompleted(ActionResult {
+        command_id,
+        interaction_path: InteractionPath::ExtensionApi,
+        output: json!({"visibleText": "ready"}),
+    });
+    let completed_for_extension = completed.clone();
+    let extension = async {
+        let wire_request: CompanionRequest = serde_json::from_value(
+            read_native_message(&mut extension_stream)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(wire_request, CompanionRequest::Action(expected_action));
+        write_native_message(
+            &mut extension_stream,
+            &serde_json::to_value(completed_for_extension).unwrap(),
+        )
+        .await
+        .unwrap();
+    };
+    let (result, ()) = tokio::join!(server.dispatch_action(action), extension);
+    assert_eq!(result.unwrap(), completed);
+
+    server
+        .send_request(&profile_id, CompanionRequest::Ping)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_value::<CompanionRequest>(
+            read_native_message(&mut extension_stream)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap(),
+        CompanionRequest::Ping
+    );
+    write_native_message(
+        &mut extension_stream,
+        &serde_json::to_value(CompanionEvent::Pong).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    drop(extension_stream);
+    host.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn revoked_reconnect_credential_stops_the_native_host() {
     let server = CompanionServer::bind_loopback(CompanionServerConfig {
         bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
@@ -272,6 +414,19 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
     server.registry().revoke(&companion_id).await.unwrap();
     server.disconnect_clients();
 
+    let terminal = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_native_message(&mut extension_stream),
+    )
+    .await
+    .expect("native host must send terminal auth status before exit")
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        terminal,
+        json!({"kind": "nativeStatus", "output": {"state": "invalidAuth"}})
+    );
+
     let result = tokio::time::timeout(Duration::from_secs(2), host)
         .await
         .expect("revoked reconnect credentials must not retry forever")
@@ -280,4 +435,44 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
         result,
         Err(NativeHostError::InvalidPairingMaterial)
     ));
+}
+
+#[tokio::test]
+async fn native_eof_cancels_connection_attempts_and_backoff_promptly() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let connect = json!({"kind": "pair", "input": connect_request()});
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(host_reader, host_writer, config));
+
+    write_native_message(&mut extension_stream, &connect)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_native_message(&mut extension_stream)
+            .await
+            .unwrap()
+            .unwrap()["kind"],
+        "paired"
+    );
+    drop(server);
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    drop(extension_stream);
+
+    let result = tokio::time::timeout(Duration::from_millis(250), host)
+        .await
+        .expect("native EOF must cancel connection attempts and backoff")
+        .unwrap();
+    assert!(result.is_ok());
 }

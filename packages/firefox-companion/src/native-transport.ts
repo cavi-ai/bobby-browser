@@ -43,7 +43,13 @@ export type NativeTransportDependencies = {
 
 export type NativeInboundMessage =
   | Exclude<CompanionRequest, { kind: "pair" }>
-  | Extract<CompanionEvent, { kind: "paired" }>;
+  | Extract<CompanionEvent, { kind: "paired" }>
+  | NativeTerminalStatus;
+
+export type NativeTerminalStatus = {
+  kind: "nativeStatus";
+  output: { state: "invalidAuth" | "revoked" };
+};
 
 const MAX_NATIVE_METADATA_BYTES = 256;
 const FORBIDDEN_SECRET_FIELD =
@@ -200,6 +206,16 @@ export function parseNativeInboundMessage(message: unknown): NativeInboundMessag
     throw new Error("native message is not valid JSON");
   }
   assertExtensionSafe(decoded);
+  if (
+    isObject(decoded) &&
+    exactKeys(decoded, ["kind", "output"]) &&
+    decoded.kind === "nativeStatus" &&
+    isObject(decoded.output) &&
+    exactKeys(decoded.output, ["state"]) &&
+    (decoded.output.state === "invalidAuth" || decoded.output.state === "revoked")
+  ) {
+    return decoded as NativeTerminalStatus;
+  }
   try {
     const request = parseCompanionRequest(encoded);
     if (request.kind !== "pair") return request;
@@ -226,6 +242,7 @@ export class NativeCompanionTransport {
   #reconnectHandle: unknown;
   #reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   #running = false;
+  #terminalAuth = false;
   #pairRequest: NativePairRequest | undefined;
 
   constructor(dependencies: NativeTransportDependencies) {
@@ -234,7 +251,7 @@ export class NativeCompanionTransport {
 
   start(listener: (message: unknown) => void | Promise<void>): void {
     this.#listener = listener;
-    if (this.#running) return;
+    if (this.#running || this.#terminalAuth) return;
     this.#running = true;
     this.#connect();
   }
@@ -263,10 +280,21 @@ export class NativeCompanionTransport {
     try {
       const port = this.#dependencies.connectNative(NATIVE_HOST_NAME);
       this.#port = port;
+      this.#reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       port.onMessage.addListener((message) => {
         if (port !== this.#port) return;
         const validated = validateInbound(message);
         if (validated === undefined || !this.#listener) return;
+        if (validated.kind === "nativeStatus") {
+          this.#terminalAuth = true;
+          this.#running = false;
+          this.#port = undefined;
+          if (this.#reconnectHandle !== undefined) {
+            (this.#dependencies.cancelReconnect ?? clearTimeout)(this.#reconnectHandle as never);
+            this.#reconnectHandle = undefined;
+          }
+          return;
+        }
         try {
           void Promise.resolve(this.#listener(validated)).catch((error: unknown) => {
             this.#dependencies.onListenerError?.(error);

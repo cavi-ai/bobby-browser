@@ -2,6 +2,9 @@ import { MAX_COMPANION_PAYLOAD_BYTES } from "./protocol.js";
 
 export const MAX_VISIBLE_TEXT_LENGTH = 64 * 1024;
 export const MAX_CONTROL_COUNT = 512;
+export const MAX_VISIBLE_TEXT_VISITED_NODES = 4_096;
+export const MAX_CONTROL_VISITED_NODES = 4_096;
+export const MAX_ELEMENT_TEXT_VISITED_NODES = 512;
 export const MAX_CONTROL_FIELD_LENGTH = 256;
 export const MAX_SELECTOR_LENGTH = 512;
 export const MAX_OBSERVATION_BYTES = MAX_COMPANION_PAYLOAD_BYTES - 64 * 1024;
@@ -9,6 +12,7 @@ const MAX_URL_LENGTH = 2 * 1024;
 const MAX_TITLE_LENGTH = 1024;
 const MAX_ROLE_LENGTH = 64;
 const REDACTED = "[redacted]";
+const MAX_ANCESTOR_VISITS = 256;
 
 export type PageObservation = {
   url: string;
@@ -90,7 +94,10 @@ function observationUrl(value: string): string {
 }
 
 function isElementHidden(element: Element): boolean {
+  let visited = 0;
   for (let current: Element | null = element; current; current = current.parentElement) {
+    visited += 1;
+    if (visited > MAX_ANCESTOR_VISITS) return true;
     if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") {
       return true;
     }
@@ -122,7 +129,11 @@ function visibleText(document: Document): string {
   let output = "";
   let outputBytes = 0;
   const walker = document.createTreeWalker(root, 4);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+  let visited = 0;
+  while (visited < MAX_VISIBLE_TEXT_VISITED_NODES) {
+    const node = walker.nextNode();
+    if (!node) break;
+    visited += 1;
     const parent = node.parentElement;
     if (
       !parent ||
@@ -286,7 +297,11 @@ function boundedElementText(
   let output = "";
   let outputBytes = 0;
   const walker = element.ownerDocument.createTreeWalker(element, 4);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+  let visited = 0;
+  while (visited < MAX_ELEMENT_TEXT_VISITED_NODES) {
+    const node = walker.nextNode();
+    if (!node) break;
+    visited += 1;
     const parent = node.parentElement;
     if (!parent || isElementHidden(parent)) continue;
     const separatorBytes = output ? 1 : 0;
@@ -353,7 +368,11 @@ export function observeDocument(document: Document): PageObservation {
   const root = document.body;
   if (!root) return observation;
   const walker = document.createTreeWalker(root, 1);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+  let visited = 0;
+  while (visited < MAX_CONTROL_VISITED_NODES) {
+    const node = walker.nextNode();
+    if (!node) break;
+    visited += 1;
     if (observation.controls.length >= MAX_CONTROL_COUNT) break;
     const element = node as Element;
     if (!element.matches(CONTROL_SELECTOR) || isElementHidden(element)) continue;

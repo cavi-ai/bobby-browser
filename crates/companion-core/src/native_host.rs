@@ -13,7 +13,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -26,8 +26,38 @@ use types::{CompanionId, ProfileId};
 use url::Url;
 
 pub const MAX_NATIVE_MESSAGE_BYTES: usize = 1024 * 1024;
-const RECONNECT_DELAY: Duration = Duration::from_millis(25);
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const MAX_SECRET_BYTES: usize = 512;
+
+#[derive(Debug, Clone)]
+pub struct NativeReconnectBackoff {
+    next: Duration,
+}
+
+impl Default for NativeReconnectBackoff {
+    fn default() -> Self {
+        Self {
+            next: INITIAL_RECONNECT_DELAY,
+        }
+    }
+}
+
+impl NativeReconnectBackoff {
+    pub fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = self
+            .next
+            .checked_mul(2)
+            .unwrap_or(MAX_RECONNECT_DELAY)
+            .min(MAX_RECONNECT_DELAY);
+        delay
+    }
+
+    pub fn reset(&mut self) {
+        self.next = INITIAL_RECONNECT_DELAY;
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum NativeHostError {
@@ -228,6 +258,19 @@ struct InitialPairedOutput {
 )]
 enum InitialServerEvent {
     Paired(InitialPairedOutput),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeStatusOutput {
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeStatus {
+    kind: &'static str,
+    output: NativeStatusOutput,
 }
 
 pub fn encode_native_message(value: &Value) -> Result<Vec<u8>, NativeHostError> {
@@ -432,6 +475,44 @@ enum ConnectionResult {
     Reconnect,
 }
 
+async fn sleep_or_native_closed(delay: Duration, closed: &mut watch::Receiver<bool>) -> bool {
+    if *closed.borrow() {
+        return true;
+    }
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => false,
+        result = closed.changed() => result.is_err() || *closed.borrow(),
+    }
+}
+
+async fn wait_for_native_close(closed: &mut watch::Receiver<bool>) {
+    if *closed.borrow() {
+        return;
+    }
+    while closed.changed().await.is_ok() {
+        if *closed.borrow() {
+            return;
+        }
+    }
+}
+
+async fn write_terminal_auth_status<W>(writer: &mut W)
+where
+    W: AsyncWrite + Unpin,
+{
+    let _ = write_native_message(
+        writer,
+        &serde_json::to_value(NativeStatus {
+            kind: "nativeStatus",
+            output: NativeStatusOutput {
+                state: "invalidAuth",
+            },
+        })
+        .unwrap_or(Value::Null),
+    )
+    .await;
+}
+
 pub async fn run_native_host<R, W>(
     mut native_reader: R,
     mut native_writer: W,
@@ -451,34 +532,51 @@ where
     let pair = serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?;
 
     let (native_messages, mut receiver) = mpsc::channel(32);
+    let (native_closed, mut native_closed_receiver) = watch::channel(false);
     let reader_task = tokio::spawn(async move {
         loop {
             let message = read_native_message(&mut native_reader).await;
             let closing = matches!(message, Ok(None) | Err(_));
             if native_messages.send(message).await.is_err() || closing {
+                if closing {
+                    let _ = native_closed.send(true);
+                }
                 break;
             }
         }
     });
 
     let result = async {
+        let mut backoff = NativeReconnectBackoff::default();
         loop {
+        if *native_closed_receiver.borrow() {
+            break Ok(());
+        }
         let has_credential = config.has_reconnect_credential()?;
         let token = config.authentication_token()?;
         let request = config.authenticated_request(&token)?;
-        let socket = match connect_async(request).await {
+        let connection = tokio::select! {
+            _ = wait_for_native_close(&mut native_closed_receiver) => break Ok(()),
+            result = connect_async(request) => result,
+        };
+        let socket = match connection {
             Ok((socket, _)) => socket,
             Err(WebSocketError::Http(response))
-                if has_credential && response.status() == StatusCode::UNAUTHORIZED =>
+                if response.status() == StatusCode::UNAUTHORIZED =>
             {
+                write_terminal_auth_status(&mut native_writer).await;
                 break Err(NativeHostError::InvalidPairingMaterial)
             }
             Err(_) if has_credential => {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                let delay = backoff.next_delay();
+                if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
+                    break Ok(());
+                }
                 continue;
             }
             Err(_) => break Err(NativeHostError::WebSocket),
         };
+        backoff.reset();
         let (mut socket_writer, mut socket_reader) = socket.split();
         if !has_credential
             && socket_writer
@@ -555,7 +653,10 @@ where
         match connection? {
             ConnectionResult::NativeClosed => break Ok(()),
             ConnectionResult::Reconnect if config.has_reconnect_credential()? => {
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                let delay = backoff.next_delay();
+                if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
+                    break Ok(());
+                }
             }
             ConnectionResult::Reconnect => break Err(NativeHostError::WebSocket),
         }
