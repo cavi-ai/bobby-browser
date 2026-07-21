@@ -12,6 +12,7 @@ use config::{
     FirefoxCompanionConfig,
 };
 use release_gates::{NativeBrowserOperationProof, NativeBrowserProof};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use types::{
@@ -59,8 +60,7 @@ pub async fn run_installed_firefox_workflow(
     let descriptor_path = state_dir.join("native-host-descriptor.json");
     let _extension = ExtensionInstallation::install(&config.profile, &config.companion_extension)?;
 
-    let (mut firefox, bidi_url, process_observations) =
-        launch_firefox(&config, &descriptor_path).await?;
+    let (mut firefox, bidi_url, process_observations) = launch_firefox(&config).await?;
     let profile_id = wait_for_profile_id(&config.profile).await?;
     let factory = cli::compose_worker_factory_with_pairing_observer(
         &AppConfig::default(),
@@ -80,9 +80,7 @@ pub async fn run_installed_firefox_workflow(
                 attachment_ttl_ms: 300_000,
             }],
         },
-        Arc::new(|pairing_code| {
-            println!("Firefox companion one-time pairing code: {pairing_code}");
-        }),
+        process_observations.pairing_code_observer(),
     )
     .map_err(|error| workflow_error(ErrorCode::BrowserLaunchFailed, error))?;
     let worker = factory.launch(&SessionId::new()).await?;
@@ -278,14 +276,12 @@ fn proof_state_dir() -> PathBuf {
 
 async fn launch_firefox(
     config: &InstalledFirefoxConfig,
-    descriptor_path: &Path,
 ) -> Result<(Child, Url, ProcessObservationCollector), CommandError> {
     let mut child = Command::new(&config.firefox_bin)
         .arg("--no-remote")
         .arg("--profile")
         .arg(&config.profile)
         .arg("--remote-debugging-port=0")
-        .env("AUTOMATION_RUNTIME_FIREFOX_DESCRIPTOR", descriptor_path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -293,7 +289,7 @@ async fn launch_firefox(
         .spawn()
         .map_err(io_error)?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
-    let process_observations = ProcessObservationCollector::new();
+    let process_observations = ProcessObservationCollector::new(Vec::new());
     if let Some(stdout) = child.stdout.take() {
         process_observations.spawn_reader(stdout, sender.clone());
     }
@@ -320,15 +316,30 @@ async fn launch_firefox(
 
 struct ProcessObservationCollector {
     findings: Arc<std::sync::Mutex<Vec<String>>>,
+    sensitive_values: Arc<std::sync::Mutex<Vec<SensitiveFingerprint>>>,
     readers: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl ProcessObservationCollector {
-    fn new() -> Self {
-        Self {
+    fn new(sensitive_values: Vec<String>) -> Self {
+        let collector = Self {
             findings: Arc::new(std::sync::Mutex::new(Vec::new())),
+            sensitive_values: Arc::new(std::sync::Mutex::new(Vec::new())),
             readers: std::sync::Mutex::new(Vec::new()),
+        };
+        for value in sensitive_values {
+            collector.observe_sensitive_value(&value);
         }
+        collector
+    }
+
+    fn pairing_code_observer(&self) -> Arc<dyn Fn(&str) + Send + Sync> {
+        let sensitive_values = Arc::clone(&self.sensitive_values);
+        Arc::new(move |value| register_sensitive_fingerprint(&sensitive_values, value))
+    }
+
+    fn observe_sensitive_value(&self, value: &str) {
+        register_sensitive_fingerprint(&self.sensitive_values, value);
     }
 
     fn spawn_reader(
@@ -337,11 +348,14 @@ impl ProcessObservationCollector {
         sender: tokio::sync::mpsc::Sender<Url>,
     ) {
         let findings = Arc::clone(&self.findings);
+        let sensitive_values = Arc::clone(&self.sensitive_values);
         let task = tokio::spawn(async move {
             let mut lines = BufReader::new(stream).lines();
             let mut endpoint_sent = false;
             while let Ok(Some(line)) = lines.next_line().await {
-                if contains_sensitive_marker(&line) {
+                if contains_sensitive_marker(&line)
+                    || contains_sensitive_fingerprint(&sensitive_values, &line)
+                {
                     let mut findings = findings.lock().expect("process findings mutex poisoned");
                     push_finding(&mut findings, "firefoxProcess");
                 }
@@ -371,6 +385,46 @@ impl ProcessObservationCollector {
             .expect("process findings mutex poisoned")
             .clone()
     }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SensitiveFingerprint {
+    byte_len: usize,
+    digest: [u8; 32],
+}
+
+fn register_sensitive_fingerprint(
+    fingerprints: &std::sync::Mutex<Vec<SensitiveFingerprint>>,
+    value: &str,
+) {
+    if value.is_empty() {
+        return;
+    }
+    let fingerprint = SensitiveFingerprint {
+        byte_len: value.len(),
+        digest: Sha256::digest(value.as_bytes()).into(),
+    };
+    let mut fingerprints = fingerprints
+        .lock()
+        .expect("sensitive fingerprints mutex poisoned");
+    if !fingerprints.contains(&fingerprint) {
+        fingerprints.push(fingerprint);
+    }
+}
+
+fn contains_sensitive_fingerprint(
+    fingerprints: &std::sync::Mutex<Vec<SensitiveFingerprint>>,
+    line: &str,
+) -> bool {
+    let fingerprints = fingerprints
+        .lock()
+        .expect("sensitive fingerprints mutex poisoned")
+        .clone();
+    fingerprints.iter().any(|fingerprint| {
+        line.as_bytes()
+            .windows(fingerprint.byte_len)
+            .any(|candidate| <[u8; 32]>::from(Sha256::digest(candidate)) == fingerprint.digest)
+    })
 }
 
 fn websocket_url(line: &str) -> Option<Url> {
@@ -720,7 +774,8 @@ mod tests {
     async fn process_redaction_collects_both_streams_after_endpoint_discovery() {
         use tokio::io::AsyncWriteExt;
 
-        let collector = ProcessObservationCollector::new();
+        let bearer = "47c851ee-600e-4d29-8794-29a8916f962e".to_owned();
+        let collector = ProcessObservationCollector::new(vec![bearer.clone()]);
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
         let (mut stdout_writer, stdout_reader) = tokio::io::duplex(1024);
         let (mut stderr_writer, stderr_reader) = tokio::io::duplex(1024);
@@ -732,13 +787,35 @@ mod tests {
             .unwrap();
         assert!(receiver.recv().await.is_some());
         stderr_writer
-            .write_all(b"Authorization: Bearer never-retain-this\n")
+            .write_all(format!("unstructured output {bearer}\n").as_bytes())
             .await
             .unwrap();
         stdout_writer.shutdown().await.unwrap();
         stderr_writer.shutdown().await.unwrap();
         let findings = collector.finish().await;
         assert_eq!(findings, vec!["firefoxProcess"]);
-        assert!(!format!("{findings:?}").contains("never-retain-this"));
+        assert!(!format!("{findings:?}").contains(&bearer));
+    }
+
+    #[tokio::test]
+    async fn production_pairing_observer_detects_an_unlabelled_raw_uuid() {
+        use tokio::io::AsyncWriteExt;
+
+        let collector = ProcessObservationCollector::new(Vec::new());
+        let observer = collector.pairing_code_observer();
+        let planted = uuid::Uuid::new_v4().to_string();
+        observer(&planted);
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        collector.spawn_reader(reader, sender);
+        writer
+            .write_all(format!("unstructured output {planted}\n").as_bytes())
+            .await
+            .unwrap();
+        writer.shutdown().await.unwrap();
+
+        let findings = collector.finish().await;
+        assert_eq!(findings, vec!["firefoxProcess"]);
+        assert!(!format!("{findings:?}").contains(&planted));
     }
 }

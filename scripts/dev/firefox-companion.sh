@@ -26,7 +26,27 @@ if [[ ! -f "$BOBBY_COMPANION_EXTENSION/manifest.json" ]]; then
 fi
 cargo build -p cli -p runtime-tests
 
-echo "Starting the loopback-only companion proof. The one-time pairing code is printed once by the test harness."
+if [[ -n "${BOBBY_NATIVE_MESSAGING_DIR:-}" ]]; then
+  native_messaging_dir="$BOBBY_NATIVE_MESSAGING_DIR"
+elif [[ "$(uname -s)" == "Darwin" ]]; then
+  native_messaging_dir="${HOME}/Library/Application Support/Mozilla/NativeMessagingHosts"
+elif [[ "$(uname -s)" == "Linux" ]]; then
+  native_messaging_dir="${HOME}/.mozilla/native-messaging-hosts"
+else
+  echo "Firefox Native Messaging installation is unsupported on this platform" >&2
+  exit 2
+fi
+
+wrapper_path="$repo_root/target/firefox-companion-proof/firefox-native-host"
+descriptor_path="$repo_root/target/firefox-companion-proof/native-host-descriptor.json"
+manifest_path="$native_messaging_dir/com.bobby_browser.companion.json"
+"$repo_root/target/debug/cli" install-firefox-native-host \
+  --wrapper "$wrapper_path" \
+  --manifest "$manifest_path" \
+  --cli "$repo_root/target/debug/cli" \
+  --descriptor "$descriptor_path"
+
+echo "Starting the loopback-only companion proof. Pairing material remains in owner-only files."
 cargo test -p runtime-tests --test firefox_companion \
   installed_firefox_completes_verified_native_input_workflow \
   -- --ignored --exact --nocapture
