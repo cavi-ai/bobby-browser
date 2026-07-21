@@ -8,6 +8,7 @@ name = "release-gates"
 path = "src/main.rs"
 
 [dependencies]
+companion-protocol = { path = "../companion-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
