@@ -214,10 +214,16 @@ async fn malformed_response_and_event_envelopes_fail_the_transport() {
         json!({"id": "request", "result": {}}),
         json!({"id": "request", "type": "event", "result": {}}),
         json!({"id": "request", "type": "success"}),
+        json!({"id": "request", "type": "success", "result": null}),
+        json!({"id": "request", "type": "success", "result": "not-a-map"}),
+        json!({"id": "request", "type": "success", "result": []}),
         json!({"id": "not-a-number", "type": "success", "result": {}}),
         json!({"method": "log.entryAdded", "params": {}}),
         json!({"type": "event", "method": "log.entryAdded"}),
         json!({"type": "event", "method": 7, "params": {}}),
+        json!({"type": "event", "method": "log.entryAdded", "params": null}),
+        json!({"type": "event", "method": "log.entryAdded", "params": "not-a-map"}),
+        json!({"type": "event", "method": "log.entryAdded", "params": []}),
     ];
 
     for message in malformed {
@@ -230,23 +236,23 @@ async fn malformed_response_and_event_envelopes_fail_the_transport() {
 
 #[tokio::test]
 async fn repeated_aborted_sends_release_capacity_and_consume_late_responses() {
-    const ABORTED: usize = 128;
+    const ABORTED: usize = 257;
     let (listener, url) = listener_url().await;
     let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
-    let (release_tx, mut release_rx) = mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         let mut socket = server_socket(listener).await;
+        let mut withheld = Vec::with_capacity(ABORTED);
         for _ in 0..ABORTED {
             let command = recv_json(&mut socket).await;
             let id = command["id"].as_u64().unwrap();
             seen_tx.send(id).unwrap();
-            release_rx.recv().await.unwrap();
-            send_json(
-                &mut socket,
-                json!({"id": id, "type": "success", "result": {"retired": true}}),
-            )
-            .await;
+            withheld.push(id);
         }
+        send_json(
+            &mut socket,
+            json!({"id": withheld[0], "type": "success", "result": {"late": true}}),
+        )
+        .await;
         let live = recv_json(&mut socket).await;
         send_json(
             &mut socket,
@@ -268,7 +274,6 @@ async fn repeated_aborted_sends_release_capacity_and_consume_late_responses() {
         let _id = seen_rx.recv().await.unwrap();
         task.abort();
         let _ = task.await;
-        release_tx.send(()).unwrap();
         tokio::task::yield_now().await;
     }
 

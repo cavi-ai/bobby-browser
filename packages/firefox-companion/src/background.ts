@@ -140,10 +140,6 @@ function supportedFrameUrl(value: unknown): value is string {
   }
 }
 
-function supportedBindingUrl(value: unknown): value is string {
-  return value === "about:blank" || supportedFrameUrl(value);
-}
-
 function navigationUrl(input: unknown): string {
   if (
     typeof input !== "object" ||
@@ -219,24 +215,12 @@ export class CompanionBackground {
       return;
     }
     const frameReady = exactKeys(message, ["type"]) && message.type === "companionFrameReady";
-    const bindingNonce =
-      exactKeys(message, ["type", "bindingNonce"]) &&
-      message.type === "companionPageBinding" &&
-      uuid(message.bindingNonce)
-        ? message.bindingNonce
-        : undefined;
-    const binding = bindingNonce !== undefined;
-    if (
-      (!frameReady && !binding) ||
-      (frameReady && !supportedFrameUrl(sender.url)) ||
-      (binding && !supportedBindingUrl(sender.url))
-    ) {
+    if (!frameReady || !supportedFrameUrl(sender.url)) {
       return;
     }
 
     const target = { tabId: sender.tab.id, frameId: sender.frameId };
-    if (binding) this.#reportPageBinding(target, bindingNonce);
-    else if (this.#registerTarget(target)) this.#sendDiscovery();
+    if (this.#registerTarget(target)) this.#sendDiscovery();
   }
 
   receiveTabUpdate(

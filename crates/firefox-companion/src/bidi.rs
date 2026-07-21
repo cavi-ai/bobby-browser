@@ -1,7 +1,7 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
     time::Duration,
@@ -20,17 +20,26 @@ use url::Url;
 
 const COMMAND_CAPACITY: usize = 64;
 const EVENT_CAPACITY: usize = 64;
-const RETIRED_CAPACITY: usize = 256;
 
 struct PendingResponse {
     response: oneshot::Sender<Result<Value, CommandError>>,
     _permit: OwnedSemaphorePermit,
 }
 
-#[derive(Default)]
 struct CorrelationState {
     pending: HashMap<u64, PendingResponse>,
-    retired: VecDeque<u64>,
+    next_id: u64,
+    terminal: Option<TerminalFailure>,
+}
+
+impl Default for CorrelationState {
+    fn default() -> Self {
+        Self {
+            pending: HashMap::with_capacity(COMMAND_CAPACITY),
+            next_id: 1,
+            terminal: None,
+        }
+    }
 }
 
 type Correlations = Arc<Mutex<CorrelationState>>;
@@ -45,8 +54,6 @@ pub struct BidiEvent {
 pub struct BidiClient {
     commands: mpsc::Sender<WriterCommand>,
     shared: Arc<SharedState>,
-    next_id: Arc<AtomicU64>,
-    enqueue: Arc<Mutex<()>>,
     permits: Arc<Semaphore>,
     events: broadcast::Sender<BidiEvent>,
     timeout: Duration,
@@ -54,7 +61,7 @@ pub struct BidiClient {
 
 struct SharedState {
     correlations: Correlations,
-    terminal: Mutex<Option<TerminalFailure>>,
+    enqueue: Mutex<()>,
     closing: AtomicBool,
     close_signal: watch::Sender<bool>,
     writer_result: Mutex<Option<Result<(), String>>>,
@@ -149,11 +156,8 @@ impl BidiClient {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let (close_signal, close_rx) = watch::channel(false);
         let shared = Arc::new(SharedState {
-            correlations: Arc::new(Mutex::new(CorrelationState {
-                pending: HashMap::with_capacity(COMMAND_CAPACITY),
-                retired: VecDeque::with_capacity(RETIRED_CAPACITY),
-            })),
-            terminal: Mutex::new(None),
+            correlations: Arc::new(Mutex::new(CorrelationState::default())),
+            enqueue: Mutex::new(()),
             closing: AtomicBool::new(false),
             close_signal,
             writer_result: Mutex::new(None),
@@ -171,8 +175,6 @@ impl BidiClient {
         Ok(Self {
             commands,
             shared,
-            next_id: Arc::new(AtomicU64::new(1)),
-            enqueue: Arc::new(Mutex::new(())),
             permits: Arc::new(Semaphore::new(COMMAND_CAPACITY)),
             events,
             timeout,
@@ -192,17 +194,19 @@ impl BidiClient {
             .await
             .map_err(|_| deadline_error("Firefox BiDi command deadline exceeded"))?
             .map_err(|_| transport_failure("Firefox BiDi command capacity closed").error())?;
-        let enqueue = tokio::time::timeout_at(deadline, self.enqueue.lock())
+        let enqueue = tokio::time::timeout_at(deadline, self.shared.enqueue.lock())
             .await
             .map_err(|_| deadline_error("Firefox BiDi command deadline exceeded"))?;
-        if let Some(error) = terminal_error(&self.shared).await {
-            return Err(error);
-        }
-
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel();
-        {
+        let id = {
             let mut correlations = self.shared.correlations.lock().await;
+            if let Some(failure) = correlations.terminal.as_ref() {
+                return Err(failure.error());
+            }
+            let id = correlations.next_id;
+            correlations.next_id = correlations.next_id.checked_add(1).ok_or_else(|| {
+                protocol_failure("Firefox BiDi command ID space was exhausted").error()
+            })?;
             debug_assert!(correlations.pending.len() < COMMAND_CAPACITY);
             correlations.pending.insert(
                 id,
@@ -211,7 +215,8 @@ impl BidiClient {
                     _permit: permit,
                 },
             );
-        }
+            id
+        };
         let mut guard = PendingGuard::new(Arc::clone(&self.shared.correlations), id);
         let outbound = WriterCommand::Send {
             id,
@@ -435,12 +440,7 @@ async fn handle_message(
             let mut correlations = shared.correlations.lock().await;
             if let Some(response) = correlations.pending.remove(&id) {
                 Some(response)
-            } else if let Some(index) = correlations
-                .retired
-                .iter()
-                .position(|retired| *retired == id)
-            {
-                correlations.retired.remove(index);
+            } else if id > 0 && id < correlations.next_id {
                 return Ok(());
             } else {
                 None
@@ -478,10 +478,14 @@ async fn handle_message(
         .await;
         return Err(());
     };
-    let Some(params) = value.get("params").cloned() else {
+    let Some(params) = value
+        .get("params")
+        .filter(|params| params.is_object())
+        .cloned()
+    else {
         terminate(
             shared,
-            protocol_failure("Firefox BiDi event params were missing"),
+            protocol_failure("Firefox BiDi event params were missing or not an object"),
         )
         .await;
         return Err(());
@@ -497,9 +501,14 @@ fn response_result(value: &Value) -> Result<Result<Value, CommandError>, Termina
     match value.get("type").and_then(Value::as_str) {
         Some("success") => value
             .get("result")
+            .filter(|result| result.is_object())
             .cloned()
             .map(Ok)
-            .ok_or_else(|| protocol_failure("Firefox BiDi success response omitted result")),
+            .ok_or_else(|| {
+                protocol_failure(
+                    "Firefox BiDi success response result was missing or not an object",
+                )
+            }),
         Some("error") => {
             let code = value
                 .get("error")
@@ -524,35 +533,27 @@ fn response_result(value: &Value) -> Result<Result<Value, CommandError>, Termina
 }
 
 fn retire_correlation(correlations: &mut CorrelationState, id: u64) {
-    if correlations.pending.remove(&id).is_none() {
-        return;
-    }
-    if correlations.retired.len() == RETIRED_CAPACITY {
-        correlations.retired.pop_front();
-    }
-    correlations.retired.push_back(id);
+    correlations.pending.remove(&id);
 }
 
 async fn terminal_error(shared: &SharedState) -> Option<CommandError> {
     shared
-        .terminal
+        .correlations
         .lock()
         .await
+        .terminal
         .as_ref()
         .map(TerminalFailure::error)
 }
 
 async fn terminate(shared: &SharedState, failure: TerminalFailure) {
-    let effective = {
-        let mut terminal = shared.terminal.lock().await;
-        terminal.get_or_insert(failure).clone()
-    };
-    shared.closing.store(true, Ordering::Release);
-    let _ = shared.close_signal.send(true);
-    let pending = {
+    let (effective, pending) = {
+        let _enqueue = shared.enqueue.lock().await;
         let mut correlations = shared.correlations.lock().await;
-        correlations.retired.clear();
-        std::mem::take(&mut correlations.pending)
+        let effective = correlations.terminal.get_or_insert(failure).clone();
+        shared.closing.store(true, Ordering::Release);
+        let _ = shared.close_signal.send(true);
+        (effective, std::mem::take(&mut correlations.pending))
     };
     for (_, response) in pending {
         let _ = response.response.send(Err(effective.error()));
@@ -598,6 +599,33 @@ fn protocol_failure(message: impl Into<String>) -> TerminalFailure {
 mod tests {
     use super::*;
 
+    fn test_shared() -> SharedState {
+        let (close_signal, _) = watch::channel(false);
+        SharedState {
+            correlations: Arc::new(Mutex::new(CorrelationState::default())),
+            enqueue: Mutex::new(()),
+            closing: AtomicBool::new(false),
+            close_signal,
+            writer_result: Mutex::new(None),
+            writer_done: Notify::new(),
+        }
+    }
+
+    fn test_client() -> (BidiClient, mpsc::Receiver<WriterCommand>) {
+        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        (
+            BidiClient {
+                commands,
+                shared: Arc::new(test_shared()),
+                permits: Arc::new(Semaphore::new(COMMAND_CAPACITY)),
+                events,
+                timeout: Duration::from_secs(1),
+            },
+            receiver,
+        )
+    }
+
     #[tokio::test]
     async fn cancellation_retirement_keeps_live_correlations_within_the_command_bound() {
         let permits = Arc::new(Semaphore::new(COMMAND_CAPACITY));
@@ -615,7 +643,132 @@ mod tests {
             retire_correlation(&mut correlations, id);
             assert!(correlations.pending.len() <= COMMAND_CAPACITY);
         }
-        assert!(correlations.retired.len() <= RETIRED_CAPACITY);
+        assert!(correlations.pending.is_empty());
         assert_eq!(permits.available_permits(), COMMAND_CAPACITY);
+    }
+
+    #[test]
+    fn success_results_must_be_json_objects() {
+        for result in [Value::Null, json!("not-a-map"), json!([])] {
+            assert!(response_result(&json!({
+                "id": 1,
+                "type": "success",
+                "result": result,
+            }))
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn event_params_must_be_json_objects() {
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        for params in [Value::Null, json!("not-a-map"), json!([])] {
+            let shared = test_shared();
+            assert!(handle_message(
+                json!({
+                    "type": "event",
+                    "method": "log.entryAdded",
+                    "params": params,
+                }),
+                &shared,
+                &events,
+            )
+            .await
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn first_issued_late_response_survives_more_than_the_old_tombstone_capacity() {
+        let shared = test_shared();
+        let permits = Arc::new(Semaphore::new(COMMAND_CAPACITY));
+        for id in 1..=257 {
+            let permit = permits.clone().acquire_owned().await.unwrap();
+            let (response, _receiver) = oneshot::channel();
+            let mut correlations = shared.correlations.lock().await;
+            correlations.pending.insert(
+                id,
+                PendingResponse {
+                    response,
+                    _permit: permit,
+                },
+            );
+            correlations.next_id = id + 1;
+            retire_correlation(&mut correlations, id);
+        }
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        assert!(handle_message(
+            json!({"id": 1, "type": "success", "result": {"late": true}}),
+            &shared,
+            &events,
+        )
+        .await
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn never_issued_zero_response_id_is_rejected() {
+        let shared = test_shared();
+        shared.correlations.lock().await.next_id = 2;
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        assert!(handle_message(
+            json!({"id": 0, "type": "success", "result": {}}),
+            &shared,
+            &events,
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_publication_wins_the_registration_race_and_releases_every_permit() {
+        let (client, mut commands) = test_client();
+        let gate = client.shared.enqueue.lock().await;
+        let shared = Arc::clone(&client.shared);
+        let terminating = tokio::spawn(async move {
+            terminate(&shared, transport_failure("deterministic shutdown")).await;
+        });
+        tokio::task::yield_now().await;
+        let sending_client = client.clone();
+        let sending = tokio::spawn(async move {
+            sending_client
+                .send("effect.after-terminal", json!({}))
+                .await
+        });
+        tokio::task::yield_now().await;
+        drop(gate);
+
+        terminating.await.unwrap();
+        let error = sending.await.unwrap().unwrap_err();
+        assert_eq!(error.message, "deterministic shutdown");
+        assert!(commands.try_recv().is_err());
+        assert_eq!(client.permits.available_permits(), COMMAND_CAPACITY);
+
+        let (loaded, _commands) = test_client();
+        let mut waiting = Vec::with_capacity(COMMAND_CAPACITY);
+        for index in 0..COMMAND_CAPACITY {
+            let sender = loaded.clone();
+            waiting.push(tokio::spawn(async move {
+                sender.send("queued.effect", json!({"index": index})).await
+            }));
+        }
+        loop {
+            if loaded.shared.correlations.lock().await.pending.len() == COMMAND_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        terminate(&loaded.shared, transport_failure("all pending failed")).await;
+        tokio::time::timeout(Duration::from_millis(100), async {
+            for task in waiting {
+                assert_eq!(
+                    task.await.unwrap().unwrap_err().message,
+                    "all pending failed"
+                );
+            }
+        })
+        .await
+        .expect("all terminal responses must resolve immediately");
+        assert_eq!(loaded.permits.available_permits(), COMMAND_CAPACITY);
     }
 }

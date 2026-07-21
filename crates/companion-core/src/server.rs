@@ -177,6 +177,16 @@ impl CompanionServerHandle {
             .begin_page_binding(attachment_id, page_id)
             .await
     }
+
+    pub async fn release_page_binding(
+        &self,
+        attachment_id: &types::AttachmentId,
+        page_id: &types::PageId,
+    ) -> Result<(), CompanionSessionError> {
+        self.coordinator
+            .release_page_binding(attachment_id, page_id)
+            .await
+    }
 }
 
 impl Drop for CompanionServerHandle {

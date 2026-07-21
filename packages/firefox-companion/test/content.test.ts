@@ -10,7 +10,6 @@ import {
   MAX_VISIBLE_TEXT_VISITED_NODES,
   executeContentAction,
   observeDocument,
-  takePageBindingMarker,
 } from "../src/content.js";
 import { MAX_COMPANION_PAYLOAD_BYTES } from "../src/protocol.js";
 
@@ -120,24 +119,6 @@ test("observe action scopes selector and target output and only includes sanitiz
   assert.equal(targeted.visibleText, "Other text Outside");
   assert.equal(targeted.controls[0]?.cssPath, "#outside");
   assert.equal("html" in targeted, false);
-});
-
-test("binding markers are consumed once and reject page-controlled malformed values", () => {
-  const document = documentFor("<main>Ready</main>");
-  document.documentElement.setAttribute(
-    "data-automation-runtime-binding",
-    "b5f6319a-6b36-43cb-9464-d337fc9d8201",
-  );
-
-  assert.equal(takePageBindingMarker(document), "b5f6319a-6b36-43cb-9464-d337fc9d8201");
-  assert.equal(takePageBindingMarker(document), undefined);
-
-  document.documentElement.setAttribute(
-    "data-automation-runtime-binding",
-    "page-controlled-value",
-  );
-  assert.equal(takePageBindingMarker(document), undefined);
-  assert.equal(document.documentElement.hasAttribute("data-automation-runtime-binding"), false);
 });
 
 test("password values never enter observations", () => {
@@ -262,6 +243,37 @@ test("sanitized HTML fails closed when unsafe content sits beyond the traversal 
   assert.ok(observed.html);
   assert.doesNotMatch(observed.html, /z7Q4-vault-material/);
   assert.ok(new TextEncoder().encode(observed.html).byteLength <= 128 * 1024);
+});
+
+test("sanitized HTML uses a strict structural attribute allowlist", () => {
+  const credential = "z7Q4-9Lm2";
+  const document = documentFor(`
+    <main id="${credential}" class="${credential}" data-session="${credential}" custom="${credential}">
+      <a href="https://example.test/${credential}" ping="https://example.test/${credential}">Link</a>
+      <img src="https://example.test/${credential}" srcset="https://example.test/${credential} 2x" alt="${credential}">
+      <video poster="https://example.test/${credential}"></video>
+      <object data="https://example.test/${credential}"></object>
+      <button role="button" aria-expanded="true" data-testid="${credential}">Continue</button>
+      <input type="checkbox" checked disabled value="${credential}">
+    </main>
+  `);
+
+  const observed = executeContentAction(document, "observe", {
+    selector: "main",
+    target: null,
+    includeHtml: true,
+  }) as { html?: string };
+  assert.ok(observed.html);
+  assert.equal(observed.html.includes(credential), false);
+  assert.doesNotMatch(
+    observed.html,
+    /\s(?:id|class|data-[^=\s]*|custom|href|ping|src|srcset|alt|poster|data|value)=/i,
+  );
+  assert.match(observed.html, /role="button"/);
+  assert.match(observed.html, /aria-expanded="true"/);
+  assert.match(observed.html, /type="checkbox"/);
+  assert.match(observed.html, /checked=""/);
+  assert.match(observed.html, /disabled=""/);
 });
 
 test("adversarial 512-control observations stay below the native ceiling", () => {

@@ -37,10 +37,13 @@ impl BidiTransport for BindingBidi {
         match method {
             "session.subscribe" => Ok(json!({})),
             "browsingContext.create" => Ok(json!({"context": "bidi-context-created"})),
+            "script.evaluate" if params["expression"] == "document.title" => {
+                Ok(json!({"result": {"type": "string", "value": "Composed original title"}}))
+            }
             "script.evaluate"
                 if params["expression"]
                     .as_str()
-                    .is_some_and(|value| value.contains("data-automation-runtime-binding")) =>
+                    .is_some_and(|value| value.contains("automation-runtime-binding:")) =>
             {
                 self.marker
                     .send(params["expression"].as_str().unwrap().to_owned())
