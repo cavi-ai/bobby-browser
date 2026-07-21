@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{fs::OpenOptions, io::Read};
 
 use axum::{response::Html, routing::get, Router};
 use companion_protocol::{BrowserEngine, BrowserIdentity, InteractionPath};
@@ -17,7 +18,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use types::{
     ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand,
-    PageId, ProfileId, SessionId, TypeTextCommand, WaitUntil,
+    PageId, SessionId, TypeTextCommand, WaitUntil,
 };
 use url::Url;
 use worker_pool::BrowserWorker;
@@ -60,9 +61,23 @@ pub async fn run_installed_firefox_workflow(
     let descriptor_path = state_dir.join("native-host-descriptor.json");
     let _extension = ExtensionInstallation::install(&config.profile, &config.companion_extension)?;
 
-    let (mut firefox, bidi_url, process_observations) = launch_firefox(&config).await?;
-    let profile_id = wait_for_profile_id(&config.profile).await?;
-    let factory = cli::compose_worker_factory_with_pairing_observer(
+    let process_observations = ProcessObservationCollector::new(Vec::new());
+    let enrollment = cli::start_firefox_profile_enrollment(
+        cli::FirefoxProfileEnrollmentConfig {
+            companion_bind: "127.0.0.1:0".parse().expect("loopback enrollment address"),
+            descriptor_path: descriptor_path.clone(),
+            timeout: PROOF_TIMEOUT,
+            pairing_code_ttl: PROOF_TIMEOUT,
+            attachment_ttl: Duration::from_secs(300),
+        },
+        process_observations.pairing_code_observer(),
+    )
+    .await?;
+    let (mut firefox, bidi_url) =
+        launch_firefox(&config, &fixture.url, &process_observations).await?;
+    let enrollment = enrollment.wait().await?;
+    let profile_id = enrollment.profile_id().clone();
+    let factory = cli::compose_worker_factory_with_enrolled_firefox(
         &AppConfig::default(),
         BrowserSelectionConfig {
             preference: EnginePreferenceConfig::Exact {
@@ -81,6 +96,7 @@ pub async fn run_installed_firefox_workflow(
             }],
         },
         process_observations.pairing_code_observer(),
+        enrollment,
     )
     .map_err(|error| workflow_error(ErrorCode::BrowserLaunchFailed, error))?;
     let worker = factory.launch(&SessionId::new()).await?;
@@ -276,12 +292,30 @@ fn proof_state_dir() -> PathBuf {
 
 async fn launch_firefox(
     config: &InstalledFirefoxConfig,
-) -> Result<(Child, Url, ProcessObservationCollector), CommandError> {
+    startup_url: &str,
+    process_observations: &ProcessObservationCollector,
+) -> Result<(Child, Url), CommandError> {
+    let endpoint_file = config.profile.join("WebDriverBiDiServer.json");
+    match endpoint_file.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::remove_file(&endpoint_file).map_err(io_error)?;
+        }
+        Ok(_) => {
+            return Err(workflow_error(
+                ErrorCode::PolicyDenied,
+                "Firefox BiDi endpoint path is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
     let mut child = Command::new(&config.firefox_bin)
         .arg("--no-remote")
+        .arg("--foreground")
         .arg("--profile")
         .arg(&config.profile)
         .arg("--remote-debugging-port=0")
+        .arg(startup_url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -289,7 +323,6 @@ async fn launch_firefox(
         .spawn()
         .map_err(io_error)?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
-    let process_observations = ProcessObservationCollector::new(Vec::new());
     if let Some(stdout) = child.stdout.take() {
         process_observations.spawn_reader(stdout, sender.clone());
     }
@@ -297,21 +330,95 @@ async fn launch_firefox(
         process_observations.spawn_reader(stderr, sender.clone());
     }
     drop(sender);
-    let url = tokio::time::timeout(PROOF_TIMEOUT, receiver.recv())
-        .await
-        .map_err(|_| {
-            workflow_error(
-                ErrorCode::BrowserLaunchFailed,
-                "Firefox BiDi endpoint timed out",
-            )
-        })?
-        .ok_or_else(|| {
-            workflow_error(
-                ErrorCode::BrowserLaunchFailed,
-                "Firefox exited without a BiDi endpoint",
-            )
-        })?;
-    Ok((child, url, process_observations))
+    let url = tokio::time::timeout(PROOF_TIMEOUT, async {
+        loop {
+            tokio::select! {
+                line_url = receiver.recv() => {
+                    if let Some(url) = line_url {
+                        return Ok(url);
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+            if let Some(url) = read_bidi_endpoint_file(&endpoint_file)? {
+                return Ok(url);
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        workflow_error(
+            ErrorCode::BrowserLaunchFailed,
+            "Firefox BiDi endpoint timed out",
+        )
+    })??;
+    Ok((child, url))
+}
+
+fn read_bidi_endpoint_file(path: &Path) -> Result<Option<Url>, CommandError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.file_type().is_file() || metadata.len() > 4096 {
+        return Err(workflow_error(
+            ErrorCode::PolicyDenied,
+            "Firefox BiDi endpoint file is invalid",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(4097).read_to_end(&mut bytes).map_err(io_error)?;
+    if bytes.len() > 4096 {
+        return Err(workflow_error(
+            ErrorCode::PolicyDenied,
+            "Firefox BiDi endpoint file exceeds its bound",
+        ));
+    }
+    bidi_endpoint_file_url(&bytes)
+        .map(Some)
+        .map_err(|message| workflow_error(ErrorCode::BrowserLaunchFailed, message))
+}
+
+fn bidi_endpoint_file_url(bytes: &[u8]) -> Result<Url, String> {
+    if bytes.len() > 4096 {
+        return Err("Firefox BiDi endpoint file exceeds its bound".into());
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| "Firefox BiDi endpoint file is malformed".to_owned())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Firefox BiDi endpoint file must be an object".to_owned())?;
+    if object.len() != 2 || !object.contains_key("ws_host") || !object.contains_key("ws_port") {
+        return Err("Firefox BiDi endpoint file has an unsupported schema".into());
+    }
+    let host = object["ws_host"]
+        .as_str()
+        .ok_or_else(|| "Firefox BiDi endpoint host is invalid".to_owned())?;
+    let address: std::net::IpAddr = host
+        .parse()
+        .map_err(|_| "Firefox BiDi endpoint host is invalid".to_owned())?;
+    if !address.is_loopback() {
+        return Err("Firefox BiDi endpoint must be loopback".into());
+    }
+    let port = object["ws_port"]
+        .as_u64()
+        .filter(|port| *port > 0 && *port <= u16::MAX as u64)
+        .ok_or_else(|| "Firefox BiDi endpoint port is invalid".to_owned())?;
+    let authority = match address {
+        std::net::IpAddr::V4(address) => format!("{address}:{port}"),
+        std::net::IpAddr::V6(address) => format!("[{address}]:{port}"),
+    };
+    Url::parse(&format!("ws://{authority}/session"))
+        .map_err(|_| "Firefox BiDi endpoint URL is invalid".to_owned())
 }
 
 struct ProcessObservationCollector {
@@ -432,46 +539,14 @@ fn websocket_url(line: &str) -> Option<Url> {
     let candidate = line[start..]
         .split(|character: char| character.is_whitespace() || character == '"')
         .next()?;
-    Url::parse(candidate).ok()
-}
-
-async fn wait_for_profile_id(profile: &Path) -> Result<ProfileId, CommandError> {
-    let storage = profile
-        .join("browser-extension-data")
-        .join(EXTENSION_ID)
-        .join("storage.js");
-    let result = tokio::time::timeout(PROOF_TIMEOUT, async {
-        loop {
-            if let Ok(contents) = std::fs::read(&storage) {
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&contents) {
-                    if let Some(id) = find_string(&value, "profileId")
-                        .and_then(|id| uuid::Uuid::parse_str(id).ok())
-                    {
-                        return ProfileId(id);
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    result.map_err(|_| {
-        workflow_error(
-            ErrorCode::BrowserLaunchFailed,
-            "companion profile identity timed out",
-        )
-    })
-}
-
-fn find_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    match value {
-        serde_json::Value::Object(object) => object
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| object.values().find_map(|value| find_string(value, key))),
-        serde_json::Value::Array(values) => values.iter().find_map(|value| find_string(value, key)),
-        _ => None,
+    let mut url = Url::parse(candidate).ok()?;
+    if url.scheme() != "ws" || url.cannot_be_a_base() {
+        return None;
     }
+    if url.path() == "/" {
+        url.set_path("/session");
+    }
+    Some(url)
 }
 
 fn derive_native_browser_proof(
@@ -724,6 +799,25 @@ mod tests {
             "ws://127.0.0.1:9222/session"
         );
         assert!(websocket_url("WebDriver BiDi listening on https://127.0.0.1").is_none());
+        assert_eq!(
+            websocket_url("WebDriver BiDi listening on ws://127.0.0.1:9222")
+                .unwrap()
+                .as_str(),
+            "ws://127.0.0.1:9222/session"
+        );
+    }
+
+    #[test]
+    fn bidi_endpoint_file_accepts_only_a_bounded_loopback_server() {
+        assert_eq!(
+            bidi_endpoint_file_url(br#"{"ws_host":"127.0.0.1","ws_port":57054}"#)
+                .unwrap()
+                .as_str(),
+            "ws://127.0.0.1:57054/session"
+        );
+        assert!(bidi_endpoint_file_url(br#"{"ws_host":"192.0.2.1","ws_port":57054}"#).is_err());
+        assert!(bidi_endpoint_file_url(br#"{"ws_host":"127.0.0.1","ws_port":0}"#).is_err());
+        assert!(bidi_endpoint_file_url(&vec![b'x'; 4097]).is_err());
     }
 
     #[test]

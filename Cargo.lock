@@ -1879,6 +1879,7 @@ dependencies = [
  "futures-util",
  "interface-conformance",
  "interface-core",
+ "libc",
  "mcp-gateway",
  "network-engine",
  "page-runtime",

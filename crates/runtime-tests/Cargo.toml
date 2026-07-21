@@ -16,6 +16,7 @@ config = { path = "../config" }
 futures-util.workspace = true
 interface-conformance = { path = "../interface-conformance" }
 interface-core = { path = "../interface-core" }
+libc = "0.2"
 cli = { path = "../cli" }
 mcp-gateway = { path = "../mcp-gateway" }
 network-engine = { path = "../network-engine" }

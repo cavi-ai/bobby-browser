@@ -794,6 +794,6 @@ if (typeof browser !== "undefined") {
     ) {
       return undefined;
     }
-    return executeContentAction(document, message.operation, message.input);
+    return Promise.resolve(executeContentAction(document, message.operation, message.input));
   });
 }

@@ -43,6 +43,30 @@ async fn listener_url() -> (TcpListener, Url) {
 }
 
 #[tokio::test]
+async fn session_connection_negotiates_a_bidi_session_before_use() {
+    let (listener, url) = listener_url().await;
+    let server = tokio::spawn(async move {
+        let mut socket = server_socket(listener).await;
+        let command = recv_json(&mut socket).await;
+        assert_eq!(command["method"], "session.new");
+        assert_eq!(
+            command["params"],
+            json!({"capabilities": {"alwaysMatch": {}}})
+        );
+        send_json(
+            &mut socket,
+            json!({"id": command["id"], "type": "success", "result": {"sessionId": "session-1", "capabilities": {}}}),
+        )
+        .await;
+    });
+
+    BidiClient::connect_session(url, Duration::from_secs(1))
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn request_ids_are_monotonic_and_out_of_order_responses_stay_correlated() {
     let (listener, url) = listener_url().await;
     let server = tokio::spawn(async move {

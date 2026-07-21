@@ -232,10 +232,112 @@ test("discovery is not a grant and only an explicit UUID grant can route", async
 test("manifest installs content receivers in subframes and newly opened blank contexts", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../manifest.json", import.meta.url), "utf8"),
-  ) as { content_scripts?: Array<{ all_frames?: boolean; match_about_blank?: boolean }> };
+  ) as {
+    manifest_version?: number;
+    permissions?: string[];
+    content_scripts?: Array<{
+      all_frames?: boolean;
+      match_about_blank?: boolean;
+      run_at?: string;
+    }>;
+  };
 
+  assert.equal(manifest.manifest_version, 2);
+  assert.equal(manifest.permissions?.includes("http://*/*"), true);
+  assert.equal(manifest.permissions?.includes("https://*/*"), true);
   assert.equal(manifest.content_scripts?.[0]?.all_frames, true);
   assert.equal(manifest.content_scripts?.[0]?.match_about_blank, true);
+  assert.equal(manifest.content_scripts?.[0]?.run_at, "document_start");
+});
+
+test("read-only observation retries a receiver that initially returns no result", async () => {
+  const transport = new FakeTransport();
+  let attempts = 0;
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      attempts += 1;
+      return attempts === 1 ? undefined : { controls: [] };
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 4 }]);
+
+  await background.receive(action(9, 4));
+
+  assert.equal(attempts, 2);
+  assert.equal((transport.sent.at(-1) as { kind: string }).kind, "actionCompleted");
+});
+
+test("read-only observation cannot retry after its command deadline", async () => {
+  const transport = new FakeTransport();
+  let attempts = 0;
+  let now = 1_000;
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      attempts += 1;
+      now = 120_001;
+      return undefined;
+    },
+    async navigateTab() {},
+    now: () => now,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 4 }]);
+
+  await background.receive(action(9, 4));
+
+  assert.equal(attempts, 1);
+  assert.deepEqual(transport.sent.at(-1), {
+    kind: "actionFailed",
+    output: {
+      commandId: "command-1",
+      code: "deadlineExceeded",
+      message: "the command deadline expired",
+      effectUncertain: false,
+    },
+  });
+});
+
+test("mutating content actions never retry an absent response", async () => {
+  const transport = new FakeTransport();
+  let attempts = 0;
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      attempts += 1;
+      return undefined;
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 4 }]);
+
+  await background.receive(action(9, 4, { operation: "click", input: { cssPath: "#submit" } }));
+
+  assert.equal(attempts, 1);
+  assert.deepEqual(transport.sent.at(-1), {
+    kind: "actionFailed",
+    output: {
+      commandId: "command-1",
+      code: "actionFailed",
+      message: "the content action failed",
+      effectUncertain: true,
+    },
+  });
 });
 
 test("paired discovery accepts profile-bound grants and rejects unrelated routes", async () => {

@@ -140,6 +140,17 @@ impl Drop for PendingGuard {
 }
 
 impl BidiClient {
+    pub async fn connect_session(url: Url, timeout: Duration) -> Result<Self, CommandError> {
+        let client = Self::connect(url, timeout).await?;
+        client
+            .send(
+                "session.new",
+                serde_json::json!({"capabilities": {"alwaysMatch": {}}}),
+            )
+            .await?;
+        Ok(client)
+    }
+
     pub async fn connect(url: Url, timeout: Duration) -> Result<Self, CommandError> {
         let (socket, _) = tokio::time::timeout(timeout, connect_async(url.as_str()))
             .await

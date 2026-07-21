@@ -175,6 +175,19 @@ impl CompanionRegistry {
         code
     }
 
+    pub async fn paired_profile_ids(&self) -> Vec<ProfileId> {
+        let mut profiles = self
+            .state
+            .read()
+            .await
+            .profiles
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        profiles.sort_by_key(|profile| profile.0);
+        profiles
+    }
+
     pub(crate) async fn claim_pairing_code(
         &self,
         code: &str,
