@@ -5,6 +5,7 @@ members = [
   "crates/config",
   "crates/types",
   "crates/companion-protocol",
+  "crates/companion-core",
   "crates/interface-core",
   "crates/sdk-core",
   "crates/session-manager",

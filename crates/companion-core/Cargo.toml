@@ -1,0 +1,14 @@
+[package]
+name = "companion-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+companion-protocol = { path = "../companion-protocol" }
+thiserror.workspace = true
+tokio.workspace = true
+types = { path = "../types" }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

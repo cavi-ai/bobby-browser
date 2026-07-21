@@ -422,6 +422,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "companion-core"
+version = "0.1.0"
+dependencies = [
+ "companion-protocol",
+ "thiserror",
+ "tokio",
+ "types",
+ "uuid",
+]
+
+[[package]]
 name = "companion-protocol"
 version = "0.1.0"
 dependencies = [
