@@ -214,6 +214,7 @@ dependencies = [
  "types",
  "url",
  "uuid",
+ "worker-pool",
 ]
 
 [[package]]
@@ -415,10 +416,20 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "broker",
+ "companion-core",
+ "companion-protocol",
  "config",
+ "firefox-companion",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
+ "types",
+ "url",
+ "uuid",
+ "worker-pool",
 ]
 
 [[package]]
@@ -2986,6 +2997,7 @@ dependencies = [
  "artifact-store",
  "async-trait",
  "chromiumoxide",
+ "companion-protocol",
  "config",
  "dom-engine",
  "futures",

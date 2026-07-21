@@ -19,6 +19,7 @@ sdk-core = { path = "../sdk-core" }
 config = { path = "../config" }
 interface-core = { path = "../interface-core" }
 artifact-store = { path = "../artifact-store" }
+worker-pool = { path = "../worker-pool" }
 
 [dev-dependencies]
 futures-util.workspace = true

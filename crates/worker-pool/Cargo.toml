@@ -22,6 +22,7 @@ tracing.workspace = true
 types = { path = "../types" }
 url.workspace = true
 artifact-store = { path = "../artifact-store" }
+companion-protocol = { path = "../companion-protocol" }
 
 [dev-dependencies]
 test-site = { path = "../test-site" }
