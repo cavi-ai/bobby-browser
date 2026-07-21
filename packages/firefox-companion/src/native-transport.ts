@@ -54,8 +54,25 @@ export type NativeTerminalStatus = {
 const MAX_NATIVE_METADATA_BYTES = 256;
 const FORBIDDEN_SECRET_FIELD =
   /(?:pairing[_-]?code|bearer|authorization|endpoint|credential|password|passwd|api[-_]?key|token|secret)/i;
-const SECRET_VALUE = /(?:^|\s)(?:bearer|basic)\s+\S+/i;
+const SECRET_VALUE = /(?:^|\s)(?:bearer|basic)\s+/i;
 const PRIVATE_SECRET_VALUE = /private[-_ ]?(?:token|secret|key)/i;
+const SENSITIVE_URL_QUERY_KEYS = new Set([
+  "authorization",
+  "bearer",
+  "token",
+  "accesstoken",
+  "refreshtoken",
+  "sessiontoken",
+  "secret",
+  "clientsecret",
+  "password",
+  "passwd",
+  "credential",
+  "apikey",
+  "accesskey",
+  "privatekey",
+  "key",
+]);
 
 function encodeBounded(message: unknown): string {
   let encoded: string;
@@ -118,7 +135,7 @@ function isCapabilities(value: unknown): value is CompanionCapabilities {
 }
 
 function assertSafeUrl(value: string): void {
-  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(value)) return;
+  if (!/^[a-z][a-z\d+.-]*:/i.test(value)) return;
   let url: URL;
   try {
     url = new URL(value);
@@ -129,7 +146,12 @@ function assertSafeUrl(value: string): void {
     throw new Error("extension channel contains endpoint or URL secret material");
   }
   for (const [name, item] of url.searchParams) {
-    if (FORBIDDEN_SECRET_FIELD.test(name) || SECRET_VALUE.test(item) || PRIVATE_SECRET_VALUE.test(item)) {
+    const normalizedName = name.toLowerCase().replaceAll(/[-_]/g, "");
+    if (
+      SENSITIVE_URL_QUERY_KEYS.has(normalizedName) ||
+      SECRET_VALUE.test(item) ||
+      PRIVATE_SECRET_VALUE.test(item)
+    ) {
       throw new Error("extension channel contains endpoint or URL secret material");
     }
   }
@@ -243,6 +265,7 @@ export class NativeCompanionTransport {
   #reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   #running = false;
   #terminalAuth = false;
+  #portValidated = false;
   #pairRequest: NativePairRequest | undefined;
 
   constructor(dependencies: NativeTransportDependencies) {
@@ -271,6 +294,7 @@ export class NativeCompanionTransport {
     }
     const port = this.#port;
     this.#port = undefined;
+    this.#portValidated = false;
     this.#pairRequest = undefined;
     port?.disconnect();
   }
@@ -280,7 +304,7 @@ export class NativeCompanionTransport {
     try {
       const port = this.#dependencies.connectNative(NATIVE_HOST_NAME);
       this.#port = port;
-      this.#reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+      this.#portValidated = false;
       port.onMessage.addListener((message) => {
         if (port !== this.#port) return;
         const validated = validateInbound(message);
@@ -295,6 +319,10 @@ export class NativeCompanionTransport {
           }
           return;
         }
+        if (!this.#portValidated) {
+          this.#portValidated = true;
+          this.#reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+        }
         try {
           void Promise.resolve(this.#listener(validated)).catch((error: unknown) => {
             this.#dependencies.onListenerError?.(error);
@@ -306,6 +334,7 @@ export class NativeCompanionTransport {
       port.onDisconnect.addListener(() => {
         if (port !== this.#port) return;
         this.#port = undefined;
+        this.#portValidated = false;
         this.#scheduleReconnect();
       });
       if (this.#pairRequest) port.postMessage(this.#pairRequest);

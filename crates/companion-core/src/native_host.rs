@@ -399,14 +399,7 @@ fn reject_extension_secrets(value: &Value, depth: usize) -> Result<(), NativeHos
 }
 
 fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("bearer ")
-        || lower.contains("basic ")
-        || lower.contains("private-token")
-        || lower.contains("private_token")
-        || lower.contains("private-secret")
-        || lower.contains("private_secret")
-    {
+    if contains_explicit_credential(text) {
         return Err(NativeHostError::InvalidProtocol);
     }
     let Ok(url) = Url::parse(text) else {
@@ -419,23 +412,68 @@ fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
         return Err(NativeHostError::InvalidProtocol);
     }
     for (name, value) in url.query_pairs() {
-        let name = name.to_ascii_lowercase();
-        let value = value.to_ascii_lowercase();
-        if [
-            "authorization",
-            "token",
-            "secret",
-            "password",
-            "credential",
-            "key",
-        ]
-        .iter()
-        .any(|marker| name.contains(marker) || value.contains(marker))
-        {
+        if is_sensitive_url_query_key(&name) || contains_explicit_credential(&value) {
             return Err(NativeHostError::InvalidProtocol);
         }
     }
     Ok(())
+}
+
+fn is_sensitive_url_query_key(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace(['-', '_'], "");
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "bearer"
+            | "token"
+            | "accesstoken"
+            | "refreshtoken"
+            | "sessiontoken"
+            | "secret"
+            | "clientsecret"
+            | "password"
+            | "passwd"
+            | "credential"
+            | "apikey"
+            | "accesskey"
+            | "privatekey"
+            | "key"
+    )
+}
+
+fn contains_explicit_credential(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let has_auth_scheme = lower.char_indices().any(|(index, _)| {
+        ["bearer", "basic"].iter().any(|scheme| {
+            lower[index..].starts_with(scheme)
+                && (index == 0
+                    || lower[..index]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace))
+                && lower[index + scheme.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+        })
+    });
+    has_auth_scheme
+        || [
+            "private-token",
+            "private_token",
+            "private token",
+            "privatetoken",
+            "private-secret",
+            "private_secret",
+            "private secret",
+            "privatesecret",
+            "private-key",
+            "private_key",
+            "private key",
+            "privatekey",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 fn decode_native_connect(value: Value) -> Result<NativeConnectRequest, NativeHostError> {
@@ -513,6 +551,25 @@ where
     .await;
 }
 
+async fn read_native_input<R>(
+    mut native_reader: R,
+    native_messages: mpsc::Sender<Result<Option<Value>, NativeHostError>>,
+    native_closed: watch::Sender<bool>,
+) where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        let message = read_native_message(&mut native_reader).await;
+        let closing = matches!(message, Ok(None) | Err(_));
+        if closing {
+            let _ = native_closed.send(true);
+        }
+        if native_messages.send(message).await.is_err() || closing {
+            break;
+        }
+    }
+}
+
 pub async fn run_native_host<R, W>(
     mut native_reader: R,
     mut native_writer: W,
@@ -533,18 +590,11 @@ where
 
     let (native_messages, mut receiver) = mpsc::channel(32);
     let (native_closed, mut native_closed_receiver) = watch::channel(false);
-    let reader_task = tokio::spawn(async move {
-        loop {
-            let message = read_native_message(&mut native_reader).await;
-            let closing = matches!(message, Ok(None) | Err(_));
-            if native_messages.send(message).await.is_err() || closing {
-                if closing {
-                    let _ = native_closed.send(true);
-                }
-                break;
-            }
-        }
-    });
+    let reader_task = tokio::spawn(read_native_input(
+        native_reader,
+        native_messages,
+        native_closed,
+    ));
 
     let result = async {
         let mut backoff = NativeReconnectBackoff::default();
@@ -665,4 +715,26 @@ where
     .await;
     reader_task.abort();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn eof_publishes_cancellation_before_a_saturated_queue_send() {
+        let (messages, receiver) = mpsc::channel(1);
+        messages.send(Ok(Some(Value::Null))).await.unwrap();
+        let (closed, mut closed_receiver) = watch::channel(false);
+        let reader = tokio::spawn(read_native_input(tokio::io::empty(), messages, closed));
+
+        tokio::time::timeout(Duration::from_millis(50), closed_receiver.changed())
+            .await
+            .expect("EOF cancellation must not wait for queue capacity")
+            .unwrap();
+        assert!(*closed_receiver.borrow());
+
+        drop(receiver);
+        reader.await.unwrap();
+    }
 }

@@ -19,6 +19,16 @@ use std::{
 use tokio::io::{duplex, split, AsyncRead, ReadBuf};
 use types::{CommandId, CompanionId, ProfileId};
 
+#[derive(serde::Deserialize)]
+struct UrlSecurityFixtures {
+    benign: Vec<String>,
+    secret: Vec<String>,
+}
+
+fn url_security_fixtures() -> UrlSecurityFixtures {
+    serde_json::from_str(include_str!("fixtures/extension-url-security.json")).unwrap()
+}
+
 struct ChunkedReader {
     bytes: Vec<u8>,
     position: usize,
@@ -185,6 +195,39 @@ fn native_host_enforces_exact_directional_schemas() {
     }))
     .is_ok());
     assert!(validate_server_message(json!({"kind": "pong"})).is_err());
+}
+
+#[test]
+fn shared_url_security_fixtures_match_the_rust_extension_boundary() {
+    let fixtures = url_security_fixtures();
+    for url in fixtures.benign {
+        let event = json!({
+            "kind": "actionCompleted",
+            "output": {
+                "commandId": CommandId::new(),
+                "interactionPath": "extensionApi",
+                "output": {"url": url}
+            }
+        });
+        assert!(
+            validate_extension_message(event).is_ok(),
+            "benign URL was rejected: {url}"
+        );
+    }
+    for url in fixtures.secret {
+        let event = json!({
+            "kind": "actionCompleted",
+            "output": {
+                "commandId": CommandId::new(),
+                "interactionPath": "extensionApi",
+                "output": {"url": url}
+            }
+        });
+        assert!(
+            validate_extension_message(event).is_err(),
+            "secret URL was accepted: {url}"
+        );
+    }
 }
 
 #[test]

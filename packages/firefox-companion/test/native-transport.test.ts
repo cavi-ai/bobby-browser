@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -31,6 +32,29 @@ class FakePort {
   disconnect(): void {
     this.disconnected = true;
   }
+}
+
+async function urlSecurityFixtures(): Promise<{ benign: string[]; secret: string[] }> {
+  return JSON.parse(
+    await readFile(
+      new URL(
+        "../../../crates/companion-core/tests/fixtures/extension-url-security.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as { benign: string[]; secret: string[] };
+}
+
+function completedWithUrl(url: string): unknown {
+  return {
+    kind: "actionCompleted",
+    output: {
+      commandId: "4c4dfe8c-7c69-4b33-a13e-1fcdf18f2952",
+      interactionPath: "extensionApi",
+      output: { url },
+    },
+  };
 }
 
 test("native transport connects only to the approved host and enforces message direction", () => {
@@ -69,6 +93,20 @@ test("native transport rejects requests outbound and events inbound", () => {
 
   assert.deepEqual(port.sent, []);
   assert.deepEqual(received, []);
+});
+
+test("shared URL security fixtures match the TypeScript extension boundary", async () => {
+  const port = new FakePort();
+  const transport = new NativeCompanionTransport({ connectNative: () => port });
+  transport.start(() => {});
+  const fixtures = await urlSecurityFixtures();
+
+  for (const url of fixtures.benign) {
+    assert.doesNotThrow(() => transport.send(completedWithUrl(url)), url);
+  }
+  for (const url of fixtures.secret) {
+    assert.throws(() => transport.send(completedWithUrl(url)), /secret|URL/i, url);
+  }
 });
 
 test("native pair metadata is exact and recursively secret free", () => {
@@ -273,6 +311,47 @@ test("failed native launches use bounded exponential backoff and reset after suc
   }
 
   assert.deepEqual(delays, [100, 200, 400, 800, 1_600, 3_200, 5_000]);
+  successfulPort.onMessage.emit({
+    kind: "paired",
+    output: { companionId: "companion-1", profileId: "profile-1" },
+  });
   successfulPort.onDisconnect.emit();
+  assert.equal(delays.at(-1), 100);
+});
+
+test("silent native ports do not reset reconnect backoff before a validated message", () => {
+  const ports = Array.from({ length: 9 }, () => new FakePort());
+  const delays: number[] = [];
+  const scheduled: Array<() => void> = [];
+  let connections = 0;
+  const transport = new NativeCompanionTransport({
+    connectNative() {
+      const port = ports[connections];
+      assert.ok(port);
+      connections += 1;
+      return port;
+    },
+    scheduleReconnect(callback, delayMs) {
+      delays.push(delayMs);
+      scheduled.push(callback);
+      return connections;
+    },
+    cancelReconnect() {},
+  });
+  transport.start(() => {});
+
+  for (let index = 0; index < 8; index += 1) {
+    ports[index]?.onDisconnect.emit();
+    const reconnect = scheduled.shift();
+    assert.ok(reconnect);
+    reconnect();
+  }
+
+  assert.deepEqual(delays, [100, 200, 400, 800, 1_600, 3_200, 5_000, 5_000]);
+  ports[8]?.onMessage.emit({
+    kind: "paired",
+    output: { companionId: "companion-1", profileId: "profile-1" },
+  });
+  ports[8]?.onDisconnect.emit();
   assert.equal(delays.at(-1), 100);
 });
