@@ -156,6 +156,45 @@ async fn pairing_bearer_is_single_use() {
 }
 
 #[tokio::test]
+async fn pairing_bearer_is_claimed_by_first_handshake() {
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let mut first = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap();
+
+    let error = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap_err();
+
+    assert_eq!(http_status(error), StatusCode::UNAUTHORIZED);
+    assert!(matches!(
+        pair(&mut first, code).await,
+        CompanionEvent::Paired { .. }
+    ));
+}
+
+#[tokio::test]
+async fn disconnect_before_pairing_invalidates_claimed_bearer() {
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let mut socket = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap();
+    socket.close(None).await.unwrap();
+
+    let error = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap_err();
+
+    assert_eq!(http_status(error), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn ping_after_pairing_receives_pong() {
     let server = CompanionServer::bind_loopback(loopback_config())
         .await
@@ -189,6 +228,29 @@ async fn first_request_must_pair() {
     let error: Value = serde_json::from_str(body.as_str()).unwrap();
     assert_eq!(error["code"], "pairingRequired");
     assert_eq!(error["message"], "the first request must pair");
+}
+
+#[tokio::test]
+async fn duplicate_object_keys_are_rejected() {
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let mut socket = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap();
+
+    socket
+        .send(Message::Text(r#"{"kind":"pair","kind":"ping"}"#.into()))
+        .await
+        .unwrap();
+
+    let Message::Text(body) = socket.next().await.unwrap().unwrap() else {
+        panic!("expected typed transport error");
+    };
+    let error: Value = serde_json::from_str(body.as_str()).unwrap();
+    assert_eq!(error["code"], "invalidRequest");
+    assert_eq!(error["message"], "request must be strict companion JSON");
 }
 
 #[tokio::test]

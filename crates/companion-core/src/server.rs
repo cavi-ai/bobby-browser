@@ -1,4 +1,4 @@
-use crate::{CompanionRegistry, PairingInput};
+use crate::{registry::PairingCodeClaim, CompanionRegistry, PairingInput};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -14,9 +14,12 @@ use axum::{
 };
 use companion_protocol::{CompanionEvent, CompanionRequest, PROTOCOL_VERSION};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{
+    de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor},
+    Serialize,
+};
 use serde_json::Value;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashSet, fmt, net::SocketAddr, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
 
@@ -126,9 +129,9 @@ async fn companion_upgrade(
     let Some(pairing_code) = bearer(&headers) else {
         return unauthorized_response();
     };
-    if !state.registry.pairing_code_is_active(&pairing_code).await {
+    let Ok(claim) = state.registry.claim_pairing_code(&pairing_code).await else {
         return unauthorized_response();
-    }
+    };
     let registry = Arc::clone(&state.registry);
 
     upgrade
@@ -136,7 +139,7 @@ async fn companion_upgrade(
         // typed 1 MiB limit error before closing the connection.
         .max_frame_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
         .max_message_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
-        .on_upgrade(move |socket| serve_socket(socket, registry, pairing_code))
+        .on_upgrade(move |socket| serve_socket(socket, registry, claim))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -166,12 +169,19 @@ fn unauthorized_response() -> Response {
     response
 }
 
-async fn serve_socket(socket: WebSocket, registry: Arc<CompanionRegistry>, pairing_code: String) {
+async fn serve_socket(
+    socket: WebSocket,
+    registry: Arc<CompanionRegistry>,
+    claim: PairingCodeClaim,
+) {
     let (sink, mut stream) = socket.split();
     let (outbound, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let writer = tokio::spawn(write_socket(sink, receiver));
 
-    let Some(first) = next_request(&mut stream, &outbound).await else {
+    let Ok(Some(first)) =
+        tokio::time::timeout(claim.remaining(), next_request(&mut stream, &outbound)).await
+    else {
+        send_error_and_close(&outbound, "pairingRejected", "pairing was rejected").await;
         drop(outbound);
         let _ = writer.await;
         return;
@@ -183,7 +193,8 @@ async fn serve_socket(socket: WebSocket, registry: Arc<CompanionRegistry>, pairi
         return;
     };
 
-    if request.protocol_version != PROTOCOL_VERSION || request.pairing_code != pairing_code {
+    if request.protocol_version != PROTOCOL_VERSION || request.pairing_code != claim.pairing_code()
+    {
         send_error_and_close(&outbound, "pairingRejected", "pairing was rejected").await;
         drop(outbound);
         let _ = writer.await;
@@ -191,13 +202,16 @@ async fn serve_socket(socket: WebSocket, registry: Arc<CompanionRegistry>, pairi
     }
 
     let paired = registry
-        .pair(PairingInput {
-            pairing_code,
-            companion_id: request.companion_id,
-            profile_id: request.profile_id,
-            identity: request.identity,
-            capabilities: request.capabilities,
-        })
+        .pair_claimed(
+            claim,
+            PairingInput {
+                pairing_code: request.pairing_code,
+                companion_id: request.companion_id,
+                profile_id: request.profile_id,
+                identity: request.identity,
+                capabilities: request.capabilities,
+            },
+        )
         .await;
     let Ok(paired) = paired else {
         send_error_and_close(&outbound, "pairingRejected", "pairing was rejected").await;
@@ -298,6 +312,12 @@ async fn next_request(
 }
 
 fn strict_decode(text: &str) -> Result<CompanionRequest, ()> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    DuplicateKeyRejector
+        .deserialize(&mut deserializer)
+        .map_err(|_| ())?;
+    deserializer.end().map_err(|_| ())?;
+
     let value: Value = serde_json::from_str(text).map_err(|_| ())?;
     let request: CompanionRequest = serde_json::from_value(value.clone()).map_err(|_| ())?;
     let canonical = serde_json::to_value(&request).map_err(|_| ())?;
@@ -305,6 +325,84 @@ fn strict_decode(text: &str) -> Result<CompanionRequest, ()> {
         return Err(());
     }
     Ok(request)
+}
+
+struct DuplicateKeyRejector;
+
+impl<'de> DeserializeSeed<'de> for DuplicateKeyRejector {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for DuplicateKeyRejector {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element_seed(DuplicateKeyRejector)?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = HashSet::new();
+        while let Some(key) = object.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(A::Error::custom("duplicate object key"));
+            }
+            object.next_value_seed(DuplicateKeyRejector)?;
+        }
+        Ok(())
+    }
 }
 
 async fn send_event(outbound: &mpsc::Sender<Message>, event: &CompanionEvent) -> Result<(), ()> {
