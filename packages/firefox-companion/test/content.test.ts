@@ -232,6 +232,67 @@ test("huge nonmatching DOM cannot exhaust the control walker budget", () => {
   assert.ok(new TextEncoder().encode(JSON.stringify(observed)).byteLength < MAX_COMPANION_PAYLOAD_BYTES);
 });
 
+test("huge sibling sets cannot bypass the css-path helper budget", () => {
+  const siblingBudget = 128;
+  const document = documentFor(
+    `<div id="bounded-parent">${"<span>noise</span>".repeat(siblingBudget + 256)}<button>Last</button></div>`,
+  );
+  const parent = document.getElementById("bounded-parent");
+  assert.ok(parent);
+  const siblings = parent.children;
+  const item = siblings.item.bind(siblings);
+  let siblingVisits = 0;
+  Object.defineProperty(siblings, "item", {
+    configurable: true,
+    value(index: number) {
+      siblingVisits += 1;
+      return item(index);
+    },
+  });
+
+  observeDocument(document);
+
+  assert.ok(
+    siblingVisits <= siblingBudget,
+    `css-path sibling work exceeded its budget: ${siblingVisits}`,
+  );
+});
+
+test("huge label sets use the bounded label index instead of a document query", () => {
+  const noise = Array.from(
+    { length: 2_048 },
+    (_, index) => `<label hidden for="noise-${index}">noise</label>`,
+  ).join("");
+  const document = documentFor(`${noise}<label for="target">Target label</label><input id="target">`);
+  const querySelector = document.querySelector.bind(document);
+  let documentQueries = 0;
+  Object.defineProperty(document, "querySelector", {
+    configurable: true,
+    value(selector: string) {
+      documentQueries += 1;
+      return querySelector(selector);
+    },
+  });
+
+  const observed = observeDocument(document);
+
+  assert.equal(documentQueries, 0);
+  assert.equal(observed.controls[0]?.label, "Target label");
+});
+
+test("hidden controls do not consume the observed control cap", () => {
+  const hidden = Array.from(
+    { length: MAX_CONTROL_COUNT },
+    (_, index) => `<button hidden>hidden-${index}</button>`,
+  ).join("");
+  const document = documentFor(`${hidden}<button id="visible-target">Visible target</button>`);
+
+  const observed = observeDocument(document);
+
+  assert.equal(observed.controls.length, 1);
+  assert.equal(observed.controls[0]?.cssPath, "#visible-target");
+});
+
 test("content fallback actions resolve stable targets inside the isolated document", () => {
   const document = documentFor(
     '<button data-testid="confirm">Confirm</button><input id="name">',

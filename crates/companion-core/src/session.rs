@@ -17,6 +17,8 @@ use uuid::Uuid;
 const MAX_DISCOVERED_TARGETS: usize = 256;
 const MAX_TARGET_ID_BYTES: usize = 256;
 const MAX_COMMAND_WAIT: Duration = Duration::from_secs(60);
+const MAX_PENDING_COMMANDS: usize = 256;
+const ABANDONED_COMMAND_RETENTION: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum CompanionSessionError {
@@ -42,6 +44,8 @@ pub enum CompanionSessionError {
     DeadlineExceeded,
     #[error("companion action response timed out")]
     ResponseTimeout,
+    #[error("companion pending command capacity is exhausted")]
+    PendingCapacity,
     #[error(transparent)]
     Registry(#[from] RegistryError),
 }
@@ -69,7 +73,8 @@ struct GrantRecord {
 
 struct PendingCommand {
     connection_id: Uuid,
-    response: oneshot::Sender<Result<CompanionEvent, CompanionSessionError>>,
+    response: Option<oneshot::Sender<Result<CompanionEvent, CompanionSessionError>>>,
+    expires_at: Instant,
 }
 
 #[derive(Default)]
@@ -82,8 +87,79 @@ struct SessionState {
 
 pub(crate) struct SessionCoordinator {
     registry: Arc<CompanionRegistry>,
-    state: Mutex<SessionState>,
+    state: Arc<Mutex<SessionState>>,
     discovery_changed: Notify,
+}
+
+struct PendingGuard {
+    state: Arc<Mutex<SessionState>>,
+    command_id: Option<CommandId>,
+    connection_id: Uuid,
+}
+
+impl PendingGuard {
+    fn new(state: Arc<Mutex<SessionState>>, command_id: CommandId, connection_id: Uuid) -> Self {
+        Self {
+            state,
+            command_id: Some(command_id),
+            connection_id,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.command_id = None;
+    }
+
+    async fn abandon(&mut self) {
+        let Some(command_id) = self.command_id.as_ref().cloned() else {
+            return;
+        };
+        let mut state = self.state.lock().await;
+        abandon_pending(&mut state, &command_id, self.connection_id);
+        self.command_id = None;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        let Some(command_id) = self.command_id.take() else {
+            return;
+        };
+        if let Ok(mut state) = self.state.try_lock() {
+            abandon_pending(&mut state, &command_id, self.connection_id);
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = Arc::clone(&self.state);
+        let connection_id = self.connection_id;
+        runtime.spawn(async move {
+            let mut state = state.lock().await;
+            abandon_pending(&mut state, &command_id, connection_id);
+        });
+    }
+}
+
+fn purge_expired_pending(state: &mut SessionState, now: Instant) {
+    state.pending.retain(|_, pending| {
+        pending.expires_at > now
+            || pending
+                .response
+                .as_ref()
+                .is_some_and(|response| !response.is_closed())
+    });
+}
+
+fn abandon_pending(state: &mut SessionState, command_id: &CommandId, connection_id: Uuid) {
+    let now = Instant::now();
+    purge_expired_pending(state, now);
+    if let Some(pending) = state.pending.get_mut(command_id) {
+        if pending.connection_id == connection_id {
+            pending.response = None;
+            pending.expires_at = now + ABANDONED_COMMAND_RETENTION;
+        }
+    }
 }
 
 impl std::fmt::Debug for SessionCoordinator {
@@ -96,7 +172,7 @@ impl SessionCoordinator {
     pub(crate) fn new(registry: Arc<CompanionRegistry>) -> Self {
         Self {
             registry,
-            state: Mutex::new(SessionState::default()),
+            state: Arc::new(Mutex::new(SessionState::default())),
             discovery_changed: Notify::new(),
         }
     }
@@ -167,7 +243,7 @@ impl SessionCoordinator {
                 state
                     .pending
                     .remove(&command_id)
-                    .map(|pending| pending.response)
+                    .and_then(|pending| pending.response)
             })
             .collect()
     }
@@ -249,6 +325,7 @@ impl SessionCoordinator {
     ) -> Result<(), CompanionSessionError> {
         let pending = {
             let mut state = self.state.lock().await;
+            purge_expired_pending(&mut state, Instant::now());
             let Some(pending) = state.pending.get(command_id) else {
                 return Err(CompanionSessionError::InvalidEvent);
             };
@@ -260,8 +337,8 @@ impl SessionCoordinator {
                 .remove(command_id)
                 .expect("pending command exists")
         };
-        if pending.response.send(Ok(event)).is_err() {
-            return Err(CompanionSessionError::InvalidEvent);
+        if let Some(response) = pending.response {
+            let _ = response.send(Ok(event));
         }
         Ok(())
     }
@@ -443,8 +520,12 @@ impl SessionCoordinator {
             .registry
             .resolve_attachment(&action.attachment_id)
             .await?;
+        let remaining_ms = u64::try_from(action.deadline_unix_ms.saturating_sub(now)).unwrap_or(0);
+        let wait = Duration::from_millis(remaining_ms).min(MAX_COMMAND_WAIT);
+        let expires_at = Instant::now() + wait;
         let (connection_id, outbound) = {
             let mut state = self.state.lock().await;
+            purge_expired_pending(&mut state, Instant::now());
             let record = state
                 .grants
                 .get(&action.attachment_id)
@@ -480,29 +561,43 @@ impl SessionCoordinator {
             if state.pending.contains_key(&action.command_id) {
                 return Err(CompanionSessionError::InvalidEvent);
             }
+            if state.pending.len() >= MAX_PENDING_COMMANDS {
+                return Err(CompanionSessionError::PendingCapacity);
+            }
             let (response, receiver) = oneshot::channel();
             state.pending.insert(
                 action.command_id.clone(),
                 PendingCommand {
                     connection_id: session.connection_id,
-                    response,
+                    response: Some(response),
+                    expires_at,
                 },
             );
             (session.connection_id, (session.outbound, receiver))
         };
         let (outbound, receiver) = outbound;
+        let mut pending_guard = PendingGuard::new(
+            Arc::clone(&self.state),
+            action.command_id.clone(),
+            connection_id,
+        );
         if let Err(error) = send_request(&outbound, &CompanionRequest::Action(action.clone())).await
         {
             self.remove_pending(&action.command_id, connection_id).await;
+            pending_guard.disarm();
             return Err(error);
         }
-        let remaining_ms = u64::try_from(action.deadline_unix_ms.saturating_sub(now)).unwrap_or(0);
-        let wait = Duration::from_millis(remaining_ms).min(MAX_COMMAND_WAIT);
         match tokio::time::timeout(wait, receiver).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(CompanionSessionError::ConnectionClosed),
+            Ok(Ok(result)) => {
+                pending_guard.disarm();
+                result
+            }
+            Ok(Err(_)) => {
+                pending_guard.disarm();
+                Err(CompanionSessionError::ConnectionClosed)
+            }
             Err(_) => {
-                self.remove_pending(&action.command_id, connection_id).await;
+                pending_guard.abandon().await;
                 Err(CompanionSessionError::ResponseTimeout)
             }
         }
@@ -574,6 +669,61 @@ mod tests {
     use super::*;
     use crate::PairingInput;
     use companion_protocol::{ActionResult, InteractionPath, TargetKind};
+
+    async fn session_fixture(
+        outbound_capacity: usize,
+    ) -> (
+        Arc<SessionCoordinator>,
+        ProfileId,
+        Uuid,
+        AttachmentGrant,
+        mpsc::Receiver<Message>,
+    ) {
+        let registry = Arc::new(CompanionRegistry::new(
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+        let code = registry.issue_pairing_code().await;
+        let input = PairingInput::firefox(code);
+        let profile_id = input.profile_id.clone();
+        let paired = registry.pair(input).await.unwrap();
+        let coordinator = Arc::new(SessionCoordinator::new(registry));
+        let (outbound, mut requests) = mpsc::channel(outbound_capacity);
+        let connection_id = coordinator.register(paired, outbound).await;
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: vec![BrowserTarget {
+                        target_id: "trusted-target".into(),
+                        kind: TargetKind::Page,
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
+        let grant = coordinator
+            .grant_discovered_targets(&profile_id)
+            .await
+            .unwrap();
+        let _grant_request = requests.recv().await.unwrap();
+        (coordinator, profile_id, connection_id, grant, requests)
+    }
+
+    fn action(grant: &AttachmentGrant, command_id: CommandId) -> ActionRequest {
+        ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            attachment_id: grant.attachment_id.clone(),
+            command_id,
+            page_id: grant.pages[0].page_id.clone(),
+            operation: "observe".into(),
+            input: serde_json::json!({}),
+            deadline_unix_ms: now_unix_ms() + 30_000,
+        }
+    }
 
     #[tokio::test]
     async fn duplicate_command_id_cannot_replace_pending_response() {
@@ -652,5 +802,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.await.unwrap().unwrap(), completed);
+    }
+
+    #[tokio::test]
+    async fn aborted_dispatch_keeps_a_bounded_tombstone_and_consumes_the_late_event() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(4).await;
+        let command_id = CommandId::new();
+        let dispatch = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let action = action(&grant, command_id.clone());
+            async move { coordinator.dispatch_action(action).await }
+        });
+        let _action_request = requests.recv().await.unwrap();
+
+        dispatch.abort();
+        assert!(dispatch.await.unwrap_err().is_cancelled());
+        tokio::task::yield_now().await;
+        assert_eq!(coordinator.state.lock().await.pending.len(), 1);
+
+        let completed = CompanionEvent::ActionCompleted(ActionResult {
+            command_id,
+            interaction_path: InteractionPath::ExtensionApi,
+            output: serde_json::json!({"late": true}),
+        });
+        coordinator
+            .consume_event(&profile_id, connection_id, completed)
+            .await
+            .unwrap();
+        assert!(coordinator.state.lock().await.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn abandoned_dispatches_are_bounded_and_unregister_cleans_them() {
+        const EXPECTED_PENDING_BOUND: usize = 256;
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(EXPECTED_PENDING_BOUND + 2).await;
+
+        for _ in 0..EXPECTED_PENDING_BOUND {
+            let dispatch = tokio::spawn({
+                let coordinator = Arc::clone(&coordinator);
+                let action = action(&grant, CommandId::new());
+                async move { coordinator.dispatch_action(action).await }
+            });
+            let _action_request = requests.recv().await.unwrap();
+            dispatch.abort();
+            assert!(dispatch.await.unwrap_err().is_cancelled());
+        }
+
+        let mut overflow = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let action = action(&grant, CommandId::new());
+            async move { coordinator.dispatch_action(action).await }
+        });
+        let overflow_result = tokio::time::timeout(Duration::from_millis(50), &mut overflow).await;
+        let pending_count = coordinator.state.lock().await.pending.len();
+        if overflow_result.is_err() {
+            overflow.abort();
+            let _ = overflow.await;
+        }
+
+        assert!(matches!(
+            overflow_result,
+            Ok(Ok(Err(CompanionSessionError::PendingCapacity)))
+        ));
+        assert!(pending_count <= EXPECTED_PENDING_BOUND);
+        coordinator.unregister(&profile_id, connection_id).await;
+        assert!(coordinator.state.lock().await.pending.is_empty());
+    }
+
+    #[test]
+    fn pending_purge_removes_expired_abandoned_entries_without_dropping_a_live_waiter() {
+        let connection_id = Uuid::new_v4();
+        let live_id = CommandId::new();
+        let abandoned_id = CommandId::new();
+        let (live_response, live_receiver) =
+            oneshot::channel::<Result<CompanionEvent, CompanionSessionError>>();
+        let expired = Instant::now() - Duration::from_millis(1);
+        let mut state = SessionState::default();
+        state.pending.insert(
+            live_id.clone(),
+            PendingCommand {
+                connection_id,
+                response: Some(live_response),
+                expires_at: expired,
+            },
+        );
+        state.pending.insert(
+            abandoned_id.clone(),
+            PendingCommand {
+                connection_id,
+                response: None,
+                expires_at: expired,
+            },
+        );
+
+        purge_expired_pending(&mut state, Instant::now());
+        assert!(state.pending.contains_key(&live_id));
+        assert!(!state.pending.contains_key(&abandoned_id));
+
+        drop(live_receiver);
+        purge_expired_pending(&mut state, Instant::now());
+        assert!(!state.pending.contains_key(&live_id));
     }
 }
