@@ -276,6 +276,26 @@ test("sanitized HTML uses a strict structural attribute allowlist", () => {
   assert.match(observed.html, /disabled=""/);
 });
 
+test("sanitized HTML removes comments and unsupported nodes before serialization", () => {
+  const credential = "z7Q4-comment-secret";
+  const document = documentFor("<main><p>Visible</p></main>");
+  const main = document.querySelector("main");
+  assert.ok(main);
+  main.append(document.createComment(credential));
+  main.append(document.createProcessingInstruction("opaque", credential));
+
+  const observed = executeContentAction(document, "observe", {
+    selector: "main",
+    target: null,
+    includeHtml: true,
+  }) as { html?: string };
+
+  assert.ok(observed.html);
+  assert.equal(observed.html.includes(credential), false);
+  assert.doesNotMatch(observed.html, /<!--|<\?/);
+  assert.match(observed.html, /<p>Visible<\/p>/);
+});
+
 test("adversarial 512-control observations stay below the native ceiling", () => {
   const longId = "selector".repeat(700);
   const longName = "accessible name ".repeat(400);

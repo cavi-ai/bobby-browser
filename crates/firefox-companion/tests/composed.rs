@@ -16,7 +16,7 @@ use firefox_companion::{
 use serde_json::{json, Value};
 use tokio::{
     io::{duplex, split},
-    sync::{broadcast, mpsc, Mutex},
+    sync::{broadcast, mpsc, oneshot, Mutex},
 };
 use types::{Evidence, InspectCommand, PageId, WorkerId};
 use worker_pool::BrowserWorker;
@@ -147,8 +147,11 @@ async fn real_server_binding_and_concrete_observer_share_the_coordinator_page_id
 
     let expected_page = PageId::new();
     let expected_page_for_extension = expected_page.clone();
+    let profile_for_assertion = profile_id.clone();
     let (marker_tx, mut marker_rx) = mpsc::unbounded_channel();
     let (events, _) = broadcast::channel(8);
+    let destroyed_events = events.clone();
+    let (reduced_tx, reduced_rx) = oneshot::channel();
     let bidi = Arc::new(BindingBidi {
         calls: Mutex::new(Vec::new()),
         marker: marker_tx,
@@ -181,7 +184,7 @@ async fn real_server_binding_and_concrete_observer_share_the_coordinator_page_id
             &serde_json::to_value(CompanionEvent::PageBindingDiscovered(
                 PageBindingDiscovered {
                     protocol_version: PROTOCOL_VERSION,
-                    profile_id,
+                    profile_id: profile_id.clone(),
                     target_id: "new-browser-target".into(),
                     binding_nonce: nonce,
                 },
@@ -236,6 +239,33 @@ async fn real_server_binding_and_concrete_observer_share_the_coordinator_page_id
         )
         .await
         .unwrap();
+
+        let reduced_grant = match serde_json::from_value(
+            read_native_message(&mut extension).await.unwrap().unwrap(),
+        )
+        .unwrap()
+        {
+            CompanionRequest::Grant(grant) => grant,
+            request => panic!("expected reduced grant, got {request:?}"),
+        };
+        assert!(!reduced_grant
+            .pages
+            .iter()
+            .any(|page| page.page_id == expected_page_for_extension));
+        reduced_tx.send(()).unwrap();
+
+        let renewed_grant = match serde_json::from_value(
+            read_native_message(&mut extension).await.unwrap().unwrap(),
+        )
+        .unwrap()
+        {
+            CompanionRequest::Grant(grant) => grant,
+            request => panic!("expected renewed grant, got {request:?}"),
+        };
+        assert!(!renewed_grant
+            .pages
+            .iter()
+            .any(|page| page.page_id == expected_page_for_extension));
     });
 
     let observer = Arc::new(CompanionExtensionObserver::new(
@@ -271,6 +301,26 @@ async fn real_server_binding_and_concrete_observer_share_the_coordinator_page_id
                 && text == "Selector scoped text"
                 && html.as_deref() == Some("<section id=\"scoped\">Selector scoped text</section>")
     )));
+    destroyed_events
+        .send(BidiEvent {
+            method: "browsingContext.contextDestroyed".into(),
+            params: json!({"context": "bidi-context-created"}),
+        })
+        .unwrap();
+    reduced_rx.await.unwrap();
+    let active = server.active_grant(&profile_for_assertion).await.unwrap();
+    assert!(!active
+        .pages
+        .iter()
+        .any(|page| page.page_id == expected_page));
+    let renewed = server
+        .renew_grant(&initial_grant.attachment_id)
+        .await
+        .unwrap();
+    assert!(!renewed
+        .pages
+        .iter()
+        .any(|page| page.page_id == expected_page));
     extension_task.await.unwrap();
     native_host.await.unwrap().unwrap();
 }

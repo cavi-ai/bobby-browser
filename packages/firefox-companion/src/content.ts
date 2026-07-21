@@ -517,9 +517,27 @@ function safeStructuralAttribute(name: string, value: string): string | undefine
 
 function sanitizedHtml(root: Element): string {
   const clone = root.cloneNode(true) as Element;
+  const pendingNodes = [...clone.childNodes];
+  let visitedNodes = 0;
+  let exceededNodeBudget = false;
+  while (pendingNodes.length > 0) {
+    const node = pendingNodes.pop() as Node;
+    visitedNodes += 1;
+    if (visitedNodes > MAX_CONTROL_VISITED_NODES + MAX_VISIBLE_TEXT_VISITED_NODES) {
+      exceededNodeBudget = true;
+      clone.textContent = REDACTED;
+      break;
+    }
+    if (node.nodeType === 1) {
+      pendingNodes.push(...node.childNodes);
+    } else if (node.nodeType !== 3) {
+      node.parentNode?.removeChild(node);
+    }
+  }
   for (const blocked of clone.querySelectorAll("script,style,template,noscript")) blocked.remove();
   const descendants = clone.querySelectorAll("*");
-  const exceededElementBudget = descendants.length + 1 > MAX_CONTROL_VISITED_NODES;
+  const exceededElementBudget =
+    exceededNodeBudget || descendants.length + 1 > MAX_CONTROL_VISITED_NODES;
   const elements = exceededElementBudget ? [clone] : [clone, ...descendants];
   for (const element of elements) {
     const sensitive = isSensitiveControl(element);

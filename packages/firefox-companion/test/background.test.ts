@@ -447,6 +447,21 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
     changeInfo: { title?: string },
     tab: { id?: number; url?: string; title?: string },
   ) => void>();
+  const tabRemovals = new ListenerSet<(
+    tabId: number,
+    removeInfo: { windowId: number; isWindowClosing: boolean },
+  ) => void>();
+  const navigationCommits = new ListenerSet<(
+    details: { tabId: number; frameId: number; url: string },
+  ) => void>();
+  let frameDiscoveryFails = false;
+  let currentFrames = [
+    { frameId: 0, url: "https://example.test/" },
+    { frameId: 4, url: "https://example.test/frame" },
+    { frameId: 5, url: "about:blank" },
+    { frameId: 6, url: "" },
+    { frameId: 7, url: "moz-extension://untrusted/" },
+  ];
   const browserApi = {
     runtime: {
       id: "trusted-extension",
@@ -472,6 +487,7 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
     },
     tabs: {
       onUpdated: tabUpdates,
+      onRemoved: tabRemovals,
       async query(query: unknown) {
         queried.push(query);
         return [
@@ -486,15 +502,11 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
       async update() {},
     },
     webNavigation: {
+      onCommitted: navigationCommits,
       async getAllFrames({ tabId }: { tabId: number }) {
         frames.push(tabId);
-        return [
-          { frameId: 0, url: "https://example.test/" },
-          { frameId: 4, url: "https://example.test/frame" },
-          { frameId: 5, url: "about:blank" },
-          { frameId: 6, url: "" },
-          { frameId: 7, url: "moz-extension://untrusted/" },
-        ];
+        if (frameDiscoveryFails) throw new Error("frame discovery unavailable");
+        return currentFrames;
       },
     },
   };
@@ -582,5 +594,90 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
         message.output.bindingNonce === bindingNonce,
     ),
     true,
+  );
+
+  currentFrames = [{ frameId: 0, url: "https://example.test/replaced" }];
+  navigationCommits.emit({
+    tabId: 9,
+    frameId: 0,
+    url: "https://example.test/replaced",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  port.onMessage.emit(action(9, 4, { deadlineUnixMs: Date.now() + 60_000 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(routed.length, 1, "navigation reconciliation must revoke disappeared frame leases");
+  const reconciledDiscoveries = port.sent.filter(
+    (message): message is {
+      kind: "targetsDiscovered";
+      output: { targets: Array<{ targetId: string; kind: string }> };
+    } =>
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "targetsDiscovered",
+  );
+  assert.equal(reconciledDiscoveries.at(-1)?.output.targets.length, 2);
+  assert.equal(
+    reconciledDiscoveries.at(-1)?.output.targets.every((target) => target.kind === "page"),
+    true,
+  );
+
+  frameDiscoveryFails = true;
+  navigationCommits.emit({
+    tabId: 9,
+    frameId: 0,
+    url: "https://example.test/unavailable",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const failedDiscoveries = port.sent.filter(
+    (message): message is {
+      kind: "targetsDiscovered";
+      output: { targets: Array<{ targetId: string; kind: string }> };
+    } =>
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "targetsDiscovered",
+  );
+  assert.equal(
+    failedDiscoveries.at(-1)?.output.targets.length,
+    1,
+    "failed frame discovery must revoke stale routes instead of retaining their leases",
+  );
+
+  const lifetimeNonces = new Set<string>();
+  for (let index = 0; index < 300; index += 1) {
+    const tabId = 1_000 + index;
+    const nonce = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    lifetimeNonces.add(nonce);
+    tabUpdates.emit(
+      tabId,
+      { title: `automation-runtime-binding:${nonce}` },
+      { id: tabId, url: "about:blank", title: `automation-runtime-binding:${nonce}` },
+    );
+    tabRemovals.emit(tabId, { windowId: 1, isWindowClosing: false });
+  }
+  const reportedLifetimeNonces = new Set(
+    port.sent.flatMap((message) => {
+      if (
+        typeof message !== "object" ||
+        message === null ||
+        !("kind" in message) ||
+        message.kind !== "pageBindingDiscovered" ||
+        !("output" in message) ||
+        typeof message.output !== "object" ||
+        message.output === null ||
+        !("bindingNonce" in message.output) ||
+        typeof message.output.bindingNonce !== "string"
+      ) {
+        return [];
+      }
+      return lifetimeNonces.has(message.output.bindingNonce) ? [message.output.bindingNonce] : [];
+    }),
+  );
+  assert.equal(
+    reportedLifetimeNonces.size,
+    lifetimeNonces.size,
+    "trusted tab removal events must reclaim target capacity across the browser lifetime",
   );
 });

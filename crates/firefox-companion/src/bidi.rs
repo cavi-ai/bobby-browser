@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex as SyncMutex,
     },
     time::Duration,
 };
@@ -29,7 +29,6 @@ struct PendingResponse {
 struct CorrelationState {
     pending: HashMap<u64, PendingResponse>,
     next_id: u64,
-    terminal: Option<TerminalFailure>,
 }
 
 impl Default for CorrelationState {
@@ -37,7 +36,6 @@ impl Default for CorrelationState {
         Self {
             pending: HashMap::with_capacity(COMMAND_CAPACITY),
             next_id: 1,
-            terminal: None,
         }
     }
 }
@@ -62,6 +60,7 @@ pub struct BidiClient {
 struct SharedState {
     correlations: Correlations,
     enqueue: Mutex<()>,
+    terminal: SyncMutex<Option<TerminalFailure>>,
     closing: AtomicBool,
     close_signal: watch::Sender<bool>,
     writer_result: Mutex<Option<Result<(), String>>>,
@@ -158,6 +157,7 @@ impl BidiClient {
         let shared = Arc::new(SharedState {
             correlations: Arc::new(Mutex::new(CorrelationState::default())),
             enqueue: Mutex::new(()),
+            terminal: SyncMutex::new(None),
             closing: AtomicBool::new(false),
             close_signal,
             writer_result: Mutex::new(None),
@@ -187,7 +187,7 @@ impl BidiClient {
 
     pub async fn send(&self, method: &str, params: Value) -> Result<Value, CommandError> {
         let deadline = Instant::now() + self.timeout;
-        if let Some(error) = terminal_error(&self.shared).await {
+        if let Some(error) = terminal_error(&self.shared) {
             return Err(error);
         }
         let permit = tokio::time::timeout_at(deadline, self.permits.clone().acquire_owned())
@@ -200,7 +200,12 @@ impl BidiClient {
         let (response_tx, response_rx) = oneshot::channel();
         let id = {
             let mut correlations = self.shared.correlations.lock().await;
-            if let Some(failure) = correlations.terminal.as_ref() {
+            let terminal = self
+                .shared
+                .terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(failure) = terminal.as_ref() {
                 return Err(failure.error());
             }
             let id = correlations.next_id;
@@ -229,7 +234,7 @@ impl BidiClient {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
                 guard.retire().await;
-                return Err(terminal_error(&self.shared).await.unwrap_or_else(|| {
+                return Err(terminal_error(&self.shared).unwrap_or_else(|| {
                     transport_failure("Firefox BiDi command channel closed").error()
                 }));
             }
@@ -246,7 +251,7 @@ impl BidiClient {
             }
             Ok(Err(_)) => {
                 guard.retire().await;
-                Err(terminal_error(&self.shared).await.unwrap_or_else(|| {
+                Err(terminal_error(&self.shared).unwrap_or_else(|| {
                     transport_failure("Firefox BiDi response channel closed").error()
                 }))
             }
@@ -355,6 +360,8 @@ async fn writer_task<S>(
             break;
         }
     }
+    commands.close();
+    drop(commands);
     let close_result = writer.close().await.map_err(|error| error.to_string());
     let result = transport_error.map_or(close_result, Err);
     *shared.writer_result.lock().await = Some(result);
@@ -536,28 +543,36 @@ fn retire_correlation(correlations: &mut CorrelationState, id: u64) {
     correlations.pending.remove(&id);
 }
 
-async fn terminal_error(shared: &SharedState) -> Option<CommandError> {
+fn terminal_error(shared: &SharedState) -> Option<CommandError> {
     shared
-        .correlations
-        .lock()
-        .await
         .terminal
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .map(TerminalFailure::error)
 }
 
 async fn terminate(shared: &SharedState, failure: TerminalFailure) {
-    let (effective, pending) = {
-        let _enqueue = shared.enqueue.lock().await;
-        let mut correlations = shared.correlations.lock().await;
-        let effective = correlations.terminal.get_or_insert(failure).clone();
-        shared.closing.store(true, Ordering::Release);
-        let _ = shared.close_signal.send(true);
-        (effective, std::mem::take(&mut correlations.pending))
+    let effective = {
+        let mut terminal = shared
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        terminal.get_or_insert(failure).clone()
     };
-    for (_, response) in pending {
-        let _ = response.response.send(Err(effective.error()));
-    }
+    shared.closing.store(true, Ordering::Release);
+    let _ = shared.close_signal.send(true);
+
+    let correlations = Arc::clone(&shared.correlations);
+    let draining = tokio::spawn(async move {
+        let mut correlations = correlations.lock().await;
+        let pending = std::mem::take(&mut correlations.pending);
+        drop(correlations);
+        for (_, response) in pending {
+            let _ = response.response.send(Err(effective.error()));
+        }
+    });
+    let _ = draining.await;
 }
 
 async fn wait_for_writer(shared: &SharedState) -> Result<(), String> {
@@ -598,12 +613,62 @@ fn protocol_failure(message: impl Into<String>) -> TerminalFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        pin::Pin,
+        sync::{atomic::AtomicUsize, Mutex as StdMutex},
+        task::{Context, Poll, Waker},
+    };
+
+    struct NeverReadySink {
+        ready_polled: Arc<Notify>,
+        allow_close: Arc<AtomicBool>,
+        close_waker: Arc<StdMutex<Option<Waker>>>,
+        sent: Arc<AtomicUsize>,
+    }
+
+    impl futures_util::Sink<Message> for NeverReadySink {
+        type Error = tokio_tungstenite::tungstenite::Error;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.ready_polled.notify_one();
+            Poll::Pending
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            self.sent.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if self.allow_close.load(Ordering::Acquire) {
+                Poll::Ready(Ok(()))
+            } else {
+                *self.close_waker.lock().expect("close waker mutex poisoned") =
+                    Some(context.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
 
     fn test_shared() -> SharedState {
         let (close_signal, _) = watch::channel(false);
         SharedState {
             correlations: Arc::new(Mutex::new(CorrelationState::default())),
             enqueue: Mutex::new(()),
+            terminal: SyncMutex::new(None),
             closing: AtomicBool::new(false),
             close_signal,
             writer_result: Mutex::new(None),
@@ -770,5 +835,112 @@ mod tests {
         .await
         .expect("all terminal responses must resolve immediately");
         assert_eq!(loaded.permits.available_permits(), COMMAND_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn close_cancellation_preempts_a_full_queue_and_unblocks_its_sender() {
+        let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let shared = Arc::new(test_shared());
+        let permits = Arc::new(Semaphore::new(COMMAND_CAPACITY));
+        let client = BidiClient {
+            commands,
+            shared: Arc::clone(&shared),
+            permits: Arc::clone(&permits),
+            events,
+            timeout: Duration::from_secs(2),
+        };
+        let ready_polled = Arc::new(Notify::new());
+        let allow_close = Arc::new(AtomicBool::new(false));
+        let close_waker = Arc::new(StdMutex::new(None));
+        let sent = Arc::new(AtomicUsize::new(0));
+        let writer = tokio::spawn(writer_task(
+            NeverReadySink {
+                ready_polled: Arc::clone(&ready_polled),
+                allow_close: Arc::clone(&allow_close),
+                close_waker: Arc::clone(&close_waker),
+                sent: Arc::clone(&sent),
+            },
+            command_rx,
+            shared.close_signal.subscribe(),
+            Arc::clone(&shared),
+        ));
+
+        let blocker_client = client.clone();
+        let blocker = tokio::spawn(async move {
+            blocker_client
+                .send("effect.blocking-writer", json!({}))
+                .await
+        });
+        ready_polled.notified().await;
+        blocker.abort();
+        let _ = blocker.await;
+        while permits.available_permits() != COMMAND_CAPACITY {
+            tokio::task::yield_now().await;
+        }
+
+        let mut abandoned = Vec::with_capacity(COMMAND_CAPACITY);
+        for index in 0..COMMAND_CAPACITY {
+            let sender = client.clone();
+            abandoned.push(tokio::spawn(async move {
+                sender
+                    .send("effect.abandoned", json!({"index": index}))
+                    .await
+            }));
+        }
+        while client.commands.capacity() != 0 {
+            tokio::task::yield_now().await;
+        }
+        for task in abandoned {
+            task.abort();
+            let _ = task.await;
+        }
+        while permits.available_permits() != COMMAND_CAPACITY {
+            tokio::task::yield_now().await;
+        }
+
+        let blocked_client = client.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_client
+                .send("effect.blocked-on-full-queue", json!({}))
+                .await
+        });
+        loop {
+            if shared.correlations.lock().await.pending.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let closing_client = client.clone();
+        let closing = tokio::spawn(async move { closing_client.close().await });
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while !shared.closing.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal state must publish without waiting for the full-queue sender");
+        closing.abort();
+        let _ = closing.await;
+
+        let error = tokio::time::timeout(Duration::from_millis(100), blocked)
+            .await
+            .expect("dropping the writer receiver must unblock the full-queue sender")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.message, "Firefox BiDi client closed");
+        assert_eq!(permits.available_permits(), COMMAND_CAPACITY);
+        assert_eq!(sent.load(Ordering::SeqCst), 0);
+
+        allow_close.store(true, Ordering::Release);
+        if let Some(waker) = close_waker
+            .lock()
+            .expect("close waker mutex poisoned")
+            .take()
+        {
+            waker.wake();
+        }
+        writer.await.unwrap();
     }
 }

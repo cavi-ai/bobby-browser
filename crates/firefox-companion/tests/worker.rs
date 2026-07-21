@@ -234,6 +234,7 @@ struct FakeObserver {
     calls: AtomicUsize,
     bindings: Mutex<Vec<PageId>>,
     releases: Arc<AtomicUsize>,
+    release_error: Option<CommandError>,
     observation: ExtensionObservation,
 }
 
@@ -243,6 +244,7 @@ impl FakeObserver {
             calls: AtomicUsize::new(0),
             bindings: Mutex::new(Vec::new()),
             releases: Arc::new(AtomicUsize::new(0)),
+            release_error: None,
             observation,
         })
     }
@@ -255,6 +257,21 @@ impl FakeObserver {
             calls: AtomicUsize::new(0),
             bindings: Mutex::new(Vec::new()),
             releases,
+            release_error: None,
+            observation,
+        })
+    }
+
+    fn with_release_error(
+        observation: ExtensionObservation,
+        releases: Arc<AtomicUsize>,
+        release_error: CommandError,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            bindings: Mutex::new(Vec::new()),
+            releases,
+            release_error: Some(release_error),
             observation,
         })
     }
@@ -407,7 +424,10 @@ impl ExtensionObserver for FakeObserver {
         _page_id: &PageId,
     ) -> Result<(), CommandError> {
         self.releases.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        match &self.release_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -462,6 +482,16 @@ async fn worker(bidi: Arc<FakeBidi>, observer: Arc<FakeObserver>) -> FirefoxComp
     )
     .await
     .unwrap()
+}
+
+async fn wait_for_release_count(releases: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while releases.load(Ordering::SeqCst) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("expected {expected} page-binding releases"));
 }
 
 fn assert_engine_native(evidence: &[Evidence]) {
@@ -736,6 +766,54 @@ async fn aborting_open_at_each_remote_stage_cleans_context_and_preserves_full_ca
             "{stage:?} cancellation consumed one of the 256 page slots"
         );
     }
+}
+
+#[tokio::test]
+async fn aborting_open_page_command_during_navigation_cleans_owned_page_and_capacity() {
+    let bidi = FakeBidi::new(vec![]);
+    let navigation = bidi.block_once("browsingContext.navigate", None).await;
+    let releases = Arc::new(AtomicUsize::new(0));
+    let observer = FakeObserver::with_release_counter(observation(), Arc::clone(&releases));
+    let worker = Arc::new(worker(bidi.clone(), observer).await);
+    let opening_worker = Arc::clone(&worker);
+    let opening = tokio::spawn(async move {
+        opening_worker
+            .open_page_command(&OpenPageCommand {
+                url: Some("https://example.test/post-open".into()),
+            })
+            .await
+    });
+
+    navigation.started.notified().await;
+    opening.abort();
+    let _ = opening.await;
+    navigation.release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if bidi
+                .calls()
+                .await
+                .iter()
+                .any(|call| call.method == "browsingContext.close")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("post-open cancellation must close its context");
+    wait_for_release_count(&releases, 1).await;
+    assert_eq!(bidi.closed_titles().await, vec!["Original tab title"]);
+
+    for _ in 0..MAX_TRACKED_PAGES {
+        worker.open_page(PageId::new()).await.unwrap();
+    }
+    assert_eq!(
+        worker.open_page(PageId::new()).await.unwrap_err().code,
+        ErrorCode::ResourceExhausted
+    );
 }
 
 #[tokio::test]
@@ -1021,7 +1099,9 @@ async fn closed_and_destroyed_contexts_are_removed_from_the_page_map() {
         Ok(json!({})),
         Ok(json!({"context": "context-2"})),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let observer = FakeObserver::new(observation());
+    let releases = Arc::clone(&observer.releases);
+    let worker = worker(bidi.clone(), observer).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
     worker
@@ -1036,7 +1116,7 @@ async fn closed_and_destroyed_contexts_are_removed_from_the_page_map() {
         "browsingContext.contextDestroyed",
         json!({"context": "context-2"}),
     );
-    tokio::task::yield_now().await;
+    wait_for_release_count(&releases, 2).await;
     let error = worker
         .navigate(
             &page,
@@ -1058,7 +1138,9 @@ async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
         Ok(json!({"context": "context-live"})),
         Ok(json!({"url": "https://example.test/live"})),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let observer = FakeObserver::new(observation());
+    let releases = Arc::clone(&observer.releases);
+    let worker = worker(bidi.clone(), observer).await;
     let stale = PageId::new();
     let live = PageId::new();
     worker.open_page(stale.clone()).await.unwrap();
@@ -1073,6 +1155,7 @@ async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
     }
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
+    wait_for_release_count(&releases, 1).await;
 
     let stale_error = worker
         .navigate(
@@ -1102,6 +1185,38 @@ async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
         .await
         .iter()
         .any(|call| call.method == "browsingContext.getTree"));
+}
+
+#[tokio::test]
+async fn failed_async_binding_release_retries_boundedly_and_fails_the_worker_closed() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-doomed"}))]);
+    let releases = Arc::new(AtomicUsize::new(0));
+    let observer = FakeObserver::with_release_error(
+        observation(),
+        Arc::clone(&releases),
+        CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "coordinator release failed".into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        },
+    );
+    let worker = worker(bidi.clone(), observer).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    bidi.emit(
+        "browsingContext.contextDestroyed",
+        json!({"context": "context-doomed"}),
+    );
+    wait_for_release_count(&releases, 3).await;
+
+    let error = worker
+        .open_page(PageId::new())
+        .await
+        .expect_err("cleanup failure must fail the worker closed");
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(error.message.contains("coordinator release failed"));
 }
 
 #[tokio::test]

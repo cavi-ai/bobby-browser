@@ -41,6 +41,7 @@ const MAX_URL_BYTES: usize = 2 * 1024;
 const MAX_TITLE_BYTES: usize = 1024;
 const PAGE_BINDING_TITLE_PREFIX: &str = "automation-runtime-binding:";
 pub const MAX_TRACKED_PAGES: usize = 256;
+const PAGE_BINDING_RELEASE_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -288,6 +289,7 @@ impl WorkerFactory for FirefoxCompanionFactory {
 enum PageContext {
     Opening(Option<String>),
     Ready { context: String, title: String },
+    Releasing { context: Option<String> },
 }
 
 pub struct FirefoxCompanionWorker {
@@ -297,6 +299,7 @@ pub struct FirefoxCompanionWorker {
     transport: Arc<dyn BidiTransport>,
     observer: Arc<dyn ExtensionObserver>,
     pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
+    cleanup_failure: Arc<TaskMutex<Option<CommandError>>>,
     cleanup_task: TaskMutex<Option<JoinHandle<()>>>,
 }
 
@@ -497,27 +500,47 @@ impl FirefoxCompanionWorker {
         let pages = Arc::new(RwLock::new(HashMap::<PageId, PageContext>::new()));
         let cleanup_pages = Arc::clone(&pages);
         let cleanup_transport = Arc::clone(&transport);
+        let cleanup_observer = Arc::clone(&observer);
+        let cleanup_lease = lease.clone();
+        let cleanup_failure = Arc::new(TaskMutex::new(None));
+        let task_failure = Arc::clone(&cleanup_failure);
         let cleanup_task = Some(tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(event) if event.method == "browsingContext.contextDestroyed" => {
                         if let Some(context) = event.params.get("context").and_then(Value::as_str) {
-                            cleanup_pages
-                                .write()
-                                .await
-                                .retain(|_, mapped| match mapped {
-                                    PageContext::Opening(None) => false,
-                                    PageContext::Opening(Some(value)) => value != context,
-                                    PageContext::Ready { context: value, .. } => value != context,
-                                });
+                            let removals = mark_destroyed_context(&cleanup_pages, context).await;
+                            release_removed_pages(
+                                &cleanup_observer,
+                                &cleanup_lease,
+                                &cleanup_pages,
+                                &task_failure,
+                                removals,
+                            )
+                            .await;
                         }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        reconcile_contexts(&cleanup_transport, &cleanup_pages).await;
+                        reconcile_contexts(
+                            &cleanup_transport,
+                            &cleanup_observer,
+                            &cleanup_lease,
+                            &cleanup_pages,
+                            &task_failure,
+                        )
+                        .await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        cleanup_pages.write().await.clear();
+                        let removals = mark_all_contexts(&cleanup_pages).await;
+                        release_removed_pages(
+                            &cleanup_observer,
+                            &cleanup_lease,
+                            &cleanup_pages,
+                            &task_failure,
+                            removals,
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -530,6 +553,7 @@ impl FirefoxCompanionWorker {
             transport,
             observer,
             pages,
+            cleanup_failure,
             cleanup_task: TaskMutex::new(cleanup_task),
         })
     }
@@ -542,7 +566,7 @@ impl FirefoxCompanionWorker {
             .get(page_id)
             .and_then(|context| match context {
                 PageContext::Ready { context, .. } => Some(context.clone()),
-                PageContext::Opening(_) => None,
+                PageContext::Opening(_) | PageContext::Releasing { .. } => None,
             })
             .ok_or_else(page_missing)
     }
@@ -554,12 +578,20 @@ impl FirefoxCompanionWorker {
             .get(page_id)
             .and_then(|context| match context {
                 PageContext::Ready { title, .. } => Some(title.clone()),
-                PageContext::Opening(_) => None,
+                PageContext::Opening(_) | PageContext::Releasing { .. } => None,
             })
             .ok_or_else(page_missing)
     }
 
     fn ensure_active(&self) -> Result<(), CommandError> {
+        if let Some(error) = self
+            .cleanup_failure
+            .lock()
+            .expect("cleanup failure mutex poisoned")
+            .clone()
+        {
+            return Err(error);
+        }
         if self.lease.expires_at <= Instant::now() {
             return Err(lease_error());
         }
@@ -595,38 +627,38 @@ impl FirefoxCompanionWorker {
         Ok(())
     }
 
-    async fn remove_page(&self, page_id: &PageId, context: Option<&str>) {
-        remove_page_mapping(&self.pages, page_id, context).await;
-    }
-
-    async fn rollback_context(
-        &self,
-        page_id: &PageId,
-        context: &str,
-        mut primary: CommandError,
-    ) -> CommandError {
-        let cleanup = self
-            .transport
-            .send("browsingContext.close", json!({"context": context}))
-            .await;
-        self.remove_page(page_id, Some(context)).await;
-        let release = self
-            .observer
-            .release_page_binding(&self.lease, page_id)
-            .await;
-        if let Err(cleanup) = cleanup {
-            primary.message = format!(
-                "{}; cleanup failed while closing Firefox context: {}",
-                primary.message, cleanup.message
-            );
+    async fn open_page_owned(&self, page_id: PageId) -> Result<OpenPageGuard, CommandError> {
+        self.ensure_active()?;
+        if !self.lease.capabilities.tabs {
+            return Err(capability_error("tab creation"));
         }
-        if let Err(release) = release {
-            primary.message = format!(
-                "{}; cleanup failed while releasing companion page binding: {}",
-                primary.message, release.message
-            );
-        }
-        primary
+        self.reserve_page(&page_id).await?;
+        let resources = PageOpenResources {
+            lease: self.lease.clone(),
+            transport: Arc::clone(&self.transport),
+            observer: Arc::clone(&self.observer),
+            pages: Arc::clone(&self.pages),
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut caller_cancellation = CallerCancellation::new(Arc::clone(&cancelled));
+        let operation = tokio::spawn(
+            PageOpenOperation {
+                resources,
+                page_id,
+                cancelled,
+            }
+            .run(),
+        );
+        let result = match operation.await {
+            Ok(result) => result,
+            Err(error) => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox page-opening task failed: {error}"),
+                true,
+            )),
+        };
+        caller_cancellation.disarm();
+        result
     }
 
     async fn resolve_element(&self, context: &str, selector: &str) -> Result<String, CommandError> {
@@ -954,6 +986,13 @@ async fn remove_page_mapping(
             }),
             Some(context),
         ) => mapped == context,
+        (Some(PageContext::Releasing { context: None }), None | Some(_)) => true,
+        (
+            Some(PageContext::Releasing {
+                context: Some(mapped),
+            }),
+            Some(context),
+        ) => mapped == context,
         _ => false,
     };
     if remove {
@@ -980,41 +1019,9 @@ impl BrowserWorker for FirefoxCompanionWorker {
     }
 
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
-        self.ensure_active()?;
-        if !self.lease.capabilities.tabs {
-            return Err(capability_error("tab creation"));
-        }
-        self.reserve_page(&page_id).await?;
-        let resources = PageOpenResources {
-            lease: self.lease.clone(),
-            transport: Arc::clone(&self.transport),
-            observer: Arc::clone(&self.observer),
-            pages: Arc::clone(&self.pages),
-        };
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let mut caller_cancellation = CallerCancellation::new(Arc::clone(&cancelled));
-        let operation = tokio::spawn(
-            PageOpenOperation {
-                resources,
-                page_id,
-                cancelled,
-            }
-            .run(),
-        );
-        let result = match operation.await {
-            Ok(Ok(guard)) => {
-                guard.disarm();
-                Ok(())
-            }
-            Ok(Err(error)) => Err(error),
-            Err(error) => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                format!("Firefox page-opening task failed: {error}"),
-                true,
-            )),
-        };
-        caller_cancellation.disarm();
-        result
+        let guard = self.open_page_owned(page_id).await?;
+        guard.disarm();
+        Ok(())
     }
 
     async fn navigate(
@@ -1172,8 +1179,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         command: &OpenPageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page_id = PageId::new();
-        self.open_page(page_id.clone()).await?;
-        let context = self.context(&page_id).await?;
+        let guard = self.open_page_owned(page_id.clone()).await?;
         let (url, title) = if let Some(url) = &command.url {
             let navigation = match self
                 .navigate(
@@ -1187,9 +1193,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 .await
             {
                 Ok(navigation) => navigation,
-                Err(error) => {
-                    return Err(self.rollback_context(&page_id, &context, error).await);
-                }
+                Err(error) => return Err(guard.fail(error).await),
             };
             navigation
                 .into_iter()
@@ -1199,16 +1203,22 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 })
                 .unwrap_or_else(|| (url.clone(), String::new()))
         } else {
-            ("about:blank".into(), self.page_title(&page_id).await?)
+            let title = match self.page_title(&page_id).await {
+                Ok(title) => title,
+                Err(error) => return Err(guard.fail(error).await),
+            };
+            ("about:blank".into(), title)
         };
-        Ok(vec![
+        let evidence = vec![
             Evidence::Page {
                 page_id,
                 url,
                 title,
             },
             self.evidence(InteractionPath::EngineNative),
-        ])
+        ];
+        guard.disarm();
+        Ok(evidence)
     }
 
     async fn close_page_command(
@@ -1259,22 +1269,138 @@ impl Drop for FirefoxCompanionWorker {
 
 async fn reconcile_contexts(
     transport: &Arc<dyn BidiTransport>,
+    observer: &Arc<dyn ExtensionObserver>,
+    lease: &AttachmentLease,
     pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
+    cleanup_failure: &Arc<TaskMutex<Option<CommandError>>>,
 ) {
     let live = match transport.send("browsingContext.getTree", json!({})).await {
         Ok(response) => live_contexts(&response),
         Err(_) => None,
     };
-    let Some(live) = live else {
-        pages.write().await.clear();
-        return;
-    };
-    pages.write().await.retain(|_, mapped| match mapped {
-        PageContext::Opening(None) => false,
-        PageContext::Opening(Some(context)) | PageContext::Ready { context, .. } => {
-            live.contains(context)
+    let removals = mark_missing_contexts(pages, live.as_ref()).await;
+    release_removed_pages(observer, lease, pages, cleanup_failure, removals).await;
+}
+
+#[derive(Clone)]
+struct PageRemoval {
+    page_id: PageId,
+    context: Option<String>,
+}
+
+async fn mark_destroyed_context(
+    pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
+    destroyed: &str,
+) -> Vec<PageRemoval> {
+    let mut pages = pages.write().await;
+    let removals = pages
+        .iter()
+        .filter_map(|(page_id, mapped)| {
+            let context = match mapped {
+                PageContext::Opening(Some(context)) | PageContext::Ready { context, .. }
+                    if context == destroyed =>
+                {
+                    context.clone()
+                }
+                _ => return None,
+            };
+            Some(PageRemoval {
+                page_id: page_id.clone(),
+                context: Some(context),
+            })
+        })
+        .collect::<Vec<_>>();
+    for removal in &removals {
+        pages.insert(
+            removal.page_id.clone(),
+            PageContext::Releasing {
+                context: removal.context.clone(),
+            },
+        );
+    }
+    removals
+}
+
+async fn mark_all_contexts(pages: &Arc<RwLock<HashMap<PageId, PageContext>>>) -> Vec<PageRemoval> {
+    mark_missing_contexts(pages, None).await
+}
+
+async fn mark_missing_contexts(
+    pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
+    live: Option<&HashSet<String>>,
+) -> Vec<PageRemoval> {
+    let mut pages = pages.write().await;
+    let removals = pages
+        .iter()
+        .filter_map(|(page_id, mapped)| {
+            let context = match mapped {
+                PageContext::Opening(None) => None,
+                PageContext::Opening(Some(context)) | PageContext::Ready { context, .. } => {
+                    Some(context.clone())
+                }
+                PageContext::Releasing { .. } => return None,
+            };
+            if live.is_some_and(|live| {
+                context
+                    .as_ref()
+                    .is_some_and(|context| live.contains(context))
+            }) {
+                return None;
+            }
+            Some(PageRemoval {
+                page_id: page_id.clone(),
+                context,
+            })
+        })
+        .collect::<Vec<_>>();
+    for removal in &removals {
+        pages.insert(
+            removal.page_id.clone(),
+            PageContext::Releasing {
+                context: removal.context.clone(),
+            },
+        );
+    }
+    removals
+}
+
+async fn release_removed_pages(
+    observer: &Arc<dyn ExtensionObserver>,
+    lease: &AttachmentLease,
+    pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
+    cleanup_failure: &Arc<TaskMutex<Option<CommandError>>>,
+    removals: Vec<PageRemoval>,
+) {
+    for removal in removals {
+        let mut last_error = None;
+        for attempt in 0..PAGE_BINDING_RELEASE_ATTEMPTS {
+            match observer.release_page_binding(lease, &removal.page_id).await {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 < PAGE_BINDING_RELEASE_ATTEMPTS {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
         }
-    });
+        remove_page_mapping(pages, &removal.page_id, removal.context.as_deref()).await;
+        if let Some(mut error) = last_error {
+            error.message = format!(
+                "Firefox page-binding cleanup failed after {PAGE_BINDING_RELEASE_ATTEMPTS} attempts: {}",
+                error.message
+            );
+            let mut failure = cleanup_failure
+                .lock()
+                .expect("cleanup failure mutex poisoned");
+            if failure.is_none() {
+                *failure = Some(error);
+            }
+        }
+    }
 }
 
 fn live_contexts(response: &Value) -> Option<HashSet<String>> {
