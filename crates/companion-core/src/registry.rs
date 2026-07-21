@@ -82,6 +82,21 @@ struct CompanionRecord {
     revoked: bool,
 }
 
+pub(crate) struct PairingCodeClaim {
+    pairing_code: String,
+    expires_at: Instant,
+}
+
+impl PairingCodeClaim {
+    pub(crate) fn pairing_code(&self) -> &str {
+        &self.pairing_code
+    }
+
+    pub(crate) fn remaining(&self) -> Duration {
+        self.expires_at.saturating_duration_since(Instant::now())
+    }
+}
+
 #[derive(Debug, Default)]
 struct RegistryState {
     pairing_codes: HashMap<String, Instant>,
@@ -116,25 +131,40 @@ impl CompanionRegistry {
         code
     }
 
-    pub(crate) async fn pairing_code_is_active(&self, code: &str) -> bool {
-        self.state
-            .read()
+    pub(crate) async fn claim_pairing_code(
+        &self,
+        code: &str,
+    ) -> Result<PairingCodeClaim, RegistryError> {
+        let expires_at = self
+            .state
+            .write()
             .await
             .pairing_codes
-            .get(code)
-            .is_some_and(|expires_at| Instant::now() < *expires_at)
-    }
-
-    pub async fn pair(&self, input: PairingInput) -> Result<PairedCompanion, RegistryError> {
-        let mut state = self.state.write().await;
-        let expires_at = state
-            .pairing_codes
-            .remove(&input.pairing_code)
+            .remove(code)
             .ok_or(RegistryError::PairingCodeInvalid)?;
         if Instant::now() >= expires_at {
             return Err(RegistryError::PairingCodeInvalid);
         }
+        Ok(PairingCodeClaim {
+            pairing_code: code.to_owned(),
+            expires_at,
+        })
+    }
 
+    pub async fn pair(&self, input: PairingInput) -> Result<PairedCompanion, RegistryError> {
+        let claim = self.claim_pairing_code(&input.pairing_code).await?;
+        self.pair_claimed(claim, input).await
+    }
+
+    pub(crate) async fn pair_claimed(
+        &self,
+        claim: PairingCodeClaim,
+        input: PairingInput,
+    ) -> Result<PairedCompanion, RegistryError> {
+        if claim.pairing_code != input.pairing_code || claim.remaining().is_zero() {
+            return Err(RegistryError::PairingCodeInvalid);
+        }
+        let mut state = self.state.write().await;
         if let Some(record) = state.companions.get(&input.companion_id) {
             if record.revoked {
                 return Err(RegistryError::Revoked);
