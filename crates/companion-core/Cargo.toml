@@ -11,10 +11,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-tungstenite = "0.29"
 tracing.workspace = true
 types = { path = "../types" }
 uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-tokio-tungstenite = "0.29"
