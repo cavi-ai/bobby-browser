@@ -15,6 +15,8 @@ import {
 
 export const MAX_PAGE_LEASES = 256;
 export const PAGE_LEASE_TTL_MS = 60_000;
+const OBSERVATION_RECEIVER_ATTEMPTS = 20;
+const OBSERVATION_RECEIVER_DELAY_MS = 50;
 const MAX_ID_COMPONENT_BYTES = 96;
 const PAGE_BINDING_TITLE_PREFIX = "automation-runtime-binding:";
 
@@ -46,6 +48,8 @@ type PageLease = {
   frameId: number;
   expiresAtUnixMs: number;
 };
+
+class ContentDeadlineError extends Error {}
 
 type TabLifecycle = {
   generation: number;
@@ -383,10 +387,11 @@ export class CompanionBackground {
         await this.#dependencies.navigateTab(lease.tabId, url);
         output = { url };
       } else {
-        output = await this.#dependencies.sendTabMessage(
-          lease.tabId,
-          { type: "companionAction", operation: input.operation, input: input.input },
-          lease.frameId,
+        output = await this.#sendContentAction(
+          lease,
+          input.operation,
+          input.input,
+          input.deadlineUnixMs,
         );
       }
       const event: CompanionEvent = {
@@ -398,14 +403,58 @@ export class CompanionBackground {
         },
       };
       this.#dependencies.transport.send(event);
-    } catch {
+    } catch (error) {
+      const deadlineExceeded = error instanceof ContentDeadlineError;
       this.#sendFailure(
         input.commandId,
-        "actionFailed",
-        "the content action failed",
+        deadlineExceeded ? "deadlineExceeded" : "actionFailed",
+        deadlineExceeded ? "the command deadline expired" : "the content action failed",
         input.operation !== "observe",
       );
     }
+  }
+
+  async #sendContentAction(
+    lease: PageLease,
+    operation: string,
+    input: unknown,
+    deadlineUnixMs: number,
+  ): Promise<unknown> {
+    const attempts = operation === "observe" ? OBSERVATION_RECEIVER_ATTEMPTS : 1;
+    let lastError: unknown = new Error("the content receiver returned no result");
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const now = (this.#dependencies.now ?? Date.now)();
+      const remaining = deadlineUnixMs - now;
+      if (remaining <= 0) throw new ContentDeadlineError();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const output = await Promise.race([
+          this.#dependencies.sendTabMessage(
+            lease.tabId,
+            { type: "companionAction", operation, input },
+            lease.frameId,
+          ),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => reject(new ContentDeadlineError()), remaining);
+          }),
+        ]);
+        if (output !== undefined) return output;
+        lastError = new Error("the content receiver returned no result");
+      } catch (error) {
+        if (error instanceof ContentDeadlineError) throw error;
+        lastError = error;
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
+      if (attempt + 1 < attempts) {
+        const delayRemaining = deadlineUnixMs - (this.#dependencies.now ?? Date.now)();
+        if (delayRemaining <= 0) throw new ContentDeadlineError();
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(OBSERVATION_RECEIVER_DELAY_MS, delayRemaining)),
+        );
+      }
+    }
+    throw lastError;
   }
 
   async #acceptPairing(event: Extract<CompanionEvent, { kind: "paired" }>): Promise<void> {

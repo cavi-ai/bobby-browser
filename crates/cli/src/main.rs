@@ -67,6 +67,92 @@ pub struct NativeHostInstallConfig {
     pub descriptor_path: PathBuf,
 }
 
+#[derive(Clone)]
+pub struct FirefoxProfileEnrollmentConfig {
+    pub companion_bind: SocketAddr,
+    pub descriptor_path: PathBuf,
+    pub timeout: Duration,
+    pub pairing_code_ttl: Duration,
+    pub attachment_ttl: Duration,
+}
+
+pub struct FirefoxProfileEnrollment {
+    attempt: FirefoxBootstrapAttempt,
+    timeout: Duration,
+}
+
+pub struct EnrolledFirefoxProfile {
+    profile_id: ProfileId,
+    server: Arc<CompanionServerHandle>,
+}
+
+impl EnrolledFirefoxProfile {
+    pub fn profile_id(&self) -> &ProfileId {
+        &self.profile_id
+    }
+}
+
+impl FirefoxProfileEnrollment {
+    pub async fn wait(self) -> Result<EnrolledFirefoxProfile, CommandError> {
+        let registry = self.attempt.server().registry();
+        let profile_id = tokio::time::timeout(self.timeout, async {
+            loop {
+                let profiles = registry.paired_profile_ids().await;
+                match profiles.as_slice() {
+                    [profile] => return Ok(profile.clone()),
+                    [] => tokio::time::sleep(Duration::from_millis(50)).await,
+                    _ => {
+                        return Err(CommandError {
+                            code: ErrorCode::PolicyDenied,
+                            message: "Firefox enrollment observed multiple profiles".into(),
+                            layer: ErrorLayer::Driver,
+                            retryable: false,
+                        });
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| companion_error("Firefox profile enrollment timed out"))??;
+        let server = self
+            .attempt
+            .complete()
+            .map_err(|error| companion_error(error.to_string()))?;
+        Ok(EnrolledFirefoxProfile { profile_id, server })
+    }
+}
+
+pub async fn start_firefox_profile_enrollment(
+    config: FirefoxProfileEnrollmentConfig,
+    pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
+) -> Result<FirefoxProfileEnrollment, CommandError> {
+    if !config.companion_bind.ip().is_loopback()
+        || config.descriptor_path.as_os_str().is_empty()
+        || config.timeout.is_zero()
+        || config.pairing_code_ttl.is_zero()
+        || config.attachment_ttl.is_zero()
+    {
+        return Err(CommandError {
+            code: ErrorCode::PolicyDenied,
+            message: "Firefox enrollment configuration is invalid".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        });
+    }
+    let attempt = start_bootstrap_attempt(
+        config.companion_bind,
+        config.descriptor_path,
+        config.pairing_code_ttl,
+        config.attachment_ttl,
+        pairing_code_observer,
+    )
+    .await?;
+    Ok(FirefoxProfileEnrollment {
+        attempt,
+        timeout: config.timeout,
+    })
+}
+
 impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
     type Error = anyhow::Error;
 
@@ -115,6 +201,10 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         let mut live_server = self.server.lock().await;
         if let Some(server) = live_server.as_ref() {
+            server
+                .wait_for_discovery(&self.config.profile_id, self.config.timeout)
+                .await
+                .map_err(companion_error)?;
             return self.launch_with_server(server, session_id).await;
         }
 
@@ -170,29 +260,46 @@ impl ConfiguredFirefoxFactory {
     }
 
     async fn start_server(&self) -> Result<FirefoxBootstrapAttempt, CommandError> {
-        let server = Arc::new(
-            CompanionServer::bind_loopback(CompanionServerConfig {
-                bind_addr: self.config.companion_bind,
-                pairing_code_ttl: self.config.pairing_code_ttl,
-                attachment_ttl: self.config.attachment_ttl,
-            })
-            .await
-            .map_err(|error| companion_error(error.to_string()))?,
-        );
-        let pairing_code = server.registry().issue_pairing_code().await;
-        (self.pairing_code_observer)(&pairing_code);
-        let descriptor = NativeHostDescriptor {
-            endpoint: format!("ws://{}/v1/companion", server.local_addr()),
-            pairing_code,
-            ownership_id: uuid::Uuid::new_v4().to_string(),
-        };
-        let publication = write_descriptor(&self.config.descriptor_path, &descriptor)
-            .map_err(|error| companion_error(error.to_string()))?;
-        Ok(FirefoxBootstrapAttempt {
-            server: Some(server),
-            publication: Some(publication),
-        })
+        start_bootstrap_attempt(
+            self.config.companion_bind,
+            self.config.descriptor_path.clone(),
+            self.config.pairing_code_ttl,
+            self.config.attachment_ttl,
+            Arc::clone(&self.pairing_code_observer),
+        )
+        .await
     }
+}
+
+async fn start_bootstrap_attempt(
+    companion_bind: SocketAddr,
+    descriptor_path: PathBuf,
+    pairing_code_ttl: Duration,
+    attachment_ttl: Duration,
+    pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
+) -> Result<FirefoxBootstrapAttempt, CommandError> {
+    let server = Arc::new(
+        CompanionServer::bind_loopback(CompanionServerConfig {
+            bind_addr: companion_bind,
+            pairing_code_ttl,
+            attachment_ttl,
+        })
+        .await
+        .map_err(|error| companion_error(error.to_string()))?,
+    );
+    let pairing_code = server.registry().issue_pairing_code().await;
+    pairing_code_observer(&pairing_code);
+    let descriptor = NativeHostDescriptor {
+        endpoint: format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+        ownership_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let publication = write_descriptor(&descriptor_path, &descriptor)
+        .map_err(|error| companion_error(error.to_string()))?;
+    Ok(FirefoxBootstrapAttempt {
+        server: Some(server),
+        publication: Some(publication),
+    })
 }
 
 struct FirefoxBootstrapAttempt {
@@ -378,6 +485,29 @@ pub fn compose_worker_factory_with_pairing_observer(
     selection: BrowserSelectionConfig,
     pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<Arc<dyn WorkerFactory>> {
+    compose_worker_factory_with_enrollment(config, selection, pairing_code_observer, None)
+}
+
+pub fn compose_worker_factory_with_enrolled_firefox(
+    config: &AppConfig,
+    selection: BrowserSelectionConfig,
+    pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
+    enrollment: EnrolledFirefoxProfile,
+) -> Result<Arc<dyn WorkerFactory>> {
+    compose_worker_factory_with_enrollment(
+        config,
+        selection,
+        pairing_code_observer,
+        Some(enrollment),
+    )
+}
+
+fn compose_worker_factory_with_enrollment(
+    config: &AppConfig,
+    selection: BrowserSelectionConfig,
+    pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
+    enrollment: Option<EnrolledFirefoxProfile>,
+) -> Result<Arc<dyn WorkerFactory>> {
     let chromium_capabilities = CompanionCapabilities {
         observe: true,
         navigate: true,
@@ -393,22 +523,36 @@ pub fn compose_worker_factory_with_pairing_observer(
         Arc::new(ChromiumWorkerFactory::new(config.browser.clone())),
     )];
     let firefox_required = required_firefox_capabilities();
+    let mut enrolled = enrollment.map(|enrollment| (enrollment.profile_id, enrollment.server));
     let firefox = selection
         .firefox
         .into_iter()
         .map(FirefoxRuntimeConfig::try_from)
         .map(|config| {
-            config.map(|config| FirefoxRegistration {
-                profile_id: config.profile_id.clone(),
-                factory: ConfiguredFirefoxFactory {
-                    config,
-                    required: firefox_required,
-                    pairing_code_observer: Arc::clone(&pairing_code_observer),
-                    server: Mutex::new(None),
-                },
+            config.map(|config| {
+                let server = match enrolled.take() {
+                    Some((profile_id, server)) if profile_id == config.profile_id => Some(server),
+                    Some(value) => {
+                        enrolled = Some(value);
+                        None
+                    }
+                    None => None,
+                };
+                FirefoxRegistration {
+                    profile_id: config.profile_id.clone(),
+                    factory: ConfiguredFirefoxFactory {
+                        config,
+                        required: firefox_required,
+                        pairing_code_observer: Arc::clone(&pairing_code_observer),
+                        server: Mutex::new(server),
+                    },
+                }
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    if enrolled.is_some() {
+        anyhow::bail!("enrolled Firefox profile is not present in selection configuration");
+    }
     registrations.extend(firefox.into_iter().map(|registration| {
         FactoryRegistration::negotiated(
             BrowserEngine::Firefox,

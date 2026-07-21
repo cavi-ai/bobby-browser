@@ -17,6 +17,17 @@ async fn pairing_code_is_single_use() {
 }
 
 #[tokio::test]
+async fn paired_profile_ids_expose_only_completed_pairings() {
+    let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::from_secs(300));
+    assert!(registry.paired_profile_ids().await.is_empty());
+
+    let code = registry.issue_pairing_code().await;
+    let paired = registry.pair(PairingInput::firefox(code)).await.unwrap();
+
+    assert_eq!(registry.paired_profile_ids().await, vec![paired.profile_id]);
+}
+
+#[tokio::test]
 async fn successful_pairing_issues_a_debug_redacted_reconnect_credential() {
     let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::from_secs(300));
     let code = registry.issue_pairing_code().await;

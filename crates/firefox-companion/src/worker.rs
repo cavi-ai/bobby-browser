@@ -284,7 +284,8 @@ impl WorkerFactory for FirefoxCompanionFactory {
         _session_id: &SessionId,
     ) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         validate_lease(&self.lease)?;
-        let transport = Arc::new(BidiClient::connect(self.bidi_url.clone(), self.timeout).await?);
+        let transport =
+            Arc::new(BidiClient::connect_session(self.bidi_url.clone(), self.timeout).await?);
         let worker = FirefoxCompanionWorker::new(
             WorkerId::new(),
             self.profile_dir.clone(),
