@@ -11,7 +11,7 @@ use types::{
     PrimitiveCommand, RecoveryDecision, RuntimeError, RuntimeInfo, SessionState, WaitUntil,
     WorkflowCheckpoint, WorkflowId,
 };
-use worker_pool::{ChromiumWorkerFactory, WorkerPool};
+use worker_pool::{ChromiumWorkerFactory, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
 
 mod interface;
@@ -56,7 +56,15 @@ impl RuntimeService {
     }
 
     pub async fn build(config: &AppConfig) -> Result<Self, RuntimeError> {
-        Self::build_inner(config, None).await
+        let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
+        Self::build_inner(config, factory, None).await
+    }
+
+    pub async fn build_with_worker_factory(
+        config: &AppConfig,
+        factory: Arc<dyn WorkerFactory>,
+    ) -> Result<Self, RuntimeError> {
+        Self::build_inner(config, factory, None).await
     }
 
     #[doc(hidden)]
@@ -64,11 +72,13 @@ impl RuntimeService {
         config: &AppConfig,
         observer: Arc<dyn ExecutionPhaseObserver>,
     ) -> Result<Self, RuntimeError> {
-        Self::build_inner(config, Some(observer)).await
+        let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
+        Self::build_inner(config, factory, Some(observer)).await
     }
 
     async fn build_inner(
         config: &AppConfig,
+        factory: Arc<dyn WorkerFactory>,
         observer: Option<Arc<dyn ExecutionPhaseObserver>>,
     ) -> Result<Self, RuntimeError> {
         let journal = Arc::new(
@@ -76,7 +86,6 @@ impl RuntimeService {
                 .await
                 .map_err(|error| RuntimeError::Internal(error.to_string()))?,
         );
-        let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
         let workers = Arc::new(WorkerPool::new(config.browser.max_active, factory));
         let checkpoints = checkpoint_store::CheckpointStore::open(&config.storage.checkpoints_dir)
             .await

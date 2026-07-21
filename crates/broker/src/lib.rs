@@ -525,6 +525,40 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     Ok(())
 }
 
+pub async fn serve_with_worker_factory(
+    config: AppConfig,
+    startup: StartupCredential,
+    factory: Arc<dyn worker_pool::WorkerFactory>,
+) -> anyhow::Result<()> {
+    let max_connections = config.interface.max_connections;
+    let max_rejection_workers = config.interface.max_rejection_workers;
+    let (app, listener) = bootstrap_listener_with(
+        config,
+        startup,
+        chrono::Utc::now,
+        |config| async move {
+            RuntimeService::build_with_worker_factory(&config, factory)
+                .await
+                .map_err(anyhow::Error::new)
+        },
+        |addr| async move {
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(anyhow::Error::new)
+        },
+    )
+    .await?;
+    serve_listener_with_rejection_limit(
+        listener,
+        app,
+        max_connections,
+        max_rejection_workers,
+        RejectionWorkerStats::default(),
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
