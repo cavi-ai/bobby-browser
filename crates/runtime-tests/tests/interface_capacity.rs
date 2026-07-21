@@ -481,4 +481,5 @@ async fn installed_chromium_capacity_fixture_supports_warm_sessions() {
     let harness = interface_conformance::live::ChromeRuntimeHarness::start().await;
     assert_eq!(harness.config.browser.max_active, 8);
     assert_eq!(harness.config.interface.max_connections, 64);
+    println!("AUTOMATION_RUNTIME_SECURITY_PROOF:v1:connection-and-workflow-capacity");
 }

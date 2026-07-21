@@ -1672,6 +1672,15 @@ impl CdpConnection {
     async fn queue_events(&self, pending: Vec<CdpEvent>) -> Result<(), CdpError> {
         let mut translated = Vec::with_capacity(pending.len());
         for event in pending {
+            if matches!(
+                event.method.as_str(),
+                "Target.targetCreated" | "Target.attachedToTarget"
+            ) && !event.params["targetInfo"]["type"]
+                .as_str()
+                .is_some_and(domains::target::target_type_is_supported)
+            {
+                continue;
+            }
             if !self.event_enabled(&event).await {
                 continue;
             }

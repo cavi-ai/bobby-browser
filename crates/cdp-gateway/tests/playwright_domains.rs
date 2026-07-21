@@ -80,6 +80,55 @@ async fn page_creating_connection() -> CdpConnection {
 }
 
 #[tokio::test]
+async fn target_event_admission_rejects_worker_families_and_allows_popup_pages() {
+    let connection = connection([Capability::SessionRead]).await;
+
+    for target_type in ["worker", "service_worker"] {
+        connection
+            .queue_event(CdpEvent {
+                method: "Target.targetCreated".into(),
+                params: json!({"targetInfo": {
+                    "targetId": format!("attack-{target_type}"),
+                    "type": target_type,
+                    "title": "untrusted target",
+                    "url": "https://example.invalid/",
+                    "attached": false,
+                    "canAccessOpener": false
+                }}),
+                session_id: None,
+            })
+            .await
+            .unwrap();
+    }
+    assert!(
+        connection.drain_events().await.is_empty(),
+        "worker and service-worker targets must not cross the CDP admission boundary"
+    );
+
+    connection
+        .queue_event(CdpEvent {
+            method: "Target.targetCreated".into(),
+            params: json!({"targetInfo": {
+                "targetId": "popup-page",
+                "type": "page",
+                "title": "popup",
+                "url": "https://example.invalid/popup",
+                "attached": false,
+                "canAccessOpener": true,
+                "openerId": "parent-page"
+            }}),
+            session_id: None,
+        })
+        .await
+        .unwrap();
+    let popup = connection.drain_events().await;
+    assert_eq!(popup.len(), 1);
+    assert_eq!(popup[0].params["targetInfo"]["type"], "page");
+    assert_eq!(popup[0].params["targetInfo"]["openerId"], "parent-page");
+    println!("AUTOMATION_RUNTIME_SECURITY_PROOF:v1:cdp-target-context-policy");
+}
+
+#[tokio::test]
 async fn puppeteer_target_manager_receives_tab_then_child_page_with_parent_routing() {
     let connection = page_creating_connection().await;
     let mut recorder = ProtocolRecorder(Vec::new());
