@@ -1,6 +1,6 @@
 use crate::{
     registry::{ConnectionAuthentication, PairingCodeClaim},
-    session::SessionCoordinator,
+    session::{PageBindingTicket, SessionCoordinator},
     CompanionRegistry, CompanionSessionError, PairingInput,
 };
 use axum::{
@@ -166,6 +166,16 @@ impl CompanionServerHandle {
         action: ActionRequest,
     ) -> Result<CompanionEvent, CompanionSessionError> {
         self.coordinator.dispatch_action(action).await
+    }
+
+    pub async fn begin_page_binding(
+        &self,
+        attachment_id: &types::AttachmentId,
+        page_id: types::PageId,
+    ) -> Result<PageBindingTicket, CompanionSessionError> {
+        self.coordinator
+            .begin_page_binding(attachment_id, page_id)
+            .await
     }
 }
 

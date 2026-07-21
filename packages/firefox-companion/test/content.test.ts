@@ -10,6 +10,7 @@ import {
   MAX_VISIBLE_TEXT_VISITED_NODES,
   executeContentAction,
   observeDocument,
+  takePageBindingMarker,
 } from "../src/content.js";
 import { MAX_COMPANION_PAYLOAD_BYTES } from "../src/protocol.js";
 
@@ -70,6 +71,73 @@ test("observeDocument returns page identity, visible text, labels, roles, and st
   assert.equal(observed.controls[1]?.cssPath, '[data-testid="submit-login"]');
   assert.equal(observed.controls[1]?.role, "button");
   assert.equal(observed.controls[1]?.name, "Continue");
+});
+
+test("observe action scopes selector and target output and only includes sanitized bounded HTML on request", () => {
+  const document = documentFor(`
+    <main id="wanted" onclick="steal()">
+      <p>Wanted text</p>
+      <span data-authorization="Bearer private-token">private-token</span>
+      <input id="secret" type="password" value="opaque-secret">
+      <button id="inside">Inside</button>
+      <script>window.exfiltrate("opaque-secret")</script>
+    </main>
+    <section id="other"><p>Other text</p><button id="outside">Outside</button></section>
+  `);
+
+  const selected = executeContentAction(document, "observe", {
+    selector: "#wanted",
+    target: null,
+    includeHtml: true,
+  }) as ReturnType<typeof observeDocument> & { html?: string };
+  assert.match(selected.visibleText, /Wanted text/);
+  assert.doesNotMatch(selected.visibleText, /Other text/);
+  assert.equal(selected.controls.length, 2);
+  assert.doesNotMatch(selected.controls[0]?.cssPath ?? "", /secret/i);
+  assert.equal(selected.controls[1]?.cssPath, "#inside");
+  assert.ok(selected.html);
+  assert.match(selected.html, /Wanted text/);
+  assert.doesNotMatch(selected.html, /opaque-secret|private-token|authorization|onclick|script/i);
+  assert.ok(new TextEncoder().encode(JSON.stringify(selected)).byteLength <= EXPECTED_MAX_OBSERVATION_BYTES);
+
+  const targeted = executeContentAction(document, "observe", {
+    selector: null,
+    target: {
+      css: "#other",
+      testId: null,
+      role: null,
+      accessibleName: null,
+      label: null,
+      text: null,
+      attributes: {},
+      framePath: [],
+      shadowPath: [],
+      ordinal: null,
+      allowBestMatch: false,
+    },
+    includeHtml: false,
+  }) as ReturnType<typeof observeDocument> & { html?: string };
+  assert.equal(targeted.visibleText, "Other text Outside");
+  assert.equal(targeted.controls[0]?.cssPath, "#outside");
+  assert.equal("html" in targeted, false);
+});
+
+test("binding markers are consumed once and reject page-controlled malformed values", () => {
+  const document = documentFor("<main>Ready</main>");
+  document.documentElement.setAttribute(
+    "data-automation-runtime-binding",
+    "b5f6319a-6b36-43cb-9464-d337fc9d8201",
+  );
+
+  assert.equal(takePageBindingMarker(document), "b5f6319a-6b36-43cb-9464-d337fc9d8201");
+  assert.equal(takePageBindingMarker(document), undefined);
+
+  document.documentElement.setAttribute(
+    "data-automation-runtime-binding",
+    "page-controlled-value",
+  );
+  assert.equal(takePageBindingMarker(document), undefined);
+  assert.equal(document.documentElement.hasAttribute("data-automation-runtime-binding"), false);
 });
 
 test("password values never enter observations", () => {
@@ -177,6 +245,23 @@ test("observations are bounded", () => {
 
   assert.equal(observed.visibleText.length, MAX_VISIBLE_TEXT_LENGTH);
   assert.equal(observed.controls.length, MAX_CONTROL_COUNT);
+});
+
+test("sanitized HTML fails closed when unsafe content sits beyond the traversal budget", () => {
+  const filler = "<i></i>".repeat(MAX_CONTROL_VISITED_NODES + 8);
+  const document = documentFor(
+    `<main id="bounded">${filler}<input value="z7Q4-vault-material"></main>`,
+  );
+
+  const observed = executeContentAction(document, "observe", {
+    selector: "#bounded",
+    target: null,
+    includeHtml: true,
+  }) as { html?: string };
+
+  assert.ok(observed.html);
+  assert.doesNotMatch(observed.html, /z7Q4-vault-material/);
+  assert.ok(new TextEncoder().encode(observed.html).byteLength <= 128 * 1024);
 });
 
 test("adversarial 512-control observations stay below the native ceiling", () => {

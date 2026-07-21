@@ -16,6 +16,7 @@ import {
 export const MAX_PAGE_LEASES = 256;
 export const PAGE_LEASE_TTL_MS = 60_000;
 const MAX_ID_COMPONENT_BYTES = 96;
+const PAGE_BINDING_TITLE_PREFIX = "automation-runtime-binding:";
 
 export type BackgroundConnectOptions = {
   companionId: string;
@@ -77,6 +78,13 @@ function boundedNonempty(value: unknown, maximum = MAX_ID_COMPONENT_BYTES): valu
   return typeof value === "string" && value.length > 0 && byteLength(value) <= maximum;
 }
 
+function uuid(value: unknown): value is string {
+  return (
+    boundedNonempty(value) &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
 function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const sortedExpected = [...expected].sort();
@@ -130,6 +138,10 @@ function supportedFrameUrl(value: unknown): value is string {
   } catch {
     return false;
   }
+}
+
+function supportedBindingUrl(value: unknown): value is string {
+  return value === "about:blank" || supportedFrameUrl(value);
 }
 
 function navigationUrl(input: unknown): string {
@@ -200,18 +212,68 @@ export class CompanionBackground {
   ): Promise<void> {
     if (
       !object(message) ||
-      !exactKeys(message, ["type"]) ||
-      message.type !== "companionFrameReady" ||
       sender.id !== extensionId ||
       !validBrowserId(sender.tab?.id) ||
-      !validBrowserId(sender.frameId) ||
-      !supportedFrameUrl(sender.url)
+      !validBrowserId(sender.frameId)
     ) {
       return;
     }
-    if (this.#registerTarget({ tabId: sender.tab.id, frameId: sender.frameId })) {
-      this.#sendDiscovery();
+    const frameReady = exactKeys(message, ["type"]) && message.type === "companionFrameReady";
+    const bindingNonce =
+      exactKeys(message, ["type", "bindingNonce"]) &&
+      message.type === "companionPageBinding" &&
+      uuid(message.bindingNonce)
+        ? message.bindingNonce
+        : undefined;
+    const binding = bindingNonce !== undefined;
+    if (
+      (!frameReady && !binding) ||
+      (frameReady && !supportedFrameUrl(sender.url)) ||
+      (binding && !supportedBindingUrl(sender.url))
+    ) {
+      return;
     }
+
+    const target = { tabId: sender.tab.id, frameId: sender.frameId };
+    if (binding) this.#reportPageBinding(target, bindingNonce);
+    else if (this.#registerTarget(target)) this.#sendDiscovery();
+  }
+
+  receiveTabUpdate(
+    tabId: number,
+    changeInfo: { title?: string },
+    tab: { id?: number; url?: string; title?: string },
+  ): void {
+    if (
+      !validBrowserId(tabId) ||
+      tab.id !== tabId ||
+      tab.url !== "about:blank" ||
+      typeof changeInfo.title !== "string" ||
+      changeInfo.title !== tab.title ||
+      !changeInfo.title.startsWith(PAGE_BINDING_TITLE_PREFIX)
+    ) {
+      return;
+    }
+    const bindingNonce = changeInfo.title.slice(PAGE_BINDING_TITLE_PREFIX.length);
+    if (!uuid(bindingNonce)) return;
+    this.#reportPageBinding({ tabId, frameId: 0 }, bindingNonce);
+  }
+
+  #reportPageBinding(target: DiscoveredTarget, bindingNonce: string): void {
+    if (this.#registerTarget(target)) this.#sendDiscovery();
+    if (!this.#paired || !this.#options) return;
+    const targetId = this.#targetIdsByRoute.get(browserRouteKey(target.tabId, target.frameId));
+    if (!targetId) return;
+    const event: CompanionEvent = {
+      kind: "pageBindingDiscovered",
+      output: {
+        protocolVersion: PROTOCOL_VERSION,
+        profileId: this.#options.profileId,
+        targetId,
+        bindingNonce,
+      },
+    };
+    this.#dependencies.transport.send(event);
   }
 
   async receive(message: unknown): Promise<void> {
@@ -411,6 +473,15 @@ export type ProductionBrowserApi = {
     };
   };
   tabs: {
+    onUpdated: {
+      addListener(
+        listener: (
+          tabId: number,
+          changeInfo: { title?: string },
+          tab: { id?: number; url?: string; title?: string },
+        ) => void,
+      ): void;
+    };
     query(query: Record<string, never>): Promise<Array<{ id?: number; url?: string; title?: string }>>;
     sendMessage(tabId: number, message: unknown, options: { frameId: number }): Promise<unknown>;
     update(tabId: number, properties: { url: string }): Promise<unknown>;
@@ -488,6 +559,9 @@ export async function startProductionBackground(
       .receiveRuntimeMessage(message, sender, browserApi.runtime.id)
       .catch(() => undefined);
     return undefined;
+  });
+  browserApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    background.receiveTabUpdate(tabId, changeInfo, tab);
   });
   background.connect({
     companionId: stored.companionId,

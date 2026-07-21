@@ -1,7 +1,7 @@
 use companion_protocol::{
     ActionRequest, AttachmentGrant, BrowserEngine, BrowserIdentity, BrowserTarget,
     CompanionCapabilities, CompanionEvent, CompanionRequest, GrantedPage, InteractionPath,
-    TargetDiscovery, TargetKind, PROTOCOL_VERSION,
+    PageBindingDiscovered, TargetDiscovery, TargetKind, PROTOCOL_VERSION,
 };
 use types::{AttachmentId, CommandId, PageId, ProfileId};
 
@@ -20,6 +20,26 @@ fn request_round_trip_preserves_browser_neutral_fields() {
     let decoded: CompanionRequest = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, request);
     assert!(!encoded.contains("firefox_command"));
+}
+
+#[test]
+fn trusted_page_binding_reports_preserve_expected_page_correlation_fields() {
+    let profile_id = ProfileId::new();
+    let event = CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+        protocol_version: PROTOCOL_VERSION,
+        profile_id: profile_id.clone(),
+        target_id: "opaque-firefox-target".into(),
+        binding_nonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201".into(),
+    });
+
+    let encoded = serde_json::to_string(&event).unwrap();
+    let decoded: CompanionEvent = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(decoded, event);
+    assert!(encoded.contains("pageBindingDiscovered"));
+    assert!(encoded.contains(&profile_id.0.to_string()));
+    assert!(!encoded.contains("tabId"));
+    assert!(!encoded.contains("frameId"));
 }
 
 #[test]

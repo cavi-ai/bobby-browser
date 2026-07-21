@@ -10,6 +10,8 @@ export const MAX_CSS_SIBLING_VISITS = 128;
 export const MAX_CONTROL_FIELD_LENGTH = 256;
 export const MAX_SELECTOR_LENGTH = 512;
 export const MAX_OBSERVATION_BYTES = MAX_COMPANION_PAYLOAD_BYTES - 64 * 1024;
+export const MAX_SANITIZED_HTML_LENGTH = 128 * 1024;
+export const PAGE_BINDING_ATTRIBUTE = "data-automation-runtime-binding";
 const MAX_URL_LENGTH = 2 * 1024;
 const MAX_TITLE_LENGTH = 1024;
 const MAX_ROLE_LENGTH = 64;
@@ -30,6 +32,7 @@ export type PageObservation = {
     value?: string;
     disabled: boolean;
   }>;
+  html?: string;
 };
 
 const CONTROL_SELECTOR = [
@@ -134,9 +137,7 @@ function isSensitiveTextContext(element: Element): boolean {
   return nested ? isSensitiveControl(nested) : false;
 }
 
-function visibleText(document: Document): string {
-  const root = document.body;
-  if (!root) return "";
+function visibleText(document: Document, root: Element): string {
   let output = "";
   let outputBytes = 0;
   const walker = document.createTreeWalker(root, 4);
@@ -395,21 +396,71 @@ function controlValue(element: Element, sensitive = isSensitiveControl(element))
   return observationString(value);
 }
 
-export function observeDocument(document: Document): PageObservation {
+function sanitizedHtml(root: Element): string {
+  const clone = root.cloneNode(true) as Element;
+  for (const blocked of clone.querySelectorAll("script,style,template,noscript")) blocked.remove();
+  const descendants = clone.querySelectorAll("*");
+  const exceededElementBudget = descendants.length + 1 > MAX_CONTROL_VISITED_NODES;
+  const elements = exceededElementBudget ? [clone] : [clone, ...descendants];
+  for (const element of elements) {
+    const sensitive = isSensitiveControl(element);
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      if (
+        name.startsWith("on") ||
+        name === "style" ||
+        containsSensitiveMaterial(name) ||
+        containsSensitiveMaterial(attribute.value)
+      ) {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+      if (["href", "src", "action", "formaction"].includes(name)) {
+        const safe = observationUrl(attribute.value);
+        if (safe) element.setAttribute(attribute.name, safe);
+        else element.removeAttribute(attribute.name);
+      }
+    }
+    if (["INPUT", "SELECT", "TEXTAREA", "OPTION"].includes(element.tagName)) {
+      if (element.hasAttribute("value")) element.setAttribute("value", REDACTED);
+      if (element.tagName === "TEXTAREA" || element.tagName === "OPTION") {
+        element.textContent = REDACTED;
+      }
+    } else if (sensitive) {
+      element.textContent = REDACTED;
+    }
+  }
+  if (exceededElementBudget) {
+    clone.textContent = REDACTED;
+    return boundedUtf8(clone.outerHTML, MAX_SANITIZED_HTML_LENGTH);
+  }
+  const walker = clone.ownerDocument.createTreeWalker(clone, 4);
+  let visited = 0;
+  while (visited < MAX_VISIBLE_TEXT_VISITED_NODES) {
+    const node = walker.nextNode();
+    if (!node) break;
+    visited += 1;
+    const safe = observationString(node.nodeValue, MAX_CONTROL_FIELD_LENGTH * 8);
+    node.nodeValue = safe ?? "";
+  }
+  if (walker.nextNode()) clone.textContent = REDACTED;
+  return boundedUtf8(clone.outerHTML, MAX_SANITIZED_HTML_LENGTH);
+}
+
+function observeRoot(document: Document, root: Element, includeHtml: boolean): PageObservation {
   const observation: PageObservation = {
     url: observationUrl(document.URL),
     title: observationString(document.title, MAX_TITLE_LENGTH) ?? "",
-    visibleText: visibleText(document),
+    visibleText: visibleText(document, root),
     controls: [],
   };
   let serializedBytes = byteLength(JSON.stringify(observation));
-  const root = document.body;
-  if (!root) return observation;
   const helperBudget: WorkBudget = { remaining: MAX_CONTROL_HELPER_VISITS };
   const labelsByControlId = new Map<string, Element>();
   const siblingPositions = new WeakMap<Element, number>();
   const siblingCountsByParent = new WeakMap<Element, Map<string, number>>();
   const candidateControls: Element[] = [];
+  if (root.matches(CONTROL_SELECTOR)) candidateControls.push(root);
   const walker = document.createTreeWalker(root, 1);
   let visited = 0;
   while (visited < MAX_CONTROL_VISITED_NODES && takeWork(helperBudget)) {
@@ -465,7 +516,23 @@ export function observeDocument(document: Document): PageObservation {
     observation.controls.push(control);
     serializedBytes += controlBytes;
   }
+  if (includeHtml) {
+    const html = sanitizedHtml(root);
+    const overhead = byteLength(JSON.stringify({ html: "" })) - 2;
+    const remaining = Math.max(
+      0,
+      Math.min(MAX_SANITIZED_HTML_LENGTH, MAX_OBSERVATION_BYTES - serializedBytes - overhead),
+    );
+    observation.html = boundedUtf8(html, remaining);
+  }
   return observation;
+}
+
+export function observeDocument(document: Document): PageObservation {
+  const root = document.body ?? document.documentElement;
+  return root
+    ? observeRoot(document, root, false)
+    : { url: observationUrl(document.URL), title: "", visibleText: "", controls: [] };
 }
 
 function actionInput(input: unknown): Record<string, unknown> {
@@ -473,6 +540,66 @@ function actionInput(input: unknown): Record<string, unknown> {
     throw new Error("content action input must be an object");
   }
   return input as Record<string, unknown>;
+}
+
+function inspectionRoot(document: Document, input: Record<string, unknown>): Element {
+  if (typeof input.includeHtml !== "boolean") {
+    throw new Error("observe requires includeHtml to be a boolean");
+  }
+  let selector: string | undefined;
+  if (input.selector !== null && input.selector !== undefined) {
+    if (
+      typeof input.selector !== "string" ||
+      input.selector.length === 0 ||
+      byteLength(input.selector) > MAX_SELECTOR_LENGTH
+    ) {
+      throw new Error("observe selector must be a bounded CSS selector");
+    }
+    selector = input.selector;
+  } else if (input.target !== null && input.target !== undefined) {
+    if (typeof input.target !== "object" || Array.isArray(input.target)) {
+      throw new Error("observe target must be an object");
+    }
+    const target = input.target as Record<string, unknown>;
+    if (typeof target.css === "string" && target.css.length > 0) {
+      if (byteLength(target.css) > MAX_SELECTOR_LENGTH) {
+        throw new Error("observe target CSS must be bounded");
+      }
+      selector = target.css;
+    } else if (typeof target.testId === "string" && target.testId.length > 0) {
+      if (byteLength(target.testId) > MAX_CONTROL_FIELD_LENGTH) {
+        throw new Error("observe target test ID must be bounded");
+      }
+      selector = `[data-testid="${cssString(target.testId)}"]`;
+    } else {
+      throw new Error("observe target requires a CSS selector or test ID");
+    }
+  }
+  if (!selector) return document.body ?? document.documentElement;
+  let root: Element | null;
+  try {
+    root = document.querySelector(selector);
+  } catch {
+    throw new Error("observe selector is invalid");
+  }
+  if (!root || isElementHidden(root)) throw new Error("observe target was not found");
+  return root;
+}
+
+export function takePageBindingMarker(document: Document): string | undefined {
+  const root = document.documentElement;
+  if (!root) return undefined;
+  const value = root.getAttribute(PAGE_BINDING_ATTRIBUTE);
+  if (value === null) return undefined;
+  root.removeAttribute(PAGE_BINDING_ATTRIBUTE);
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 function target(document: Document, input: Record<string, unknown>): Element {
@@ -498,8 +625,10 @@ export function executeContentAction(
   operation: string,
   input: unknown,
 ): unknown {
-  if (operation === "observe") return observeDocument(document);
   const parsed = actionInput(input);
+  if (operation === "observe") {
+    return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
+  }
   const element = target(document, parsed);
   switch (operation) {
     case "click":
@@ -540,7 +669,25 @@ type ContentBrowserApi = {
 declare const browser: ContentBrowserApi | undefined;
 
 if (typeof browser !== "undefined") {
-  void browser.runtime.sendMessage({ type: "companionFrameReady" }).catch(() => undefined);
+  const reportBinding = (): void => {
+    const bindingNonce = takePageBindingMarker(document);
+    if (bindingNonce) {
+      void browser.runtime
+        .sendMessage({ type: "companionPageBinding", bindingNonce })
+        .catch(() => undefined);
+    }
+  };
+  void browser.runtime
+    .sendMessage({ type: "companionFrameReady" })
+    .then(reportBinding)
+    .catch(() => undefined);
+  const MutationObserverConstructor = document.defaultView?.MutationObserver;
+  if (MutationObserverConstructor && document.documentElement) {
+    new MutationObserverConstructor(reportBinding).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: [PAGE_BINDING_ATTRIBUTE],
+    });
+  }
   browser.runtime.onMessage.addListener((message) => {
     if (
       typeof message !== "object" ||

@@ -3,7 +3,10 @@ use std::time::Duration;
 use firefox_companion::bidi::BidiClient;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+};
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 use types::{ErrorCode, ErrorLayer};
 use url::Url;
@@ -90,7 +93,7 @@ async fn events_are_delivered_independently_of_command_responses() {
         let command = recv_json(&mut socket).await;
         send_json(
             &mut socket,
-            json!({"method": "log.entryAdded", "params": {"text": "ready"}}),
+            json!({"type": "event", "method": "log.entryAdded", "params": {"text": "ready"}}),
         )
         .await;
         send_json(
@@ -184,4 +187,152 @@ async fn disconnect_fails_pending_commands_as_retryable_driver_errors() {
     assert_eq!(error.layer, ErrorLayer::Driver);
     assert!(error.retryable);
     server.await.unwrap();
+}
+
+async fn malformed_message_error(message: Value) -> types::CommandError {
+    let (listener, url) = listener_url().await;
+    let server = tokio::spawn(async move {
+        let mut socket = server_socket(listener).await;
+        let command = recv_json(&mut socket).await;
+        let mut message = message;
+        if message.get("id") == Some(&Value::String("request".into())) {
+            message["id"] = command["id"].clone();
+        }
+        send_json(&mut socket, message).await;
+    });
+    let client = BidiClient::connect(url, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let error = client.send("session.status", json!({})).await.unwrap_err();
+    server.await.unwrap();
+    error
+}
+
+#[tokio::test]
+async fn malformed_response_and_event_envelopes_fail_the_transport() {
+    let malformed = [
+        json!({"id": "request", "result": {}}),
+        json!({"id": "request", "type": "event", "result": {}}),
+        json!({"id": "request", "type": "success"}),
+        json!({"id": "not-a-number", "type": "success", "result": {}}),
+        json!({"method": "log.entryAdded", "params": {}}),
+        json!({"type": "event", "method": "log.entryAdded"}),
+        json!({"type": "event", "method": 7, "params": {}}),
+    ];
+
+    for message in malformed {
+        let error = malformed_message_error(message).await;
+        assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+        assert_eq!(error.layer, ErrorLayer::Driver);
+        assert!(!error.retryable);
+    }
+}
+
+#[tokio::test]
+async fn repeated_aborted_sends_release_capacity_and_consume_late_responses() {
+    const ABORTED: usize = 128;
+    let (listener, url) = listener_url().await;
+    let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
+    let (release_tx, mut release_rx) = mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let mut socket = server_socket(listener).await;
+        for _ in 0..ABORTED {
+            let command = recv_json(&mut socket).await;
+            let id = command["id"].as_u64().unwrap();
+            seen_tx.send(id).unwrap();
+            release_rx.recv().await.unwrap();
+            send_json(
+                &mut socket,
+                json!({"id": id, "type": "success", "result": {"retired": true}}),
+            )
+            .await;
+        }
+        let live = recv_json(&mut socket).await;
+        send_json(
+            &mut socket,
+            json!({"id": live["id"], "type": "success", "result": {"alive": true}}),
+        )
+        .await;
+    });
+
+    let client = BidiClient::connect(url, Duration::from_secs(2))
+        .await
+        .unwrap();
+    for index in 0..ABORTED {
+        let sender = client.clone();
+        let task = tokio::spawn(async move {
+            sender
+                .send("aborted.command", json!({"index": index}))
+                .await
+        });
+        let _id = seen_rx.recv().await.unwrap();
+        task.abort();
+        let _ = task.await;
+        release_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        client.send("live.command", json!({})).await.unwrap(),
+        json!({"alive": true})
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn close_preempts_queued_effect_commands_and_is_idempotent() {
+    let (listener, url) = listener_url().await;
+    let server = tokio::spawn(async move {
+        let mut socket = server_socket(listener).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let mut effects = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    if let Ok(value) = serde_json::from_str::<Value>(text.as_str()) {
+                        if value["method"]
+                            .as_str()
+                            .is_some_and(|method| method.starts_with("effect."))
+                        {
+                            effects.push(value);
+                        }
+                    }
+                }
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Err(_) => break,
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(_))) => break,
+            }
+        }
+        effects
+    });
+
+    let client = BidiClient::connect(url, Duration::from_secs(3))
+        .await
+        .unwrap();
+    let blocker_client = client.clone();
+    let blocker = tokio::spawn(async move {
+        blocker_client
+            .send(
+                "blocker.command",
+                json!({"padding": "x".repeat(8 * 1024 * 1024)}),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    let queued = (0..8)
+        .map(|index| {
+            let sender = client.clone();
+            tokio::spawn(async move { sender.send(&format!("effect.{index}"), json!({})).await })
+        })
+        .collect::<Vec<_>>();
+    tokio::task::yield_now().await;
+
+    let _ = client.close().await;
+    let _ = client.close().await;
+    blocker.abort();
+    for task in queued {
+        task.abort();
+    }
+
+    assert!(server.await.unwrap().is_empty());
 }
