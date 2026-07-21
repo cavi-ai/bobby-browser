@@ -11,15 +11,36 @@ use companion_protocol::{
     PageBindingDiscovered, TargetDiscovery, TargetKind, PROTOCOL_VERSION,
 };
 use firefox_companion::{
-    BidiEvent, BidiTransport, CompanionExtensionObserver, FirefoxCompanionWorker,
+    required_extension_capabilities, BidiEvent, BidiTransport, CompanionExtensionObserver,
+    FirefoxCompanionWorker,
 };
 use serde_json::{json, Value};
 use tokio::{
     io::{duplex, split},
     sync::{broadcast, mpsc, oneshot, Mutex},
 };
-use types::{Evidence, InspectCommand, PageId, WorkerId};
-use worker_pool::BrowserWorker;
+use types::{
+    ClickCommand, CommandError, Evidence, InspectCommand, PageId, SessionId, TypeTextCommand,
+    WorkerId,
+};
+use worker_pool::{
+    BrowserWorker, BrowserWorkerSelector, EnginePreference, FactoryRegistration,
+    RequiredCapabilities, SelectedWorkerFactory, WorkerFactory,
+};
+
+struct StaticFirefoxFactory {
+    worker: Arc<dyn BrowserWorker>,
+}
+
+#[async_trait]
+impl WorkerFactory for StaticFirefoxFactory {
+    async fn launch(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        Ok(Arc::clone(&self.worker))
+    }
+}
 
 struct BindingBidi {
     calls: Mutex<Vec<(String, Value)>>,
@@ -49,6 +70,13 @@ impl BidiTransport for BindingBidi {
                     .send(params["expression"].as_str().unwrap().to_owned())
                     .unwrap();
                 Ok(json!({"result": {"type": "boolean", "value": true}}))
+            }
+            "script.evaluate"
+                if params["expression"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("document.querySelector(")) =>
+            {
+                Ok(json!({"result": {"type": "node", "sharedId": "native-target"}}))
             }
             "script.evaluate" => Ok(json!({"result": {"type": "boolean", "value": true}})),
             _ => Ok(json!({})),
@@ -86,7 +114,8 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
     );
     let registry = server.registry();
     let pairing_code = registry.issue_pairing_code().await;
-    let pairing = PairingInput::firefox(pairing_code.clone());
+    let mut pairing = PairingInput::firefox(pairing_code.clone());
+    pairing.capabilities.native_input = false;
     let profile_id = pairing.profile_id.clone();
     let native = NativeHostConfig::new(
         format!("ws://{}/v1/companion", server.local_addr())
@@ -144,6 +173,8 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
         .resolve_attachment(&initial_grant.attachment_id)
         .await
         .unwrap();
+    assert!(!lease.capabilities.native_input);
+    assert!(required_extension_capabilities().are_met_by(&lease.capabilities));
 
     let expected_page = PageId::new();
     let expected_page_for_extension = expected_page.clone();
@@ -272,15 +303,36 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
         Arc::clone(&server),
         Duration::from_secs(2),
     ));
-    let worker = FirefoxCompanionWorker::new(
-        WorkerId::new(),
-        PathBuf::from("/profiles/firefox"),
-        lease,
-        bidi,
-        observer,
-    )
-    .await
-    .unwrap();
+    let worker: Arc<dyn BrowserWorker> = Arc::new(
+        FirefoxCompanionWorker::new(
+            WorkerId::new(),
+            PathBuf::from("/profiles/firefox"),
+            lease,
+            bidi,
+            observer,
+        )
+        .await
+        .unwrap(),
+    );
+    let session_id = SessionId::new();
+    let selector = Arc::new(BrowserWorkerSelector::new(
+        vec![FactoryRegistration::negotiated(
+            companion_protocol::BrowserEngine::Firefox,
+            Some(profile_for_assertion.clone()),
+            Arc::new(StaticFirefoxFactory {
+                worker: Arc::clone(&worker),
+            }),
+        )],
+        RequiredCapabilities::default(),
+    ));
+    let selected = SelectedWorkerFactory::new(
+        selector,
+        EnginePreference::Exact {
+            engine: companion_protocol::BrowserEngine::Firefox,
+            profile_id: Some(profile_for_assertion.clone()),
+        },
+    );
+    let worker = selected.launch(&session_id).await.unwrap();
     worker.open_page(expected_page.clone()).await.unwrap();
     let evidence = worker
         .inspect(
@@ -300,6 +352,35 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
             if selector.as_deref() == Some("#scoped")
                 && text == "Selector scoped text"
                 && html.as_deref() == Some("<section id=\"scoped\">Selector scoped text</section>")
+    )));
+    let typed = worker
+        .type_text(
+            &expected_page,
+            &TypeTextCommand {
+                selector: "#name".into(),
+                target: None,
+                value: "Bobby".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+    let clicked = worker
+        .click(
+            &expected_page,
+            &ClickCommand {
+                selector: "#submit".into(),
+                target: None,
+                boundary: true,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(typed.iter().chain(&clicked).any(|item| matches!(
+        item,
+        Evidence::BrowserExecution { interaction_path, .. }
+            if interaction_path == "engineNative"
     )));
     worker.close().await.unwrap();
     assert_eq!(

@@ -570,7 +570,7 @@ fn lease() -> AttachmentLease {
         capabilities: CompanionCapabilities {
             observe: true,
             navigate: true,
-            native_input: true,
+            native_input: false,
             tabs: true,
             frames: true,
             native_dialogs: false,

@@ -9,7 +9,9 @@ use config::{
     AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
     FirefoxCompanionConfig,
 };
-use firefox_companion::{CompanionExtensionObserver, FirefoxCompanionFactory};
+use firefox_companion::{
+    required_extension_capabilities, CompanionExtensionObserver, FirefoxCompanionFactory,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
@@ -33,6 +35,7 @@ struct FirefoxRegistration {
 struct ConfiguredFirefoxFactory {
     config: FirefoxRuntimeConfig,
     required: RequiredCapabilities,
+    pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
     server: Mutex<Option<Arc<CompanionServerHandle>>>,
 }
 
@@ -169,6 +172,7 @@ impl ConfiguredFirefoxFactory {
             .map_err(|error| companion_error(error.to_string()))?,
         );
         let pairing_code = server.registry().issue_pairing_code().await;
+        (self.pairing_code_observer)(&pairing_code);
         let descriptor = NativeHostDescriptor {
             endpoint: format!("ws://{}/v1/companion", server.local_addr()),
             pairing_code,
@@ -354,9 +358,17 @@ fn write_descriptor_with_pending_remove(
     result
 }
 
-fn compose_worker_factory(
+pub fn compose_worker_factory(
     config: &AppConfig,
     selection: BrowserSelectionConfig,
+) -> Result<Arc<dyn WorkerFactory>> {
+    compose_worker_factory_with_pairing_observer(config, selection, Arc::new(|_| {}))
+}
+
+pub fn compose_worker_factory_with_pairing_observer(
+    config: &AppConfig,
+    selection: BrowserSelectionConfig,
+    pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<Arc<dyn WorkerFactory>> {
     let chromium_capabilities = CompanionCapabilities {
         observe: true,
@@ -372,14 +384,7 @@ fn compose_worker_factory(
         chromium_capabilities,
         Arc::new(ChromiumWorkerFactory::new(config.browser.clone())),
     )];
-    let firefox_required = RequiredCapabilities {
-        observe: true,
-        navigate: true,
-        native_input: true,
-        tabs: true,
-        frames: true,
-        native_dialogs: false,
-    };
+    let firefox_required = required_firefox_capabilities();
     let firefox = selection
         .firefox
         .into_iter()
@@ -390,6 +395,7 @@ fn compose_worker_factory(
                 factory: ConfiguredFirefoxFactory {
                     config,
                     required: firefox_required,
+                    pairing_code_observer: Arc::clone(&pairing_code_observer),
                     server: Mutex::new(None),
                 },
             })
@@ -408,6 +414,10 @@ fn compose_worker_factory(
         RequiredCapabilities::default(),
     ));
     Ok(Arc::new(SelectedWorkerFactory::new(selector, preference)))
+}
+
+pub fn required_firefox_capabilities() -> RequiredCapabilities {
+    required_extension_capabilities()
 }
 
 fn preference(config: EnginePreferenceConfig) -> Result<EnginePreference> {
@@ -433,7 +443,7 @@ fn browser_engine(value: BrowserEngineConfig) -> BrowserEngine {
     }
 }
 
-fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
+pub fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
     value
         .map(serde_json::from_str)
         .transpose()
@@ -441,8 +451,7 @@ fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
         .map_err(Into::into)
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("info")
         .json()
@@ -532,6 +541,17 @@ mod tests {
             Ok(_) => panic!("exact Firefox unexpectedly launched Chromium"),
         };
         assert_eq!(error.code, types::ErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    fn production_firefox_registration_requires_vertical_slice_capabilities() {
+        let required = required_firefox_capabilities();
+        assert!(required.observe);
+        assert!(required.navigate);
+        assert!(!required.native_input);
+        assert!(required.tabs);
+        assert!(required.frames);
+        assert!(!required.native_dialogs);
     }
 
     #[tokio::test]
@@ -681,6 +701,78 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_descriptor_publication_has_one_owner_and_never_clobbers() {
+        let path = PathBuf::from("target").join(format!(
+            "concurrent-firefox-descriptor-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let attempts = (0..2)
+            .map(|index| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let descriptor = NativeHostDescriptor {
+                        endpoint: format!("ws://127.0.0.1:{}/v1/companion", 1200 + index),
+                        pairing_code: format!("pairing-{index}"),
+                        ownership_id: uuid::Uuid::new_v4().to_string(),
+                    };
+                    barrier.wait();
+                    write_descriptor(&path, &descriptor)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .filter(|error| error.kind() == std::io::ErrorKind::AlreadyExists)
+                .count(),
+            1
+        );
+        drop(results);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_publication_never_follows_an_existing_symlink() {
+        let root = PathBuf::from("target").join(format!(
+            "symlink-firefox-descriptor-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("destination.json");
+        let target = root.join("operator.json");
+        std::fs::write(&target, b"operator-owned").unwrap();
+        std::os::unix::fs::symlink(&target, &destination).unwrap();
+        let result = write_descriptor(
+            &destination,
+            &NativeHostDescriptor {
+                endpoint: "ws://127.0.0.1:1234/v1/companion".into(),
+                pairing_code: "must-not-write".into(),
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            },
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("symlink destination was unexpectedly replaced"),
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).unwrap(), b"operator-owned");
+        std::fs::remove_file(destination).unwrap();
+        std::fs::remove_file(target).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[cfg(unix)]
