@@ -435,6 +435,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing 0.1.44",
  "types",
+ "url",
  "uuid",
 ]
 

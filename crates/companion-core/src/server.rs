@@ -1,4 +1,7 @@
-use crate::{registry::PairingCodeClaim, CompanionRegistry, PairingInput};
+use crate::{
+    registry::{ConnectionAuthentication, PairingCodeClaim},
+    CompanionRegistry, PairingInput,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -21,7 +24,11 @@ use serde::{
 use serde_json::Value;
 use std::{collections::HashSet, fmt, net::SocketAddr, sync::Arc, time::Duration};
 use thiserror::Error;
-use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const FRAME_ERROR_HEADROOM_BYTES: usize = 64 * 1024;
@@ -66,8 +73,10 @@ impl CompanionServer {
             config.pairing_code_ttl,
             config.attachment_ttl,
         ));
+        let (disconnect, _) = watch::channel(0_u64);
         let state = Arc::new(ServerState {
             registry: Arc::clone(&registry),
+            disconnect: disconnect.clone(),
         });
         let router = Router::new()
             .route("/v1/companion", get(companion_upgrade))
@@ -81,6 +90,7 @@ impl CompanionServer {
         Ok(CompanionServerHandle {
             local_addr,
             registry,
+            disconnect,
             task,
         })
     }
@@ -90,6 +100,7 @@ impl CompanionServer {
 pub struct CompanionServerHandle {
     local_addr: SocketAddr,
     registry: Arc<CompanionRegistry>,
+    disconnect: watch::Sender<u64>,
     task: JoinHandle<()>,
 }
 
@@ -100,6 +111,10 @@ impl CompanionServerHandle {
 
     pub fn registry(&self) -> Arc<CompanionRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    pub fn disconnect_clients(&self) {
+        self.disconnect.send_modify(|generation| *generation += 1);
     }
 }
 
@@ -112,6 +127,7 @@ impl Drop for CompanionServerHandle {
 #[derive(Debug)]
 struct ServerState {
     registry: Arc<CompanionRegistry>,
+    disconnect: watch::Sender<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -129,17 +145,18 @@ async fn companion_upgrade(
     let Some(pairing_code) = bearer(&headers) else {
         return unauthorized_response();
     };
-    let Ok(claim) = state.registry.claim_pairing_code(&pairing_code).await else {
+    let Ok(authentication) = state.registry.authenticate_bearer(&pairing_code).await else {
         return unauthorized_response();
     };
     let registry = Arc::clone(&state.registry);
+    let disconnect = state.disconnect.subscribe();
 
     upgrade
         // A small, bounded decoder headroom lets the application return the
         // typed 1 MiB limit error before closing the connection.
         .max_frame_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
         .max_message_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
-        .on_upgrade(move |socket| serve_socket(socket, registry, claim))
+        .on_upgrade(move |socket| serve_socket(socket, registry, authentication, disconnect))
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -172,35 +189,102 @@ fn unauthorized_response() -> Response {
 async fn serve_socket(
     socket: WebSocket,
     registry: Arc<CompanionRegistry>,
-    claim: PairingCodeClaim,
+    authentication: ConnectionAuthentication,
+    mut disconnect: watch::Receiver<u64>,
 ) {
     let (sink, mut stream) = socket.split();
     let (outbound, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let writer = tokio::spawn(write_socket(sink, receiver));
 
-    let Ok(Some(first)) =
-        tokio::time::timeout(claim.remaining(), next_request(&mut stream, &outbound)).await
-    else {
-        send_error_and_close(&outbound, "pairingRejected", "pairing was rejected").await;
-        drop(outbound);
-        let _ = writer.await;
-        return;
-    };
-    let CompanionRequest::Pair(request) = first else {
-        send_error_and_close(&outbound, "pairingRequired", "the first request must pair").await;
-        drop(outbound);
-        let _ = writer.await;
-        return;
-    };
-
-    if request.protocol_version != PROTOCOL_VERSION || request.pairing_code != claim.pairing_code()
-    {
-        send_error_and_close(&outbound, "pairingRejected", "pairing was rejected").await;
-        drop(outbound);
-        let _ = writer.await;
-        return;
+    match authentication {
+        ConnectionAuthentication::Pairing(claim) => {
+            let Some(session) = complete_pairing(&mut stream, &outbound, &registry, claim).await
+            else {
+                drop(outbound);
+                let _ = writer.await;
+                return;
+            };
+            if send_initial_paired(&outbound, &session).await.is_err() {
+                drop(outbound);
+                let _ = writer.await;
+                return;
+            }
+        }
+        ConnectionAuthentication::Reconnect(paired) => {
+            if send_event(
+                &outbound,
+                &CompanionEvent::Paired {
+                    companion_id: paired.companion_id.clone(),
+                    profile_id: paired.profile_id.clone(),
+                },
+            )
+            .await
+            .is_err()
+            {
+                drop(outbound);
+                let _ = writer.await;
+                return;
+            }
+        }
     }
 
+    loop {
+        tokio::select! {
+            changed = disconnect.changed() => {
+                if changed.is_ok() {
+                    let _ = outbound.send(Message::Close(None)).await;
+                }
+                break;
+            }
+            request = next_request(&mut stream, &outbound) => {
+                let Some(request) = request else {
+                    break;
+                };
+                match request {
+                    CompanionRequest::Ping => {
+                        if send_event(&outbound, &CompanionEvent::Pong).await.is_err() {
+                            break;
+                        }
+                    }
+                    CompanionRequest::Pair(_) | CompanionRequest::Action(_) => {
+                        send_error_and_close(
+                            &outbound,
+                            "invalidRequest",
+                            "request is not valid in the current state",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    drop(outbound);
+    let _ = writer.await;
+}
+
+async fn complete_pairing(
+    stream: &mut futures_util::stream::SplitStream<WebSocket>,
+    outbound: &mpsc::Sender<Message>,
+    registry: &CompanionRegistry,
+    claim: PairingCodeClaim,
+) -> Option<crate::PairedSession> {
+    let Ok(Some(first)) =
+        tokio::time::timeout(claim.remaining(), next_request(stream, outbound)).await
+    else {
+        send_error_and_close(outbound, "pairingRejected", "pairing was rejected").await;
+        return None;
+    };
+    let CompanionRequest::Pair(request) = first else {
+        send_error_and_close(outbound, "pairingRequired", "the first request must pair").await;
+        return None;
+    };
+    if request.protocol_version != PROTOCOL_VERSION || request.pairing_code != claim.pairing_code()
+    {
+        send_error_and_close(outbound, "pairingRejected", "pairing was rejected").await;
+        return None;
+    }
     let paired = registry
         .pair_claimed(
             claim,
@@ -213,48 +297,45 @@ async fn serve_socket(
             },
         )
         .await;
-    let Ok(paired) = paired else {
-        send_error_and_close(&outbound, "pairingRejected", "pairing was rejected").await;
-        drop(outbound);
-        let _ = writer.await;
-        return;
-    };
-    if send_event(
-        &outbound,
-        &CompanionEvent::Paired {
-            companion_id: paired.companion_id,
-            profile_id: paired.profile_id,
+    match paired {
+        Ok(paired) => Some(paired),
+        Err(_) => {
+            send_error_and_close(outbound, "pairingRejected", "pairing was rejected").await;
+            None
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InitialPairedOutput<'a> {
+    companion_id: &'a types::CompanionId,
+    profile_id: &'a types::ProfileId,
+    reconnect_credential: &'a str,
+}
+
+#[derive(Serialize)]
+struct InitialPairedEvent<'a> {
+    kind: &'static str,
+    output: InitialPairedOutput<'a>,
+}
+
+async fn send_initial_paired(
+    outbound: &mpsc::Sender<Message>,
+    session: &crate::PairedSession,
+) -> Result<(), ()> {
+    send_json(
+        outbound,
+        &InitialPairedEvent {
+            kind: "paired",
+            output: InitialPairedOutput {
+                companion_id: &session.companion.companion_id,
+                profile_id: &session.companion.profile_id,
+                reconnect_credential: session.credential.expose_secret(),
+            },
         },
     )
     .await
-    .is_err()
-    {
-        drop(outbound);
-        let _ = writer.await;
-        return;
-    }
-
-    while let Some(request) = next_request(&mut stream, &outbound).await {
-        match request {
-            CompanionRequest::Ping => {
-                if send_event(&outbound, &CompanionEvent::Pong).await.is_err() {
-                    break;
-                }
-            }
-            CompanionRequest::Pair(_) | CompanionRequest::Action(_) => {
-                send_error_and_close(
-                    &outbound,
-                    "invalidRequest",
-                    "request is not valid in the current state",
-                )
-                .await;
-                break;
-            }
-        }
-    }
-
-    drop(outbound);
-    let _ = writer.await;
 }
 
 async fn next_request(
@@ -406,6 +487,13 @@ impl<'de> Visitor<'de> for DuplicateKeyRejector {
 }
 
 async fn send_event(outbound: &mpsc::Sender<Message>, event: &CompanionEvent) -> Result<(), ()> {
+    send_json(outbound, event).await
+}
+
+async fn send_json<T>(outbound: &mpsc::Sender<Message>, event: &T) -> Result<(), ()>
+where
+    T: Serialize + ?Sized,
+{
     let body = serde_json::to_string(event).map_err(|_| ())?;
     outbound
         .send(Message::Text(body.into()))

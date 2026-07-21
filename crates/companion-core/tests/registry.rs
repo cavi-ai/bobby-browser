@@ -17,6 +17,45 @@ async fn pairing_code_is_single_use() {
 }
 
 #[tokio::test]
+async fn successful_pairing_issues_a_debug_redacted_reconnect_credential() {
+    let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::from_secs(300));
+    let code = registry.issue_pairing_code().await;
+    let session = registry
+        .pair_with_credential(PairingInput::firefox(code))
+        .await
+        .unwrap();
+    let credential = session.credential.expose_secret().to_owned();
+
+    assert!(!credential.is_empty());
+    assert!(!format!("{:?}", session.credential).contains(&credential));
+    assert_eq!(
+        registry.authenticate_credential(&credential).await.unwrap(),
+        session.companion
+    );
+
+    registry
+        .revoke(&session.companion.companion_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        registry.authenticate_credential(&credential).await,
+        Err(RegistryError::Revoked)
+    );
+}
+
+#[tokio::test]
+async fn credential_authentication_cannot_consume_an_initial_pairing_code() {
+    let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::from_secs(300));
+    let code = registry.issue_pairing_code().await;
+
+    assert_eq!(
+        registry.authenticate_credential(&code).await,
+        Err(RegistryError::CredentialInvalid)
+    );
+    registry.pair(PairingInput::firefox(code)).await.unwrap();
+}
+
+#[tokio::test]
 async fn attachment_resolves_before_expiry() {
     let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::from_secs(300));
     let code = registry.issue_pairing_code().await;

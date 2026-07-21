@@ -54,6 +54,39 @@ test("protocol version 1 action requests preserve the Rust JSON shape", () => {
   });
 });
 
+test("action request identifiers and deadlines are strictly bounded", () => {
+  const request = {
+    kind: "action",
+    input: {
+      protocolVersion: 1,
+      attachmentId: "attachment-1",
+      commandId: "command-1",
+      pageId: "page-1",
+      operation: "observe",
+      input: {},
+      deadlineUnixMs: 1_800_000_000_000,
+    },
+  };
+
+  assert.throws(
+    () =>
+      parseCompanionRequest(
+        JSON.stringify({
+          ...request,
+          input: { ...request.input, attachmentId: "a".repeat(257) },
+        }),
+      ),
+    /attachmentId.*bounded|attachmentId.*256/i,
+  );
+  assert.throws(
+    () =>
+      parseCompanionRequest(
+        JSON.stringify({ ...request, input: { ...request.input, deadlineUnixMs: -1 } }),
+      ),
+    /deadlineUnixMs.*nonnegative/i,
+  );
+});
+
 test("parseCompanionEvent rejects unknown protocol versions", () => {
   assert.throws(
     () =>
@@ -116,6 +149,7 @@ test("the background connects through the native host without receiving pairing 
   const transport = new FakeTransport();
   const background = new CompanionBackground({
     transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
     async sendTabMessage() {
       return {};
     },
@@ -176,6 +210,7 @@ test("leased page actions route only to the matching tab and frame", async () =>
   const routed: unknown[] = [];
   const background = new CompanionBackground({
     transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
     async sendTabMessage(tabId, message, frameId) {
       routed.push({ tabId, message, frameId });
       return { url: "https://example.test/", title: "Example", visibleText: "Hi", controls: [] };
@@ -202,12 +237,9 @@ test("leased page actions route only to the matching tab and frame", async () =>
       nativeDialogs: false,
     },
   });
-  background.leasePage({
-    attachmentId: "attachment-1",
-    pageId: "page-1",
-    tabId: 9,
-    frameId: 4,
-    expiresAtUnixMs: 2_000,
+  await background.receive({
+    kind: "paired",
+    output: { companionId: "companion-1", profileId: "profile-1" },
   });
 
   await background.receive(
@@ -215,9 +247,9 @@ test("leased page actions route only to the matching tab and frame", async () =>
       kind: "action",
       input: {
         protocolVersion: 1,
-        attachmentId: "attachment-1",
+        attachmentId: "attachment:companion-1:profile-1",
         commandId: "command-1",
-        pageId: "page-1",
+        pageId: "page:9:4",
         operation: "observe",
         input: {},
         deadlineUnixMs: 1_500,
@@ -250,14 +282,16 @@ test("leased page actions route only to the matching tab and frame", async () =>
 test("expired page leases cannot route commands", async () => {
   const transport = new FakeTransport();
   let routed = false;
+  let now = 1_000;
   const background = new CompanionBackground({
     transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
     async sendTabMessage() {
       routed = true;
       return {};
     },
     async navigateTab() {},
-    now: () => 2_001,
+    now: () => now,
   });
   background.connect({
     companionId: "companion-1",
@@ -278,25 +312,23 @@ test("expired page leases cannot route commands", async () => {
       nativeDialogs: false,
     },
   });
-  background.leasePage({
-    attachmentId: "attachment-1",
-    pageId: "page-1",
-    tabId: 9,
-    frameId: 4,
-    expiresAtUnixMs: 2_000,
+  await background.receive({
+    kind: "paired",
+    output: { companionId: "companion-1", profileId: "profile-1" },
   });
+  now = 61_001;
 
   await background.receive(
     JSON.stringify({
       kind: "action",
       input: {
         protocolVersion: 1,
-        attachmentId: "attachment-1",
+        attachmentId: "attachment:companion-1:profile-1",
         commandId: "command-1",
-        pageId: "page-1",
+        pageId: "page:9:4",
         operation: "observe",
         input: {},
-        deadlineUnixMs: 3_000,
+        deadlineUnixMs: 120_000,
       },
     }),
   );

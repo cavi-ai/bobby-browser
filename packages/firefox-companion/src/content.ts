@@ -1,6 +1,14 @@
+import { MAX_COMPANION_PAYLOAD_BYTES } from "./protocol.js";
+
 export const MAX_VISIBLE_TEXT_LENGTH = 64 * 1024;
 export const MAX_CONTROL_COUNT = 512;
-const MAX_CONTROL_FIELD_LENGTH = 2 * 1024;
+export const MAX_CONTROL_FIELD_LENGTH = 256;
+export const MAX_SELECTOR_LENGTH = 512;
+export const MAX_OBSERVATION_BYTES = MAX_COMPANION_PAYLOAD_BYTES - 64 * 1024;
+const MAX_URL_LENGTH = 2 * 1024;
+const MAX_TITLE_LENGTH = 1024;
+const MAX_ROLE_LENGTH = 64;
+const REDACTED = "[redacted]";
 
 export type PageObservation = {
   url: string;
@@ -28,11 +36,57 @@ const CONTROL_SELECTOR = [
 
 const SENSITIVE_MARKER =
   /(?:authorization|auth(?:entication)?|bearer|token|secret|password|passwd|api[-_]?key|credential)/i;
-const SECRET_VALUE = /^(?:bearer|basic)\s+\S+$/i;
+const SECRET_VALUE = /(?:^|\s)(?:bearer|basic)\s+\S+/i;
+const textEncoder = new TextEncoder();
 
-function bounded(value: string | null | undefined, maximum = MAX_CONTROL_FIELD_LENGTH): string | undefined {
-  const normalized = value?.replace(/\s+/g, " ").trim();
-  return normalized ? normalized.slice(0, maximum) : undefined;
+function byteLength(value: string): number {
+  return textEncoder.encode(value).byteLength;
+}
+
+function boundedUtf8(value: string, maximum: number): string {
+  if (byteLength(value) <= maximum) return value;
+  let low = 0;
+  let high = Math.min(value.length, maximum);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (byteLength(value.slice(0, middle)) <= maximum) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low);
+}
+
+function containsSensitiveMaterial(value: string): boolean {
+  return SENSITIVE_MARKER.test(value) || SECRET_VALUE.test(value);
+}
+
+function observationString(
+  value: string | null | undefined,
+  maximum = MAX_CONTROL_FIELD_LENGTH,
+): string | undefined {
+  const normalized = value?.slice(0, maximum * 8).replace(/\s+/g, " ").trim();
+  if (!normalized) return undefined;
+  if (containsSensitiveMaterial(normalized)) {
+    return byteLength(REDACTED) <= maximum ? REDACTED : undefined;
+  }
+  return boundedUtf8(normalized, maximum);
+}
+
+function observationUrl(value: string): string {
+  try {
+    const url = new URL(value.slice(0, MAX_URL_LENGTH * 8));
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    let path = url.pathname;
+    try {
+      path = decodeURIComponent(path);
+    } catch {}
+    if (containsSensitiveMaterial(path)) url.pathname = "/";
+    return observationString(url.href, MAX_URL_LENGTH) ?? "";
+  } catch {
+    return observationString(value, MAX_URL_LENGTH) ?? "";
+  }
 }
 
 function isElementHidden(element: Element): boolean {
@@ -48,10 +102,25 @@ function isElementHidden(element: Element): boolean {
   return false;
 }
 
+function isSensitiveTextContext(element: Element): boolean {
+  const control = element.closest(CONTROL_SELECTOR);
+  if (control && isSensitiveControl(control)) return true;
+  const label = element.closest("label");
+  if (!label) return false;
+  const labelled = label.getAttribute("for");
+  if (labelled) {
+    const target = label.ownerDocument.getElementById(labelled);
+    if (target && isSensitiveControl(target)) return true;
+  }
+  const nested = label.querySelector("input,select,textarea");
+  return nested ? isSensitiveControl(nested) : false;
+}
+
 function visibleText(document: Document): string {
   const root = document.body;
   if (!root) return "";
-  const texts: string[] = [];
+  let output = "";
+  let outputBytes = 0;
   const walker = document.createTreeWalker(root, 4);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const parent = node.parentElement;
@@ -62,10 +131,20 @@ function visibleText(document: Document): string {
     ) {
       continue;
     }
-    const text = bounded(node.nodeValue, MAX_VISIBLE_TEXT_LENGTH);
-    if (text) texts.push(text);
+    const separatorBytes = output ? 1 : 0;
+    const remaining = MAX_VISIBLE_TEXT_LENGTH - outputBytes - separatorBytes;
+    if (remaining <= 0) break;
+    const text = isSensitiveTextContext(parent)
+      ? byteLength(REDACTED) <= remaining
+        ? REDACTED
+        : undefined
+      : observationString(node.nodeValue, remaining);
+    if (text) {
+      output += `${output ? " " : ""}${text}`;
+      outputBytes += separatorBytes + byteLength(text);
+    }
   }
-  return texts.join(" ").replace(/\s+/g, " ").trim().slice(0, MAX_VISIBLE_TEXT_LENGTH);
+  return output;
 }
 
 function cssString(value: string): string {
@@ -84,8 +163,9 @@ function safeStableAttribute(element: Element): { name: string; value: string } 
     if (
       value &&
       !SENSITIVE_MARKER.test(name) &&
-      !SENSITIVE_MARKER.test(value) &&
-      !SECRET_VALUE.test(value)
+      !containsSensitiveMaterial(value) &&
+      byteLength(value) <= MAX_SELECTOR_LENGTH &&
+      byteLength(`[${name}="${cssString(value)}"]`) <= MAX_SELECTOR_LENGTH
     ) {
       return { name, value };
     }
@@ -93,34 +173,62 @@ function safeStableAttribute(element: Element): { name: string; value: string } 
   return undefined;
 }
 
-function cssPath(element: Element): string {
+function cssPath(element: Element, allowStableMetadata = true): string {
   const id = element.getAttribute("id");
-  if (id && !SECRET_VALUE.test(id)) return `#${cssIdentifier(id)}`;
-  const stable = safeStableAttribute(element);
+  if (
+    allowStableMetadata &&
+    id &&
+    byteLength(id) <= MAX_SELECTOR_LENGTH &&
+    !containsSensitiveMaterial(id)
+  ) {
+    const selector = `#${cssIdentifier(id)}`;
+    if (byteLength(selector) <= MAX_SELECTOR_LENGTH) return selector;
+  }
+  const stable = allowStableMetadata ? safeStableAttribute(element) : undefined;
   if (stable) return `[${stable.name}="${cssString(stable.value)}"]`;
 
   const parts: string[] = [];
   for (let current: Element | null = element; current && parts.length < 8; current = current.parentElement) {
     const tag = current.tagName.toLowerCase();
-    const parent = current.parentElement;
+    const parent: HTMLElement | null = current.parentElement;
     if (!parent) {
       parts.unshift(tag);
       break;
     }
-    const peers = Array.from(parent.children).filter((child) => child.tagName === current?.tagName);
-    const position = peers.indexOf(current) + 1;
-    parts.unshift(peers.length > 1 ? `${tag}:nth-of-type(${position})` : tag);
+    let peerCount = 0;
+    let position = 0;
+    for (let childIndex = 0; childIndex < parent.children.length; childIndex += 1) {
+      const child: Element | null = parent.children.item(childIndex);
+      if (!child) continue;
+      if (child.tagName !== current.tagName) continue;
+      peerCount += 1;
+      if (child === current) position = peerCount;
+    }
+    parts.unshift(peerCount > 1 ? `${tag}:nth-of-type(${position})` : tag);
     const parentId = parent.getAttribute("id");
-    if (parentId && !SECRET_VALUE.test(parentId)) {
-      parts.unshift(`#${cssIdentifier(parentId)}`);
-      break;
+    if (
+      allowStableMetadata &&
+      parentId &&
+      byteLength(parentId) <= MAX_SELECTOR_LENGTH &&
+      !containsSensitiveMaterial(parentId)
+    ) {
+      const parentSelector = `#${cssIdentifier(parentId)}`;
+      const candidate = [parentSelector, ...parts].join(" > ");
+      if (byteLength(candidate) <= MAX_SELECTOR_LENGTH) {
+        parts.unshift(parentSelector);
+        break;
+      }
     }
   }
-  return parts.join(" > ").slice(0, MAX_CONTROL_FIELD_LENGTH);
+  const path = parts.join(" > ");
+  if (byteLength(path) <= MAX_SELECTOR_LENGTH) return path;
+  return parts.at(-1) ?? element.tagName.toLowerCase();
 }
 
-function implicitRole(element: Element): string | undefined {
-  const explicit = bounded(element.getAttribute("role"));
+function implicitRole(element: Element, allowExplicit = true): string | undefined {
+  const explicit = allowExplicit
+    ? observationString(element.getAttribute("role"), MAX_ROLE_LENGTH)
+    : undefined;
   if (explicit) return explicit;
   const tag = element.tagName.toLowerCase();
   if (tag === "button") return "button";
@@ -140,37 +248,68 @@ function implicitRole(element: Element): string | undefined {
 }
 
 function labelledByText(element: Element): string | undefined {
-  const ids = element.getAttribute("aria-labelledby")?.trim().split(/\s+/) ?? [];
-  return bounded(
-    ids
-      .map((id) => element.ownerDocument.getElementById(id)?.textContent ?? "")
-      .filter(Boolean)
-      .join(" "),
-  );
+  const reference = element.getAttribute("aria-labelledby")?.slice(0, MAX_CONTROL_FIELD_LENGTH * 8);
+  if (!reference) return undefined;
+  if (containsSensitiveMaterial(reference)) return REDACTED;
+  let output = "";
+  let outputBytes = 0;
+  for (const id of reference.trim().split(/\s+/, 16)) {
+    const separatorBytes = output ? 1 : 0;
+    const remaining = MAX_CONTROL_FIELD_LENGTH - outputBytes - separatorBytes;
+    if (remaining <= 0) break;
+    const referenced = element.ownerDocument.getElementById(id);
+    const text = referenced ? boundedElementText(referenced, remaining) : undefined;
+    if (!text) continue;
+    output += `${output ? " " : ""}${text}`;
+    outputBytes += separatorBytes + byteLength(text);
+  }
+  return observationString(output);
 }
 
 function labelText(element: Element): string | undefined {
   const id = element.getAttribute("id");
-  if (id) {
-    const labels = Array.from(element.ownerDocument.querySelectorAll("label")).filter(
-      (label) => label.getAttribute("for") === id,
-    );
-    const label = bounded(labels.map((item) => item.textContent ?? "").join(" "));
-    if (label) return label;
+  if (id && byteLength(id) <= MAX_SELECTOR_LENGTH) {
+    try {
+      const label = element.ownerDocument.querySelector(`label[for="${cssString(id)}"]`);
+      const text = label ? boundedElementText(label) : undefined;
+      if (text) return text;
+    } catch {}
   }
-  return bounded(element.closest("label")?.textContent);
+  const closest = element.closest("label");
+  return closest ? boundedElementText(closest) : undefined;
+}
+
+function boundedElementText(
+  element: Element,
+  maximum = MAX_CONTROL_FIELD_LENGTH,
+): string | undefined {
+  let output = "";
+  let outputBytes = 0;
+  const walker = element.ownerDocument.createTreeWalker(element, 4);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parent = node.parentElement;
+    if (!parent || isElementHidden(parent)) continue;
+    const separatorBytes = output ? 1 : 0;
+    const remaining = maximum - outputBytes - separatorBytes;
+    if (remaining <= 0) break;
+    const text = observationString(node.nodeValue, remaining);
+    if (!text) continue;
+    output += `${output ? " " : ""}${text}`;
+    outputBytes += separatorBytes + byteLength(text);
+  }
+  return output || undefined;
 }
 
 function accessibleName(element: Element, label: string | undefined): string | undefined {
   return (
-    bounded(element.getAttribute("aria-label")) ??
+    observationString(element.getAttribute("aria-label")) ??
     labelledByText(element) ??
     label ??
-    bounded(element.getAttribute("alt")) ??
-    bounded(element.getAttribute("title")) ??
-    bounded(element.textContent) ??
+    observationString(element.getAttribute("alt")) ??
+    observationString(element.getAttribute("title")) ??
+    boundedElementText(element) ??
     (element.tagName === "INPUT" && !isSensitiveControl(element)
-      ? bounded(element.getAttribute("value"))
+      ? observationString(element.getAttribute("value"))
       : undefined)
   );
 }
@@ -182,42 +321,61 @@ function isSensitiveControl(element: Element): boolean {
   ) {
     return true;
   }
-  return Array.from(element.attributes).some(
-    ({ name, value }) =>
-      SENSITIVE_MARKER.test(name) || SENSITIVE_MARKER.test(value) || SECRET_VALUE.test(value),
-  );
+  if (element.attributes.length > 128) return true;
+  for (const attribute of element.attributes) {
+    const value = attribute.value.slice(0, MAX_CONTROL_FIELD_LENGTH * 8);
+    if (
+      SENSITIVE_MARKER.test(attribute.name) ||
+      SENSITIVE_MARKER.test(value) ||
+      SECRET_VALUE.test(value)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function controlValue(element: Element): string | undefined {
   if (!["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) return undefined;
-  if (isSensitiveControl(element)) return "[redacted]";
+  if (isSensitiveControl(element)) return REDACTED;
   const value = (element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value;
-  return bounded(value);
+  return observationString(value);
 }
 
 export function observeDocument(document: Document): PageObservation {
-  const controls = Array.from(document.querySelectorAll(CONTROL_SELECTOR))
-    .filter((element) => !isElementHidden(element))
-    .slice(0, MAX_CONTROL_COUNT)
-    .map((element) => {
-      const label = labelText(element);
-      return {
-        cssPath: cssPath(element),
-        role: implicitRole(element),
-        name: accessibleName(element, label),
-        label,
-        value: controlValue(element),
-        disabled:
-          element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
-      };
-    });
-
-  return {
-    url: document.URL,
-    title: bounded(document.title) ?? "",
+  const observation: PageObservation = {
+    url: observationUrl(document.URL),
+    title: observationString(document.title, MAX_TITLE_LENGTH) ?? "",
     visibleText: visibleText(document),
-    controls,
+    controls: [],
   };
+  let serializedBytes = byteLength(JSON.stringify(observation));
+  const root = document.body;
+  if (!root) return observation;
+  const walker = document.createTreeWalker(root, 1);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (observation.controls.length >= MAX_CONTROL_COUNT) break;
+    const element = node as Element;
+    if (!element.matches(CONTROL_SELECTOR) || isElementHidden(element)) continue;
+    const sensitive = isSensitiveControl(element);
+    const observedLabel = labelText(element);
+    const observedName = accessibleName(element, observedLabel);
+    const label = sensitive && observedLabel ? REDACTED : observedLabel;
+    const control = {
+      cssPath: cssPath(element, !sensitive),
+      role: implicitRole(element, !sensitive),
+      name: sensitive && observedName ? REDACTED : observedName,
+      label,
+      value: controlValue(element),
+      disabled:
+        element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
+    };
+    const controlBytes = byteLength(JSON.stringify(control)) + (observation.controls.length ? 1 : 0);
+    if (serializedBytes + controlBytes > MAX_OBSERVATION_BYTES) break;
+    observation.controls.push(control);
+    serializedBytes += controlBytes;
+  }
+  return observation;
 }
 
 function actionInput(input: unknown): Record<string, unknown> {
@@ -228,7 +386,11 @@ function actionInput(input: unknown): Record<string, unknown> {
 }
 
 function target(document: Document, input: Record<string, unknown>): Element {
-  if (typeof input.cssPath !== "string" || input.cssPath.length === 0 || input.cssPath.length > 2048) {
+  if (
+    typeof input.cssPath !== "string" ||
+    input.cssPath.length === 0 ||
+    byteLength(input.cssPath) > MAX_SELECTOR_LENGTH
+  ) {
     throw new Error("content action requires a bounded cssPath");
   }
   let element: Element | null;
@@ -278,6 +440,7 @@ export function executeContentAction(
 
 type ContentBrowserApi = {
   runtime: {
+    sendMessage(message: unknown): Promise<unknown>;
     onMessage: {
       addListener(listener: (message: unknown) => unknown): void;
     };
@@ -287,6 +450,7 @@ type ContentBrowserApi = {
 declare const browser: ContentBrowserApi | undefined;
 
 if (typeof browser !== "undefined") {
+  void browser.runtime.sendMessage({ type: "companionFrameReady" }).catch(() => undefined);
   browser.runtime.onMessage.addListener((message) => {
     if (
       typeof message !== "object" ||

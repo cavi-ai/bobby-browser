@@ -5,6 +5,8 @@ import {
   parseCompanionRequest,
   type BrowserIdentity,
   type CompanionCapabilities,
+  type CompanionEvent,
+  type CompanionRequest,
 } from "./protocol.js";
 
 export const NATIVE_HOST_NAME = "com.bobby_browser.companion";
@@ -36,7 +38,18 @@ export type NativeTransportDependencies = {
   connectNative(hostName: string): NativePort;
   scheduleReconnect?: (callback: () => void, delayMs: number) => unknown;
   cancelReconnect?: (handle: unknown) => void;
+  onListenerError?: (error: unknown) => void;
 };
+
+export type NativeInboundMessage =
+  | Exclude<CompanionRequest, { kind: "pair" }>
+  | Extract<CompanionEvent, { kind: "paired" }>;
+
+const MAX_NATIVE_METADATA_BYTES = 256;
+const FORBIDDEN_SECRET_FIELD =
+  /(?:pairing[_-]?code|bearer|authorization|endpoint|credential|password|passwd|api[-_]?key|token|secret)/i;
+const SECRET_VALUE = /(?:^|\s)(?:bearer|basic)\s+\S+/i;
+const PRIVATE_SECRET_VALUE = /private[-_ ]?(?:token|secret|key)/i;
 
 function encodeBounded(message: unknown): string {
   let encoded: string;
@@ -58,52 +71,149 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
+}
+
+function boundedString(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    new TextEncoder().encode(value).byteLength <= MAX_NATIVE_METADATA_BYTES
+  );
+}
+
+function isBrowserIdentity(value: unknown): value is BrowserIdentity {
+  if (!isObject(value) || !exactKeys(value, ["engine", "browserName", "browserVersion", "os", "profileLabel"])) {
+    return false;
+  }
+  return (
+    (["firefox", "chromium", "webKit"] as unknown[]).includes(value.engine) &&
+    boundedString(value.browserName) &&
+    boundedString(value.browserVersion) &&
+    boundedString(value.os) &&
+    boundedString(value.profileLabel)
+  );
+}
+
+function isCapabilities(value: unknown): value is CompanionCapabilities {
+  if (
+    !isObject(value) ||
+    !exactKeys(value, ["observe", "navigate", "nativeInput", "tabs", "frames", "nativeDialogs"])
+  ) {
+    return false;
+  }
+  return Object.values(value).every((item) => typeof item === "boolean");
+}
+
+function assertSafeUrl(value: string): void {
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(value)) return;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("extension channel contains an invalid URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("extension channel contains endpoint or URL secret material");
+  }
+  for (const [name, item] of url.searchParams) {
+    if (FORBIDDEN_SECRET_FIELD.test(name) || SECRET_VALUE.test(item) || PRIVATE_SECRET_VALUE.test(item)) {
+      throw new Error("extension channel contains endpoint or URL secret material");
+    }
+  }
+  if (SECRET_VALUE.test(url.pathname) || PRIVATE_SECRET_VALUE.test(url.pathname + url.hash)) {
+    throw new Error("extension channel contains endpoint or URL secret material");
+  }
+}
+
+function assertExtensionSafe(
+  value: unknown,
+  depth = 0,
+  budget: { nodes: number } = { nodes: 20_000 },
+): void {
+  budget.nodes -= 1;
+  if (budget.nodes < 0 || depth > 32) {
+    throw new Error("extension channel message nesting exceeds the safety limit");
+  }
+  if (typeof value === "string") {
+    if (SECRET_VALUE.test(value) || PRIVATE_SECRET_VALUE.test(value)) {
+      throw new Error("extension channel contains secret material");
+    }
+    assertSafeUrl(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertExtensionSafe(item, depth + 1, budget);
+    return;
+  }
+  if (!isObject(value)) return;
+  for (const [name, item] of Object.entries(value)) {
+    if (FORBIDDEN_SECRET_FIELD.test(name)) {
+      throw new Error("extension channel contains a forbidden secret field");
+    }
+    assertExtensionSafe(item, depth + 1, budget);
+  }
+}
+
 function isNativePairRequest(message: unknown): message is NativePairRequest {
   if (!isObject(message) || message.kind !== "pair" || !isObject(message.input)) {
     return false;
   }
   const input = message.input;
   return (
-    Object.keys(message).sort().join(",") === "input,kind" &&
-    Object.keys(input).sort().join(",") ===
-      "capabilities,companionId,identity,profileId,protocolVersion" &&
+    exactKeys(message, ["kind", "input"]) &&
+    exactKeys(input, ["protocolVersion", "companionId", "profileId", "identity", "capabilities"]) &&
     input.protocolVersion === PROTOCOL_VERSION &&
-    typeof input.companionId === "string" &&
-    input.companionId.length > 0 &&
-    typeof input.profileId === "string" &&
-    input.profileId.length > 0 &&
-    isObject(input.identity) &&
-    isObject(input.capabilities) &&
-    !("pairingCode" in input)
+    boundedString(input.companionId) &&
+    boundedString(input.profileId) &&
+    isBrowserIdentity(input.identity) &&
+    isCapabilities(input.capabilities)
   );
 }
 
 function validateOutbound(message: unknown): void {
   const encoded = encodeBounded(message);
+  assertExtensionSafe(message);
   if (isNativePairRequest(message)) return;
   try {
-    parseCompanionRequest(encoded);
-    return;
+    const event = parseCompanionEvent(encoded);
+    if (event.kind !== "paired") return;
   } catch {}
-  try {
-    parseCompanionEvent(encoded);
-    return;
-  } catch {}
-  throw new Error("native message is not a valid protocol v1 message");
+  throw new Error("native message is invalid for the outbound extension direction");
 }
 
-function validateInbound(message: unknown): unknown | undefined {
-  let encoded: string;
-  try {
-    encoded = encodeBounded(message);
-  } catch {
-    return undefined;
+export function parseNativeInboundMessage(message: unknown): NativeInboundMessage {
+  const encoded = typeof message === "string" ? message : encodeBounded(message);
+  if (new TextEncoder().encode(encoded).byteLength > MAX_NATIVE_MESSAGE_BYTES) {
+    throw new Error("native message exceeds the 1 MiB limit");
   }
+  let decoded: unknown;
   try {
-    return parseCompanionRequest(encoded);
+    decoded = typeof message === "string" ? (JSON.parse(message) as unknown) : message;
+  } catch {
+    throw new Error("native message is not valid JSON");
+  }
+  assertExtensionSafe(decoded);
+  try {
+    const request = parseCompanionRequest(encoded);
+    if (request.kind !== "pair") return request;
   } catch {}
   try {
-    return parseCompanionEvent(encoded);
+    const event = parseCompanionEvent(encoded);
+    if (event.kind === "paired") return event;
+  } catch {}
+  throw new Error("native message is invalid for the inbound native direction");
+}
+
+function validateInbound(message: unknown): NativeInboundMessage | undefined {
+  try {
+    return parseNativeInboundMessage(message);
   } catch {
     return undefined;
   }
@@ -156,7 +266,14 @@ export class NativeCompanionTransport {
       port.onMessage.addListener((message) => {
         if (port !== this.#port) return;
         const validated = validateInbound(message);
-        if (validated !== undefined) void this.#listener?.(validated);
+        if (validated === undefined || !this.#listener) return;
+        try {
+          void Promise.resolve(this.#listener(validated)).catch((error: unknown) => {
+            this.#dependencies.onListenerError?.(error);
+          });
+        } catch (error) {
+          this.#dependencies.onListenerError?.(error);
+        }
       });
       port.onDisconnect.addListener(() => {
         if (port !== this.#port) return;
