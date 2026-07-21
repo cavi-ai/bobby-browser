@@ -36,6 +36,19 @@ async fn attachment_resolves_before_expiry() {
 }
 
 #[tokio::test]
+async fn expired_attachment_is_rejected() {
+    let registry = CompanionRegistry::new(Duration::from_secs(60), Duration::ZERO);
+    let code = registry.issue_pairing_code().await;
+    let paired = registry.pair(PairingInput::firefox(code)).await.unwrap();
+    let lease = registry.attach(paired.profile_id).await.unwrap();
+
+    assert_eq!(
+        registry.resolve_attachment(&lease.attachment_id).await,
+        Err(RegistryError::AttachmentExpired)
+    );
+}
+
+#[tokio::test]
 async fn expired_pairing_code_is_rejected() {
     let registry = CompanionRegistry::new(Duration::ZERO, Duration::from_secs(300));
     let code = registry.issue_pairing_code().await;
