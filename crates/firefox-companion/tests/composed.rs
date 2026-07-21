@@ -74,7 +74,7 @@ fn binding_nonce(expression: &str) -> String {
 }
 
 #[tokio::test]
-async fn real_server_binding_and_concrete_observer_share_the_coordinator_page_id() {
+async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() {
     let server = Arc::new(
         CompanionServer::bind_loopback(CompanionServerConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -150,13 +150,13 @@ async fn real_server_binding_and_concrete_observer_share_the_coordinator_page_id
     let profile_for_assertion = profile_id.clone();
     let (marker_tx, mut marker_rx) = mpsc::unbounded_channel();
     let (events, _) = broadcast::channel(8);
-    let destroyed_events = events.clone();
     let (reduced_tx, reduced_rx) = oneshot::channel();
     let bidi = Arc::new(BindingBidi {
         calls: Mutex::new(Vec::new()),
         marker: marker_tx,
         events,
     });
+    let bidi_for_assertion = Arc::clone(&bidi);
     let extension_task = tokio::spawn(async move {
         let nonce = binding_nonce(&marker_rx.recv().await.unwrap());
         write_native_message(
@@ -301,12 +301,17 @@ async fn real_server_binding_and_concrete_observer_share_the_coordinator_page_id
                 && text == "Selector scoped text"
                 && html.as_deref() == Some("<section id=\"scoped\">Selector scoped text</section>")
     )));
-    destroyed_events
-        .send(BidiEvent {
-            method: "browsingContext.contextDestroyed".into(),
-            params: json!({"context": "bidi-context-created"}),
-        })
-        .unwrap();
+    worker.close().await.unwrap();
+    assert_eq!(
+        bidi_for_assertion
+            .calls
+            .lock()
+            .await
+            .iter()
+            .filter(|(method, _)| method == "browsingContext.close")
+            .count(),
+        1
+    );
     reduced_rx.await.unwrap();
     let active = server.active_grant(&profile_for_assertion).await.unwrap();
     assert!(!active

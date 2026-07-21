@@ -93,6 +93,31 @@ async function grant(
   });
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((completion) => {
+    resolve = completion;
+  });
+  return { promise, resolve };
+}
+
+function discoveredTargetIds(transport: FakeTransport): string[] {
+  const discoveries = transport.sent.filter(
+    (message): message is {
+      kind: "targetsDiscovered";
+      output: { targets: Array<{ targetId: string }> };
+    } =>
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "targetsDiscovered",
+  );
+  return discoveries.at(-1)?.output.targets.map((target) => target.targetId).sort() ?? [];
+}
+
 test("discovery is not a grant and only an explicit UUID grant can route", async () => {
   const transport = new FakeTransport();
   const routed: unknown[] = [];
@@ -407,6 +432,111 @@ test("lease capacity is bounded and leases expire", async () => {
     ).length,
     2,
   );
+});
+
+test("tab removal invalidates an older asynchronous frame snapshot", async () => {
+  const transport = new FakeTransport();
+  const snapshots: Array<ReturnType<typeof deferred<readonly DiscoveredTarget[]>>> = [];
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 21, frameId: 0 }],
+    discoverTabTargets: async () => {
+      const snapshot = deferred<readonly DiscoveredTarget[]>();
+      snapshots.push(snapshot);
+      return snapshot.promise;
+    },
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const stale = background.reconcileTab(21);
+  background.receiveTabRemoved(21);
+  const pendingSnapshot = snapshots.at(0);
+  assert.ok(pendingSnapshot);
+  pendingSnapshot.resolve([
+    { tabId: 21, frameId: 0 },
+    { tabId: 21, frameId: 4 },
+  ]);
+  await stale;
+
+  assert.deepEqual(discoveredTargetIds(transport), []);
+});
+
+test("the newest overlapping navigation reconciliation wins regardless of resolution order", async () => {
+  const transport = new FakeTransport();
+  const snapshots: Array<ReturnType<typeof deferred<readonly DiscoveredTarget[]>>> = [];
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 22, frameId: 0 }],
+    discoverTabTargets: async () => {
+      const snapshot = deferred<readonly DiscoveredTarget[]>();
+      snapshots.push(snapshot);
+      return snapshot.promise;
+    },
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const older = background.reconcileTab(22);
+  const newer = background.reconcileTab(22);
+  const newerSnapshot = snapshots.at(1);
+  assert.ok(newerSnapshot);
+  newerSnapshot.resolve([
+    { tabId: 22, frameId: 0 },
+    { tabId: 22, frameId: 8 },
+  ]);
+  await newer;
+  const olderSnapshot = snapshots.at(0);
+  assert.ok(olderSnapshot);
+  olderSnapshot.resolve([
+    { tabId: 22, frameId: 0 },
+    { tabId: 22, frameId: 7 },
+  ]);
+  await older;
+
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(22, 0), targetId(22, 8)]);
+});
+
+test("a trusted tab update invalidates an older asynchronous frame snapshot", async () => {
+  const transport = new FakeTransport();
+  const snapshot = deferred<readonly DiscoveredTarget[]>();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    discoverTabTargets: async () => snapshot.promise,
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const stale = background.reconcileTab(23);
+  const nonce = "b5f6319a-6b36-43cb-9464-d337fc9d8201";
+  background.receiveTabUpdate(
+    23,
+    { title: `automation-runtime-binding:${nonce}` },
+    { id: 23, url: "about:blank", title: `automation-runtime-binding:${nonce}` },
+  );
+  snapshot.resolve([
+    { tabId: 23, frameId: 0 },
+    { tabId: 23, frameId: 9 },
+  ]);
+  await stale;
+
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(23, 0)]);
 });
 
 class ListenerSet<T extends (...arguments_: never[]) => unknown> {

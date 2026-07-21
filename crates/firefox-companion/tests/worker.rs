@@ -45,6 +45,7 @@ struct FakeBidi {
 struct BlockedSend {
     method: &'static str,
     expression_contains: Option<&'static str>,
+    matches_to_skip: usize,
     started: Arc<Notify>,
     release: Arc<Notify>,
 }
@@ -75,11 +76,22 @@ impl FakeBidi {
         method: &'static str,
         expression_contains: Option<&'static str>,
     ) -> BlockControl {
+        self.block_after_matches(method, expression_contains, 0)
+            .await
+    }
+
+    async fn block_after_matches(
+        &self,
+        method: &'static str,
+        expression_contains: Option<&'static str>,
+        matches_to_skip: usize,
+    ) -> BlockControl {
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         *self.blocked.lock().await = Some(BlockedSend {
             method,
             expression_contains,
+            matches_to_skip,
             started: Arc::clone(&started),
             release: Arc::clone(&release),
         });
@@ -140,7 +152,22 @@ impl BidiTransport for FakeBidi {
                             .is_some_and(|expression| expression.contains(needle))
                     })
             });
-            matches.then(|| blocked.take().expect("matching blocked send exists"))
+            if !matches {
+                None
+            } else if blocked
+                .as_ref()
+                .expect("matching blocked send exists")
+                .matches_to_skip
+                > 0
+            {
+                blocked
+                    .as_mut()
+                    .expect("matching blocked send exists")
+                    .matches_to_skip -= 1;
+                None
+            } else {
+                blocked.take()
+            }
         };
         if let Some(blocked) = blocked {
             blocked.started.notify_one();
@@ -312,6 +339,19 @@ struct BlockingOnceObserver {
     releases: Arc<AtomicUsize>,
 }
 
+struct BlockingCleanupObserver {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    releases: Arc<AtomicUsize>,
+}
+
+struct HangingFirstReleaseObserver {
+    first_page: Mutex<Option<PageId>>,
+    attempts: Arc<AtomicUsize>,
+    successful_releases: Arc<AtomicUsize>,
+    timeout: Duration,
+}
+
 #[async_trait]
 impl ExtensionObserver for BlockingObserver {
     async fn begin_page_binding(
@@ -381,6 +421,83 @@ impl ExtensionObserver for BlockingOnceObserver {
     ) -> Result<(), CommandError> {
         self.releases.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ExtensionObserver for BlockingCleanupObserver {
+    async fn begin_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        Ok(Box::new(FakePageBinding {
+            nonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201".into(),
+        }))
+    }
+
+    async fn observe(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        Ok(observation())
+    }
+
+    async fn release_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<(), CommandError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ExtensionObserver for HangingFirstReleaseObserver {
+    fn operation_timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    async fn begin_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        page_id: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        let mut first_page = self.first_page.lock().await;
+        if first_page.is_none() {
+            *first_page = Some(page_id.clone());
+        }
+        Ok(Box::new(FakePageBinding {
+            nonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201".into(),
+        }))
+    }
+
+    async fn observe(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        Ok(observation())
+    }
+
+    async fn release_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        page_id: &PageId,
+    ) -> Result<(), CommandError> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self.first_page.lock().await.as_ref() == Some(page_id) {
+            std::future::pending().await
+        } else {
+            self.successful_releases.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 }
 
@@ -816,6 +933,105 @@ async fn aborting_open_page_command_during_navigation_cleans_owned_page_and_capa
     );
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CleanupAbortStage {
+    RestoreTitle,
+    CloseContext,
+    ReleaseBinding,
+}
+
+#[tokio::test]
+async fn cancelling_error_rollback_at_each_cleanup_await_restarts_the_same_cleanup() {
+    for stage in [
+        CleanupAbortStage::RestoreTitle,
+        CleanupAbortStage::CloseContext,
+        CleanupAbortStage::ReleaseBinding,
+    ] {
+        let primary = CommandError {
+            code: ErrorCode::DeadlineExceeded,
+            message: "navigation failed before rollback".into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        };
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": format!("cleanup-{stage:?}")})),
+            Err(primary),
+        ]);
+        let transport_block = match stage {
+            CleanupAbortStage::RestoreTitle => Some(
+                bidi.block_after_matches("script.evaluate", Some("Original tab title"), 1)
+                    .await,
+            ),
+            CleanupAbortStage::CloseContext => {
+                Some(bidi.block_once("browsingContext.close", None).await)
+            }
+            CleanupAbortStage::ReleaseBinding => None,
+        };
+        let release_started = Arc::new(Notify::new());
+        let release_gate = Arc::new(Notify::new());
+        let releases = Arc::new(AtomicUsize::new(0));
+        let observer: Arc<dyn ExtensionObserver> = match stage {
+            CleanupAbortStage::ReleaseBinding => Arc::new(BlockingCleanupObserver {
+                started: Arc::clone(&release_started),
+                release: Arc::clone(&release_gate),
+                releases: Arc::clone(&releases),
+            }),
+            _ => FakeObserver::with_release_counter(observation(), Arc::clone(&releases)),
+        };
+        let worker = Arc::new(
+            FirefoxCompanionWorker::new(
+                WorkerId::new(),
+                PathBuf::from("/profiles/firefox"),
+                lease(),
+                bidi.clone(),
+                observer,
+            )
+            .await
+            .unwrap(),
+        );
+        let opening_worker = Arc::clone(&worker);
+        let rollback = tokio::spawn(async move {
+            opening_worker
+                .open_page_command(&OpenPageCommand {
+                    url: Some("https://example.test/fail-before-cleanup".into()),
+                })
+                .await
+        });
+
+        match stage {
+            CleanupAbortStage::ReleaseBinding => release_started.notified().await,
+            _ => {
+                transport_block
+                    .as_ref()
+                    .expect("transport cleanup block exists")
+                    .started
+                    .notified()
+                    .await
+            }
+        }
+        rollback.abort();
+        let _ = rollback.await;
+        match stage {
+            CleanupAbortStage::ReleaseBinding => release_gate.notify_one(),
+            _ => transport_block
+                .as_ref()
+                .expect("transport cleanup block exists")
+                .release
+                .notify_one(),
+        }
+
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while releases.load(Ordering::SeqCst) != 1
+                || bidi.closed_titles().await != vec!["Original tab title"]
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{stage:?} cancellation abandoned rollback ownership"));
+    }
+}
+
 #[tokio::test]
 async fn open_page_and_navigate_map_to_bidi_context_commands() {
     let bidi = FakeBidi::new(vec![
@@ -1132,6 +1348,83 @@ async fn closed_and_destroyed_contexts_are_removed_from_the_page_map() {
 }
 
 #[tokio::test]
+async fn worker_close_cleans_ready_pages_once_and_prevents_reopening() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-close-one"})),
+        Ok(json!({"context": "context-close-two"})),
+    ]);
+    let releases = Arc::new(AtomicUsize::new(0));
+    let observer = FakeObserver::with_release_counter(observation(), Arc::clone(&releases));
+    let worker = worker(bidi.clone(), observer).await;
+    worker.open_page(PageId::new()).await.unwrap();
+    worker.open_page(PageId::new()).await.unwrap();
+
+    worker.close().await.unwrap();
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "browsingContext.close")
+            .count(),
+        2
+    );
+    assert_eq!(releases.load(Ordering::SeqCst), 2);
+    let error = worker
+        .open_page(PageId::new())
+        .await
+        .expect_err("a closed worker must not create another context");
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+
+    worker.close().await.unwrap();
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "browsingContext.close")
+            .count(),
+        2
+    );
+    assert_eq!(releases.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn worker_close_and_in_flight_open_converge_on_one_cleanup() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-opening-at-close"}))]);
+    let marker = bidi
+        .block_once("script.evaluate", Some("automation-runtime-binding:"))
+        .await;
+    let releases = Arc::new(AtomicUsize::new(0));
+    let observer = FakeObserver::with_release_counter(observation(), Arc::clone(&releases));
+    let worker = Arc::new(worker(bidi.clone(), observer).await);
+    let opening_worker = Arc::clone(&worker);
+    let opening = tokio::spawn(async move { opening_worker.open_page(PageId::new()).await });
+    marker.started.notified().await;
+
+    worker.close().await.unwrap();
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "browsingContext.close")
+            .count(),
+        1
+    );
+    marker.release.notify_one();
+    assert!(opening.await.unwrap().is_err());
+    tokio::task::yield_now().await;
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "browsingContext.close")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-stale"})),
@@ -1217,6 +1510,60 @@ async fn failed_async_binding_release_retries_boundedly_and_fails_the_worker_clo
         .expect_err("cleanup failure must fail the worker closed");
     assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
     assert!(error.message.contains("coordinator release failed"));
+}
+
+#[tokio::test]
+async fn hung_binding_release_times_out_each_attempt_and_does_not_stall_later_cleanup() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-hung-release"})),
+        Ok(json!({"context": "context-later-release"})),
+    ]);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let successful_releases = Arc::new(AtomicUsize::new(0));
+    let observer = Arc::new(HangingFirstReleaseObserver {
+        first_page: Mutex::new(None),
+        attempts: Arc::clone(&attempts),
+        successful_releases: Arc::clone(&successful_releases),
+        timeout: Duration::from_millis(10),
+    });
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        bidi.clone(),
+        observer,
+    )
+    .await
+    .unwrap();
+    let hung_page = PageId::new();
+    let later_page = PageId::new();
+    worker.open_page(hung_page.clone()).await.unwrap();
+    worker.open_page(later_page.clone()).await.unwrap();
+
+    bidi.emit(
+        "browsingContext.contextDestroyed",
+        json!({"context": "context-hung-release"}),
+    );
+    bidi.emit(
+        "browsingContext.contextDestroyed",
+        json!({"context": "context-later-release"}),
+    );
+
+    tokio::time::timeout(Duration::from_millis(200), async {
+        while successful_releases.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a hung release must not stall the next lifecycle event");
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    let error = worker
+        .open_page(PageId::new())
+        .await
+        .expect_err("exhausted release deadlines must fail the worker closed");
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(error.message.contains("3 attempts"));
+    assert!(error.message.contains("timed out"));
 }
 
 #[tokio::test]
