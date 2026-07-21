@@ -116,6 +116,15 @@ impl CompanionRegistry {
         code
     }
 
+    pub(crate) async fn pairing_code_is_active(&self, code: &str) -> bool {
+        self.state
+            .read()
+            .await
+            .pairing_codes
+            .get(code)
+            .is_some_and(|expires_at| Instant::now() < *expires_at)
+    }
+
     pub async fn pair(&self, input: PairingInput) -> Result<PairedCompanion, RegistryError> {
         let mut state = self.state.write().await;
         let expires_at = state
