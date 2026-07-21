@@ -39,6 +39,7 @@ struct FakeBidi {
     tree: Mutex<Value>,
     titles: Mutex<HashMap<String, String>>,
     closed_titles: Mutex<Vec<String>>,
+    transport_closes: AtomicUsize,
     events: broadcast::Sender<BidiEvent>,
 }
 
@@ -67,6 +68,7 @@ impl FakeBidi {
             tree: Mutex::new(json!({"contexts": []})),
             titles: Mutex::new(HashMap::new()),
             closed_titles: Mutex::new(Vec::new()),
+            transport_closes: AtomicUsize::new(0),
             events,
         })
     }
@@ -120,6 +122,10 @@ impl FakeBidi {
 
     async fn closed_titles(&self) -> Vec<String> {
         self.closed_titles.lock().await.clone()
+    }
+
+    fn transport_close_count(&self) -> usize {
+        self.transport_closes.load(Ordering::SeqCst)
     }
 
     fn emit(&self, method: &str, params: Value) {
@@ -244,6 +250,7 @@ impl BidiTransport for FakeBidi {
     }
 
     async fn close(&self) -> Result<(), CommandError> {
+        self.transport_closes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -735,6 +742,45 @@ async fn context_destroyed_while_binding_cannot_be_exposed_as_ready() {
             .code,
         ErrorCode::NotFound
     );
+}
+
+#[tokio::test]
+async fn destruction_after_ready_but_before_exposure_fails_open_and_finishes_cleanup() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-destroyed-before-exposure"})),
+        Ok(json!({"url": "https://example.test/final"})),
+    ]);
+    let navigation = bidi.block_once("browsingContext.navigate", None).await;
+    let releases = Arc::new(AtomicUsize::new(0));
+    let observer = FakeObserver::with_release_counter(observation(), Arc::clone(&releases));
+    let worker = Arc::new(worker(bidi.clone(), observer).await);
+    let opening_worker = Arc::clone(&worker);
+    let opening = tokio::spawn(async move {
+        opening_worker
+            .open_page_command(&OpenPageCommand {
+                url: Some("https://example.test/final".into()),
+            })
+            .await
+    });
+
+    navigation.started.notified().await;
+    bidi.emit(
+        "browsingContext.contextDestroyed",
+        json!({"context": "context-destroyed-before-exposure"}),
+    );
+    wait_for_release_count(&releases, 1).await;
+    navigation.release.notify_one();
+
+    let error = opening
+        .await
+        .unwrap()
+        .expect_err("a page destroyed before exposure commit must never be returned");
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(bidi.calls().await.iter().any(|call| {
+        call.method == "browsingContext.close"
+            && call.params["context"] == "context-destroyed-before-exposure"
+    }));
+    assert_eq!(bidi.closed_titles().await, vec!["Original tab title"]);
 }
 
 #[tokio::test]
@@ -1422,6 +1468,48 @@ async fn worker_close_and_in_flight_open_converge_on_one_cleanup() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn cancelled_close_waiter_and_worker_drop_do_not_cancel_owned_shutdown() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-owned-close-one"})),
+        Ok(json!({"context": "context-owned-close-two"})),
+    ]);
+    let first_close = bidi.block_once("browsingContext.close", None).await;
+    let releases = Arc::new(AtomicUsize::new(0));
+    let observer = FakeObserver::with_release_counter(observation(), Arc::clone(&releases));
+    let worker = Arc::new(worker(bidi.clone(), observer).await);
+    worker.open_page(PageId::new()).await.unwrap();
+    worker.open_page(PageId::new()).await.unwrap();
+
+    let close_worker = Arc::clone(&worker);
+    let close_waiter = tokio::spawn(async move { close_worker.close().await });
+    first_close.started.notified().await;
+    close_waiter.abort();
+    let _ = close_waiter.await;
+    drop(worker);
+    first_close.release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let closed_contexts = bidi
+                .calls()
+                .await
+                .iter()
+                .filter(|call| call.method == "browsingContext.close")
+                .count();
+            if closed_contexts == 2
+                && releases.load(Ordering::SeqCst) == 2
+                && bidi.transport_close_count() == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned shutdown must outlive its cancelled waiter and dropped worker");
 }
 
 #[tokio::test]
