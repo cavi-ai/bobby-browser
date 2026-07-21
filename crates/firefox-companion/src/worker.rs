@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as TaskMutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as TaskMutex,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -36,7 +39,6 @@ const MAX_SELECTOR_BYTES: usize = 512;
 const MAX_CONTROL_FIELD_BYTES: usize = 256;
 const MAX_URL_BYTES: usize = 2 * 1024;
 const MAX_TITLE_BYTES: usize = 1024;
-const PAGE_BINDING_ATTRIBUTE: &str = "data-automation-runtime-binding";
 const PAGE_BINDING_TITLE_PREFIX: &str = "automation-runtime-binding:";
 pub const MAX_TRACKED_PAGES: usize = 256;
 
@@ -87,6 +89,12 @@ pub trait ExtensionObserver: Send + Sync {
         page_id: &PageId,
         command: &InspectCommand,
     ) -> Result<ExtensionObservation, CommandError>;
+
+    async fn release_page_binding(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+    ) -> Result<(), CommandError>;
 }
 
 struct CompanionPageBinding {
@@ -217,6 +225,17 @@ impl ExtensionObserver for CompanionExtensionObserver {
             )),
         }
     }
+
+    async fn release_page_binding(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+    ) -> Result<(), CommandError> {
+        self.server
+            .release_page_binding(&lease.attachment_id, page_id)
+            .await
+            .map_err(session_error)
+    }
 }
 
 pub struct FirefoxCompanionFactory {
@@ -268,7 +287,7 @@ impl WorkerFactory for FirefoxCompanionFactory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PageContext {
     Opening(Option<String>),
-    Ready(String),
+    Ready { context: String, title: String },
 }
 
 pub struct FirefoxCompanionWorker {
@@ -279,6 +298,171 @@ pub struct FirefoxCompanionWorker {
     observer: Arc<dyn ExtensionObserver>,
     pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
     cleanup_task: TaskMutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+struct PageOpenResources {
+    lease: AttachmentLease,
+    transport: Arc<dyn BidiTransport>,
+    observer: Arc<dyn ExtensionObserver>,
+    pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
+}
+
+struct CallerCancellation {
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl CallerCancellation {
+    fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            cancelled,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CallerCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+struct OpenPageCleanup {
+    resources: PageOpenResources,
+    page_id: PageId,
+    context: Option<String>,
+    original_title: Option<String>,
+    binding_started: bool,
+}
+
+impl OpenPageCleanup {
+    async fn run(self) -> Vec<String> {
+        let mut failures = Vec::new();
+        if let Some(context) = self.context.as_deref() {
+            if let Some(title) = self.original_title.as_deref() {
+                if let Err(error) =
+                    restore_context_title(&self.resources.transport, context, title).await
+                {
+                    failures.push(format!(
+                        "restoring the original page title: {}",
+                        error.message
+                    ));
+                }
+            }
+            if let Err(error) = self
+                .resources
+                .transport
+                .send("browsingContext.close", json!({"context": context}))
+                .await
+            {
+                failures.push(format!("closing the Firefox context: {}", error.message));
+            }
+        }
+        remove_page_mapping(
+            &self.resources.pages,
+            &self.page_id,
+            self.context.as_deref(),
+        )
+        .await;
+        if self.binding_started {
+            if let Err(error) = self
+                .resources
+                .observer
+                .release_page_binding(&self.resources.lease, &self.page_id)
+                .await
+            {
+                failures.push(format!(
+                    "releasing the companion page binding: {}",
+                    error.message
+                ));
+            }
+        }
+        failures
+    }
+}
+
+struct OpenPageGuard {
+    cleanup: Option<OpenPageCleanup>,
+}
+
+impl OpenPageGuard {
+    fn new(resources: PageOpenResources, page_id: PageId) -> Self {
+        Self {
+            cleanup: Some(OpenPageCleanup {
+                resources,
+                page_id,
+                context: None,
+                original_title: None,
+                binding_started: false,
+            }),
+        }
+    }
+
+    fn binding_started(&mut self) {
+        self.cleanup
+            .as_mut()
+            .expect("open-page cleanup is armed")
+            .binding_started = true;
+    }
+
+    fn context_created(&mut self, context: String) {
+        self.cleanup
+            .as_mut()
+            .expect("open-page cleanup is armed")
+            .context = Some(context);
+    }
+
+    fn title_captured(&mut self, title: String) {
+        self.cleanup
+            .as_mut()
+            .expect("open-page cleanup is armed")
+            .original_title = Some(title);
+    }
+
+    async fn fail(mut self, mut primary: CommandError) -> CommandError {
+        if let Some(cleanup) = self.cleanup.take() {
+            let failures = cleanup.run().await;
+            if !failures.is_empty() {
+                primary.message = format!(
+                    "{}; cleanup failed while {}",
+                    primary.message,
+                    failures.join("; ")
+                );
+            }
+        }
+        primary
+    }
+
+    fn disarm(mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl Drop for OpenPageGuard {
+    fn drop(&mut self) {
+        let Some(cleanup) = self.cleanup.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            let _ = cleanup.run().await;
+        });
+    }
+}
+
+struct PageOpenOperation {
+    resources: PageOpenResources,
+    page_id: PageId,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl FirefoxCompanionWorker {
@@ -297,12 +481,19 @@ impl FirefoxCompanionWorker {
                 false,
             )
         })?;
-        transport
+        let subscription = transport
             .send(
                 "session.subscribe",
                 json!({"events": ["browsingContext.contextDestroyed"]}),
             )
             .await?;
+        if !subscription.is_object() {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox BiDi session.subscribe result was not an object",
+                false,
+            ));
+        }
         let pages = Arc::new(RwLock::new(HashMap::<PageId, PageContext>::new()));
         let cleanup_pages = Arc::clone(&pages);
         let cleanup_transport = Arc::clone(&transport);
@@ -316,8 +507,8 @@ impl FirefoxCompanionWorker {
                                 .await
                                 .retain(|_, mapped| match mapped {
                                     PageContext::Opening(None) => false,
-                                    PageContext::Opening(Some(value))
-                                    | PageContext::Ready(value) => value != context,
+                                    PageContext::Opening(Some(value)) => value != context,
+                                    PageContext::Ready { context: value, .. } => value != context,
                                 });
                         }
                     }
@@ -350,7 +541,19 @@ impl FirefoxCompanionWorker {
             .await
             .get(page_id)
             .and_then(|context| match context {
-                PageContext::Ready(context) => Some(context.clone()),
+                PageContext::Ready { context, .. } => Some(context.clone()),
+                PageContext::Opening(_) => None,
+            })
+            .ok_or_else(page_missing)
+    }
+
+    async fn page_title(&self, page_id: &PageId) -> Result<String, CommandError> {
+        self.pages
+            .read()
+            .await
+            .get(page_id)
+            .and_then(|context| match context {
+                PageContext::Ready { title, .. } => Some(title.clone()),
                 PageContext::Opening(_) => None,
             })
             .ok_or_else(page_missing)
@@ -392,38 +595,8 @@ impl FirefoxCompanionWorker {
         Ok(())
     }
 
-    async fn record_opening_context(
-        &self,
-        page_id: &PageId,
-        context: &str,
-    ) -> Result<(), CommandError> {
-        let mut pages = self.pages.write().await;
-        if pages.get(page_id) != Some(&PageContext::Opening(None)) {
-            return Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "page creation was invalidated before Firefox returned its context",
-                true,
-            ));
-        }
-        pages.insert(
-            page_id.clone(),
-            PageContext::Opening(Some(context.to_owned())),
-        );
-        Ok(())
-    }
-
     async fn remove_page(&self, page_id: &PageId, context: Option<&str>) {
-        let mut pages = self.pages.write().await;
-        let remove = match (pages.get(page_id), context) {
-            (Some(PageContext::Opening(None)), None) => true,
-            (Some(PageContext::Opening(None)), Some(_)) => true,
-            (Some(PageContext::Opening(Some(mapped))), Some(context)) => mapped == context,
-            (Some(PageContext::Ready(mapped)), Some(context)) => mapped == context,
-            _ => false,
-        };
-        if remove {
-            pages.remove(page_id);
-        }
+        remove_page_mapping(&self.pages, page_id, context).await;
     }
 
     async fn rollback_context(
@@ -437,66 +610,23 @@ impl FirefoxCompanionWorker {
             .send("browsingContext.close", json!({"context": context}))
             .await;
         self.remove_page(page_id, Some(context)).await;
+        let release = self
+            .observer
+            .release_page_binding(&self.lease, page_id)
+            .await;
         if let Err(cleanup) = cleanup {
             primary.message = format!(
                 "{}; cleanup failed while closing Firefox context: {}",
                 primary.message, cleanup.message
             );
         }
-        primary
-    }
-
-    async fn mark_context_binding(
-        &self,
-        context: &str,
-        binding_nonce: &str,
-    ) -> Result<(), CommandError> {
-        let attribute = serde_json::to_string(PAGE_BINDING_ATTRIBUTE).map_err(|error| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                format!("failed to encode page-binding attribute: {error}"),
-                false,
-            )
-        })?;
-        let nonce = serde_json::to_string(binding_nonce).map_err(|error| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                format!("failed to encode page-binding nonce: {error}"),
-                false,
-            )
-        })?;
-        let title = serde_json::to_string(&format!("{PAGE_BINDING_TITLE_PREFIX}{binding_nonce}"))
-            .map_err(|error| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                format!("failed to encode page-binding title: {error}"),
-                false,
-            )
-        })?;
-        let response = self
-            .transport
-            .send(
-                "script.evaluate",
-                json!({
-                    "expression": format!(
-                        "(()=>{{const root=document.documentElement;if(!root)return false;document.title={title};root.setAttribute({attribute},{nonce});return true;}})()"
-                    ),
-                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                    "awaitPromise": false,
-                    "resultOwnership": "none",
-                }),
-            )
-            .await?;
-        if response.pointer("/result/value").and_then(Value::as_bool) != Some(true)
-            && response.get("value").and_then(Value::as_bool) != Some(true)
-        {
-            return Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox BiDi could not mark the new context for companion binding",
-                false,
-            ));
+        if let Err(release) = release {
+            primary.message = format!(
+                "{}; cleanup failed while releasing companion page binding: {}",
+                primary.message, release.message
+            );
         }
-        Ok(())
+        primary
     }
 
     async fn resolve_element(&self, context: &str, selector: &str) -> Result<String, CommandError> {
@@ -553,6 +683,292 @@ impl FirefoxCompanionWorker {
     }
 }
 
+impl PageOpenOperation {
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn run(self) -> Result<OpenPageGuard, CommandError> {
+        let mut guard = OpenPageGuard::new(self.resources.clone(), self.page_id.clone());
+        if self.cancelled() {
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+
+        let binding = match self
+            .resources
+            .observer
+            .begin_page_binding(&self.resources.lease, &self.page_id)
+            .await
+        {
+            Ok(binding) => binding,
+            Err(error) => return Err(guard.fail(error).await),
+        };
+        guard.binding_started();
+        if self.cancelled() {
+            drop(binding);
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+
+        let response = match self
+            .resources
+            .transport
+            .send("browsingContext.create", json!({"type": "tab"}))
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return Err(guard.fail(error).await),
+        };
+        let context = match response
+            .get("context")
+            .and_then(Value::as_str)
+            .filter(|context| !context.is_empty())
+        {
+            Some(context) => context.to_owned(),
+            None => {
+                return Err(guard
+                    .fail(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox BiDi did not return a browsing context",
+                        false,
+                    ))
+                    .await);
+            }
+        };
+        guard.context_created(context.clone());
+        if self.cancelled() {
+            drop(binding);
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+        if let Err(error) =
+            record_opening_context(&self.resources.pages, &self.page_id, &context).await
+        {
+            drop(binding);
+            return Err(guard.fail(error).await);
+        }
+        if self.cancelled() {
+            drop(binding);
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+
+        let original_title = match capture_context_title(&self.resources.transport, &context).await
+        {
+            Ok(title) => title,
+            Err(error) => {
+                drop(binding);
+                return Err(guard.fail(error).await);
+            }
+        };
+        guard.title_captured(original_title.clone());
+        if self.cancelled() {
+            drop(binding);
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+        if let Err(error) =
+            set_context_binding_title(&self.resources.transport, &context, binding.nonce()).await
+        {
+            drop(binding);
+            return Err(guard.fail(error).await);
+        }
+        if self.cancelled() {
+            drop(binding);
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+        if let Err(error) = binding.complete().await {
+            return Err(guard.fail(error).await);
+        }
+        if self.cancelled() {
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+        if let Err(error) =
+            restore_context_title(&self.resources.transport, &context, &original_title).await
+        {
+            return Err(guard.fail(error).await);
+        }
+        if self.cancelled() {
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+
+        let mut pages = self.resources.pages.write().await;
+        if self.cancelled() {
+            drop(pages);
+            return Err(guard.fail(open_cancelled_error()).await);
+        }
+        if pages.get(&self.page_id) != Some(&PageContext::Opening(Some(context.clone()))) {
+            drop(pages);
+            return Err(guard
+                .fail(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "page binding was invalidated before context activation",
+                    true,
+                ))
+                .await);
+        }
+        pages.insert(
+            self.page_id,
+            PageContext::Ready {
+                context,
+                title: original_title,
+            },
+        );
+        Ok(guard)
+    }
+}
+
+async fn capture_context_title(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+) -> Result<String, CommandError> {
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": "document.title",
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    response
+        .pointer("/result/value")
+        .or_else(|| response.get("value"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox BiDi did not return the original page title",
+                false,
+            )
+        })
+}
+
+async fn set_context_binding_title(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    binding_nonce: &str,
+) -> Result<(), CommandError> {
+    let marker = serde_json::to_string(&format!("{PAGE_BINDING_TITLE_PREFIX}{binding_nonce}"))
+        .map_err(|error| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("failed to encode page-binding title: {error}"),
+                false,
+            )
+        })?;
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": format!(
+                    "(()=>{{document.title={marker};return document.title==={marker};}})()"
+                ),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    require_remote_true(
+        &response,
+        "Firefox BiDi could not mark the new context for companion binding",
+    )
+}
+
+async fn restore_context_title(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    original_title: &str,
+) -> Result<(), CommandError> {
+    let title = serde_json::to_string(original_title).map_err(|error| {
+        driver_error(
+            ErrorCode::BrowserCommandFailed,
+            format!("failed to encode the original page title: {error}"),
+            false,
+        )
+    })?;
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": format!(
+                    "(()=>{{document.title={title};return document.title==={title};}})()"
+                ),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    require_remote_true(
+        &response,
+        "Firefox BiDi could not restore the original page title",
+    )
+}
+
+fn require_remote_true(response: &Value, message: &'static str) -> Result<(), CommandError> {
+    if response.pointer("/result/value").and_then(Value::as_bool) == Some(true)
+        || response.get("value").and_then(Value::as_bool) == Some(true)
+    {
+        return Ok(());
+    }
+    Err(driver_error(
+        ErrorCode::BrowserCommandFailed,
+        message,
+        false,
+    ))
+}
+
+async fn record_opening_context(
+    pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
+    page_id: &PageId,
+    context: &str,
+) -> Result<(), CommandError> {
+    let mut pages = pages.write().await;
+    if pages.get(page_id) != Some(&PageContext::Opening(None)) {
+        return Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "page creation was invalidated before Firefox returned its context",
+            true,
+        ));
+    }
+    pages.insert(
+        page_id.clone(),
+        PageContext::Opening(Some(context.to_owned())),
+    );
+    Ok(())
+}
+
+async fn remove_page_mapping(
+    pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
+    page_id: &PageId,
+    context: Option<&str>,
+) {
+    let mut pages = pages.write().await;
+    let remove = match (pages.get(page_id), context) {
+        (Some(PageContext::Opening(None)), None | Some(_)) => true,
+        (Some(PageContext::Opening(Some(mapped))), Some(context)) => mapped == context,
+        (
+            Some(PageContext::Ready {
+                context: mapped, ..
+            }),
+            Some(context),
+        ) => mapped == context,
+        _ => false,
+    };
+    if remove {
+        pages.remove(page_id);
+    }
+}
+
+fn open_cancelled_error() -> CommandError {
+    driver_error(
+        ErrorCode::BrowserCommandFailed,
+        "Firefox page opening was cancelled",
+        true,
+    )
+}
+
 #[async_trait]
 impl BrowserWorker for FirefoxCompanionWorker {
     fn worker_id(&self) -> WorkerId {
@@ -569,64 +985,36 @@ impl BrowserWorker for FirefoxCompanionWorker {
             return Err(capability_error("tab creation"));
         }
         self.reserve_page(&page_id).await?;
-        let binding = match self
-            .observer
-            .begin_page_binding(&self.lease, &page_id)
-            .await
-        {
-            Ok(binding) => binding,
-            Err(error) => {
-                self.remove_page(&page_id, None).await;
-                return Err(error);
-            }
+        let resources = PageOpenResources {
+            lease: self.lease.clone(),
+            transport: Arc::clone(&self.transport),
+            observer: Arc::clone(&self.observer),
+            pages: Arc::clone(&self.pages),
         };
-        let response = match self
-            .transport
-            .send("browsingContext.create", json!({"type": "tab"}))
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                self.remove_page(&page_id, None).await;
-                return Err(error);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut caller_cancellation = CallerCancellation::new(Arc::clone(&cancelled));
+        let operation = tokio::spawn(
+            PageOpenOperation {
+                resources,
+                page_id,
+                cancelled,
             }
-        };
-        let context = match response
-            .get("context")
-            .and_then(Value::as_str)
-            .filter(|context| !context.is_empty())
-        {
-            Some(context) => context.to_owned(),
-            None => {
-                self.remove_page(&page_id, None).await;
-                return Err(driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "Firefox BiDi did not return a browsing context",
-                    false,
-                ));
+            .run(),
+        );
+        let result = match operation.await {
+            Ok(Ok(guard)) => {
+                guard.disarm();
+                Ok(())
             }
-        };
-        if let Err(error) = self.record_opening_context(&page_id, &context).await {
-            return Err(self.rollback_context(&page_id, &context, error).await);
-        }
-        if let Err(error) = self.mark_context_binding(&context, binding.nonce()).await {
-            return Err(self.rollback_context(&page_id, &context, error).await);
-        }
-        if let Err(error) = binding.complete().await {
-            return Err(self.rollback_context(&page_id, &context, error).await);
-        }
-        let mut pages = self.pages.write().await;
-        if pages.get(&page_id) != Some(&PageContext::Opening(Some(context.clone()))) {
-            drop(pages);
-            let error = driver_error(
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(driver_error(
                 ErrorCode::BrowserCommandFailed,
-                "page binding was invalidated before context activation",
+                format!("Firefox page-opening task failed: {error}"),
                 true,
-            );
-            return Err(self.rollback_context(&page_id, &context, error).await);
-        }
-        pages.insert(page_id, PageContext::Ready(context));
-        Ok(())
+            )),
+        };
+        caller_cancellation.disarm();
+        result
     }
 
     async fn navigate(
@@ -811,7 +1199,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 })
                 .unwrap_or_else(|| (url.clone(), String::new()))
         } else {
-            ("about:blank".into(), String::new())
+            ("about:blank".into(), self.page_title(&page_id).await?)
         };
         Ok(vec![
             Evidence::Page {
@@ -832,9 +1220,16 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .send("browsingContext.close", json!({"context": context.clone()}))
             .await?;
         let mut pages = self.pages.write().await;
-        if pages.get(&command.page_id) == Some(&PageContext::Ready(context)) {
+        if matches!(
+            pages.get(&command.page_id),
+            Some(PageContext::Ready { context: mapped, .. }) if mapped == &context
+        ) {
             pages.remove(&command.page_id);
         }
+        drop(pages);
+        self.observer
+            .release_page_binding(&self.lease, &command.page_id)
+            .await?;
         Ok(vec![self.evidence(InteractionPath::EngineNative)])
     }
 
@@ -876,7 +1271,9 @@ async fn reconcile_contexts(
     };
     pages.write().await.retain(|_, mapped| match mapped {
         PageContext::Opening(None) => false,
-        PageContext::Opening(Some(context)) | PageContext::Ready(context) => live.contains(context),
+        PageContext::Opening(Some(context)) | PageContext::Ready { context, .. } => {
+            live.contains(context)
+        }
     });
 }
 

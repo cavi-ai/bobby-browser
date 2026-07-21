@@ -11,12 +11,106 @@ export const MAX_CONTROL_FIELD_LENGTH = 256;
 export const MAX_SELECTOR_LENGTH = 512;
 export const MAX_OBSERVATION_BYTES = MAX_COMPANION_PAYLOAD_BYTES - 64 * 1024;
 export const MAX_SANITIZED_HTML_LENGTH = 128 * 1024;
-export const PAGE_BINDING_ATTRIBUTE = "data-automation-runtime-binding";
 const MAX_URL_LENGTH = 2 * 1024;
 const MAX_TITLE_LENGTH = 1024;
 const MAX_ROLE_LENGTH = 64;
 const REDACTED = "[redacted]";
 const MAX_ANCESTOR_VISITS = 256;
+const SAFE_BOOLEAN_HTML_ATTRIBUTES = new Set([
+  "checked",
+  "disabled",
+  "hidden",
+  "multiple",
+  "open",
+  "readonly",
+  "required",
+  "selected",
+]);
+const SAFE_INPUT_TYPES = new Set([
+  "button",
+  "checkbox",
+  "color",
+  "date",
+  "datetime-local",
+  "email",
+  "file",
+  "hidden",
+  "image",
+  "month",
+  "number",
+  "password",
+  "radio",
+  "range",
+  "reset",
+  "search",
+  "submit",
+  "tel",
+  "text",
+  "time",
+  "url",
+  "week",
+]);
+const SAFE_ROLES = new Set([
+  "alert",
+  "article",
+  "banner",
+  "button",
+  "cell",
+  "checkbox",
+  "columnheader",
+  "combobox",
+  "complementary",
+  "contentinfo",
+  "dialog",
+  "document",
+  "form",
+  "grid",
+  "gridcell",
+  "group",
+  "heading",
+  "link",
+  "list",
+  "listbox",
+  "listitem",
+  "main",
+  "menu",
+  "menuitem",
+  "navigation",
+  "option",
+  "progressbar",
+  "radio",
+  "radiogroup",
+  "region",
+  "row",
+  "rowgroup",
+  "rowheader",
+  "search",
+  "slider",
+  "spinbutton",
+  "status",
+  "switch",
+  "tab",
+  "table",
+  "tablist",
+  "tabpanel",
+  "textbox",
+  "toolbar",
+  "tooltip",
+  "tree",
+  "treeitem",
+]);
+const SAFE_ARIA_BOOLEAN_ATTRIBUTES = new Set([
+  "aria-busy",
+  "aria-disabled",
+  "aria-expanded",
+  "aria-hidden",
+  "aria-multiline",
+  "aria-multiselectable",
+  "aria-pressed",
+  "aria-readonly",
+  "aria-required",
+  "aria-selected",
+]);
 
 type WorkBudget = { remaining: number };
 
@@ -396,6 +490,31 @@ function controlValue(element: Element, sensitive = isSensitiveControl(element))
   return observationString(value);
 }
 
+function safeStructuralAttribute(name: string, value: string): string | undefined {
+  const normalizedName = name.toLowerCase();
+  const normalizedValue = value.trim().toLowerCase();
+  if (SAFE_BOOLEAN_HTML_ATTRIBUTES.has(normalizedName)) return "";
+  if (normalizedName === "type" && SAFE_INPUT_TYPES.has(normalizedValue)) return normalizedValue;
+  if (normalizedName === "role" && SAFE_ROLES.has(normalizedValue)) return normalizedValue;
+  if (
+    SAFE_ARIA_BOOLEAN_ATTRIBUTES.has(normalizedName) &&
+    ["true", "false", "mixed"].includes(normalizedValue)
+  ) {
+    return normalizedValue;
+  }
+  if (normalizedName === "aria-checked" && ["true", "false", "mixed"].includes(normalizedValue)) {
+    return normalizedValue;
+  }
+  if (normalizedName === "scope" && ["row", "col", "rowgroup", "colgroup"].includes(normalizedValue)) {
+    return normalizedValue;
+  }
+  if (["colspan", "rowspan"].includes(normalizedName) && /^\d{1,3}$/.test(normalizedValue)) {
+    const span = Number(normalizedValue);
+    if (span >= 1 && span <= 100) return String(span);
+  }
+  return undefined;
+}
+
 function sanitizedHtml(root: Element): string {
   const clone = root.cloneNode(true) as Element;
   for (const blocked of clone.querySelectorAll("script,style,template,noscript")) blocked.remove();
@@ -405,20 +524,11 @@ function sanitizedHtml(root: Element): string {
   for (const element of elements) {
     const sensitive = isSensitiveControl(element);
     for (const attribute of [...element.attributes]) {
-      const name = attribute.name.toLowerCase();
-      if (
-        name.startsWith("on") ||
-        name === "style" ||
-        containsSensitiveMaterial(name) ||
-        containsSensitiveMaterial(attribute.value)
-      ) {
+      const safe = safeStructuralAttribute(attribute.name, attribute.value);
+      if (safe === undefined) {
         element.removeAttribute(attribute.name);
-        continue;
-      }
-      if (["href", "src", "action", "formaction"].includes(name)) {
-        const safe = observationUrl(attribute.value);
-        if (safe) element.setAttribute(attribute.name, safe);
-        else element.removeAttribute(attribute.name);
+      } else {
+        element.setAttribute(attribute.name.toLowerCase(), safe);
       }
     }
     if (["INPUT", "SELECT", "TEXTAREA", "OPTION"].includes(element.tagName)) {
@@ -586,22 +696,6 @@ function inspectionRoot(document: Document, input: Record<string, unknown>): Ele
   return root;
 }
 
-export function takePageBindingMarker(document: Document): string | undefined {
-  const root = document.documentElement;
-  if (!root) return undefined;
-  const value = root.getAttribute(PAGE_BINDING_ATTRIBUTE);
-  if (value === null) return undefined;
-  root.removeAttribute(PAGE_BINDING_ATTRIBUTE);
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      value,
-    )
-  ) {
-    return undefined;
-  }
-  return value;
-}
-
 function target(document: Document, input: Record<string, unknown>): Element {
   if (
     typeof input.cssPath !== "string" ||
@@ -669,25 +763,7 @@ type ContentBrowserApi = {
 declare const browser: ContentBrowserApi | undefined;
 
 if (typeof browser !== "undefined") {
-  const reportBinding = (): void => {
-    const bindingNonce = takePageBindingMarker(document);
-    if (bindingNonce) {
-      void browser.runtime
-        .sendMessage({ type: "companionPageBinding", bindingNonce })
-        .catch(() => undefined);
-    }
-  };
-  void browser.runtime
-    .sendMessage({ type: "companionFrameReady" })
-    .then(reportBinding)
-    .catch(() => undefined);
-  const MutationObserverConstructor = document.defaultView?.MutationObserver;
-  if (MutationObserverConstructor && document.documentElement) {
-    new MutationObserverConstructor(reportBinding).observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: [PAGE_BINDING_ATTRIBUTE],
-    });
-  }
+  void browser.runtime.sendMessage({ type: "companionFrameReady" }).catch(() => undefined);
   browser.runtime.onMessage.addListener((message) => {
     if (
       typeof message !== "object" ||

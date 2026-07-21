@@ -330,7 +330,7 @@ test("trusted runtime sender metadata creates the route without trusting payload
   assert.deepEqual(routed, [{ tabId: 10, frameId: 3 }]);
 });
 
-test("trusted binding markers report the discovered browser route without trusting page IDs", async () => {
+test("runtime messages cannot submit page-visible binding nonces", async () => {
   const transport = new FakeTransport();
   const background = new CompanionBackground({
     transport,
@@ -344,6 +344,7 @@ test("trusted binding markers report the discovered browser route without trusti
   });
   background.connect(CONNECT_OPTIONS);
   await pair(background);
+  const sentBeforeMarkers = transport.sent.length;
 
   const bindingNonce = "b5f6319a-6b36-43cb-9464-d337fc9d8201";
   await background.receiveRuntimeMessage(
@@ -367,24 +368,7 @@ test("trusted binding markers report the discovered browser route without trusti
     "trusted-extension",
   );
 
-  assert.deepEqual(transport.sent.at(-1), {
-    kind: "pageBindingDiscovered",
-    output: {
-      protocolVersion: 1,
-      profileId: CONNECT_OPTIONS.profileId,
-      targetId: targetId(10, 3),
-      bindingNonce,
-    },
-  });
-  assert.equal(
-    transport.sent.some(
-      (message) =>
-        typeof message === "object" &&
-        message !== null &&
-        JSON.stringify(message).includes(pageId(10, 3)),
-    ),
-    false,
-  );
+  assert.equal(transport.sent.length, sentBeforeMarkers);
 });
 
 test("lease capacity is bounded and leases expire", async () => {

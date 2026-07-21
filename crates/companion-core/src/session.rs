@@ -105,6 +105,7 @@ struct SessionState {
 pub(crate) struct SessionCoordinator {
     registry: Arc<CompanionRegistry>,
     state: Arc<Mutex<SessionState>>,
+    grant_updates: Mutex<()>,
     discovery_changed: Notify,
 }
 
@@ -294,6 +295,7 @@ impl SessionCoordinator {
         Self {
             registry,
             state: Arc::new(Mutex::new(SessionState::default())),
+            grant_updates: Mutex::new(()),
             discovery_changed: Notify::new(),
         }
     }
@@ -305,6 +307,7 @@ impl SessionCoordinator {
     ) -> Uuid {
         let connection_id = Uuid::new_v4();
         let previous = {
+            let _grant_update = self.grant_updates.lock().await;
             let mut state = self.state.lock().await;
             let previous = state.sessions.insert(
                 paired.profile_id.clone(),
@@ -327,6 +330,7 @@ impl SessionCoordinator {
 
     pub(crate) async fn unregister(&self, profile_id: &ProfileId, connection_id: Uuid) {
         let pending = {
+            let _grant_update = self.grant_updates.lock().await;
             let mut state = self.state.lock().await;
             if state
                 .sessions
@@ -540,6 +544,69 @@ impl SessionCoordinator {
         })
     }
 
+    pub(crate) async fn release_page_binding(
+        &self,
+        attachment_id: &AttachmentId,
+        page_id: &PageId,
+    ) -> Result<(), CompanionSessionError> {
+        let _grant_update = self.grant_updates.lock().await;
+        let update = {
+            let mut state = self.state.lock().await;
+            purge_expired_bindings(&mut state, Instant::now());
+
+            let pending_nonces = state
+                .bindings
+                .iter()
+                .filter(|(_, binding)| {
+                    binding.attachment_id == *attachment_id && binding.expected_page_id == *page_id
+                })
+                .map(|(nonce, _)| nonce.clone())
+                .collect::<Vec<_>>();
+            for nonce in pending_nonces {
+                if let Some(binding) = state.bindings.remove(&nonce) {
+                    let _ = binding
+                        .response
+                        .send(Err(CompanionSessionError::BindingExpired));
+                }
+            }
+
+            let Some(record) = state.grants.get(attachment_id).cloned() else {
+                return Ok(());
+            };
+            if !record
+                .grant
+                .pages
+                .iter()
+                .any(|page| page.page_id == *page_id)
+            {
+                return Ok(());
+            }
+            let mut updated = record.grant;
+            updated.pages.retain(|page| page.page_id != *page_id);
+            state
+                .grants
+                .get_mut(attachment_id)
+                .expect("grant exists")
+                .grant = updated.clone();
+            let outbound = state
+                .sessions
+                .get(&updated.profile_id)
+                .filter(|session| {
+                    session.connection_id == record.connection_id
+                        && session.companion_id == record.companion_id
+                })
+                .map(|session| session.outbound.clone());
+            outbound.map(|outbound| (outbound, updated))
+        };
+
+        if let Some((outbound, updated)) = update {
+            send_request(&outbound, &CompanionRequest::Grant(updated))
+                .await
+                .map_err(|_| CompanionSessionError::QueueClosed)?;
+        }
+        Ok(())
+    }
+
     async fn record_page_binding(
         &self,
         profile_id: &ProfileId,
@@ -556,6 +623,7 @@ impl SessionCoordinator {
             return Ok(());
         }
 
+        let _grant_update = self.grant_updates.lock().await;
         let prepared = {
             let mut state = self.state.lock().await;
             purge_expired_bindings(&mut state, Instant::now());
@@ -740,6 +808,7 @@ impl SessionCoordinator {
         &self,
         profile_id: &ProfileId,
     ) -> Result<AttachmentGrant, CompanionSessionError> {
+        let _grant_update = self.grant_updates.lock().await;
         let (session, discovery) = {
             let state = self.state.lock().await;
             let session = state
@@ -788,6 +857,7 @@ impl SessionCoordinator {
         &self,
         attachment_id: &AttachmentId,
     ) -> Result<AttachmentGrant, CompanionSessionError> {
+        let _grant_update = self.grant_updates.lock().await;
         let (record, session) = {
             let state = self.state.lock().await;
             let record = state
@@ -1314,6 +1384,217 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn releasing_a_page_binding_clears_pending_and_granted_state_idempotently() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(8).await;
+        let expected_page = PageId::new();
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, expected_page.clone())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: vec![
+                        BrowserTarget {
+                            target_id: "trusted-target".into(),
+                            kind: TargetKind::Page,
+                        },
+                        BrowserTarget {
+                            target_id: "cancelled-context".into(),
+                            kind: TargetKind::Page,
+                        },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    target_id: "cancelled-context".into(),
+                    binding_nonce: nonce,
+                }),
+            )
+            .await
+            .unwrap();
+        ticket.complete(Duration::from_secs(1)).await.unwrap();
+        let _grant_with_page = requests.recv().await.unwrap();
+
+        coordinator
+            .release_page_binding(&grant.attachment_id, &expected_page)
+            .await
+            .unwrap();
+        let Message::Text(released) = requests.recv().await.unwrap() else {
+            panic!("binding release must publish the reduced grant")
+        };
+        let CompanionRequest::Grant(released): CompanionRequest =
+            serde_json::from_str(released.as_str()).unwrap()
+        else {
+            panic!("binding release must publish a grant")
+        };
+        assert!(!released
+            .pages
+            .iter()
+            .any(|page| page.page_id == expected_page));
+
+        coordinator
+            .release_page_binding(&grant.attachment_id, &expected_page)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), requests.recv())
+                .await
+                .is_err()
+        );
+
+        let pending_page = PageId::new();
+        let pending = coordinator
+            .begin_page_binding(&grant.attachment_id, pending_page.clone())
+            .await
+            .unwrap();
+        coordinator
+            .release_page_binding(&grant.attachment_id, &pending_page)
+            .await
+            .unwrap();
+        assert!(matches!(
+            pending.complete(Duration::from_secs(1)).await,
+            Err(CompanionSessionError::BindingExpired)
+        ));
+        assert!(coordinator.state.lock().await.bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn binding_release_cannot_overtake_the_binding_grant_publication() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(1).await;
+        coordinator
+            .send_request(&profile_id, CompanionRequest::Ping)
+            .await
+            .unwrap();
+
+        let page_id = PageId::new();
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, page_id.clone())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: vec![
+                        BrowserTarget {
+                            target_id: "trusted-target".into(),
+                            kind: TargetKind::Page,
+                        },
+                        BrowserTarget {
+                            target_id: "new-context".into(),
+                            kind: TargetKind::Page,
+                        },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+
+        let publish = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let profile_id = profile_id.clone();
+            async move {
+                coordinator
+                    .consume_event(
+                        &profile_id,
+                        connection_id,
+                        CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                            protocol_version: PROTOCOL_VERSION,
+                            profile_id: profile_id.clone(),
+                            target_id: "new-context".into(),
+                            binding_nonce: nonce,
+                        }),
+                    )
+                    .await
+            }
+        });
+        loop {
+            if coordinator
+                .active_grant(&profile_id)
+                .await
+                .is_some_and(|active| active.pages.iter().any(|page| page.page_id == page_id))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let release = coordinator.release_page_binding(&grant.attachment_id, &page_id);
+        tokio::pin!(release);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut release)
+                .await
+                .is_err()
+        );
+        assert!(
+            coordinator
+                .active_grant(&profile_id)
+                .await
+                .unwrap()
+                .pages
+                .iter()
+                .any(|page| page.page_id == page_id),
+            "release must not mutate the grant until the in-flight grant publication completes"
+        );
+
+        let Message::Text(ping) = requests.recv().await.unwrap() else {
+            panic!("expected queued ping")
+        };
+        assert_eq!(
+            serde_json::from_str::<CompanionRequest>(ping.as_str()).unwrap(),
+            CompanionRequest::Ping
+        );
+        let Message::Text(binding_grant) = requests.recv().await.unwrap() else {
+            panic!("expected binding grant")
+        };
+        let CompanionRequest::Grant(binding_grant): CompanionRequest =
+            serde_json::from_str(binding_grant.as_str()).unwrap()
+        else {
+            panic!("expected binding grant")
+        };
+        assert!(binding_grant
+            .pages
+            .iter()
+            .any(|page| page.page_id == page_id));
+        publish.await.unwrap().unwrap();
+        ticket.complete(Duration::from_secs(1)).await.unwrap();
+
+        release.await.unwrap();
+        let Message::Text(reduced_grant) = requests.recv().await.unwrap() else {
+            panic!("expected reduced grant")
+        };
+        let CompanionRequest::Grant(reduced_grant): CompanionRequest =
+            serde_json::from_str(reduced_grant.as_str()).unwrap()
+        else {
+            panic!("expected reduced grant")
+        };
+        assert!(!reduced_grant
+            .pages
+            .iter()
+            .any(|page| page.page_id == page_id));
     }
 
     #[tokio::test]
