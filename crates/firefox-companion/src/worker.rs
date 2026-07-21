@@ -1428,9 +1428,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        if !self.lease.capabilities.native_input {
-            return Err(capability_error("native pointer input"));
-        }
         let context = self.context(page_id).await?;
         let selector = command
             .target
@@ -1453,9 +1450,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        if !self.lease.capabilities.native_input {
-            return Err(capability_error("native keyboard input"));
-        }
         if command.value.chars().count() > MAX_TYPE_CODEPOINTS {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,

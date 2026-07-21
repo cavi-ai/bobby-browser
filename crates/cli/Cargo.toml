@@ -3,6 +3,13 @@ name = "cli"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+path = "src/main.rs"
+
+[[bin]]
+name = "cli"
+path = "src/bin/cli.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

@@ -1766,6 +1766,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "release-gates"
 version = "0.1.0"
 dependencies = [
+ "companion-protocol",
  "libc",
  "rustix",
  "serde",
@@ -1871,6 +1872,8 @@ dependencies = [
  "cdp-gateway",
  "checkpoint-store",
  "chrono",
+ "cli",
+ "companion-protocol",
  "config",
  "futures-util",
  "interface-conformance",
@@ -1878,6 +1881,7 @@ dependencies = [
  "mcp-gateway",
  "network-engine",
  "page-runtime",
+ "release-gates",
  "reqwest 0.12.28",
  "sdk-core",
  "serde_json",
@@ -1889,6 +1893,7 @@ dependencies = [
  "tokio-tungstenite",
  "tower",
  "types",
+ "url",
  "uuid",
  "worker-pool",
  "workflow-journal",
