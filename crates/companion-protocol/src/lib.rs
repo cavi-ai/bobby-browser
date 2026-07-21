@@ -87,6 +87,15 @@ pub struct TargetDiscovery {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageBindingDiscovered {
+    pub protocol_version: u16,
+    pub profile_id: ProfileId,
+    pub target_id: String,
+    pub binding_nonce: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GrantedPage {
     pub target_id: String,
     pub page_id: PageId,
@@ -138,5 +147,6 @@ pub enum CompanionEvent {
         effect_uncertain: bool,
     },
     TargetsDiscovered(TargetDiscovery),
+    PageBindingDiscovered(PageBindingDiscovered),
     Pong,
 }

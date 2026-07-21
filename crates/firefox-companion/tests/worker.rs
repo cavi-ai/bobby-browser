@@ -12,11 +12,11 @@ use async_trait::async_trait;
 use companion_core::AttachmentLease;
 use companion_protocol::{BrowserEngine, BrowserIdentity, CompanionCapabilities, InteractionPath};
 use firefox_companion::{
-    BidiEvent, BidiTransport, ExtensionObservation, ExtensionObserver, FirefoxCompanionWorker,
-    MAX_TRACKED_PAGES,
+    BidiEvent, BidiTransport, ExtensionControl, ExtensionObservation, ExtensionObserver,
+    ExtensionPageBinding, FirefoxCompanionWorker, MAX_TRACKED_PAGES,
 };
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 use types::{
     AttachmentId, ClickCommand, ClosePageCommand, CommandError, CompanionId, ErrorCode, ErrorLayer,
     Evidence, InspectCommand, NavigateCommand, OpenPageCommand, PageId, ProfileId, TypeTextCommand,
@@ -33,17 +33,29 @@ struct BidiCall {
 struct FakeBidi {
     calls: Mutex<Vec<BidiCall>>,
     scripted: Mutex<VecDeque<Result<Value, CommandError>>>,
+    subscribe_error: Mutex<Option<CommandError>>,
+    tree: Mutex<Value>,
     events: broadcast::Sender<BidiEvent>,
 }
 
 impl FakeBidi {
     fn new(scripted: Vec<Result<Value, CommandError>>) -> Arc<Self> {
-        let (events, _) = broadcast::channel(16);
+        let (events, _) = broadcast::channel(2);
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             scripted: Mutex::new(scripted.into()),
+            subscribe_error: Mutex::new(None),
+            tree: Mutex::new(json!({"contexts": []})),
             events,
         })
+    }
+
+    async fn fail_subscribe(&self, error: CommandError) {
+        *self.subscribe_error.lock().await = Some(error);
+    }
+
+    async fn set_tree(&self, tree: Value) {
+        *self.tree.lock().await = tree;
     }
 
     async fn calls(&self) -> Vec<BidiCall> {
@@ -66,10 +78,30 @@ impl BidiTransport for FakeBidi {
         let mut calls = self.calls.lock().await;
         calls.push(BidiCall {
             method: method.into(),
-            params,
+            params: params.clone(),
         });
         let call_number = calls.len();
         drop(calls);
+        if method == "session.subscribe" {
+            assert!(
+                self.events.receiver_count() > 0,
+                "event receiver must exist before the remote subscription is enabled"
+            );
+            if let Some(error) = self.subscribe_error.lock().await.take() {
+                return Err(error);
+            }
+            return Ok(json!({}));
+        }
+        if method == "script.evaluate"
+            && params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("data-automation-runtime-binding"))
+        {
+            return Ok(json!({"result": {"type": "boolean", "value": true}}));
+        }
+        if method == "browsingContext.getTree" {
+            return Ok(self.tree.lock().await.clone());
+        }
         if let Some(response) = self.scripted.lock().await.pop_front() {
             return response;
         }
@@ -90,6 +122,7 @@ impl BidiTransport for FakeBidi {
 
 struct FakeObserver {
     calls: AtomicUsize,
+    bindings: Mutex<Vec<PageId>>,
     observation: ExtensionObservation,
 }
 
@@ -97,13 +130,88 @@ impl FakeObserver {
     fn new(observation: ExtensionObservation) -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
+            bindings: Mutex::new(Vec::new()),
             observation,
         })
     }
 }
 
+struct FakePageBinding {
+    nonce: String,
+}
+
+struct BlockingPageBinding {
+    nonce: String,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl ExtensionPageBinding for BlockingPageBinding {
+    fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    async fn complete(self: Box<Self>) -> Result<(), CommandError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+struct BlockingObserver {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl ExtensionObserver for BlockingObserver {
+    async fn begin_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        Ok(Box::new(BlockingPageBinding {
+            nonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201".into(),
+            started: Arc::clone(&self.started),
+            release: Arc::clone(&self.release),
+        }))
+    }
+
+    async fn observe(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        Ok(observation())
+    }
+}
+
+#[async_trait]
+impl ExtensionPageBinding for FakePageBinding {
+    fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
+    async fn complete(self: Box<Self>) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl ExtensionObserver for FakeObserver {
+    async fn begin_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        page_id: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        self.bindings.lock().await.push(page_id.clone());
+        Ok(Box::new(FakePageBinding {
+            nonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201".into(),
+        }))
+    }
+
     async fn observe(
         &self,
         _lease: &AttachmentLease,
@@ -143,12 +251,20 @@ fn observation() -> ExtensionObservation {
     ExtensionObservation {
         url: "https://example.test/page".into(),
         title: "Example".into(),
-        text: "Observed text".into(),
+        visible_text: "Observed text".into(),
+        controls: vec![ExtensionControl {
+            css_path: "#confirm".into(),
+            role: Some("button".into()),
+            name: Some("Confirm".into()),
+            label: None,
+            value: None,
+            disabled: false,
+        }],
         html: Some("<main>Observed text</main>".into()),
     }
 }
 
-fn worker(bidi: Arc<FakeBidi>, observer: Arc<FakeObserver>) -> FirefoxCompanionWorker {
+async fn worker(bidi: Arc<FakeBidi>, observer: Arc<FakeObserver>) -> FirefoxCompanionWorker {
     FirefoxCompanionWorker::new(
         WorkerId::new(),
         PathBuf::from("/profiles/firefox"),
@@ -156,6 +272,7 @@ fn worker(bidi: Arc<FakeBidi>, observer: Arc<FakeObserver>) -> FirefoxCompanionW
         bidi,
         observer,
     )
+    .await
     .unwrap()
 }
 
@@ -172,13 +289,128 @@ fn assert_engine_native(evidence: &[Evidence]) {
 }
 
 #[tokio::test]
+async fn worker_subscribes_to_context_destruction_before_exposure_and_propagates_failure() {
+    let subscribe_error = CommandError {
+        code: ErrorCode::BrowserCommandFailed,
+        message: "subscription rejected".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    };
+    let bidi = FakeBidi::new(vec![]);
+    bidi.fail_subscribe(subscribe_error.clone()).await;
+
+    let result = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        bidi.clone(),
+        FakeObserver::new(observation()),
+    )
+    .await;
+
+    let error = match result {
+        Ok(_) => panic!("worker must not be exposed after subscription failure"),
+        Err(error) => error,
+    };
+    assert_eq!(error.message, subscribe_error.message);
+    assert_eq!(
+        bidi.calls().await,
+        vec![BidiCall {
+            method: "session.subscribe".into(),
+            params: json!({"events": ["browsingContext.contextDestroyed"]}),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn context_destroyed_while_binding_cannot_be_exposed_as_ready() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-doomed"}))]);
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let worker = Arc::new(
+        FirefoxCompanionWorker::new(
+            WorkerId::new(),
+            PathBuf::from("/profiles/firefox"),
+            lease(),
+            bidi.clone(),
+            Arc::new(BlockingObserver {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+        )
+        .await
+        .unwrap(),
+    );
+    let page_id = PageId::new();
+    let opening_worker = Arc::clone(&worker);
+    let opening_page = page_id.clone();
+    let opening = tokio::spawn(async move { opening_worker.open_page(opening_page).await });
+
+    started.notified().await;
+    bidi.emit(
+        "browsingContext.contextDestroyed",
+        json!({"context": "context-doomed"}),
+    );
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    release.notify_one();
+
+    let error = opening.await.unwrap().unwrap_err();
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(bidi.calls().await.iter().any(|call| {
+        call.method == "browsingContext.close" && call.params["context"] == "context-doomed"
+    }));
+    assert_eq!(
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "https://example.test/should-not-run".into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 100,
+                },
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn open_page_marks_the_created_context_with_the_coordinator_binding_nonce() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-bound"}))]);
+    let observer = FakeObserver::new(observation());
+    let worker = worker(bidi.clone(), observer.clone()).await;
+    let expected_page = PageId::new();
+
+    worker.open_page(expected_page.clone()).await.unwrap();
+
+    assert_eq!(observer.bindings.lock().await.as_slice(), &[expected_page]);
+    let calls = bidi.calls().await;
+    assert_eq!(calls[0].method, "session.subscribe");
+    assert_eq!(calls[1].method, "browsingContext.create");
+    assert_eq!(calls[2].method, "script.evaluate");
+    assert_eq!(calls[2].params["target"]["context"], "context-bound");
+    assert_eq!(
+        calls[2].params["target"]["sandbox"],
+        "automation-runtime-companion"
+    );
+    let expression = calls[2].params["expression"].as_str().unwrap();
+    assert!(expression.contains("data-automation-runtime-binding"));
+    assert!(expression.contains("automation-runtime-binding:"));
+    assert!(expression.contains("b5f6319a-6b36-43cb-9464-d337fc9d8201"));
+}
+
+#[tokio::test]
 async fn open_page_and_navigate_map_to_bidi_context_commands() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
         Ok(json!({"url": "https://example.test/final", "navigation": "nav-1"})),
         Ok(json!({"url": "https://example.test/interactive", "navigation": "nav-2"})),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()));
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
 
@@ -207,14 +439,14 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
 
     let calls = bidi.calls().await;
     assert_eq!(
-        calls[0],
+        calls[1],
         BidiCall {
             method: "browsingContext.create".into(),
             params: json!({"type": "tab"}),
         }
     );
     assert_eq!(
-        calls[1],
+        calls[3],
         BidiCall {
             method: "browsingContext.navigate".into(),
             params: json!({
@@ -224,7 +456,7 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
             }),
         }
     );
-    assert_eq!(calls[2].params["wait"], "interactive");
+    assert_eq!(calls[4].params["wait"], "interactive");
     assert_engine_native(&complete);
     assert_engine_native(&interactive);
 }
@@ -235,7 +467,7 @@ async fn open_page_command_returns_page_and_browser_execution_evidence() {
         Ok(json!({"context": "context-1"})),
         Ok(json!({"url": "https://example.test/", "navigation": "nav-1"})),
     ]);
-    let worker = worker(bidi, FakeObserver::new(observation()));
+    let worker = worker(bidi, FakeObserver::new(observation())).await;
 
     let evidence = worker
         .open_page_command(&OpenPageCommand {
@@ -258,7 +490,7 @@ async fn inspect_evaluates_in_isolated_realm_and_uses_extension_observation() {
         Ok(json!({"realm": "realm-1", "result": {"type": "boolean", "value": true}})),
     ]);
     let observer = FakeObserver::new(observation());
-    let worker = worker(bidi.clone(), observer.clone());
+    let worker = worker(bidi.clone(), observer.clone()).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
 
@@ -275,10 +507,10 @@ async fn inspect_evaluates_in_isolated_realm_and_uses_extension_observation() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[1].method, "script.evaluate");
-    assert_eq!(calls[1].params["target"]["context"], "context-1");
+    assert_eq!(calls[3].method, "script.evaluate");
+    assert_eq!(calls[3].params["target"]["context"], "context-1");
     assert_eq!(
-        calls[1].params["target"]["sandbox"],
+        calls[3].params["target"]["sandbox"],
         "automation-runtime-companion"
     );
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
@@ -296,7 +528,7 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
         Ok(json!({"result": {"type": "node", "sharedId": "element-1"}})),
         Ok(json!({})),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()));
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
 
@@ -314,11 +546,11 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[2].method, "input.performActions");
-    assert_eq!(calls[2].params["context"], "context-1");
-    assert_eq!(calls[2].params["actions"][0]["type"], "pointer");
+    assert_eq!(calls[4].method, "input.performActions");
+    assert_eq!(calls[4].params["context"], "context-1");
+    assert_eq!(calls[4].params["actions"][0]["type"], "pointer");
     assert_eq!(
-        calls[2].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        calls[4].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
         "element-1"
     );
     assert_engine_native(&evidence);
@@ -332,7 +564,7 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
         Ok(json!({})),
         Ok(json!({})),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()));
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
 
@@ -350,11 +582,11 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[2].method, "input.performActions");
-    assert_eq!(calls[2].params["actions"][0]["type"], "pointer");
-    assert_eq!(calls[3].method, "input.performActions");
-    assert_eq!(calls[3].params["actions"][0]["type"], "key");
-    let keys = calls[3].params["actions"][0]["actions"].as_array().unwrap();
+    assert_eq!(calls[4].method, "input.performActions");
+    assert_eq!(calls[4].params["actions"][0]["type"], "pointer");
+    assert_eq!(calls[5].method, "input.performActions");
+    assert_eq!(calls[5].params["actions"][0]["type"], "key");
+    let keys = calls[5].params["actions"][0]["actions"].as_array().unwrap();
     assert!(keys.iter().any(|action| action["value"] == "a"));
     assert!(keys.iter().any(|action| action["value"] == "\u{e003}"));
     assert!(keys.iter().any(|action| action["value"] == "H"));
@@ -369,7 +601,7 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
 #[tokio::test]
 async fn missing_page_context_is_not_found_without_transport_calls() {
     let bidi = FakeBidi::new(vec![]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()));
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
 
     let error = worker
         .click(
@@ -385,7 +617,14 @@ async fn missing_page_context_is_not_found_without_transport_calls() {
         .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::NotFound);
-    assert!(bidi.calls().await.is_empty());
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .map(|call| call.method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session.subscribe"]
+    );
 }
 
 #[tokio::test]
@@ -401,7 +640,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
         Ok(json!({"result": {"type": "node", "sharedId": "element-1"}})),
         Err(native_error),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()));
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
 
@@ -426,7 +665,9 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
             .map(|call| call.method.as_str())
             .collect::<Vec<_>>(),
         vec![
+            "session.subscribe",
             "browsingContext.create",
+            "script.evaluate",
             "script.evaluate",
             "input.performActions"
         ]
@@ -443,7 +684,7 @@ async fn closed_and_destroyed_contexts_are_removed_from_the_page_map() {
         Ok(json!({})),
         Ok(json!({"context": "context-2"})),
     ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()));
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
     worker
@@ -474,14 +715,126 @@ async fn closed_and_destroyed_contexts_are_removed_from_the_page_map() {
 }
 
 #[tokio::test]
+async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-stale"})),
+        Ok(json!({"context": "context-live"})),
+        Ok(json!({"url": "https://example.test/live"})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let stale = PageId::new();
+    let live = PageId::new();
+    worker.open_page(stale.clone()).await.unwrap();
+    worker.open_page(live.clone()).await.unwrap();
+    bidi.set_tree(json!({
+        "contexts": [{"context": "context-live", "children": []}]
+    }))
+    .await;
+
+    for index in 0..16 {
+        bidi.emit("log.entryAdded", json!({"index": index}));
+    }
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+
+    let stale_error = worker
+        .navigate(
+            &stale,
+            &NavigateCommand {
+                url: "https://example.test/stale".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 100,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(stale_error.code, ErrorCode::NotFound);
+    worker
+        .navigate(
+            &live,
+            &NavigateCommand {
+                url: "https://example.test/live".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 100,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(bidi
+        .calls()
+        .await
+        .iter()
+        .any(|call| call.method == "browsingContext.getTree"));
+}
+
+#[tokio::test]
+async fn failed_open_navigation_rolls_back_context_and_preserves_primary_error() {
+    let primary = CommandError {
+        code: ErrorCode::DeadlineExceeded,
+        message: "navigation timed out".into(),
+        layer: ErrorLayer::Driver,
+        retryable: true,
+    };
+    let cleanup = CommandError {
+        code: ErrorCode::BrowserCommandFailed,
+        message: "close rejected".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    };
+    let attempts = MAX_TRACKED_PAGES + 8;
+    let mut scripted = Vec::with_capacity(attempts * 3 + 1);
+    for index in 0..attempts {
+        scripted.push(Ok(json!({"context": format!("failed-{index}")})));
+        scripted.push(Err(primary.clone()));
+        scripted.push(Err(cleanup.clone()));
+    }
+    scripted.push(Ok(json!({"context": "still-available"})));
+    let bidi = FakeBidi::new(scripted);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+
+    for _ in 0..attempts {
+        let error = worker
+            .open_page_command(&OpenPageCommand {
+                url: Some("https://example.test/fail".into()),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, primary.code);
+        assert_eq!(error.layer, primary.layer);
+        assert_eq!(error.retryable, primary.retryable);
+        assert!(error.message.contains("navigation timed out"));
+        assert!(error.message.contains("cleanup failed"));
+        assert!(error.message.contains("close rejected"));
+    }
+
+    worker.open_page(PageId::new()).await.unwrap();
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "browsingContext.close")
+            .count(),
+        attempts
+    );
+}
+
+#[tokio::test]
 async fn page_context_map_rejects_growth_beyond_its_bound() {
     let bidi = FakeBidi::new(vec![]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()));
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     for _ in 0..MAX_TRACKED_PAGES {
         worker.open_page(PageId::new()).await.unwrap();
     }
 
     let error = worker.open_page(PageId::new()).await.unwrap_err();
     assert_eq!(error.code, ErrorCode::ResourceExhausted);
-    assert_eq!(bidi.calls().await.len(), MAX_TRACKED_PAGES);
+    let calls = bidi.calls().await;
+    assert_eq!(calls[0].method, "session.subscribe");
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.method == "browsingContext.create")
+            .count(),
+        MAX_TRACKED_PAGES
+    );
 }

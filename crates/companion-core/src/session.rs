@@ -2,7 +2,7 @@ use crate::{AttachmentLease, CompanionRegistry, PairedCompanion, RegistryError};
 use axum::extract::ws::Message;
 use companion_protocol::{
     ActionRequest, AttachmentGrant, BrowserTarget, CompanionEvent, CompanionRequest, GrantedPage,
-    TargetDiscovery, PROTOCOL_VERSION,
+    PageBindingDiscovered, TargetDiscovery, TargetKind, PROTOCOL_VERSION,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -19,6 +19,8 @@ const MAX_TARGET_ID_BYTES: usize = 256;
 const MAX_COMMAND_WAIT: Duration = Duration::from_secs(60);
 const MAX_PENDING_COMMANDS: usize = 256;
 const ABANDONED_COMMAND_RETENTION: Duration = Duration::from_secs(60);
+pub(crate) const MAX_PENDING_BINDINGS: usize = 64;
+const PAGE_BINDING_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum CompanionSessionError {
@@ -46,6 +48,10 @@ pub enum CompanionSessionError {
     ResponseTimeout,
     #[error("companion pending command capacity is exhausted")]
     PendingCapacity,
+    #[error("companion pending page-binding capacity is exhausted")]
+    BindingCapacity,
+    #[error("companion page binding expired")]
+    BindingExpired,
     #[error(transparent)]
     Registry(#[from] RegistryError),
 }
@@ -77,18 +83,107 @@ struct PendingCommand {
     expires_at: Instant,
 }
 
+struct PendingBinding {
+    connection_id: Uuid,
+    profile_id: ProfileId,
+    attachment_id: AttachmentId,
+    expected_page_id: PageId,
+    known_targets: HashSet<String>,
+    response: oneshot::Sender<Result<AttachmentGrant, CompanionSessionError>>,
+    expires_at: Instant,
+}
+
 #[derive(Default)]
 struct SessionState {
     sessions: HashMap<ProfileId, ActiveSession>,
     discoveries: HashMap<ProfileId, DiscoveryRecord>,
     grants: HashMap<AttachmentId, GrantRecord>,
     pending: HashMap<CommandId, PendingCommand>,
+    bindings: HashMap<String, PendingBinding>,
 }
 
 pub(crate) struct SessionCoordinator {
     registry: Arc<CompanionRegistry>,
     state: Arc<Mutex<SessionState>>,
     discovery_changed: Notify,
+}
+
+pub struct PageBindingTicket {
+    state: Arc<Mutex<SessionState>>,
+    binding_nonce: Option<String>,
+    connection_id: Uuid,
+    response: Option<oneshot::Receiver<Result<AttachmentGrant, CompanionSessionError>>>,
+}
+
+impl std::fmt::Debug for PageBindingTicket {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PageBindingTicket")
+            .field("active", &self.binding_nonce.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PageBindingTicket {
+    pub fn binding_nonce(&self) -> &str {
+        self.binding_nonce
+            .as_deref()
+            .expect("page binding ticket is active")
+    }
+
+    pub async fn complete(
+        mut self,
+        timeout: Duration,
+    ) -> Result<AttachmentGrant, CompanionSessionError> {
+        let response = self
+            .response
+            .take()
+            .expect("page binding ticket response is active");
+        let result = tokio::time::timeout(timeout.min(PAGE_BINDING_TTL), response).await;
+        match result {
+            Ok(Ok(result)) => {
+                self.binding_nonce = None;
+                result
+            }
+            Ok(Err(_)) => {
+                self.remove().await;
+                Err(CompanionSessionError::ConnectionClosed)
+            }
+            Err(_) => {
+                self.remove().await;
+                Err(CompanionSessionError::BindingExpired)
+            }
+        }
+    }
+
+    async fn remove(&mut self) {
+        let Some(binding_nonce) = self.binding_nonce.take() else {
+            return;
+        };
+        let mut state = self.state.lock().await;
+        remove_binding(&mut state, &binding_nonce, self.connection_id);
+    }
+}
+
+impl Drop for PageBindingTicket {
+    fn drop(&mut self) {
+        let Some(binding_nonce) = self.binding_nonce.take() else {
+            return;
+        };
+        if let Ok(mut state) = self.state.try_lock() {
+            remove_binding(&mut state, &binding_nonce, self.connection_id);
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = Arc::clone(&self.state);
+        let connection_id = self.connection_id;
+        runtime.spawn(async move {
+            let mut state = state.lock().await;
+            remove_binding(&mut state, &binding_nonce, connection_id);
+        });
+    }
 }
 
 struct PendingGuard {
@@ -162,6 +257,32 @@ fn abandon_pending(state: &mut SessionState, command_id: &CommandId, connection_
     }
 }
 
+fn purge_expired_bindings(state: &mut SessionState, now: Instant) {
+    let expired = state
+        .bindings
+        .iter()
+        .filter(|(_, binding)| binding.expires_at <= now)
+        .map(|(nonce, _)| nonce.clone())
+        .collect::<Vec<_>>();
+    for nonce in expired {
+        if let Some(binding) = state.bindings.remove(&nonce) {
+            let _ = binding
+                .response
+                .send(Err(CompanionSessionError::BindingExpired));
+        }
+    }
+}
+
+fn remove_binding(state: &mut SessionState, binding_nonce: &str, connection_id: Uuid) {
+    if state
+        .bindings
+        .get(binding_nonce)
+        .is_some_and(|binding| binding.connection_id == connection_id)
+    {
+        state.bindings.remove(binding_nonce);
+    }
+}
+
 impl std::fmt::Debug for SessionCoordinator {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("SessionCoordinator")
@@ -231,6 +352,19 @@ impl SessionCoordinator {
         state
             .grants
             .retain(|_, grant| grant.connection_id != connection_id);
+        let binding_nonces = state
+            .bindings
+            .iter()
+            .filter(|(_, binding)| binding.connection_id == connection_id)
+            .map(|(nonce, _)| nonce.clone())
+            .collect::<Vec<_>>();
+        for nonce in binding_nonces {
+            if let Some(binding) = state.bindings.remove(&nonce) {
+                let _ = binding
+                    .response
+                    .send(Err(CompanionSessionError::ConnectionClosed));
+            }
+        }
         let command_ids: Vec<_> = state
             .pending
             .iter()
@@ -257,6 +391,10 @@ impl SessionCoordinator {
         match event {
             CompanionEvent::TargetsDiscovered(discovery) => {
                 self.record_discovery(profile_id, connection_id, discovery)
+                    .await
+            }
+            CompanionEvent::PageBindingDiscovered(binding) => {
+                self.record_page_binding(profile_id, connection_id, binding)
                     .await
             }
             CompanionEvent::ActionCompleted(ref result) => {
@@ -314,6 +452,198 @@ impl SessionCoordinator {
         );
         drop(state);
         self.discovery_changed.notify_waiters();
+        Ok(())
+    }
+
+    pub(crate) async fn begin_page_binding(
+        self: &Arc<Self>,
+        attachment_id: &AttachmentId,
+        expected_page_id: PageId,
+    ) -> Result<PageBindingTicket, CompanionSessionError> {
+        let lease = self.registry.resolve_attachment(attachment_id).await?;
+        let (binding_nonce, connection_id, response) = {
+            let mut state = self.state.lock().await;
+            purge_expired_bindings(&mut state, Instant::now());
+            if state.bindings.len() >= MAX_PENDING_BINDINGS {
+                return Err(CompanionSessionError::BindingCapacity);
+            }
+            let record = state
+                .grants
+                .get(attachment_id)
+                .cloned()
+                .ok_or(CompanionSessionError::GrantUnavailable)?;
+            if record.grant.profile_id != lease.profile_id
+                || record.companion_id != lease.companion_id
+                || record.grant.expires_at_unix_ms <= now_unix_ms()
+            {
+                return Err(CompanionSessionError::AttachmentMismatch);
+            }
+            if state
+                .grants
+                .values()
+                .flat_map(|grant| &grant.grant.pages)
+                .any(|page| page.page_id == expected_page_id)
+                || state
+                    .bindings
+                    .values()
+                    .any(|binding| binding.expected_page_id == expected_page_id)
+            {
+                return Err(CompanionSessionError::InvalidEvent);
+            }
+            let session = state
+                .sessions
+                .get(&lease.profile_id)
+                .cloned()
+                .ok_or(CompanionSessionError::ProfileUnavailable)?;
+            let discovery = state
+                .discoveries
+                .get(&lease.profile_id)
+                .cloned()
+                .ok_or(CompanionSessionError::DiscoveryUnavailable)?;
+            if session.connection_id != record.connection_id
+                || discovery.connection_id != record.connection_id
+                || session.companion_id != record.companion_id
+                || discovery.companion_id != record.companion_id
+            {
+                return Err(CompanionSessionError::ConnectionClosed);
+            }
+            let binding_nonce = loop {
+                let candidate = Uuid::new_v4().to_string();
+                if !state.bindings.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
+            let (response, receiver) = oneshot::channel();
+            state.bindings.insert(
+                binding_nonce.clone(),
+                PendingBinding {
+                    connection_id: record.connection_id,
+                    profile_id: lease.profile_id,
+                    attachment_id: attachment_id.clone(),
+                    expected_page_id,
+                    known_targets: discovery
+                        .targets
+                        .into_iter()
+                        .map(|target| target.target_id)
+                        .collect(),
+                    response,
+                    expires_at: Instant::now() + PAGE_BINDING_TTL,
+                },
+            );
+            (binding_nonce, record.connection_id, receiver)
+        };
+        Ok(PageBindingTicket {
+            state: Arc::clone(&self.state),
+            binding_nonce: Some(binding_nonce),
+            connection_id,
+            response: Some(response),
+        })
+    }
+
+    async fn record_page_binding(
+        &self,
+        profile_id: &ProfileId,
+        connection_id: Uuid,
+        binding: PageBindingDiscovered,
+    ) -> Result<(), CompanionSessionError> {
+        if binding.protocol_version != PROTOCOL_VERSION || binding.profile_id != *profile_id {
+            return Err(CompanionSessionError::ProfileMismatch);
+        }
+        if binding.target_id.is_empty()
+            || binding.target_id.len() > MAX_TARGET_ID_BYTES
+            || Uuid::parse_str(&binding.binding_nonce).is_err()
+        {
+            return Ok(());
+        }
+
+        let prepared = {
+            let mut state = self.state.lock().await;
+            purge_expired_bindings(&mut state, Instant::now());
+            let Some(pending) = state.bindings.get(&binding.binding_nonce) else {
+                return Ok(());
+            };
+            if pending.connection_id != connection_id || pending.profile_id != *profile_id {
+                return Err(CompanionSessionError::InvalidEvent);
+            }
+            let Some(discovery) = state.discoveries.get(profile_id) else {
+                return Ok(());
+            };
+            let newly_discovered_page = discovery.connection_id == connection_id
+                && discovery.targets.iter().any(|target| {
+                    target.target_id == binding.target_id
+                        && target.kind == TargetKind::Page
+                        && !pending.known_targets.contains(&target.target_id)
+                })
+                && !state
+                    .grants
+                    .values()
+                    .flat_map(|grant| &grant.grant.pages)
+                    .any(|page| page.target_id == binding.target_id);
+            if !newly_discovered_page {
+                return Ok(());
+            }
+            let attachment_id = pending.attachment_id.clone();
+            let expected_page_id = pending.expected_page_id.clone();
+            let Some(record) = state.grants.get(&attachment_id).cloned() else {
+                let pending = state
+                    .bindings
+                    .remove(&binding.binding_nonce)
+                    .expect("pending binding exists");
+                let _ = pending
+                    .response
+                    .send(Err(CompanionSessionError::GrantUnavailable));
+                return Ok(());
+            };
+            let Some(session) = state.sessions.get(profile_id).cloned() else {
+                return Err(CompanionSessionError::ProfileUnavailable);
+            };
+            if record.connection_id != connection_id
+                || session.connection_id != connection_id
+                || record.companion_id != session.companion_id
+            {
+                return Err(CompanionSessionError::ConnectionClosed);
+            }
+            let mut updated = record.grant;
+            updated.pages.retain(|page| {
+                page.target_id != binding.target_id && page.page_id != expected_page_id
+            });
+            if updated.pages.len() >= MAX_DISCOVERED_TARGETS {
+                let pending = state
+                    .bindings
+                    .remove(&binding.binding_nonce)
+                    .expect("pending binding exists");
+                let _ = pending
+                    .response
+                    .send(Err(CompanionSessionError::BindingCapacity));
+                return Ok(());
+            }
+            updated.pages.push(GrantedPage {
+                target_id: binding.target_id,
+                page_id: expected_page_id,
+            });
+            state
+                .grants
+                .get_mut(&attachment_id)
+                .expect("grant exists")
+                .grant = updated.clone();
+            let pending = state
+                .bindings
+                .remove(&binding.binding_nonce)
+                .expect("pending binding exists");
+            (pending, session.outbound, updated)
+        };
+
+        let (pending, outbound, updated) = prepared;
+        if send_request(&outbound, &CompanionRequest::Grant(updated.clone()))
+            .await
+            .is_err()
+        {
+            let _ = pending
+                .response
+                .send(Err(CompanionSessionError::QueueClosed));
+            return Err(CompanionSessionError::QueueClosed);
+        }
+        let _ = pending.response.send(Ok(updated));
         Ok(())
     }
 
@@ -668,7 +998,7 @@ async fn send_request(
 mod tests {
     use super::*;
     use crate::PairingInput;
-    use companion_protocol::{ActionResult, InteractionPath, TargetKind};
+    use companion_protocol::{ActionResult, InteractionPath, PageBindingDiscovered, TargetKind};
 
     async fn session_fixture(
         outbound_capacity: usize,
@@ -904,5 +1234,194 @@ mod tests {
         drop(live_receiver);
         purge_expired_pending(&mut state, Instant::now());
         assert!(!state.pending.contains_key(&live_id));
+    }
+
+    #[tokio::test]
+    async fn one_time_binding_nonce_grants_the_exact_coordinator_page_to_the_reported_target() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(8).await;
+        let expected_page = PageId::new();
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, expected_page.clone())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        assert!(!format!("{ticket:?}").contains(&nonce));
+
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: vec![
+                        BrowserTarget {
+                            target_id: "trusted-target".into(),
+                            kind: TargetKind::Page,
+                        },
+                        BrowserTarget {
+                            target_id: "new-bidi-context".into(),
+                            kind: TargetKind::Page,
+                        },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    target_id: "new-bidi-context".into(),
+                    binding_nonce: nonce.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let updated = ticket.complete(Duration::from_secs(1)).await.unwrap();
+        let outbound = requests.recv().await.unwrap();
+        let Message::Text(outbound) = outbound else {
+            panic!("binding must publish an updated grant")
+        };
+        let published: CompanionRequest = serde_json::from_str(outbound.as_str()).unwrap();
+
+        assert_eq!(published, CompanionRequest::Grant(updated.clone()));
+        assert!(updated
+            .pages
+            .iter()
+            .any(|page| { page.target_id == "new-bidi-context" && page.page_id == expected_page }));
+
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    target_id: "trusted-target".into(),
+                    binding_nonce: nonce,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), requests.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_page_bindings_are_bounded_and_cancelled_tickets_release_capacity() {
+        let (coordinator, _profile_id, _connection_id, grant, _requests) =
+            session_fixture(MAX_PENDING_BINDINGS + 2).await;
+        let mut tickets = Vec::new();
+        for _ in 0..MAX_PENDING_BINDINGS {
+            tickets.push(
+                coordinator
+                    .begin_page_binding(&grant.attachment_id, PageId::new())
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert!(matches!(
+            coordinator
+                .begin_page_binding(&grant.attachment_id, PageId::new())
+                .await,
+            Err(CompanionSessionError::BindingCapacity)
+        ));
+
+        drop(tickets.pop());
+        tokio::task::yield_now().await;
+        coordinator
+            .begin_page_binding(&grant.attachment_id, PageId::new())
+            .await
+            .unwrap();
+        assert!(coordinator.state.lock().await.bindings.len() <= MAX_PENDING_BINDINGS);
+    }
+
+    #[tokio::test]
+    async fn pending_bindings_reject_duplicate_expected_page_ids() {
+        let (coordinator, _profile_id, _connection_id, grant, _requests) = session_fixture(4).await;
+        let expected_page = PageId::new();
+        let _ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, expected_page.clone())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            coordinator
+                .begin_page_binding(&grant.attachment_id, expected_page)
+                .await,
+            Err(CompanionSessionError::InvalidEvent)
+        ));
+    }
+
+    #[tokio::test]
+    async fn newly_discovered_target_can_complete_only_one_pending_binding() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(8).await;
+        let first = coordinator
+            .begin_page_binding(&grant.attachment_id, PageId::new())
+            .await
+            .unwrap();
+        let second = coordinator
+            .begin_page_binding(&grant.attachment_id, PageId::new())
+            .await
+            .unwrap();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: vec![
+                        BrowserTarget {
+                            target_id: "trusted-target".into(),
+                            kind: TargetKind::Page,
+                        },
+                        BrowserTarget {
+                            target_id: "new-bidi-context".into(),
+                            kind: TargetKind::Page,
+                        },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+
+        for nonce in [first.binding_nonce(), second.binding_nonce()] {
+            coordinator
+                .consume_event(
+                    &profile_id,
+                    connection_id,
+                    CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                        protocol_version: PROTOCOL_VERSION,
+                        profile_id: profile_id.clone(),
+                        target_id: "new-bidi-context".into(),
+                        binding_nonce: nonce.to_owned(),
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+
+        first.complete(Duration::from_secs(1)).await.unwrap();
+        assert!(matches!(
+            second.complete(Duration::from_millis(25)).await,
+            Err(CompanionSessionError::BindingExpired)
+        ));
+        let _ = requests.recv().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), requests.recv())
+                .await
+                .is_err()
+        );
     }
 }

@@ -97,6 +97,45 @@ test("browser-neutral discovery events and explicit UUID grants preserve the Rus
   assert.match(grant.input.pages[0]?.pageId ?? "", /^[0-9a-f-]{36}$/);
 });
 
+test("page binding discovery events preserve the strict Rust JSON shape", () => {
+  const event = parseCompanionEvent(
+    JSON.stringify({
+      kind: "pageBindingDiscovered",
+      output: {
+        protocolVersion: 1,
+        profileId: "8ec6d155-8d88-4107-87a5-744660228b65",
+        targetId: "opaque-target-handle",
+        bindingNonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201",
+      },
+    }),
+  );
+
+  assert.deepEqual(event, {
+    kind: "pageBindingDiscovered",
+    output: {
+      protocolVersion: 1,
+      profileId: "8ec6d155-8d88-4107-87a5-744660228b65",
+      targetId: "opaque-target-handle",
+      bindingNonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201",
+    },
+  });
+  assert.throws(
+    () =>
+      parseCompanionEvent(
+        JSON.stringify({
+          kind: "pageBindingDiscovered",
+          output: {
+            protocolVersion: 1,
+            profileId: "8ec6d155-8d88-4107-87a5-744660228b65",
+            targetId: "opaque-target-handle",
+            bindingNonce: "page-controlled-value",
+          },
+        }),
+      ),
+    /bindingNonce.*UUID/i,
+  );
+});
+
 test("action request identifiers and deadlines are strictly bounded", () => {
   const request = {
     kind: "action",

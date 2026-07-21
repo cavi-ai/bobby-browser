@@ -61,6 +61,13 @@ export type TargetDiscovery = {
   targets: BrowserTarget[];
 };
 
+export type PageBindingDiscovered = {
+  protocolVersion: typeof PROTOCOL_VERSION;
+  profileId: string;
+  targetId: string;
+  bindingNonce: string;
+};
+
 export type GrantedPage = {
   targetId: string;
   pageId: string;
@@ -105,6 +112,7 @@ export type CompanionEvent =
       };
     }
   | { kind: "targetsDiscovered"; output: TargetDiscovery }
+  | { kind: "pageBindingDiscovered"; output: PageBindingDiscovered }
   | { kind: "pong" };
 
 type JsonObject = Record<string, unknown>;
@@ -429,6 +437,24 @@ export function parseCompanionEvent(payload: string): CompanionEvent {
           protocolVersion: protocolVersion(output.protocolVersion),
           profileId: uuid(output.profileId, "profileId"),
           targets,
+        },
+      };
+    }
+    case "pageBindingDiscovered": {
+      exactKeys(message, ["kind", "output"], "pageBindingDiscovered event");
+      const output = parseEventOutput(message.output, "pageBindingDiscovered");
+      exactKeys(
+        output,
+        ["protocolVersion", "profileId", "targetId", "bindingNonce"],
+        "pageBindingDiscovered output",
+      );
+      return {
+        kind: "pageBindingDiscovered",
+        output: {
+          protocolVersion: protocolVersion(output.protocolVersion),
+          profileId: uuid(output.profileId, "profileId"),
+          targetId: string(output.targetId, "targetId", MAX_TARGET_ID_BYTES),
+          bindingNonce: uuid(output.bindingNonce, "bindingNonce"),
         },
       };
     }

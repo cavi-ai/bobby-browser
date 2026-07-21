@@ -204,12 +204,13 @@ test("discovery is not a grant and only an explicit UUID grant can route", async
   ]);
 });
 
-test("manifest installs content receivers in subframes", async () => {
+test("manifest installs content receivers in subframes and newly opened blank contexts", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../manifest.json", import.meta.url), "utf8"),
-  ) as { content_scripts?: Array<{ all_frames?: boolean }> };
+  ) as { content_scripts?: Array<{ all_frames?: boolean; match_about_blank?: boolean }> };
 
   assert.equal(manifest.content_scripts?.[0]?.all_frames, true);
+  assert.equal(manifest.content_scripts?.[0]?.match_about_blank, true);
 });
 
 test("paired discovery accepts profile-bound grants and rejects unrelated routes", async () => {
@@ -329,6 +330,63 @@ test("trusted runtime sender metadata creates the route without trusting payload
   assert.deepEqual(routed, [{ tabId: 10, frameId: 3 }]);
 });
 
+test("trusted binding markers report the discovered browser route without trusting page IDs", async () => {
+  const transport = new FakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const bindingNonce = "b5f6319a-6b36-43cb-9464-d337fc9d8201";
+  await background.receiveRuntimeMessage(
+    { type: "companionPageBinding", bindingNonce },
+    {
+      id: "trusted-extension",
+      tab: { id: 10 },
+      frameId: 3,
+      url: "about:blank",
+    },
+    "trusted-extension",
+  );
+  await background.receiveRuntimeMessage(
+    { type: "companionPageBinding", bindingNonce: "page-controlled-value" },
+    {
+      id: "trusted-extension",
+      tab: { id: 11 },
+      frameId: 0,
+      url: "https://example.test/forged",
+    },
+    "trusted-extension",
+  );
+
+  assert.deepEqual(transport.sent.at(-1), {
+    kind: "pageBindingDiscovered",
+    output: {
+      protocolVersion: 1,
+      profileId: CONNECT_OPTIONS.profileId,
+      targetId: targetId(10, 3),
+      bindingNonce,
+    },
+  });
+  assert.equal(
+    transport.sent.some(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        JSON.stringify(message).includes(pageId(10, 3)),
+    ),
+    false,
+  );
+});
+
 test("lease capacity is bounded and leases expire", async () => {
   const transport = new FakeTransport();
   let now = 1_000;
@@ -400,6 +458,11 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
   const routed: unknown[] = [];
   const queried: unknown[] = [];
   const frames: number[] = [];
+  const tabUpdates = new ListenerSet<(
+    tabId: number,
+    changeInfo: { title?: string },
+    tab: { id?: number; url?: string; title?: string },
+  ) => void>();
   const browserApi = {
     runtime: {
       id: "trusted-extension",
@@ -424,6 +487,7 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
       },
     },
     tabs: {
+      onUpdated: tabUpdates,
       async query(query: unknown) {
         queried.push(query);
         return [
@@ -509,6 +573,29 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
         message !== null &&
         "kind" in message &&
         message.kind === "actionCompleted",
+    ),
+    true,
+  );
+
+  const bindingNonce = "b5f6319a-6b36-43cb-9464-d337fc9d8201";
+  tabUpdates.emit(
+    12,
+    { title: `automation-runtime-binding:${bindingNonce}` },
+    { id: 12, url: "about:blank", title: `automation-runtime-binding:${bindingNonce}` },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    port.sent.some(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "pageBindingDiscovered" &&
+        "output" in message &&
+        typeof message.output === "object" &&
+        message.output !== null &&
+        "bindingNonce" in message.output &&
+        message.output.bindingNonce === bindingNonce,
     ),
     true,
   );
