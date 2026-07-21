@@ -383,3 +383,22 @@ fn workflow_evidence_is_typed_and_camel_case() {
     assert_eq!(value["sha256"], json!("9f64a747"));
     assert_eq!(value["bytes"], json!(4));
 }
+
+#[test]
+fn browser_execution_evidence_is_journal_safe_without_paths_or_content() {
+    let evidence = Evidence::BrowserExecution {
+        engine: "firefox".into(),
+        browser_version: "128.0".into(),
+        profile_id: "847ac21e-a1f4-4a31-b35b-ff1741c480f7".into(),
+        interaction_path: "engineNative".into(),
+    };
+
+    let value = serde_json::to_value(evidence.journal_safe()).unwrap();
+    assert_eq!(value["kind"], "browserExecution");
+    assert_eq!(value["engine"], "firefox");
+    assert_eq!(value["browserVersion"], "128.0");
+    assert_eq!(value["profileId"], "847ac21e-a1f4-4a31-b35b-ff1741c480f7");
+    assert_eq!(value["interactionPath"], "engineNative");
+    assert!(value.get("profilePath").is_none());
+    assert!(value.get("value").is_none());
+}
