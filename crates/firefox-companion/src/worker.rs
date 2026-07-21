@@ -18,7 +18,8 @@ use companion_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
-    sync::{Mutex as AsyncMutex, RwLock},
+    runtime::Handle,
+    sync::{watch, Mutex as AsyncMutex, RwLock},
     task::JoinHandle,
 };
 use types::{
@@ -313,9 +314,25 @@ pub struct FirefoxCompanionWorker {
     page_cleanups: Arc<RwLock<HashMap<PageId, OpenPageCleanup>>>,
     closed: AtomicBool,
     lifecycle: AsyncMutex<()>,
-    close_result: TaskMutex<Option<Result<(), CommandError>>>,
+    shutdown: Arc<WorkerShutdown>,
     cleanup_failure: Arc<TaskMutex<Option<CommandError>>>,
-    cleanup_task: TaskMutex<Option<JoinHandle<()>>>,
+    cleanup_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
+}
+
+struct WorkerShutdown {
+    started: AtomicBool,
+    result: watch::Sender<Option<Result<(), CommandError>>>,
+    runtime: Handle,
+}
+
+#[derive(Clone)]
+struct WorkerShutdownResources {
+    transport: Arc<dyn BidiTransport>,
+    observer: Arc<dyn ExtensionObserver>,
+    pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
+    page_cleanups: Arc<RwLock<HashMap<PageId, OpenPageCleanup>>>,
+    cleanup_failure: Arc<TaskMutex<Option<CommandError>>>,
+    cleanup_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
 }
 
 #[derive(Clone)]
@@ -535,11 +552,33 @@ impl OpenPageCleanup {
             .fetch_and(!CLEANUP_RESTORE_DONE, Ordering::AcqRel);
     }
 
-    fn mark_exposed(&self) {
-        self.details
-            .lock()
-            .expect("open-page cleanup details mutex poisoned")
-            .exposed = true;
+    async fn commit_exposure(&self) -> Result<(), Vec<String>> {
+        let _run = self.execution.run.lock().await;
+        let details = self.details();
+        let ready = self
+            .resources
+            .pages
+            .read()
+            .await
+            .get(&self.page_id)
+            .is_some_and(|mapped| {
+                matches!(
+                    (mapped, details.context.as_deref()),
+                    (PageContext::Ready { context, .. }, Some(expected)) if context == expected
+                )
+            });
+        if ready {
+            let mut details = self
+                .details
+                .lock()
+                .expect("open-page cleanup details mutex poisoned");
+            details.exposed = true;
+            details.opening_settled = true;
+            return Ok(());
+        }
+
+        self.settle_opening();
+        Err(self.run_locked(true).await)
     }
 
     fn settle_opening(&self) {
@@ -628,12 +667,30 @@ impl OpenPageGuard {
         primary
     }
 
-    fn disarm(mut self) {
-        if let Some(cleanup) = self.cleanup.as_ref() {
-            cleanup.mark_exposed();
-            cleanup.settle_opening();
+    async fn disarm(mut self) -> Result<(), CommandError> {
+        let cleanup = self.cleanup.as_ref().expect("open-page cleanup is armed");
+        match cleanup.commit_exposure().await {
+            Ok(()) => {
+                self.cleanup = None;
+                Ok(())
+            }
+            Err(failures) => {
+                self.cleanup = None;
+                let mut error = driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox page was destroyed before exposure commit",
+                    true,
+                );
+                if !failures.is_empty() {
+                    error.message = format!(
+                        "{}; cleanup failed while {}",
+                        error.message,
+                        failures.join("; ")
+                    );
+                }
+                Err(error)
+            }
         }
-        self.cleanup = None;
     }
 
     fn settle_opening(&self) {
@@ -702,7 +759,7 @@ impl FirefoxCompanionWorker {
         let cleanup_transport = Arc::clone(&transport);
         let cleanup_failure = Arc::new(TaskMutex::new(None));
         let task_failure = Arc::clone(&cleanup_failure);
-        let cleanup_task = Some(tokio::spawn(async move {
+        let cleanup_task = Arc::new(TaskMutex::new(Some(tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(event) if event.method == "browsingContext.contextDestroyed" => {
@@ -730,7 +787,8 @@ impl FirefoxCompanionWorker {
                     }
                 }
             }
-        }));
+        }))));
+        let (shutdown_result, _) = watch::channel(None);
         Ok(Self {
             id,
             profile_dir,
@@ -741,10 +799,52 @@ impl FirefoxCompanionWorker {
             page_cleanups,
             closed: AtomicBool::new(false),
             lifecycle: AsyncMutex::new(()),
-            close_result: TaskMutex::new(None),
+            shutdown: Arc::new(WorkerShutdown {
+                started: AtomicBool::new(false),
+                result: shutdown_result,
+                runtime: Handle::current(),
+            }),
             cleanup_failure,
-            cleanup_task: TaskMutex::new(cleanup_task),
+            cleanup_task,
         })
+    }
+
+    fn start_shutdown(&self) {
+        if self.shutdown.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        self.closed.store(true, Ordering::Release);
+        let resources = WorkerShutdownResources {
+            transport: Arc::clone(&self.transport),
+            observer: Arc::clone(&self.observer),
+            pages: Arc::clone(&self.pages),
+            page_cleanups: Arc::clone(&self.page_cleanups),
+            cleanup_failure: Arc::clone(&self.cleanup_failure),
+            cleanup_task: Arc::clone(&self.cleanup_task),
+        };
+        let shutdown = Arc::clone(&self.shutdown);
+        let runtime = shutdown.runtime.clone();
+        runtime.spawn(async move {
+            let result = run_worker_shutdown(resources).await;
+            shutdown.result.send_replace(Some(result));
+        });
+    }
+
+    async fn wait_for_shutdown(&self) -> Result<(), CommandError> {
+        let mut result = self.shutdown.result.subscribe();
+        loop {
+            if let Some(result) = result.borrow().clone() {
+                return result;
+            }
+            result.changed().await.map_err(|_| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox worker shutdown ended without a result",
+                    false,
+                )
+            })?;
+        }
     }
 
     async fn context(&self, page_id: &PageId) -> Result<String, CommandError> {
@@ -1233,8 +1333,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
 
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         let guard = self.open_page_owned(page_id).await?;
-        guard.disarm();
-        Ok(())
+        guard.disarm().await
     }
 
     async fn navigate(
@@ -1430,7 +1529,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ];
-        guard.disarm();
+        guard.disarm().await?;
         Ok(evidence)
     }
 
@@ -1454,88 +1553,82 @@ impl BrowserWorker for FirefoxCompanionWorker {
     }
 
     async fn close(&self) -> Result<(), CommandError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        if let Some(result) = self
-            .close_result
-            .lock()
-            .expect("close result mutex poisoned")
-            .clone()
         {
-            return result;
+            let _lifecycle = self.lifecycle.lock().await;
+            self.start_shutdown();
         }
-        self.closed.store(true, Ordering::Release);
-        let cleanups = self
-            .page_cleanups
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        {
-            let mut pages = self.pages.write().await;
-            for context in pages.values_mut() {
-                let owned = match context {
-                    PageContext::Opening(context) | PageContext::Releasing { context } => {
-                        context.clone()
-                    }
-                    PageContext::Ready { context, .. } => Some(context.clone()),
-                };
-                *context = PageContext::Releasing { context: owned };
-            }
-        }
-        let mut failures = Vec::new();
-        if let Some(error) = self
-            .cleanup_failure
-            .lock()
-            .expect("cleanup failure mutex poisoned")
-            .clone()
-        {
-            failures.push(error.message);
-        }
-        for cleanup in cleanups {
-            cleanup.cancel();
-            failures.extend(cleanup.run().await);
-        }
-        self.pages.write().await.clear();
-        if let Some(task) = self
-            .cleanup_task
-            .lock()
-            .expect("cleanup task mutex poisoned")
-            .take()
-        {
-            task.abort();
-        }
-        match tokio::time::timeout(self.observer.operation_timeout(), self.transport.close()).await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                failures.push(format!("closing the Firefox transport: {}", error.message))
-            }
-            Err(_) => failures.push(format!(
-                "closing the Firefox transport: {}",
-                cleanup_deadline_error("closing the Firefox transport").message
-            )),
-        }
-        let result = if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(cleanup_failures_error(&failures))
-        };
-        *self
-            .close_result
-            .lock()
-            .expect("close result mutex poisoned") = Some(result.clone());
-        result
+        self.wait_for_shutdown().await
     }
 }
 
 impl Drop for FirefoxCompanionWorker {
     fn drop(&mut self) {
-        if let Ok(task) = self.cleanup_task.get_mut() {
-            if let Some(task) = task.take() {
-                task.abort();
-            }
+        self.start_shutdown();
+    }
+}
+
+async fn run_worker_shutdown(resources: WorkerShutdownResources) -> Result<(), CommandError> {
+    let cleanups = resources
+        .page_cleanups
+        .read()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    {
+        let mut pages = resources.pages.write().await;
+        for context in pages.values_mut() {
+            let owned = match context {
+                PageContext::Opening(context) | PageContext::Releasing { context } => {
+                    context.clone()
+                }
+                PageContext::Ready { context, .. } => Some(context.clone()),
+            };
+            *context = PageContext::Releasing { context: owned };
         }
+    }
+
+    let mut failures = Vec::new();
+    if let Some(error) = resources
+        .cleanup_failure
+        .lock()
+        .expect("cleanup failure mutex poisoned")
+        .clone()
+    {
+        failures.push(error.message);
+    }
+    for cleanup in cleanups {
+        cleanup.cancel();
+        failures.extend(cleanup.run().await);
+    }
+    resources.pages.write().await.clear();
+    if let Some(task) = resources
+        .cleanup_task
+        .lock()
+        .expect("cleanup task mutex poisoned")
+        .take()
+    {
+        task.abort();
+    }
+    match tokio::time::timeout(
+        resources.observer.operation_timeout(),
+        resources.transport.close(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            failures.push(format!("closing the Firefox transport: {}", error.message))
+        }
+        Err(_) => failures.push(format!(
+            "closing the Firefox transport: {}",
+            cleanup_deadline_error("closing the Firefox transport").message
+        )),
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(cleanup_failures_error(&failures))
     }
 }
 

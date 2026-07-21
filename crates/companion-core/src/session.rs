@@ -6,11 +6,11 @@ use companion_protocol::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex as TaskMutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
 use types::{AttachmentId, CommandId, CompanionId, PageId, ProfileId};
 use uuid::Uuid;
 
@@ -105,8 +105,19 @@ struct SessionState {
 pub(crate) struct SessionCoordinator {
     registry: Arc<CompanionRegistry>,
     state: Arc<Mutex<SessionState>>,
-    grant_updates: Mutex<()>,
+    grant_updates: Arc<Mutex<()>>,
+    binding_releases: Arc<TaskMutex<HashMap<PageBindingReleaseKey, Arc<PageBindingRelease>>>>,
     discovery_changed: Notify,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PageBindingReleaseKey {
+    attachment_id: AttachmentId,
+    page_id: PageId,
+}
+
+struct PageBindingRelease {
+    result: watch::Sender<Option<Result<(), CompanionSessionError>>>,
 }
 
 pub struct PageBindingTicket {
@@ -295,7 +306,8 @@ impl SessionCoordinator {
         Self {
             registry,
             state: Arc::new(Mutex::new(SessionState::default())),
-            grant_updates: Mutex::new(()),
+            grant_updates: Arc::new(Mutex::new(())),
+            binding_releases: Arc::new(TaskMutex::new(HashMap::new())),
             discovery_changed: Notify::new(),
         }
     }
@@ -549,9 +561,69 @@ impl SessionCoordinator {
         attachment_id: &AttachmentId,
         page_id: &PageId,
     ) -> Result<(), CompanionSessionError> {
-        let _grant_update = self.grant_updates.lock().await;
+        let key = PageBindingReleaseKey {
+            attachment_id: attachment_id.clone(),
+            page_id: page_id.clone(),
+        };
+        let mut result = {
+            let mut releases = self
+                .binding_releases
+                .lock()
+                .expect("page-binding release mutex poisoned");
+            if let Some(release) = releases.get(&key) {
+                release.result.subscribe()
+            } else {
+                let (result, receiver) = watch::channel(None);
+                let release = Arc::new(PageBindingRelease { result });
+                releases.insert(key.clone(), Arc::clone(&release));
+                let state = Arc::clone(&self.state);
+                let grant_updates = Arc::clone(&self.grant_updates);
+                let binding_releases = Arc::clone(&self.binding_releases);
+                tokio::spawn(async move {
+                    let outcome = Self::release_page_binding_owned(
+                        &state,
+                        &grant_updates,
+                        &key.attachment_id,
+                        &key.page_id,
+                    )
+                    .await;
+                    release.result.send_replace(Some(outcome.clone()));
+                    if outcome.is_ok() {
+                        let mut releases = binding_releases
+                            .lock()
+                            .expect("page-binding release mutex poisoned");
+                        if releases
+                            .get(&key)
+                            .is_some_and(|current| Arc::ptr_eq(current, &release))
+                        {
+                            releases.remove(&key);
+                        }
+                    }
+                });
+                receiver
+            }
+        };
+
+        loop {
+            if let Some(outcome) = result.borrow().clone() {
+                return outcome;
+            }
+            result
+                .changed()
+                .await
+                .map_err(|_| CompanionSessionError::ConnectionClosed)?;
+        }
+    }
+
+    async fn release_page_binding_owned(
+        state: &Arc<Mutex<SessionState>>,
+        grant_updates: &Arc<Mutex<()>>,
+        attachment_id: &AttachmentId,
+        page_id: &PageId,
+    ) -> Result<(), CompanionSessionError> {
+        let _grant_update = grant_updates.lock().await;
         let update = {
-            let mut state = self.state.lock().await;
+            let mut state = state.lock().await;
             purge_expired_bindings(&mut state, Instant::now());
 
             let pending_nonces = state
@@ -1595,6 +1667,185 @@ mod tests {
             .pages
             .iter()
             .any(|page| page.page_id == page_id));
+    }
+
+    #[tokio::test]
+    async fn cancelled_release_waiter_does_not_cancel_publication_and_retry_joins_it() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(1).await;
+        let page_id = PageId::new();
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, page_id.clone())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: vec![
+                        BrowserTarget {
+                            target_id: "trusted-target".into(),
+                            kind: TargetKind::Page,
+                        },
+                        BrowserTarget {
+                            target_id: "release-owned-context".into(),
+                            kind: TargetKind::Page,
+                        },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    target_id: "release-owned-context".into(),
+                    binding_nonce: nonce,
+                }),
+            )
+            .await
+            .unwrap();
+        ticket.complete(Duration::from_secs(1)).await.unwrap();
+        let _binding_grant = requests.recv().await.unwrap();
+        coordinator
+            .send_request(&profile_id, CompanionRequest::Ping)
+            .await
+            .unwrap();
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                coordinator.release_page_binding(&grant.attachment_id, &page_id),
+            )
+            .await
+            .is_err(),
+            "the first waiter must time out while the outbound queue is saturated"
+        );
+        assert!(!coordinator
+            .active_grant(&profile_id)
+            .await
+            .unwrap()
+            .pages
+            .iter()
+            .any(|page| page.page_id == page_id));
+
+        let mut retry = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let attachment_id = grant.attachment_id.clone();
+            let page_id = page_id.clone();
+            async move {
+                coordinator
+                    .release_page_binding(&attachment_id, &page_id)
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut retry)
+                .await
+                .is_err(),
+            "retry must join the unfinished publication instead of returning false success"
+        );
+
+        let Message::Text(ping) = requests.recv().await.unwrap() else {
+            panic!("expected the queue-saturating ping")
+        };
+        assert_eq!(
+            serde_json::from_str::<CompanionRequest>(ping.as_str()).unwrap(),
+            CompanionRequest::Ping
+        );
+        retry.await.unwrap().unwrap();
+        let Message::Text(reduced) = requests.recv().await.unwrap() else {
+            panic!("expected the owned reduced-grant publication")
+        };
+        let CompanionRequest::Grant(reduced): CompanionRequest =
+            serde_json::from_str(reduced.as_str()).unwrap()
+        else {
+            panic!("expected a reduced grant")
+        };
+        assert!(!reduced.pages.iter().any(|page| page.page_id == page_id));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), requests.recv())
+                .await
+                .is_err(),
+            "deduplicated retries must publish the reduced grant exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_owned_release_publication_is_durable_for_retries() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(1).await;
+        let page_id = PageId::new();
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, page_id.clone())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: vec![
+                        BrowserTarget {
+                            target_id: "trusted-target".into(),
+                            kind: TargetKind::Page,
+                        },
+                        BrowserTarget {
+                            target_id: "release-failure-context".into(),
+                            kind: TargetKind::Page,
+                        },
+                    ],
+                }),
+            )
+            .await
+            .unwrap();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    target_id: "release-failure-context".into(),
+                    binding_nonce: nonce,
+                }),
+            )
+            .await
+            .unwrap();
+        ticket.complete(Duration::from_secs(1)).await.unwrap();
+        let _binding_grant = requests.recv().await.unwrap();
+        coordinator
+            .send_request(&profile_id, CompanionRequest::Ping)
+            .await
+            .unwrap();
+
+        assert!(tokio::time::timeout(
+            Duration::from_millis(25),
+            coordinator.release_page_binding(&grant.attachment_id, &page_id),
+        )
+        .await
+        .is_err());
+        drop(requests);
+
+        let first_retry = coordinator
+            .release_page_binding(&grant.attachment_id, &page_id)
+            .await;
+        assert_eq!(first_retry, Err(CompanionSessionError::QueueClosed));
+        let second_retry = coordinator
+            .release_page_binding(&grant.attachment_id, &page_id)
+            .await;
+        assert_eq!(second_retry, Err(CompanionSessionError::QueueClosed));
     }
 
     #[tokio::test]

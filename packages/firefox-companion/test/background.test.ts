@@ -507,7 +507,7 @@ test("the newest overlapping navigation reconciliation wins regardless of resolu
   assert.deepEqual(discoveredTargetIds(transport), [targetId(22, 0), targetId(22, 8)]);
 });
 
-test("a trusted tab update invalidates an older asynchronous frame snapshot", async () => {
+test("a page-binding marker does not invalidate an authoritative frame snapshot", async () => {
   const transport = new FakeTransport();
   const snapshot = deferred<readonly DiscoveredTarget[]>();
   const background = new CompanionBackground({
@@ -536,7 +536,74 @@ test("a trusted tab update invalidates an older asynchronous frame snapshot", as
   ]);
   await stale;
 
-  assert.deepEqual(discoveredTargetIds(transport), [targetId(23, 0)]);
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(23, 0), targetId(23, 9)]);
+});
+
+test("a normal title update does not prevent an in-flight snapshot from pruning routes", async () => {
+  const transport = new FakeTransport();
+  const snapshot = deferred<readonly DiscoveredTarget[]>();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [
+      { tabId: 24, frameId: 0 },
+      { tabId: 24, frameId: 4 },
+    ],
+    discoverTabTargets: async () => snapshot.promise,
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const reconciliation = background.reconcileTab(24);
+  background.receiveTabUpdate(
+    24,
+    { title: "A normal page title" },
+    { id: 24, url: "https://example.test/", title: "A normal page title" },
+  );
+  snapshot.resolve([{ tabId: 24, frameId: 0 }]);
+  await reconciliation;
+
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(24, 0)]);
+});
+
+test("frame-ready does not invalidate the snapshot that prunes disappeared routes", async () => {
+  const transport = new FakeTransport();
+  const snapshot = deferred<readonly DiscoveredTarget[]>();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [
+      { tabId: 25, frameId: 0 },
+      { tabId: 25, frameId: 4 },
+    ],
+    discoverTabTargets: async () => snapshot.promise,
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const reconciliation = background.reconcileTab(25);
+  await background.receiveRuntimeMessage(
+    { type: "companionFrameReady" },
+    {
+      id: "trusted-extension",
+      tab: { id: 25 },
+      frameId: 8,
+      url: "https://example.test/frame",
+    },
+    "trusted-extension",
+  );
+  snapshot.resolve([{ tabId: 25, frameId: 0 }]);
+  await reconciliation;
+
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(25, 0)]);
 });
 
 class ListenerSet<T extends (...arguments_: never[]) => unknown> {

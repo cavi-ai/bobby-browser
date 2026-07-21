@@ -230,7 +230,6 @@ export class CompanionBackground {
     }
 
     const target = { tabId: sender.tab.id, frameId: sender.frameId };
-    this.#advanceTabLifecycle(target.tabId, true);
     if (this.#registerTarget(target)) this.#sendDiscovery();
   }
 
@@ -240,7 +239,6 @@ export class CompanionBackground {
     tab: { id?: number; url?: string; title?: string },
   ): void {
     if (!validBrowserId(tabId)) return;
-    this.#advanceTabLifecycle(tabId, true);
     if (
       tab.id !== tabId ||
       tab.url !== "about:blank" ||
