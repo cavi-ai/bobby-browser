@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod manifest;
+pub mod native_browser;
 pub mod policy;
 pub mod process;
 pub mod result;
@@ -11,6 +12,10 @@ mod persistence;
 pub use manifest::{
     ManifestError, ReleaseManifest, SecurityManifest, DEFAULT_CHECK_TIMEOUT_SECS,
     DEFAULT_MAX_OUTPUT_BYTES, MANIFEST_SCHEMA_VERSION,
+};
+pub use native_browser::{
+    evaluate_native_browser_proof, NativeBrowserOperationProof, NativeBrowserProof,
+    NativeBrowserProofError,
 };
 pub use policy::{evaluate, CertificationVerdict, PolicyError};
 pub use process::{run_process, ProcessFailure, ProcessOutcome, ProcessSpec};

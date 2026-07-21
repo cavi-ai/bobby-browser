@@ -129,6 +129,12 @@ pub enum Evidence {
         bytes: u64,
         sha256: String,
     },
+    BrowserExecution {
+        engine: String,
+        browser_version: String,
+        profile_id: String,
+        interaction_path: String,
+    },
 }
 
 impl Evidence {
@@ -166,6 +172,7 @@ impl Evidence {
                     page.url = safe_url(&page.url);
                 }
             }
+            Self::BrowserExecution { .. } => {}
             _ => {}
         }
         safe
