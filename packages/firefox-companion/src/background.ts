@@ -56,6 +56,7 @@ type Transport = {
 export type BackgroundDependencies = {
   transport: Transport;
   discoverTargets?: () => Promise<readonly DiscoveredTarget[]>;
+  discoverTabTargets?: (tabId: number) => Promise<readonly DiscoveredTarget[]>;
   sendTabMessage(tabId: number, message: unknown, frameId: number): Promise<unknown>;
   navigateTab(tabId: number, url: string): Promise<void>;
   createTargetId?: (target: DiscoveredTarget) => string;
@@ -243,6 +244,33 @@ export class CompanionBackground {
     this.#reportPageBinding({ tabId, frameId: 0 }, bindingNonce);
   }
 
+  receiveTabRemoved(tabId: number): void {
+    if (!validBrowserId(tabId)) return;
+    if (this.#removeTargets((target) => target.tabId === tabId)) this.#sendDiscovery();
+  }
+
+  async reconcileTab(tabId: number): Promise<void> {
+    if (!validBrowserId(tabId) || !this.#dependencies.discoverTabTargets) return;
+    const discovered = await this.#dependencies.discoverTabTargets(tabId);
+    const current = new Map<string, DiscoveredTarget>();
+    for (const target of discovered) {
+      if (
+        object(target) &&
+        exactKeys(target, ["tabId", "frameId"]) &&
+        target.tabId === tabId &&
+        validBrowserId(target.frameId)
+      ) {
+        current.set(browserRouteKey(target.tabId, target.frameId), target);
+      }
+    }
+    let changed = this.#removeTargets(
+      (target) =>
+        target.tabId === tabId && !current.has(browserRouteKey(target.tabId, target.frameId)),
+    );
+    for (const target of current.values()) changed = this.#registerTarget(target) || changed;
+    if (changed) this.#sendDiscovery();
+  }
+
   #reportPageBinding(target: DiscoveredTarget, bindingNonce: string): void {
     if (this.#registerTarget(target)) this.#sendDiscovery();
     if (!this.#paired || !this.#options) return;
@@ -371,6 +399,22 @@ export class CompanionBackground {
     return true;
   }
 
+  #removeTargets(predicate: (target: DiscoveredTarget) => boolean): boolean {
+    const removedRoutes = new Set<string>();
+    for (const [targetId, target] of this.#targets) {
+      if (!predicate(target)) continue;
+      const browserKey = browserRouteKey(target.tabId, target.frameId);
+      removedRoutes.add(browserKey);
+      this.#targets.delete(targetId);
+      this.#targetIdsByRoute.delete(browserKey);
+    }
+    if (removedRoutes.size === 0) return false;
+    for (const [key, lease] of this.#leases) {
+      if (removedRoutes.has(browserRouteKey(lease.tabId, lease.frameId))) this.#leases.delete(key);
+    }
+    return true;
+  }
+
   #sendDiscovery(): void {
     if (!this.#paired || !this.#options) return;
     const event: CompanionEvent = {
@@ -466,11 +510,24 @@ export type ProductionBrowserApi = {
         ) => void,
       ): void;
     };
+    onRemoved: {
+      addListener(
+        listener: (
+          tabId: number,
+          removeInfo: { windowId: number; isWindowClosing: boolean },
+        ) => void,
+      ): void;
+    };
     query(query: Record<string, never>): Promise<Array<{ id?: number; url?: string; title?: string }>>;
     sendMessage(tabId: number, message: unknown, options: { frameId: number }): Promise<unknown>;
     update(tabId: number, properties: { url: string }): Promise<unknown>;
   };
   webNavigation: {
+    onCommitted: {
+      addListener(
+        listener: (details: { tabId: number; frameId: number; url: string }) => void,
+      ): void;
+    };
     getAllFrames(details: { tabId: number }): Promise<Array<{ frameId: number; url: string }> | null>;
   };
 };
@@ -505,6 +562,25 @@ export async function startProductionBackground(
   const transport = new NativeCompanionTransport({
     connectNative: (hostName) => browserApi.runtime.connectNative(hostName),
   });
+  const discoverTabTargets = async (
+    tabId: number,
+    fallbackUrl?: string,
+  ): Promise<DiscoveredTarget[]> => {
+    let frames: Array<{ frameId: number; url: string }> | null;
+    try {
+      frames = await browserApi.webNavigation.getAllFrames({ tabId });
+    } catch {
+      frames = supportedFrameUrl(fallbackUrl) ? [{ frameId: 0, url: fallbackUrl }] : [];
+    }
+    if (!frames?.length && supportedFrameUrl(fallbackUrl)) {
+      frames = [{ frameId: 0, url: fallbackUrl }];
+    }
+    return (frames ?? []).flatMap((frame) =>
+      validBrowserId(frame.frameId) && supportedFrameUrl(frame.url)
+        ? [{ tabId, frameId: frame.frameId }]
+        : [],
+    );
+  };
   const background = new CompanionBackground({
     transport,
     discoverTargets: async () => {
@@ -513,25 +589,16 @@ export async function startProductionBackground(
       for (const tab of tabs) {
         if (targets.length >= MAX_PAGE_LEASES) break;
         if (!validBrowserId(tab.id)) continue;
-        let frames: Array<{ frameId: number; url: string }> | null = null;
         try {
-          frames = await browserApi.webNavigation.getAllFrames({ tabId: tab.id });
+          const discovered = await discoverTabTargets(tab.id, tab.url);
+          targets.push(...discovered.slice(0, MAX_PAGE_LEASES - targets.length));
         } catch {
-          frames = null;
-        }
-        if (!frames?.length) {
-          if (!supportedFrameUrl(tab.url)) continue;
-          frames = [{ frameId: 0, url: tab.url }];
-        }
-        for (const frame of frames) {
-          if (targets.length >= MAX_PAGE_LEASES) break;
-          if (validBrowserId(frame.frameId) && supportedFrameUrl(frame.url)) {
-            targets.push({ tabId: tab.id, frameId: frame.frameId });
-          }
+          continue;
         }
       }
       return targets;
     },
+    discoverTabTargets: (tabId) => discoverTabTargets(tabId),
     sendTabMessage: (tabId, message, frameId) =>
       browserApi.tabs.sendMessage(tabId, message, { frameId }),
     navigateTab: async (tabId, url) => {
@@ -546,6 +613,12 @@ export async function startProductionBackground(
   });
   browserApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     background.receiveTabUpdate(tabId, changeInfo, tab);
+  });
+  browserApi.tabs.onRemoved.addListener((tabId) => {
+    background.receiveTabRemoved(tabId);
+  });
+  browserApi.webNavigation.onCommitted.addListener((details) => {
+    void background.reconcileTab(details.tabId).catch(() => undefined);
   });
   background.connect({
     companionId: stored.companionId,
