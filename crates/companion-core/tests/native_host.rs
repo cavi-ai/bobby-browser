@@ -1,7 +1,7 @@
 use companion_core::{
-    encode_native_message, read_native_message, run_native_host, validate_protocol_message,
-    write_native_message, CompanionServer, CompanionServerConfig, NativeConnectRequest,
-    NativeHostConfig, NativeHostError, MAX_NATIVE_MESSAGE_BYTES,
+    encode_native_message, read_native_message, run_native_host, validate_extension_message,
+    validate_server_message, write_native_message, CompanionServer, CompanionServerConfig,
+    NativeConnectRequest, NativeHostConfig, NativeHostError, MAX_NATIVE_MESSAGE_BYTES,
 };
 use companion_protocol::{
     BrowserEngine, BrowserIdentity, CompanionCapabilities, CompanionRequest, PROTOCOL_VERSION,
@@ -142,10 +142,46 @@ fn native_host_owns_pairing_material_and_redacts_it_from_debug() {
 }
 
 #[test]
-fn native_host_forwards_only_canonical_protocol_messages() {
-    assert!(validate_protocol_message(json!({"kind": "pong"})).is_ok());
-    assert!(validate_protocol_message(json!({"kind": "unknown"})).is_err());
-    assert!(validate_protocol_message(json!({"kind": "pong", "extra": true})).is_err());
+fn native_connect_metadata_rejects_recursive_secret_material() {
+    let config = NativeHostConfig::new(
+        "ws://127.0.0.1:49152/v1/companion".parse().unwrap(),
+        "pairing-secret",
+    );
+    let mut request = connect_request();
+    request.identity.profile_label = "Bearer private-token".into();
+
+    assert!(matches!(
+        config.pair_request(request),
+        Err(NativeHostError::InvalidProtocol)
+    ));
+}
+
+#[test]
+fn native_host_enforces_exact_directional_schemas() {
+    assert!(validate_extension_message(json!({"kind": "pong"})).is_ok());
+    assert!(validate_extension_message(json!({"kind": "ping"})).is_err());
+    assert!(validate_extension_message(json!({
+        "kind": "paired",
+        "output": {"companionId": CompanionId::new(), "profileId": ProfileId::new()}
+    }))
+    .is_err());
+    assert!(validate_extension_message(json!({
+        "kind": "actionCompleted",
+        "output": {
+            "commandId": "command-1",
+            "interactionPath": "extensionApi",
+            "output": {"authorization": "Bearer private-token"}
+        }
+    }))
+    .is_err());
+
+    assert!(validate_server_message(json!({"kind": "ping"})).is_ok());
+    assert!(validate_server_message(json!({
+        "kind": "paired",
+        "output": {"companionId": CompanionId::new(), "profileId": ProfileId::new()}
+    }))
+    .is_ok());
+    assert!(validate_server_message(json!({"kind": "pong"})).is_err());
 }
 
 #[tokio::test]
@@ -183,17 +219,65 @@ async fn native_host_keeps_pairing_material_out_of_the_extension_channel() {
         .unwrap()
         .contains(&pairing_code));
 
-    write_native_message(&mut extension_stream, &json!({"kind": "ping"}))
-        .await
-        .unwrap();
-    assert_eq!(
-        read_native_message(&mut extension_stream)
-            .await
-            .unwrap()
-            .unwrap(),
-        json!({"kind": "pong"})
-    );
+    server.disconnect_clients();
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_native_message(&mut extension_stream),
+    )
+    .await
+    .expect("native host must reconnect after a live server disconnect")
+    .unwrap()
+    .unwrap();
+    assert_eq!(resumed["kind"], "paired");
+    assert!(resumed["output"].get("reconnectCredential").is_none());
+    assert!(!serde_json::to_string(&resumed)
+        .unwrap()
+        .contains(&pairing_code));
 
     drop(extension_stream);
     host.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn revoked_reconnect_credential_stops_the_native_host() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let request = connect_request();
+    let companion_id = request.companion_id.clone();
+    let connect = json!({"kind": "pair", "input": request});
+
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(host_reader, host_writer, config));
+
+    write_native_message(&mut extension_stream, &connect)
+        .await
+        .unwrap();
+    let paired = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(paired["kind"], "paired");
+
+    server.registry().revoke(&companion_id).await.unwrap();
+    server.disconnect_clients();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), host)
+        .await
+        .expect("revoked reconnect credentials must not retry forever")
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(NativeHostError::InvalidPairingMaterial)
+    ));
 }

@@ -14,6 +14,7 @@ tokio.workspace = true
 tokio-tungstenite = "0.29"
 tracing.workspace = true
 types = { path = "../types" }
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

@@ -5,7 +5,12 @@ use companion_protocol::{
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fmt, net::IpAddr};
+use std::{
+    fmt,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -13,13 +18,16 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{
         client::IntoClientRequest,
-        http::{header::AUTHORIZATION, HeaderValue},
-        Message,
+        http::{header::AUTHORIZATION, HeaderValue, StatusCode},
+        Error as WebSocketError, Message,
     },
 };
 use types::{CompanionId, ProfileId};
+use url::Url;
 
 pub const MAX_NATIVE_MESSAGE_BYTES: usize = 1024 * 1024;
+const RECONNECT_DELAY: Duration = Duration::from_millis(25);
+const MAX_SECRET_BYTES: usize = 512;
 
 #[derive(Debug, Error)]
 pub enum NativeHostError {
@@ -46,9 +54,19 @@ pub enum NativeHostError {
 }
 
 #[derive(Clone)]
+struct ReconnectCredential(String);
+
+impl fmt::Debug for ReconnectCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReconnectCredential([redacted])")
+    }
+}
+
+#[derive(Clone)]
 pub struct NativeHostConfig {
     endpoint: String,
     pairing_code: String,
+    reconnect_credential: Arc<Mutex<Option<ReconnectCredential>>>,
 }
 
 impl NativeHostConfig {
@@ -56,6 +74,7 @@ impl NativeHostConfig {
         Self {
             endpoint,
             pairing_code: pairing_code.into(),
+            reconnect_credential: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -66,9 +85,8 @@ impl NativeHostConfig {
         if request.protocol_version != PROTOCOL_VERSION {
             return Err(NativeHostError::UnsupportedProtocolVersion);
         }
-        if self.pairing_code.is_empty() || self.pairing_code.len() > 512 {
-            return Err(NativeHostError::InvalidPairingMaterial);
-        }
+        validate_native_connect(&request)?;
+        validate_secret(&self.pairing_code)?;
         Ok(CompanionRequest::Pair(PairRequest {
             protocol_version: PROTOCOL_VERSION,
             pairing_code: self.pairing_code.clone(),
@@ -79,8 +97,40 @@ impl NativeHostConfig {
         }))
     }
 
+    fn authentication_token(&self) -> Result<String, NativeHostError> {
+        if let Some(credential) = self
+            .reconnect_credential
+            .lock()
+            .map_err(|_| NativeHostError::InvalidPairingMaterial)?
+            .as_ref()
+        {
+            return Ok(credential.0.clone());
+        }
+        validate_secret(&self.pairing_code)?;
+        Ok(self.pairing_code.clone())
+    }
+
+    fn has_reconnect_credential(&self) -> Result<bool, NativeHostError> {
+        Ok(self
+            .reconnect_credential
+            .lock()
+            .map_err(|_| NativeHostError::InvalidPairingMaterial)?
+            .is_some())
+    }
+
+    fn store_reconnect_credential(&self, credential: String) -> Result<(), NativeHostError> {
+        validate_secret(&credential)?;
+        *self
+            .reconnect_credential
+            .lock()
+            .map_err(|_| NativeHostError::InvalidPairingMaterial)? =
+            Some(ReconnectCredential(credential));
+        Ok(())
+    }
+
     fn authenticated_request(
         &self,
+        token: &str,
     ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, NativeHostError> {
         let mut request = self
             .endpoint
@@ -99,10 +149,8 @@ impl NativeHostConfig {
         if !loopback {
             return Err(NativeHostError::NonLoopbackEndpoint);
         }
-        if self.pairing_code.is_empty() || self.pairing_code.len() > 512 {
-            return Err(NativeHostError::InvalidPairingMaterial);
-        }
-        let bearer = HeaderValue::from_str(&format!("Bearer {}", self.pairing_code))
+        validate_secret(token)?;
+        let bearer = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| NativeHostError::InvalidPairingMaterial)?;
         request.headers_mut().insert(AUTHORIZATION, bearer);
         Ok(request)
@@ -115,8 +163,31 @@ impl fmt::Debug for NativeHostConfig {
             .debug_struct("NativeHostConfig")
             .field("endpoint", &self.endpoint)
             .field("pairing_code", &"[redacted]")
+            .field("reconnect_credential", &"[redacted]")
             .finish()
     }
+}
+
+fn validate_secret(secret: &str) -> Result<(), NativeHostError> {
+    if secret.is_empty() || secret.len() > MAX_SECRET_BYTES {
+        return Err(NativeHostError::InvalidPairingMaterial);
+    }
+    Ok(())
+}
+
+fn validate_native_connect(request: &NativeConnectRequest) -> Result<(), NativeHostError> {
+    for value in [
+        request.identity.browser_name.as_str(),
+        request.identity.browser_version.as_str(),
+        request.identity.os.as_str(),
+        request.identity.profile_label.as_str(),
+    ] {
+        if value.is_empty() || value.len() > 256 {
+            return Err(NativeHostError::InvalidProtocol);
+        }
+    }
+    let value = serde_json::to_value(request).map_err(|_| NativeHostError::InvalidProtocol)?;
+    reject_extension_secrets(&value, 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,6 +209,25 @@ pub struct NativeConnectRequest {
 )]
 enum NativeRequest {
     Pair(NativeConnectRequest),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InitialPairedOutput {
+    companion_id: CompanionId,
+    profile_id: ProfileId,
+    reconnect_credential: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    content = "output",
+    rename_all = "camelCase",
+    deny_unknown_fields
+)]
+enum InitialServerEvent {
+    Paired(InitialPairedOutput),
 }
 
 pub fn encode_native_message(value: &Value) -> Result<Vec<u8>, NativeHostError> {
@@ -187,18 +277,122 @@ where
     Ok(())
 }
 
-pub fn validate_protocol_message(value: Value) -> Result<Value, NativeHostError> {
-    if let Ok(request) = serde_json::from_value::<CompanionRequest>(value.clone()) {
-        if serde_json::to_value(request).map_err(|_| NativeHostError::InvalidProtocol)? == value {
+fn canonical<T>(value: &Value) -> Result<Option<T>, NativeHostError>
+where
+    T: serde::de::DeserializeOwned + Serialize,
+{
+    let Ok(decoded) = serde_json::from_value::<T>(value.clone()) else {
+        return Ok(None);
+    };
+    if serde_json::to_value(&decoded).map_err(|_| NativeHostError::InvalidProtocol)? != *value {
+        return Ok(None);
+    }
+    Ok(Some(decoded))
+}
+
+pub fn validate_extension_message(value: Value) -> Result<Value, NativeHostError> {
+    reject_extension_secrets(&value, 0)?;
+    let Some(event) = canonical::<CompanionEvent>(&value)? else {
+        return Err(NativeHostError::InvalidProtocol);
+    };
+    if matches!(event, CompanionEvent::Paired { .. }) {
+        return Err(NativeHostError::InvalidProtocol);
+    }
+    Ok(value)
+}
+
+pub fn validate_server_message(value: Value) -> Result<Value, NativeHostError> {
+    reject_extension_secrets(&value, 0)?;
+    if let Some(request) = canonical::<CompanionRequest>(&value)? {
+        if !matches!(request, CompanionRequest::Pair(_)) {
             return Ok(value);
         }
     }
-    if let Ok(event) = serde_json::from_value::<CompanionEvent>(value.clone()) {
-        if serde_json::to_value(event).map_err(|_| NativeHostError::InvalidProtocol)? == value {
+    if let Some(event) = canonical::<CompanionEvent>(&value)? {
+        if matches!(event, CompanionEvent::Paired { .. }) {
             return Ok(value);
         }
     }
     Err(NativeHostError::InvalidProtocol)
+}
+
+fn reject_extension_secrets(value: &Value, depth: usize) -> Result<(), NativeHostError> {
+    if depth > 32 {
+        return Err(NativeHostError::InvalidProtocol);
+    }
+    match value {
+        Value::Object(object) => {
+            for (name, item) in object {
+                let normalized = name.to_ascii_lowercase().replace(['-', '_'], "");
+                if [
+                    "pairingcode",
+                    "bearer",
+                    "authorization",
+                    "endpoint",
+                    "credential",
+                    "password",
+                    "passwd",
+                    "apikey",
+                    "token",
+                    "secret",
+                ]
+                .iter()
+                .any(|marker| normalized.contains(marker))
+                {
+                    return Err(NativeHostError::InvalidProtocol);
+                }
+                reject_extension_secrets(item, depth + 1)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                reject_extension_secrets(item, depth + 1)?;
+            }
+        }
+        Value::String(text) => reject_secret_string(text)?,
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("bearer ")
+        || lower.contains("basic ")
+        || lower.contains("private-token")
+        || lower.contains("private_token")
+        || lower.contains("private-secret")
+        || lower.contains("private_secret")
+    {
+        return Err(NativeHostError::InvalidProtocol);
+    }
+    let Ok(url) = Url::parse(text) else {
+        return Ok(());
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(NativeHostError::InvalidProtocol);
+    }
+    for (name, value) in url.query_pairs() {
+        let name = name.to_ascii_lowercase();
+        let value = value.to_ascii_lowercase();
+        if [
+            "authorization",
+            "token",
+            "secret",
+            "password",
+            "credential",
+            "key",
+        ]
+        .iter()
+        .any(|marker| name.contains(marker) || value.contains(marker))
+        {
+            return Err(NativeHostError::InvalidProtocol);
+        }
+    }
+    Ok(())
 }
 
 fn decode_native_connect(value: Value) -> Result<NativeConnectRequest, NativeHostError> {
@@ -213,6 +407,31 @@ fn decode_native_connect(value: Value) -> Result<NativeConnectRequest, NativeHos
     }
 }
 
+fn decode_initial_paired(value: &Value) -> Result<Option<InitialPairedOutput>, NativeHostError> {
+    let Some(event) = canonical::<InitialServerEvent>(value)? else {
+        return Ok(None);
+    };
+    match event {
+        InitialServerEvent::Paired(output) => {
+            validate_secret(&output.reconnect_credential)?;
+            Ok(Some(output))
+        }
+    }
+}
+
+fn public_paired(output: &InitialPairedOutput) -> Result<Value, NativeHostError> {
+    serde_json::to_value(CompanionEvent::Paired {
+        companion_id: output.companion_id.clone(),
+        profile_id: output.profile_id.clone(),
+    })
+    .map_err(|_| NativeHostError::InvalidProtocol)
+}
+
+enum ConnectionResult {
+    NativeClosed,
+    Reconnect,
+}
+
 pub async fn run_native_host<R, W>(
     mut native_reader: R,
     mut native_writer: W,
@@ -225,17 +444,11 @@ where
     let connect = read_native_message(&mut native_reader)
         .await?
         .ok_or(NativeHostError::MissingConnectRequest)?;
-    let pair = config.pair_request(decode_native_connect(connect)?)?;
-    let request = config.authenticated_request()?;
-    let (socket, _) = connect_async(request)
-        .await
-        .map_err(|_| NativeHostError::WebSocket)?;
-    let (mut socket_writer, mut socket_reader) = socket.split();
+    let connect = decode_native_connect(connect)?;
+    let expected_companion_id = connect.companion_id.clone();
+    let expected_profile_id = connect.profile_id.clone();
+    let pair = config.pair_request(connect)?;
     let pair = serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?;
-    socket_writer
-        .send(Message::Text(pair.into()))
-        .await
-        .map_err(|_| NativeHostError::WebSocket)?;
 
     let (native_messages, mut receiver) = mpsc::channel(32);
     let reader_task = tokio::spawn(async move {
@@ -248,41 +461,107 @@ where
         }
     });
 
-    let result = loop {
-        tokio::select! {
-            native = receiver.recv() => {
-                match native {
-                    Some(Ok(Some(value))) => {
-                        let value = validate_protocol_message(value)?;
-                        let body = serde_json::to_string(&value).map_err(|_| NativeHostError::InvalidProtocol)?;
-                        socket_writer.send(Message::Text(body.into())).await.map_err(|_| NativeHostError::WebSocket)?;
-                    }
-                    Some(Ok(None)) | None => break Ok(()),
-                    Some(Err(error)) => break Err(error),
-                }
+    let result = async {
+        loop {
+        let has_credential = config.has_reconnect_credential()?;
+        let token = config.authentication_token()?;
+        let request = config.authenticated_request(&token)?;
+        let socket = match connect_async(request).await {
+            Ok((socket, _)) => socket,
+            Err(WebSocketError::Http(response))
+                if has_credential && response.status() == StatusCode::UNAUTHORIZED =>
+            {
+                break Err(NativeHostError::InvalidPairingMaterial)
             }
-            message = socket_reader.next() => {
-                match message {
-                    Some(Ok(Message::Text(body))) => {
-                        if body.len() > MAX_NATIVE_MESSAGE_BYTES {
-                            break Err(NativeHostError::MessageTooLarge { length: body.len() });
-                        }
-                        let value: Value = serde_json::from_str(body.as_str()).map_err(|_| NativeHostError::InvalidJson)?;
-                        let value = validate_protocol_message(value)?;
-                        write_native_message(&mut native_writer, &value).await?;
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        socket_writer.send(Message::Pong(payload)).await.map_err(|_| NativeHostError::WebSocket)?;
-                    }
-                    Some(Ok(Message::Pong(_))) => {}
-                    Some(Ok(Message::Close(_))) | None => break Ok(()),
-                    Some(Ok(Message::Binary(_))) | Some(Ok(Message::Frame(_))) | Some(Err(_)) => {
-                        break Err(NativeHostError::WebSocket);
-                    }
-                }
+            Err(_) if has_credential => {
+                tokio::time::sleep(RECONNECT_DELAY).await;
+                continue;
             }
+            Err(_) => break Err(NativeHostError::WebSocket),
+        };
+        let (mut socket_writer, mut socket_reader) = socket.split();
+        if !has_credential
+            && socket_writer
+                .send(Message::Text(pair.clone().into()))
+                .await
+                .is_err()
+        {
+            break Err(NativeHostError::WebSocket);
         }
-    };
+
+        let connection = loop {
+            tokio::select! {
+                native = receiver.recv() => {
+                    match native {
+                        Some(Ok(Some(value))) => {
+                            let value = validate_extension_message(value)?;
+                            let body = serde_json::to_string(&value)
+                                .map_err(|_| NativeHostError::InvalidProtocol)?;
+                            if socket_writer.send(Message::Text(body.into())).await.is_err() {
+                                break Ok(ConnectionResult::Reconnect);
+                            }
+                        }
+                        Some(Ok(None)) | None => break Ok(ConnectionResult::NativeClosed),
+                        Some(Err(error)) => break Err(error),
+                    }
+                }
+                message = socket_reader.next() => {
+                    match message {
+                        Some(Ok(Message::Text(body))) => {
+                            if body.len() > MAX_NATIVE_MESSAGE_BYTES {
+                                    break Err(NativeHostError::MessageTooLarge { length: body.len() });
+                            }
+                            let value: Value = serde_json::from_str(body.as_str())
+                                .map_err(|_| NativeHostError::InvalidJson)?;
+                            let value = if let Some(initial) = decode_initial_paired(&value)? {
+                                if has_credential
+                                    || initial.companion_id != expected_companion_id
+                                    || initial.profile_id != expected_profile_id
+                                {
+                                    break Err(NativeHostError::InvalidProtocol);
+                                }
+                                config.store_reconnect_credential(initial.reconnect_credential.clone())?;
+                                public_paired(&initial)?
+                            } else {
+                                let value = validate_server_message(value)?;
+                                if let Ok(CompanionEvent::Paired { companion_id, profile_id }) =
+                                    serde_json::from_value::<CompanionEvent>(value.clone())
+                                {
+                                    if companion_id != expected_companion_id || profile_id != expected_profile_id {
+                                        break Err(NativeHostError::InvalidProtocol);
+                                    }
+                                }
+                                value
+                            };
+                            write_native_message(&mut native_writer, &value).await?;
+                        }
+                        Some(Ok(Message::Ping(payload))) => {
+                            if socket_writer.send(Message::Pong(payload)).await.is_err() {
+                                break Ok(ConnectionResult::Reconnect);
+                            }
+                        }
+                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                            break Ok(ConnectionResult::Reconnect);
+                        }
+                        Some(Ok(Message::Binary(_))) | Some(Ok(Message::Frame(_))) => {
+                            break Err(NativeHostError::WebSocket);
+                        }
+                    }
+                }
+            }
+        };
+
+        match connection? {
+            ConnectionResult::NativeClosed => break Ok(()),
+            ConnectionResult::Reconnect if config.has_reconnect_credential()? => {
+                tokio::time::sleep(RECONNECT_DELAY).await;
+            }
+            ConnectionResult::Reconnect => break Err(NativeHostError::WebSocket),
+        }
+        }
+    }
+    .await;
     reader_task.abort();
     result
 }

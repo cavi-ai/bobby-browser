@@ -33,7 +33,7 @@ class FakePort {
   }
 }
 
-test("native transport connects only to the approved host and validates messages", () => {
+test("native transport connects only to the approved host and enforces message direction", () => {
   const port = new FakePort();
   const hosts: string[] = [];
   const received: unknown[] = [];
@@ -47,13 +47,106 @@ test("native transport connects only to the approved host and validates messages
   transport.start((message) => {
     received.push(message);
   });
-  transport.send({ kind: "ping" });
-  port.onMessage.emit({ kind: "pong" });
+  transport.send({ kind: "pong" });
+  port.onMessage.emit({ kind: "ping" });
   port.onMessage.emit({ kind: "notAProtocolMessage" });
 
   assert.deepEqual(hosts, ["com.bobby_browser.companion"]);
-  assert.deepEqual(port.sent, [{ kind: "ping" }]);
-  assert.deepEqual(received, [{ kind: "pong" }]);
+  assert.deepEqual(port.sent, [{ kind: "pong" }]);
+  assert.deepEqual(received, [{ kind: "ping" }]);
+});
+
+test("native transport rejects requests outbound and events inbound", () => {
+  const port = new FakePort();
+  const received: unknown[] = [];
+  const transport = new NativeCompanionTransport({ connectNative: () => port });
+  transport.start((message) => {
+    received.push(message);
+  });
+
+  assert.throws(() => transport.send({ kind: "ping" }), /direction|outbound/i);
+  port.onMessage.emit({ kind: "pong" });
+
+  assert.deepEqual(port.sent, []);
+  assert.deepEqual(received, []);
+});
+
+test("native pair metadata is exact and recursively secret free", () => {
+  const port = new FakePort();
+  const transport = new NativeCompanionTransport({ connectNative: () => port });
+  transport.start(() => {});
+  const base = {
+    kind: "pair",
+    input: {
+      protocolVersion: 1,
+      companionId: "companion-1",
+      profileId: "profile-1",
+      identity: {
+        engine: "firefox",
+        browserName: "Firefox",
+        browserVersion: "stable",
+        os: "macos",
+        profileLabel: "default-release",
+      },
+      capabilities: {
+        observe: true,
+        navigate: true,
+        nativeInput: false,
+        tabs: true,
+        frames: true,
+        nativeDialogs: false,
+      },
+    },
+  } as const;
+
+  assert.throws(
+    () =>
+      transport.send({
+        ...base,
+        input: {
+          ...base.input,
+          identity: { ...base.input.identity, profileLabel: "Bearer private-token" },
+        },
+      }),
+    /secret|pair/i,
+  );
+  assert.throws(
+    () =>
+      transport.send({
+        ...base,
+        input: {
+          ...base.input,
+          identity: { ...base.input.identity, endpoint: "ws://127.0.0.1:9000/private" },
+        },
+      }),
+    /shape|secret|pair/i,
+  );
+  assert.deepEqual(port.sent, []);
+});
+
+test("paired events are delivered and listener failures are contained", async () => {
+  const port = new FakePort();
+  const errors: unknown[] = [];
+  const transport = new NativeCompanionTransport({
+    connectNative: () => port,
+    onListenerError: (error: unknown) => errors.push(error),
+  });
+  transport.start(async (message) => {
+    assert.deepEqual(message, {
+      kind: "paired",
+      output: { companionId: "companion-1", profileId: "profile-1" },
+    });
+    throw new Error("listener exploded");
+  });
+
+  port.onMessage.emit({
+    kind: "paired",
+    output: { companionId: "companion-1", profileId: "profile-1" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0]), /listener exploded/);
 });
 
 test("native transport rejects outbound messages larger than 1 MiB", () => {

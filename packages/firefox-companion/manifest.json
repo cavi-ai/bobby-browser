@@ -9,7 +9,7 @@
       "strict_min_version": "128.0"
     }
   },
-  "permissions": ["tabs", "activeTab", "scripting", "nativeMessaging"],
+  "permissions": ["tabs", "activeTab", "scripting", "nativeMessaging", "storage", "webNavigation"],
   "background": {
     "scripts": ["background.js"]
   },

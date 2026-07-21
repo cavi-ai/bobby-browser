@@ -87,9 +87,40 @@ async fn send_request(socket: &mut ClientSocket, request: &CompanionRequest) {
 async fn receive_event(socket: &mut ClientSocket) -> CompanionEvent {
     loop {
         match socket.next().await.unwrap().unwrap() {
-            Message::Text(text) => return serde_json::from_str(text.as_str()).unwrap(),
+            Message::Text(text) => {
+                let mut value: Value = serde_json::from_str(text.as_str()).unwrap();
+                if value["kind"] == "paired" {
+                    value["output"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("reconnectCredential");
+                }
+                return serde_json::from_value(value).unwrap();
+            }
             Message::Ping(payload) => socket.send(Message::Pong(payload)).await.unwrap(),
             other => panic!("expected companion event, got {other:?}"),
+        }
+    }
+}
+
+async fn pair_with_credential(socket: &mut ClientSocket, code: String) -> (CompanionEvent, String) {
+    send_request(socket, &pair_request(code)).await;
+    loop {
+        match socket.next().await.unwrap().unwrap() {
+            Message::Text(text) => {
+                let mut value: Value = serde_json::from_str(text.as_str()).unwrap();
+                let credential = value["output"]["reconnectCredential"]
+                    .as_str()
+                    .expect("paired wire event must include reconnect credential")
+                    .to_owned();
+                value["output"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("reconnectCredential");
+                return (serde_json::from_value(value).unwrap(), credential);
+            }
+            Message::Ping(payload) => socket.send(Message::Pong(payload)).await.unwrap(),
+            other => panic!("expected paired wire event, got {other:?}"),
         }
     }
 }
@@ -150,6 +181,57 @@ async fn pairing_bearer_is_single_use() {
     ));
 
     let error = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap_err();
+    assert_eq!(http_status(error), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn reconnect_credential_resumes_without_reusing_the_pairing_code() {
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let mut first = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap();
+    let (paired, credential) = pair_with_credential(&mut first, code.clone()).await;
+    assert!(matches!(paired, CompanionEvent::Paired { .. }));
+    first.close(None).await.unwrap();
+
+    let mut resumed = connect_with_bearer(server.local_addr(), &credential)
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive_event(&mut resumed).await,
+        CompanionEvent::Paired { .. }
+    ));
+    send_request(&mut resumed, &CompanionRequest::Ping).await;
+    assert_eq!(receive_event(&mut resumed).await, CompanionEvent::Pong);
+
+    let error = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap_err();
+    assert_eq!(http_status(error), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn revocation_invalidates_the_reconnect_credential() {
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let mut socket = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap();
+    let (paired, credential) = pair_with_credential(&mut socket, code).await;
+    let CompanionEvent::Paired { companion_id, .. } = paired else {
+        panic!("expected paired event");
+    };
+    socket.close(None).await.unwrap();
+    server.registry().revoke(&companion_id).await.unwrap();
+
+    let error = connect_with_bearer(server.local_addr(), &credential)
         .await
         .unwrap_err();
     assert_eq!(http_status(error), StatusCode::UNAUTHORIZED);

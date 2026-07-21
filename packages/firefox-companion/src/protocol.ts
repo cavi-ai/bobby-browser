@@ -1,5 +1,12 @@
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_COMPANION_PAYLOAD_BYTES = 1024 * 1024;
+const MAX_ID_BYTES = 256;
+const MAX_METADATA_BYTES = 256;
+const MAX_PAIRING_CODE_BYTES = 512;
+const MAX_OPERATION_BYTES = 64;
+const MAX_ERROR_CODE_BYTES = 128;
+const MAX_ERROR_MESSAGE_BYTES = 4 * 1024;
+const textEncoder = new TextEncoder();
 
 export type BrowserEngine = "firefox" | "chromium" | "webKit";
 
@@ -108,9 +115,13 @@ function exactKeys(value: JsonObject, keys: readonly string[], name: string): vo
   }
 }
 
-function string(value: unknown, name: string): string {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new CompanionProtocolError(`${name} must be a non-empty string`);
+function string(value: unknown, name: string, maximum = MAX_METADATA_BYTES): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    textEncoder.encode(value).byteLength > maximum
+  ) {
+    throw new CompanionProtocolError(`${name} must be a non-empty bounded string of at most ${maximum} bytes`);
   }
   return value;
 }
@@ -176,9 +187,9 @@ function pairRequest(value: unknown): PairRequest {
   );
   return {
     protocolVersion: protocolVersion(input.protocolVersion),
-    pairingCode: string(input.pairingCode, "pairingCode"),
-    companionId: string(input.companionId, "companionId"),
-    profileId: string(input.profileId, "profileId"),
+    pairingCode: string(input.pairingCode, "pairingCode", MAX_PAIRING_CODE_BYTES),
+    companionId: string(input.companionId, "companionId", MAX_ID_BYTES),
+    profileId: string(input.profileId, "profileId", MAX_ID_BYTES),
     identity: {
       engine: identity.engine as BrowserEngine,
       browserName: string(identity.browserName, "browserName"),
@@ -212,15 +223,15 @@ function actionRequest(value: unknown): ActionRequest {
     ],
     "action input",
   );
-  if (!Number.isSafeInteger(input.deadlineUnixMs)) {
-    throw new CompanionProtocolError("deadlineUnixMs must be a safe integer");
+  if (!Number.isSafeInteger(input.deadlineUnixMs) || (input.deadlineUnixMs as number) < 0) {
+    throw new CompanionProtocolError("deadlineUnixMs must be a nonnegative safe integer");
   }
   return {
     protocolVersion: protocolVersion(input.protocolVersion),
-    attachmentId: string(input.attachmentId, "attachmentId"),
-    commandId: string(input.commandId, "commandId"),
-    pageId: string(input.pageId, "pageId"),
-    operation: string(input.operation, "operation"),
+    attachmentId: string(input.attachmentId, "attachmentId", MAX_ID_BYTES),
+    commandId: string(input.commandId, "commandId", MAX_ID_BYTES),
+    pageId: string(input.pageId, "pageId", MAX_ID_BYTES),
+    operation: string(input.operation, "operation", MAX_OPERATION_BYTES),
     input: input.input,
     deadlineUnixMs: input.deadlineUnixMs as number,
   };
@@ -259,8 +270,8 @@ export function parseCompanionEvent(payload: string): CompanionEvent {
       return {
         kind: "paired",
         output: {
-          companionId: string(output.companionId, "companionId"),
-          profileId: string(output.profileId, "profileId"),
+          companionId: string(output.companionId, "companionId", MAX_ID_BYTES),
+          profileId: string(output.profileId, "profileId", MAX_ID_BYTES),
         },
       };
     }
@@ -283,7 +294,7 @@ export function parseCompanionEvent(payload: string): CompanionEvent {
       return {
         kind: "actionCompleted",
         output: {
-          commandId: string(output.commandId, "commandId"),
+          commandId: string(output.commandId, "commandId", MAX_ID_BYTES),
           interactionPath: output.interactionPath as InteractionPath,
           output: output.output,
         },
@@ -301,9 +312,9 @@ export function parseCompanionEvent(payload: string): CompanionEvent {
       return {
         kind: "actionFailed",
         output: {
-          commandId: string(output.commandId, "commandId"),
-          code: string(output.code, "code"),
-          message: string(output.message, "message"),
+          commandId: string(output.commandId, "commandId", MAX_ID_BYTES),
+          code: string(output.code, "code", MAX_ERROR_CODE_BYTES),
+          message: string(output.message, "message", MAX_ERROR_MESSAGE_BYTES),
           effectUncertain: boolean(output.effectUncertain, "effectUncertain"),
         },
       };

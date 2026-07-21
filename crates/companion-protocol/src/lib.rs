@@ -83,14 +83,18 @@ pub struct ActionResult {
 #[serde(tag = "kind", content = "output", rename_all = "camelCase")]
 pub enum CompanionEvent {
     Paired {
+        #[serde(rename = "companionId")]
         companion_id: CompanionId,
+        #[serde(rename = "profileId")]
         profile_id: ProfileId,
     },
     ActionCompleted(ActionResult),
     ActionFailed {
+        #[serde(rename = "commandId")]
         command_id: CommandId,
         code: String,
         message: String,
+        #[serde(rename = "effectUncertain")]
         effect_uncertain: bool,
     },
     Pong,
