@@ -425,9 +425,15 @@ dependencies = [
 name = "companion-core"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "companion-protocol",
+ "futures-util",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
+ "tracing 0.1.44",
  "types",
  "uuid",
 ]
