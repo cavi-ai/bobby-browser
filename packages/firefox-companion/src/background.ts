@@ -47,6 +47,12 @@ type PageLease = {
   expiresAtUnixMs: number;
 };
 
+type TabLifecycle = {
+  generation: number;
+  exists: boolean;
+  pendingReconciliations: number;
+};
+
 type Transport = {
   start(listener: (message: unknown) => void | Promise<void>): void;
   send(message: unknown): void;
@@ -162,6 +168,7 @@ export class CompanionBackground {
   readonly #leases = new Map<string, PageLease>();
   readonly #targets = new Map<string, DiscoveredTarget & { kind: BrowserTarget["kind"] }>();
   readonly #targetIdsByRoute = new Map<string, string>();
+  readonly #tabLifecycles = new Map<number, TabLifecycle>();
   #options: BackgroundConnectOptions | undefined;
   #paired = false;
   #started = false;
@@ -181,6 +188,7 @@ export class CompanionBackground {
     this.#leases.clear();
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
+    this.#tabLifecycles.clear();
     const request: NativePairRequest = {
       kind: "pair",
       input: {
@@ -199,6 +207,7 @@ export class CompanionBackground {
     this.#leases.clear();
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
+    this.#tabLifecycles.clear();
     this.#dependencies.transport.stop();
   }
 
@@ -221,6 +230,7 @@ export class CompanionBackground {
     }
 
     const target = { tabId: sender.tab.id, frameId: sender.frameId };
+    this.#advanceTabLifecycle(target.tabId, true);
     if (this.#registerTarget(target)) this.#sendDiscovery();
   }
 
@@ -229,8 +239,9 @@ export class CompanionBackground {
     changeInfo: { title?: string },
     tab: { id?: number; url?: string; title?: string },
   ): void {
+    if (!validBrowserId(tabId)) return;
+    this.#advanceTabLifecycle(tabId, true);
     if (
-      !validBrowserId(tabId) ||
       tab.id !== tabId ||
       tab.url !== "about:blank" ||
       typeof changeInfo.title !== "string" ||
@@ -246,29 +257,67 @@ export class CompanionBackground {
 
   receiveTabRemoved(tabId: number): void {
     if (!validBrowserId(tabId)) return;
+    const lifecycle = this.#advanceTabLifecycle(tabId, false);
     if (this.#removeTargets((target) => target.tabId === tabId)) this.#sendDiscovery();
+    this.#retireTabTombstone(tabId, lifecycle);
   }
 
   async reconcileTab(tabId: number): Promise<void> {
     if (!validBrowserId(tabId) || !this.#dependencies.discoverTabTargets) return;
-    const discovered = await this.#dependencies.discoverTabTargets(tabId);
-    const current = new Map<string, DiscoveredTarget>();
-    for (const target of discovered) {
+    const lifecycle = this.#advanceTabLifecycle(tabId, true);
+    const generation = lifecycle.generation;
+    lifecycle.pendingReconciliations += 1;
+    try {
+      const discovered = await this.#dependencies.discoverTabTargets(tabId);
       if (
-        object(target) &&
-        exactKeys(target, ["tabId", "frameId"]) &&
-        target.tabId === tabId &&
-        validBrowserId(target.frameId)
+        this.#tabLifecycles.get(tabId) !== lifecycle ||
+        lifecycle.generation !== generation ||
+        !lifecycle.exists
       ) {
-        current.set(browserRouteKey(target.tabId, target.frameId), target);
+        return;
       }
+      const current = new Map<string, DiscoveredTarget>();
+      for (const target of discovered) {
+        if (
+          object(target) &&
+          exactKeys(target, ["tabId", "frameId"]) &&
+          target.tabId === tabId &&
+          validBrowserId(target.frameId)
+        ) {
+          current.set(browserRouteKey(target.tabId, target.frameId), target);
+        }
+      }
+      let changed = this.#removeTargets(
+        (target) =>
+          target.tabId === tabId && !current.has(browserRouteKey(target.tabId, target.frameId)),
+      );
+      for (const target of current.values()) changed = this.#registerTarget(target) || changed;
+      if (changed) this.#sendDiscovery();
+    } finally {
+      lifecycle.pendingReconciliations -= 1;
+      this.#retireTabTombstone(tabId, lifecycle);
     }
-    let changed = this.#removeTargets(
-      (target) =>
-        target.tabId === tabId && !current.has(browserRouteKey(target.tabId, target.frameId)),
-    );
-    for (const target of current.values()) changed = this.#registerTarget(target) || changed;
-    if (changed) this.#sendDiscovery();
+  }
+
+  #advanceTabLifecycle(tabId: number, exists: boolean): TabLifecycle {
+    let lifecycle = this.#tabLifecycles.get(tabId);
+    if (!lifecycle) {
+      lifecycle = { generation: 0, exists, pendingReconciliations: 0 };
+      this.#tabLifecycles.set(tabId, lifecycle);
+    }
+    lifecycle.generation += 1;
+    lifecycle.exists = exists;
+    return lifecycle;
+  }
+
+  #retireTabTombstone(tabId: number, lifecycle: TabLifecycle): void {
+    if (
+      !lifecycle.exists &&
+      lifecycle.pendingReconciliations === 0 &&
+      this.#tabLifecycles.get(tabId) === lifecycle
+    ) {
+      this.#tabLifecycles.delete(tabId);
+    }
   }
 
   #reportPageBinding(target: DiscoveredTarget, bindingNonce: string): void {
@@ -373,6 +422,7 @@ export class CompanionBackground {
     this.#leases.clear();
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
+    this.#tabLifecycles.clear();
     const targets = (await this.#dependencies.discoverTargets?.()) ?? [];
     for (const target of targets) {
       if (this.#targets.size >= MAX_PAGE_LEASES) break;
