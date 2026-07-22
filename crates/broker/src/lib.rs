@@ -442,7 +442,8 @@ where
     BindFuture: std::future::Future<Output = anyhow::Result<T>>,
 {
     config.validate().map_err(anyhow::Error::msg)?;
-    let authority = Arc::new(EnrolledAuthority::enroll(startup).await?);
+    let authority =
+        Arc::new(EnrolledAuthority::enroll(startup, config.interface.max_principals).await?);
     let gate = StartupGate {
         handle: authority.startup_handle(),
         authority: authority.clone(),

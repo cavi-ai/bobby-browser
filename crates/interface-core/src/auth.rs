@@ -152,6 +152,15 @@ impl Authority for AuthorityStore {
         }
         Ok(())
     }
+
+    async fn issue(
+        &self,
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<IssuedToken, InterfaceError> {
+        AuthorityStore::issue(self, principal, capabilities, expires_at).await
+    }
 }
 
 #[async_trait]
@@ -162,6 +171,25 @@ pub trait Authority: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<CapabilityHandle, InterfaceError>;
     async fn revoke(&self, principal: &PrincipalId) -> Result<(), InterfaceError>;
+
+    async fn issue(
+        &self,
+        _principal: PrincipalId,
+        _capabilities: Vec<Capability>,
+        _expires_at: DateTime<Utc>,
+    ) -> Result<IssuedToken, InterfaceError> {
+        Err(InterfaceError {
+            code: InterfaceErrorCode::UnsupportedOperation,
+            layer: ErrorLayer::Interface,
+            message: "principal issuance is not supported by this authority".to_owned(),
+            correlation_id: CorrelationId::new(),
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
 }
 
 pub struct IssuedToken {

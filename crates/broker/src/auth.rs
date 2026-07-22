@@ -134,8 +134,11 @@ pub struct EnrolledAuthority {
 }
 
 impl EnrolledAuthority {
-    pub async fn enroll(startup: StartupCredential) -> Result<Self, StartupCredentialError> {
-        let store = AuthorityStore::with_capacity(1);
+    pub async fn enroll(
+        startup: StartupCredential,
+        max_principals: usize,
+    ) -> Result<Self, StartupCredentialError> {
+        let store = AuthorityStore::with_capacity(max_principals);
         let startup_handle = store
             .enroll_hash(
                 startup.token_hash,
@@ -153,6 +156,15 @@ impl EnrolledAuthority {
 
     pub(crate) fn startup_handle(&self) -> CapabilityHandle {
         self.startup_handle.clone()
+    }
+
+    pub async fn issue(
+        &self,
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<interface_core::IssuedToken, InterfaceError> {
+        self.store.issue(principal, capabilities, expires_at).await
     }
 }
 
@@ -180,6 +192,15 @@ impl Authority for EnrolledAuthority {
 
     async fn revoke(&self, principal: &PrincipalId) -> Result<(), InterfaceError> {
         self.store.revoke(principal).await
+    }
+
+    async fn issue(
+        &self,
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<interface_core::IssuedToken, InterfaceError> {
+        EnrolledAuthority::issue(self, principal, capabilities, expires_at).await
     }
 }
 
@@ -524,4 +545,49 @@ pub(crate) fn authorize_boundary(
     AuthorizationGuard::new(request.handle.clone())
         .authorize(&request.context, operation)
         .map_err(ProtocolError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn startup() -> StartupCredential {
+        StartupCredential::new(
+            "bootstrap-bearer-0123456789abcdef0123456789abcdef".to_owned(),
+            PrincipalId::from_uuid(Uuid::nil()),
+            vec![Capability::AuthorityAdmin, Capability::SessionRead],
+            Utc::now() + Duration::minutes(30),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn enrolled_authority_issues_second_principal() {
+        let authority = EnrolledAuthority::enroll(startup(), 4).await.unwrap();
+        let issued = authority
+            .issue(
+                PrincipalId::from_uuid(Uuid::from_u128(2)),
+                vec![Capability::SessionRead, Capability::SessionWrite],
+                Utc::now() + Duration::minutes(10),
+            )
+            .await
+            .unwrap();
+        let bearer = issued.expose_once();
+        let handle = authority.authenticate(&bearer, Utc::now()).await.unwrap();
+        assert!(handle.is_valid_at(Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn capacity_still_bounds_enrollment() {
+        let authority = EnrolledAuthority::enroll(startup(), 1).await.unwrap();
+        assert!(authority
+            .issue(
+                PrincipalId::from_uuid(Uuid::from_u128(3)),
+                vec![Capability::SessionRead],
+                Utc::now() + Duration::minutes(10),
+            )
+            .await
+            .is_err());
+    }
 }
