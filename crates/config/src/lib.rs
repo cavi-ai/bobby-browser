@@ -86,6 +86,13 @@ pub struct InterfaceConfig {
     pub max_rejection_workers: usize,
     #[serde(default = "default_token_records_path", alias = "tokenRecordsPath")]
     pub token_records_path: PathBuf,
+    #[serde(default = "default_max_principals", alias = "maxPrincipals")]
+    pub max_principals: usize,
+    #[serde(
+        default = "default_max_in_flight_per_principal",
+        alias = "maxInFlightPerPrincipal"
+    )]
+    pub max_in_flight_per_principal: usize,
 }
 
 const fn default_max_request_bytes() -> usize {
@@ -112,6 +119,14 @@ fn default_token_records_path() -> PathBuf {
     PathBuf::from("./data/storage/authorities.json")
 }
 
+const fn default_max_principals() -> usize {
+    16
+}
+
+const fn default_max_in_flight_per_principal() -> usize {
+    8
+}
+
 impl Default for InterfaceConfig {
     fn default() -> Self {
         Self {
@@ -121,6 +136,8 @@ impl Default for InterfaceConfig {
             max_connections: default_max_connections(),
             max_rejection_workers: default_max_rejection_workers(),
             token_records_path: default_token_records_path(),
+            max_principals: default_max_principals(),
+            max_in_flight_per_principal: default_max_in_flight_per_principal(),
         }
     }
 }
@@ -144,6 +161,12 @@ impl InterfaceConfig {
         }
         if self.token_records_path.as_os_str().is_empty() {
             return Err("interface token_records_path must not be empty");
+        }
+        if self.max_principals == 0 {
+            return Err("interface max_principals must be positive");
+        }
+        if self.max_in_flight_per_principal == 0 {
+            return Err("interface max_in_flight_per_principal must be positive");
         }
         Ok(())
     }
@@ -205,6 +228,7 @@ pub struct BrowserConfig {
 pub struct StorageConfig {
     pub journal_path: PathBuf,
     pub checkpoints_dir: PathBuf,
+    pub authority_path: PathBuf,
 }
 
 impl Default for AppConfig {
@@ -228,6 +252,7 @@ impl Default for AppConfig {
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
                 checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
+                authority_path: PathBuf::from("./data/storage/authority.json"),
             },
             http: HttpConfig::default(),
             interface: InterfaceConfig::default(),
@@ -303,6 +328,7 @@ mod tests {
         assert_eq!(interface.max_event_retention, 16_384);
         assert_eq!(interface.max_connections, 64);
         assert_eq!(interface.max_rejection_workers, 16);
+        assert_eq!(interface.max_in_flight_per_principal, 8);
         assert_eq!(
             interface.token_records_path,
             std::path::PathBuf::from("./data/storage/authorities.json")
@@ -359,6 +385,10 @@ mod tests {
             },
             InterfaceConfig {
                 token_records_path: std::path::PathBuf::new(),
+                ..InterfaceConfig::default()
+            },
+            InterfaceConfig {
+                max_in_flight_per_principal: 0,
                 ..InterfaceConfig::default()
             },
         ] {

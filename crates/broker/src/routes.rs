@@ -14,7 +14,8 @@ use interface_core::{Event, EventGap};
 use serde::{de::DeserializeOwned, Deserialize};
 use types::{
     CommandEnvelope, CommandOutcome, CorrelationId, Evidence, InterfaceErrorCode,
-    InterfaceOperation, OpenPageRequest, RecoveryDecision, WorkflowCheckpoint, WorkflowId,
+    InterfaceOperation, OpenPageRequest, PrincipalId, RecoveryDecision, WorkflowCheckpoint,
+    WorkflowId,
 };
 use uuid::Uuid;
 
@@ -33,6 +34,11 @@ pub(crate) fn protected_router() -> Router<AppState> {
         .route("/v1/recovery/{workflow}", post(recover))
         .route("/v1/events", get(events))
         .route("/v1/artifacts/{id}", get(artifact))
+        .route("/v1/principals", post(issue_principal))
+        .route(
+            "/v1/principals/{principal}",
+            axum::routing::delete(revoke_principal),
+        )
 }
 
 pub(crate) async fn healthz() -> Json<serde_json::Value> {
@@ -256,6 +262,98 @@ async fn artifact(
     Ok(response)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IssuePrincipalRequest {
+    principal_id: Uuid,
+    capabilities: Vec<types::Capability>,
+    expires_at: chrono::DateTime<Utc>,
+}
+
+/// Longest lifetime an interface-issued principal token may be granted.
+const MAX_TOKEN_TTL_DAYS: i64 = 90;
+
+async fn issue_principal(
+    State(state): State<AppState>,
+    Extension(request): Extension<AuthenticatedRequest>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ProtocolError> {
+    authorize_boundary(&request, InterfaceOperation::IssuePrincipal)?;
+    let input: IssuePrincipalRequest = parse_json(body, &request.context.correlation_id)?;
+    if input.capabilities.is_empty() {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        ));
+    }
+    if input
+        .capabilities
+        .contains(&types::Capability::AuthorityAdmin)
+    {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        ));
+    }
+    if !input
+        .capabilities
+        .iter()
+        .all(|capability| request.context.capabilities.contains(*capability))
+    {
+        return Err(ProtocolError::from(interface_error(
+            InterfaceErrorCode::InvalidRequest,
+            "issued capabilities must not exceed the issuer's",
+            request.context.correlation_id.clone(),
+            None,
+        )));
+    }
+    if input.expires_at > Utc::now() + chrono::Duration::days(MAX_TOKEN_TTL_DAYS) {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        ));
+    }
+    let issued = state
+        .authority
+        .issue(
+            PrincipalId::from_uuid(input.principal_id),
+            input.capabilities.clone(),
+            input.expires_at,
+        )
+        .await
+        .map_err(ProtocolError::from)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "bearer": issued.expose_once(),
+            "principalId": input.principal_id,
+            "capabilities": input.capabilities,
+            "expiresAt": input.expires_at,
+        })),
+    )
+        .into_response())
+}
+
+async fn revoke_principal(
+    Path(principal): Path<String>,
+    Extension(request): Extension<AuthenticatedRequest>,
+    State(state): State<AppState>,
+) -> Result<Response, ProtocolError> {
+    authorize_boundary(&request, InterfaceOperation::RevokePrincipal)?;
+    let principal = PrincipalId::from_uuid(Uuid::parse_str(&principal).map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?);
+    state
+        .authority
+        .revoke(&principal)
+        .await
+        .map_err(ProtocolError::from)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 fn parse_json<T: DeserializeOwned>(
     body: Result<Bytes, BytesRejection>,
     correlation_id: &CorrelationId,
@@ -297,6 +395,7 @@ pub(crate) async fn validate_request_boundary(
             | (&Method::POST, "/v1/pages")
             | (&Method::POST, "/v1/commands")
             | (&Method::POST, "/v1/checkpoints")
+            | (&Method::POST, "/v1/principals")
     );
 
     if path == "/v1/events" {

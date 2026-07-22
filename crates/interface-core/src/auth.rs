@@ -152,6 +152,15 @@ impl Authority for AuthorityStore {
         }
         Ok(())
     }
+
+    async fn issue(
+        &self,
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<IssuedToken, InterfaceError> {
+        AuthorityStore::issue(self, principal, capabilities, expires_at).await
+    }
 }
 
 #[async_trait]
@@ -162,6 +171,25 @@ pub trait Authority: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<CapabilityHandle, InterfaceError>;
     async fn revoke(&self, principal: &PrincipalId) -> Result<(), InterfaceError>;
+
+    async fn issue(
+        &self,
+        _principal: PrincipalId,
+        _capabilities: Vec<Capability>,
+        _expires_at: DateTime<Utc>,
+    ) -> Result<IssuedToken, InterfaceError> {
+        Err(InterfaceError {
+            code: InterfaceErrorCode::UnsupportedOperation,
+            layer: ErrorLayer::Interface,
+            message: "principal issuance is not supported by this authority".to_owned(),
+            correlation_id: CorrelationId::new(),
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
 }
 
 pub struct IssuedToken {
@@ -171,6 +199,15 @@ pub struct IssuedToken {
 impl IssuedToken {
     pub fn expose_once(self) -> String {
         self.bearer
+    }
+
+    /// Authority-internal constructor for callers that mint their own bearer outside
+    /// `AuthorityStore::issue` (e.g. a persistent `Authority` implementation that must
+    /// generate the bearer itself before enrolling only its hash). Not for use outside
+    /// an `Authority` implementation — never construct an `IssuedToken` from bearer
+    /// material that has not already been enrolled by hash.
+    pub fn from_bearer(bearer: String) -> Self {
+        Self { bearer }
     }
 }
 
@@ -200,8 +237,16 @@ impl CapabilityHandle {
         }
     }
 
-    pub(crate) fn principal_id(&self) -> &PrincipalId {
+    pub fn principal_id(&self) -> &PrincipalId {
         &self.principal_id
+    }
+
+    /// The capability set this handle carries. Exposed so callers that cache a runtime
+    /// binding across requests (see `broker::bootstrap_listener_with`) can detect that a
+    /// later request's handle grants a different capability set than the cached one and
+    /// rebuild the binding, rather than silently authorizing against a stale set.
+    pub fn capabilities(&self) -> &CapabilitySet {
+        &self.capabilities
     }
 
     pub(crate) fn allows(&self, capability: Capability) -> bool {

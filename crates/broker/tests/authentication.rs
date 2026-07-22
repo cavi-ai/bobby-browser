@@ -283,6 +283,7 @@ async fn startup_enrollment_accepts_only_the_explicit_bearer_and_honors_revocati
             Utc::now() + Duration::minutes(5),
         )
         .unwrap(),
+        1,
     )
     .await
     .unwrap();
@@ -316,7 +317,7 @@ async fn startup_bearer_limits_fit_the_authorization_header_exactly() {
     )
     .unwrap();
     assert!(!format!("{credential:?}").contains(&max));
-    let authority = EnrolledAuthority::enroll(credential).await.unwrap();
+    let authority = EnrolledAuthority::enroll(credential, 1).await.unwrap();
     let runtime = RuntimeService::default();
     let app = router(AppState::new(
         Arc::new(authority),

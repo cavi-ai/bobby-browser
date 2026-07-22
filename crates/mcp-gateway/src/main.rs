@@ -131,6 +131,7 @@ fn parse_capability(value: &str) -> anyhow::Result<Capability> {
         "artifact:capture" => Ok(Capability::ArtifactCapture),
         "recovery:read" => Ok(Capability::RecoveryRead),
         "recovery:write" => Ok(Capability::RecoveryWrite),
+        "authority:admin" => Ok(Capability::AuthorityAdmin),
         _ => anyhow::bail!("startup capability is invalid"),
     }
 }

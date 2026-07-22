@@ -10,6 +10,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use interface_core::{Authority, AuthorityStore, AuthorizationGuard, CapabilityHandle};
 use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use types::{
     Capability, CorrelationId, ErrorLayer, IdempotencyKey, InterfaceError, InterfaceErrorCode,
     InterfaceVersion, PrincipalId, RequestContext,
@@ -134,8 +135,15 @@ pub struct EnrolledAuthority {
 }
 
 impl EnrolledAuthority {
-    pub async fn enroll(startup: StartupCredential) -> Result<Self, StartupCredentialError> {
-        let store = AuthorityStore::with_capacity(1);
+    pub async fn enroll(
+        startup: StartupCredential,
+        max_principals: usize,
+    ) -> Result<Self, StartupCredentialError> {
+        // `+ 1` reserves a slot for the startup/admin credential itself, so
+        // `max_principals` means "how many *issued* team principals fit" rather than
+        // being silently reduced by one to make room for the startup credential that
+        // every `EnrolledAuthority` already carries.
+        let store = AuthorityStore::with_capacity(max_principals + 1);
         let startup_handle = store
             .enroll_hash(
                 startup.token_hash,
@@ -153,6 +161,33 @@ impl EnrolledAuthority {
 
     pub(crate) fn startup_handle(&self) -> CapabilityHandle {
         self.startup_handle.clone()
+    }
+
+    pub async fn issue(
+        &self,
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<interface_core::IssuedToken, InterfaceError> {
+        self.store.issue(principal, capabilities, expires_at).await
+    }
+
+    /// Re-enrolls a record whose bearer already exists elsewhere (restored from disk by
+    /// `PersistentAuthority`, or a freshly generated bearer whose hash the caller already
+    /// computed) directly by hash, discarding the resulting `CapabilityHandle`. Delegates
+    /// to `AuthorityStore::enroll_hash`, so it is still subject to the same expiry check
+    /// and capacity bound as any other enrollment.
+    pub(crate) async fn enroll_restored(
+        &self,
+        hash: [u8; 32],
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), InterfaceError> {
+        self.store
+            .enroll_hash(hash, principal, capabilities, expires_at)
+            .await
+            .map(|_handle| ())
     }
 }
 
@@ -181,6 +216,15 @@ impl Authority for EnrolledAuthority {
     async fn revoke(&self, principal: &PrincipalId) -> Result<(), InterfaceError> {
         self.store.revoke(principal).await
     }
+
+    async fn issue(
+        &self,
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<interface_core::IssuedToken, InterfaceError> {
+        EnrolledAuthority::issue(self, principal, capabilities, expires_at).await
+    }
 }
 
 pub(crate) async fn authenticate(
@@ -200,6 +244,7 @@ pub(crate) async fn authenticate(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
+    let principal_id = handle.principal_id().clone();
     let mut context = handle.context(parsed.deadline, parsed.idempotency_key);
     context.interface_version = parsed.interface_version;
     context.correlation_id = parsed.correlation_id;
@@ -225,14 +270,24 @@ pub(crate) async fn authenticate(
         Err(_) => ProtocolError::from(interface_error(
             InterfaceErrorCode::ResourceExhausted,
             "interface in-flight request capacity exhausted",
-            correlation_id,
+            correlation_id.clone(),
             Some(1_000),
         ))
         .into_response(),
-        Ok(_permit) => match crate::routes::validate_request_boundary(&state, &mut request).await {
-            Err(error) => error.into_response(),
-            Ok(()) => next.run(request).await,
-        },
+        // `_global_permit` and `_principal_permit` are both held across
+        // `next.run(request).await` below: they are dropped only once this match arm's
+        // value (the response) has been produced.
+        Ok(_global_permit) => {
+            match acquire_principal_permit(&state, &principal_id, correlation_id.clone()).await {
+                Err(error) => error.into_response(),
+                Ok(_principal_permit) => {
+                    match crate::routes::validate_request_boundary(&state, &mut request).await {
+                        Err(error) => error.into_response(),
+                        Ok(()) => next.run(request).await,
+                    }
+                }
+            }
+        }
     };
     response.headers_mut().insert(
         "x-interface-version",
@@ -244,6 +299,38 @@ pub(crate) async fn authenticate(
             .insert("x-correlation-id", correlation);
     }
     response
+}
+
+/// Acquires an owned permit from `principal`'s per-principal in-flight semaphore,
+/// creating it (bounded by `state.interface.max_in_flight_per_principal`) on first
+/// use. This keeps one team's request burst from starving every other principal's
+/// share of the interface's global in-flight capacity.
+pub(crate) async fn acquire_principal_permit(
+    state: &AppState,
+    principal: &PrincipalId,
+    correlation_id: CorrelationId,
+) -> Result<OwnedSemaphorePermit, ProtocolError> {
+    let existing = state.principal_permits.read().await.get(principal).cloned();
+    let semaphore = match existing {
+        Some(semaphore) => semaphore,
+        None => state
+            .principal_permits
+            .write()
+            .await
+            .entry(principal.clone())
+            .or_insert_with(|| {
+                Arc::new(Semaphore::new(state.interface.max_in_flight_per_principal))
+            })
+            .clone(),
+    };
+    semaphore.try_acquire_owned().map_err(|_| {
+        ProtocolError::from(interface_error(
+            InterfaceErrorCode::ResourceExhausted,
+            "principal in-flight capacity exhausted",
+            correlation_id,
+            Some(1_000),
+        ))
+    })
 }
 
 struct ParsedHeaders {
@@ -389,6 +476,7 @@ fn parse_capability(value: &str) -> Result<Capability, StartupCredentialError> {
         "artifact:capture" => Ok(Capability::ArtifactCapture),
         "recovery:read" => Ok(Capability::RecoveryRead),
         "recovery:write" => Ok(Capability::RecoveryWrite),
+        "authority:admin" => Ok(Capability::AuthorityAdmin),
         _ => Err(StartupCredentialError::InvalidCapability),
     }
 }
@@ -523,4 +611,61 @@ pub(crate) fn authorize_boundary(
     AuthorizationGuard::new(request.handle.clone())
         .authorize(&request.context, operation)
         .map_err(ProtocolError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn startup() -> StartupCredential {
+        StartupCredential::new(
+            "bootstrap-bearer-0123456789abcdef0123456789abcdef".to_owned(),
+            PrincipalId::from_uuid(Uuid::nil()),
+            vec![Capability::AuthorityAdmin, Capability::SessionRead],
+            Utc::now() + Duration::minutes(30),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn enrolled_authority_issues_second_principal() {
+        let authority = EnrolledAuthority::enroll(startup(), 4).await.unwrap();
+        let issued = authority
+            .issue(
+                PrincipalId::from_uuid(Uuid::from_u128(2)),
+                vec![Capability::SessionRead, Capability::SessionWrite],
+                Utc::now() + Duration::minutes(10),
+            )
+            .await
+            .unwrap();
+        let bearer = issued.expose_once();
+        let handle = authority.authenticate(&bearer, Utc::now()).await.unwrap();
+        assert!(handle.is_valid_at(Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn capacity_still_bounds_enrollment() {
+        // `max_principals: 1` reserves capacity for exactly one *issued* principal, on
+        // top of the startup credential's own reserved slot (see the `+ 1` in
+        // `EnrolledAuthority::enroll`): the first issuance must succeed and the second
+        // must fail.
+        let authority = EnrolledAuthority::enroll(startup(), 1).await.unwrap();
+        assert!(authority
+            .issue(
+                PrincipalId::from_uuid(Uuid::from_u128(3)),
+                vec![Capability::SessionRead],
+                Utc::now() + Duration::minutes(10),
+            )
+            .await
+            .is_ok());
+        assert!(authority
+            .issue(
+                PrincipalId::from_uuid(Uuid::from_u128(4)),
+                vec![Capability::SessionRead],
+                Utc::now() + Duration::minutes(10),
+            )
+            .await
+            .is_err());
+    }
 }

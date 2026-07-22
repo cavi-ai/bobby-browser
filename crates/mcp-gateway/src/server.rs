@@ -67,6 +67,15 @@ impl Server {
         resources: ArtifactResources,
     ) -> Self {
         let handle = runtime.capability_handle();
+        Self::for_interface(runtime, handle, events, resources)
+    }
+
+    pub fn for_interface(
+        runtime: Arc<dyn RuntimeInterface>,
+        handle: CapabilityHandle,
+        events: EventStore,
+        resources: ArtifactResources,
+    ) -> Self {
         Self {
             runtime,
             handle: handle.clone(),
