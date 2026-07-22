@@ -389,6 +389,7 @@ fn parse_capability(value: &str) -> Result<Capability, StartupCredentialError> {
         "artifact:capture" => Ok(Capability::ArtifactCapture),
         "recovery:read" => Ok(Capability::RecoveryRead),
         "recovery:write" => Ok(Capability::RecoveryWrite),
+        "authority:admin" => Ok(Capability::AuthorityAdmin),
         _ => Err(StartupCredentialError::InvalidCapability),
     }
 }
