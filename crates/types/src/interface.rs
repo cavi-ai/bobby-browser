@@ -203,6 +203,8 @@ pub enum InterfaceOperation {
     ReadArtifact,
     CaptureArtifact,
     SubscribeEvents,
+    IssuePrincipal,
+    RevokePrincipal,
 }
 
 impl InterfaceOperation {
@@ -222,6 +224,8 @@ impl InterfaceOperation {
             Self::ReadArtifact => &[Capability::ArtifactRead],
             Self::CaptureArtifact => &[Capability::ArtifactCapture],
             Self::SubscribeEvents => &[Capability::SessionRead],
+            Self::IssuePrincipal => &[Capability::AuthorityAdmin],
+            Self::RevokePrincipal => &[Capability::AuthorityAdmin],
         }
     }
 }

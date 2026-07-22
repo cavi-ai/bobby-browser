@@ -163,6 +163,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         storage: StorageConfig {
             journal_path: journal_path.clone(),
             checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
     };

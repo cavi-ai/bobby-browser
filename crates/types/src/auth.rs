@@ -14,6 +14,10 @@ impl PrincipalId {
     pub fn from_uuid(value: Uuid) -> Self {
         Self(value)
     }
+
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
@@ -43,6 +47,8 @@ pub enum Capability {
     RecoveryRead,
     #[serde(rename = "recovery:write")]
     RecoveryWrite,
+    #[serde(rename = "authority:admin")]
+    AuthorityAdmin,
 }
 
 impl Capability {
@@ -60,6 +66,7 @@ impl Capability {
             Self::ArtifactCapture => "artifact:capture",
             Self::RecoveryRead => "recovery:read",
             Self::RecoveryWrite => "recovery:write",
+            Self::AuthorityAdmin => "authority:admin",
         }
     }
 }
@@ -115,5 +122,18 @@ impl<'de> Deserialize<'de> for CapabilitySet {
             }
         }
         Ok(Self(verified))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authority_admin_serde_round_trip() {
+        let json = serde_json::to_string(&Capability::AuthorityAdmin).unwrap();
+        assert_eq!(json, "\"authority:admin\"");
+        let parsed: Capability = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, Capability::AuthorityAdmin);
     }
 }

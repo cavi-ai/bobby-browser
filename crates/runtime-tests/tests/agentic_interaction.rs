@@ -71,6 +71,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
         storage: StorageConfig {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
     };
