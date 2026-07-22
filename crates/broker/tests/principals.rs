@@ -7,7 +7,7 @@ use chrono::{Duration, SecondsFormat, Utc};
 use tower::ServiceExt;
 use types::{
     AttemptId, CommandEnvelope, CommandId, InspectCommand, PageId, PrimitiveCommand, SessionId,
-    WorkflowId,
+    UploadFilesCommand, WorkflowId,
 };
 use uuid::uuid;
 
@@ -346,4 +346,53 @@ async fn idempotent_command_replay_persists_and_is_scoped_per_principal() {
     let envelope_b = inspect_envelope(session_b);
     let (status4, body4) = submit_command(&app, &bearer_b, &envelope_b, key).await;
     assert_eq!(status4, StatusCode::UNPROCESSABLE_ENTITY, "{body4}");
+}
+
+/// A `PrimitiveCommand::UploadFiles` envelope. Uploads move files across the host/browser
+/// boundary and require `file:upload` in addition to `browser:mutate`.
+fn upload_files_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id,
+        page_id: Some(PageId::new()),
+        deadline: Utc::now() + Duration::minutes(1),
+        command: PrimitiveCommand::UploadFiles(UploadFilesCommand {
+            selector: "input[type=file]".into(),
+            target: None,
+            paths: vec!["/tmp/example.txt".into()],
+        }),
+    }
+}
+
+/// Security regression: `submit_command` (`POST /v1/commands`) authorizes only the coarse
+/// `browser:mutate` capability via `InterfaceOperation::SubmitCommand` before this fix, so
+/// a principal holding `browser:mutate` (but not `file:upload`) could smuggle a privileged
+/// `UploadFiles` primitive through the HTTP surface. This exercises the fix end-to-end
+/// through the broker's real HTTP route, not just the sdk-core unit boundary.
+#[tokio::test]
+async fn upload_files_over_http_requires_file_upload_capability_not_just_browser_mutate() {
+    let (app, _authority, admin_bearer) = app_with_admin(8).await;
+    let bearer = issue_bearer(
+        &app,
+        &admin_bearer,
+        uuid::Uuid::from_u128(41),
+        &["session:write", "browser:mutate"],
+    )
+    .await;
+    let session = create_session(&app, &bearer).await;
+
+    let (status, body) = submit_command(
+        &app,
+        &bearer,
+        &upload_files_envelope(session),
+        "upload-without-file-upload-capability",
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "missingCapability", "{body}");
+    assert_eq!(body["error"]["requiredCapability"], "file:upload", "{body}");
 }

@@ -179,6 +179,7 @@ async fn fixture_with(
                 Capability::SessionWrite,
                 Capability::PageWrite,
                 Capability::BrowserMutate,
+                Capability::FileDownload,
                 Capability::ArtifactRead,
                 Capability::ArtifactCapture,
             ],
