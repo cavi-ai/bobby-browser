@@ -95,7 +95,7 @@ impl ChromeRuntimeHarness {
     }
 }
 
-pub fn all_capabilities() -> [Capability; 12] {
+pub fn all_capabilities() -> [Capability; 13] {
     [
         Capability::SessionRead,
         Capability::SessionWrite,
@@ -109,5 +109,6 @@ pub fn all_capabilities() -> [Capability; 12] {
         Capability::ArtifactCapture,
         Capability::RecoveryRead,
         Capability::RecoveryWrite,
+        Capability::AuthorityAdmin,
     ]
 }

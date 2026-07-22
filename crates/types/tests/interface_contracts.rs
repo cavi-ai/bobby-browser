@@ -56,6 +56,14 @@ fn every_operation_capability_is_stable_and_fail_closed() {
         InterfaceOperation::ReadArtifact.required(),
         &[Capability::ArtifactRead]
     );
+    assert_eq!(
+        InterfaceOperation::IssuePrincipal.required(),
+        &[Capability::AuthorityAdmin]
+    );
+    assert_eq!(
+        InterfaceOperation::RevokePrincipal.required(),
+        &[Capability::AuthorityAdmin]
+    );
     assert!(!CapabilitySet::default().allows(InterfaceOperation::RuntimeInfo));
 }
 

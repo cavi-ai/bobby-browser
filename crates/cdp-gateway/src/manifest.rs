@@ -568,6 +568,7 @@ fn parse_capability(value: &str) -> Option<Capability> {
         "artifact:capture" => Capability::ArtifactCapture,
         "recovery:read" => Capability::RecoveryRead,
         "recovery:write" => Capability::RecoveryWrite,
+        "authority:admin" => Capability::AuthorityAdmin,
         _ => return None,
     })
 }
