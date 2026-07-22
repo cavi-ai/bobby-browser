@@ -228,8 +228,16 @@ impl CapabilityHandle {
         }
     }
 
-    pub(crate) fn principal_id(&self) -> &PrincipalId {
+    pub fn principal_id(&self) -> &PrincipalId {
         &self.principal_id
+    }
+
+    /// The capability set this handle carries. Exposed so callers that cache a runtime
+    /// binding across requests (see `broker::bootstrap_listener_with`) can detect that a
+    /// later request's handle grants a different capability set than the cached one and
+    /// rebuild the binding, rather than silently authorizing against a stale set.
+    pub fn capabilities(&self) -> &CapabilitySet {
+        &self.capabilities
     }
 
     pub(crate) fn allows(&self, capability: Capability) -> bool {

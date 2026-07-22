@@ -5,6 +5,10 @@ use axum::{
 use broker::testing::{app_with_admin, context_headers, issue_bearer};
 use chrono::{Duration, SecondsFormat, Utc};
 use tower::ServiceExt;
+use types::{
+    AttemptId, CommandEnvelope, CommandId, InspectCommand, PageId, PrimitiveCommand, SessionId,
+    WorkflowId,
+};
 use uuid::uuid;
 
 #[tokio::test]
@@ -184,4 +188,162 @@ async fn revoking_one_principal_leaves_others_valid() {
         app.oneshot(request_b).await.unwrap().status(),
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn principals_do_not_share_the_first_callers_binding() {
+    let (app, _authority, admin_bearer) = broker::testing::app_with_admin(16).await;
+    let team_bearer = broker::testing::issue_bearer(
+        &app,
+        &admin_bearer,
+        uuid::Uuid::from_u128(9),
+        &["session:read", "session:write"],
+    )
+    .await;
+    // Admin touches the runtime first (this used to freeze the binding).
+    let first = app
+        .clone()
+        .oneshot(
+            context_headers(Request::get("/v1/sessions"), &admin_bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    // Team principal acts under ITS OWN handle.
+    let created = app
+        .clone()
+        .oneshot(
+            context_headers(Request::post("/v1/sessions"), &team_bearer)
+                .header("content-type", "application/json")
+                .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+                .body(Body::from(r#"{"profile":"default"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    assert_eq!(
+        broker::testing::last_bound_principal(),
+        Some(uuid::Uuid::from_u128(9)),
+        "runtime binding must use the caller's handle, not the first caller's"
+    );
+}
+
+/// Creates a session for `bearer` via `POST /v1/sessions` and returns its id.
+async fn create_session(app: &axum::Router, bearer: &str) -> SessionId {
+    let request = context_headers(Request::post("/v1/sessions"), bearer)
+        .header("content-type", "application/json")
+        .header("idempotency-key", uuid::Uuid::new_v4().to_string())
+        .body(Body::from(r#"{"profile":"default"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    serde_json::from_value(json["id"].clone()).expect("session response carries an id")
+}
+
+/// A command envelope that references a page which was never opened. The runtime's own
+/// validation rejects it deterministically (`page does not exist`), which is enough to
+/// exercise idempotency replay without needing a real Chromium worker.
+fn inspect_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id,
+        page_id: Some(PageId::new()),
+        deadline: Utc::now() + Duration::minutes(1),
+        command: PrimitiveCommand::Inspect(InspectCommand::default()),
+    }
+}
+
+/// Submits `envelope` under `bearer` with idempotency-key `key` and returns the response
+/// status and JSON body.
+async fn submit_command(
+    app: &axum::Router,
+    bearer: &str,
+    envelope: &CommandEnvelope,
+    key: &str,
+) -> (StatusCode, serde_json::Value) {
+    let request = context_headers(Request::post("/v1/commands"), bearer)
+        .header("content-type", "application/json")
+        .header("idempotency-key", key)
+        .body(Body::from(serde_json::to_vec(envelope).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).expect("response body is valid JSON"),
+    )
+}
+
+/// Regression test for the cached-runtime fix: idempotency replay/conflict detection
+/// only works if the same `AuthenticatedRuntime` (and thus the same `IdempotencyStore`)
+/// serves a principal's requests across the whole HTTP call, not just within one call.
+///
+/// Per `interface_core::idempotency`, a non-retryable outcome (like the validation
+/// failure this test triggers) is retained by the store: a same-key/same-digest replay
+/// returns the stored outcome, and a same-key/different-digest request conflicts
+/// (`InterfaceErrorCode::IdempotencyConflict`, HTTP 409). The conflict case is the
+/// decisive check here — it is observable *only* if the first request's reservation is
+/// still present when the second request runs, which requires the store to have
+/// survived between two separate HTTP round trips.
+#[tokio::test]
+async fn idempotent_command_replay_persists_and_is_scoped_per_principal() {
+    let (app, _authority, admin_bearer) = app_with_admin(16).await;
+    let bearer_a = issue_bearer(
+        &app,
+        &admin_bearer,
+        uuid::Uuid::from_u128(31),
+        &["session:write", "browser:mutate"],
+    )
+    .await;
+    let bearer_b = issue_bearer(
+        &app,
+        &admin_bearer,
+        uuid::Uuid::from_u128(32),
+        &["session:write", "browser:mutate"],
+    )
+    .await;
+
+    let session_a = create_session(&app, &bearer_a).await;
+    let session_b = create_session(&app, &bearer_b).await;
+
+    let key = "shared-idempotency-key-across-principals";
+    let envelope = inspect_envelope(session_a.clone());
+
+    // First submission fails validation (page was never opened) with a non-retryable
+    // error, which the idempotency store retains for future replay.
+    let (status1, body1) = submit_command(&app, &bearer_a, &envelope, key).await;
+    assert_eq!(status1, StatusCode::UNPROCESSABLE_ENTITY, "{body1}");
+
+    // Replay: identical key, identical envelope (same canonical digest) -> the stored
+    // outcome is returned verbatim.
+    let (status2, body2) = submit_command(&app, &bearer_a, &envelope, key).await;
+    assert_eq!(status2, status1);
+    assert_eq!(body2, body1);
+
+    // Same key, a DIFFERENT envelope (fresh command id -> different canonical digest)
+    // under the SAME principal: this can only produce a 409 if the first request's
+    // reservation is still live, i.e. the IdempotencyStore genuinely persisted across
+    // separate HTTP requests. Before the fix (a fresh AuthenticatedRuntime, and thus a
+    // fresh IdempotencyStore, built on every bind call) this reservation would never
+    // survive to be observed here — it would just execute independently.
+    let mismatched = inspect_envelope(session_a);
+    let (status3, body3) = submit_command(&app, &bearer_a, &mismatched, key).await;
+    assert_eq!(status3, StatusCode::CONFLICT, "{body3}");
+    assert_eq!(body3["error"]["code"], "idempotencyConflict");
+
+    // Principal B reusing the exact same idempotency-key string on its own session is
+    // unaffected: each principal is bound to its own cached runtime / IdempotencyStore
+    // instance, so there is no shared keyspace to collide in.
+    let envelope_b = inspect_envelope(session_b);
+    let (status4, body4) = submit_command(&app, &bearer_b, &envelope_b, key).await;
+    assert_eq!(status4, StatusCode::UNPROCESSABLE_ENTITY, "{body4}");
 }
