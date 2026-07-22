@@ -14,6 +14,10 @@ impl PrincipalId {
     pub fn from_uuid(value: Uuid) -> Self {
         Self(value)
     }
+
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]

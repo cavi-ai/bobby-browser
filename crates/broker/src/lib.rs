@@ -8,7 +8,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex,
     },
     task::{Context, Poll},
 };
@@ -25,11 +25,76 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, RwLock, Semaphore},
 };
-use types::{CommandEnvelope, CommandOutcome, Evidence, SessionId};
+use types::{CommandEnvelope, CommandOutcome, Evidence, PrincipalId, SessionId};
 
 pub use auth::{EnrolledAuthority, StartupCredential, StartupCredentialError};
 
 type RuntimeBinder = dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static;
+
+/// Caches one [`AuthenticatedRuntime`] per principal so repeated requests from the same
+/// principal reuse the same runtime binding rather than getting a fresh one every call.
+/// This matters for more than efficiency: `AuthenticatedRuntime` owns an
+/// `IdempotencyStore` (see `sdk_core::AuthenticatedRuntime::with_session_ownership`), and
+/// idempotency-key replay/conflict detection only works if that store persists across the
+/// two-plus HTTP requests that share a key. A fresh runtime per call silently drops the
+/// idempotency memory after every request.
+///
+/// Bounded in the steady state: an `Authority` only ever hands out live handles for up to
+/// `max_principals` distinct principals at once, and this cache holds at most one entry
+/// per principal. Note it does not evict on revoke — a principal id that is revoked and
+/// never reused leaves a stale, harmless entry (its cached handle simply reports itself
+/// invalid) until the process exits, so long-running processes with heavy principal-id
+/// churn (not just token rotation for the same principal) would grow this map without
+/// bound; that tradeoff was accepted here rather than adding eviction machinery for a
+/// case fleet-multi-principal callers are not expected to hit.
+///
+/// A cached entry is only reused while it still reflects what a fresh authentication
+/// would produce: same capability set, and still valid (unexpired, unrevoked) at the time
+/// of use. `CapabilityHandle::is_valid_at` and `CapabilityHandle::capabilities` back this
+/// check. Without it, a principal whose token is rotated (reissued, e.g. because the
+/// first-seen token neared expiry, possibly with a different capability set) would keep
+/// being bound to the stale first handle: `AuthorizationGuard::validate` checks
+/// `is_invalid_at` against *that* handle, so once it expires every future request for the
+/// principal would fail closed with `AuthenticationFailed` even though the caller
+/// presented a live token; and `AuthorizationGuard::authorize` intersects the stale
+/// handle's capabilities with the fresh per-request context, so newly granted
+/// capabilities would silently never be honored.
+struct RuntimeBindingCache {
+    entries: Mutex<HashMap<PrincipalId, (CapabilityHandle, Arc<AuthenticatedRuntime>)>>,
+}
+
+impl RuntimeBindingCache {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns the cached runtime for `handle`'s principal, or builds and caches one via
+    /// `build` if there is no entry yet, or the entry no longer reflects a live handle
+    /// with the same capabilities as `handle`.
+    fn bind(
+        &self,
+        handle: CapabilityHandle,
+        build: impl FnOnce(CapabilityHandle) -> AuthenticatedRuntime,
+    ) -> Arc<AuthenticatedRuntime> {
+        let principal = handle.principal_id().clone();
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("runtime binding cache mutex is not poisoned");
+        if let Some((cached_handle, runtime)) = entries.get(&principal) {
+            if cached_handle.capabilities() == handle.capabilities()
+                && cached_handle.is_valid_at(chrono::Utc::now())
+            {
+                return runtime.clone();
+            }
+        }
+        let runtime = Arc::new(build(handle.clone()));
+        entries.insert(principal, (handle, runtime.clone()));
+        runtime
+    }
+}
 
 #[derive(Clone)]
 pub struct ArtifactCatalog {
@@ -467,22 +532,18 @@ where
     )
     .map_err(anyhow::Error::new)?;
     let events = EventStore::new(config.interface.max_event_retention);
-    let bound_runtime = Arc::new(OnceLock::<AuthenticatedRuntime>::new());
+    let bindings = RuntimeBindingCache::new();
     let app = router(
         AppState::new(
             gate.authority.clone(),
             move |handle| {
-                Arc::new(
-                    bound_runtime
-                        .get_or_init(|| {
-                            AuthenticatedRuntime::with_session_ownership(
-                                runtime.clone(),
-                                handle,
-                                recorder.clone(),
-                            )
-                        })
-                        .clone(),
-                )
+                bindings.bind(handle, |handle| {
+                    AuthenticatedRuntime::with_session_ownership(
+                        runtime.clone(),
+                        handle,
+                        recorder.clone(),
+                    )
+                }) as Arc<dyn RuntimeInterface>
             },
             config.interface.clone(),
         )
@@ -529,7 +590,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
 /// Test-only helpers shared by broker integration tests. Not part of the public API.
 #[doc(hidden)]
 pub mod testing {
-    use std::sync::Arc;
+    use std::{cell::Cell, sync::Arc};
 
     use axum::{
         body::{to_bytes, Body},
@@ -547,6 +608,27 @@ pub mod testing {
 
     const ADMIN_BEARER: &str = "admin-bootstrap-bearer-0123456789abcdef01";
 
+    // Thread-local rather than a process-wide static: `cargo test`'s default harness
+    // runs every #[tokio::test] in this file on its own OS thread, and each such test
+    // builds and drives its own `app_with_admin` router end-to-end on that thread. A
+    // process-wide static would let concurrently-running sibling tests clobber this
+    // test's observation between its own bind calls. Scoping per-thread keeps "last
+    // bind call wins" meaningful within a single test's request sequence while still
+    // requiring no locking of, or changes to, the other tests in this file.
+    thread_local! {
+        static LAST_BOUND_PRINCIPAL: Cell<Option<Uuid>> = const { Cell::new(None) };
+    }
+
+    /// Returns the principal UUID recorded by the most recent test runtime binding made
+    /// on the calling thread, if any.
+    pub fn last_bound_principal() -> Option<Uuid> {
+        LAST_BOUND_PRINCIPAL.with(Cell::get)
+    }
+
+    fn record_bound_principal(principal: &PrincipalId) {
+        LAST_BOUND_PRINCIPAL.with(|cell| cell.set(Some(*principal.as_uuid())));
+    }
+
     /// Builds a router wired to an [`EnrolledAuthority`] with a fixed admin bearer that
     /// holds `authority:admin` plus the core session/page capabilities. Returns the
     /// router, the enrolled authority (for direct assertions), and the admin bearer.
@@ -562,6 +644,7 @@ pub mod testing {
                 Capability::SessionWrite,
                 Capability::PageRead,
                 Capability::PageWrite,
+                Capability::BrowserMutate,
             ],
             Utc::now() + Duration::minutes(30),
         )
@@ -576,14 +659,24 @@ pub mod testing {
         let mut interface = InterfaceConfig::default();
         interface.max_principals = max_principals;
 
+        // Mirrors the production binder in `bootstrap_listener_with`: one
+        // `AuthenticatedRuntime` (and thus one `IdempotencyStore`) per principal for the
+        // life of this router, so idempotency-key replay tests observe the real
+        // contract. The observation hook still fires on every bind *request*, cache hit
+        // or not, so `last_bound_principal` reflects the true caller of the most recent
+        // request regardless of caching.
+        let bindings = crate::RuntimeBindingCache::new();
         let app = router(AppState::new(
             authority.clone() as Arc<dyn Authority>,
             move |handle| {
-                Arc::new(AuthenticatedRuntime::with_session_ownership(
-                    runtime.clone(),
-                    handle,
-                    recorder.clone(),
-                )) as Arc<dyn RuntimeInterface>
+                record_bound_principal(handle.principal_id());
+                bindings.bind(handle, |handle| {
+                    AuthenticatedRuntime::with_session_ownership(
+                        runtime.clone(),
+                        handle,
+                        recorder.clone(),
+                    )
+                }) as Arc<dyn RuntimeInterface>
             },
             interface,
         ));
@@ -695,5 +788,124 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(bind_calls.load(Ordering::SeqCst), 0);
+    }
+
+    async fn issued_handle(
+        store: &interface_core::AuthorityStore,
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+    ) -> CapabilityHandle {
+        let bearer = store
+            .issue(principal, capabilities, Utc::now() + Duration::minutes(10))
+            .await
+            .expect("token issues")
+            .expose_once();
+        store.verify(&bearer).await.expect("issued token verifies")
+    }
+
+    #[tokio::test]
+    async fn runtime_binding_cache_reuses_one_runtime_per_principal() {
+        let store = interface_core::AuthorityStore::in_memory();
+        let principal = PrincipalId::from_uuid(uuid!("20000000-0000-0000-0000-000000000001"));
+        let handle_one =
+            issued_handle(&store, principal.clone(), vec![Capability::SessionRead]).await;
+        let handle_two = issued_handle(&store, principal, vec![Capability::SessionRead]).await;
+
+        let cache = RuntimeBindingCache::new();
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let counted_build = |calls: Arc<AtomicUsize>| {
+            move |handle: CapabilityHandle| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                AuthenticatedRuntime::new(RuntimeService::default(), handle)
+            }
+        };
+
+        let runtime_one = cache.bind(handle_one, counted_build(build_calls.clone()));
+        let runtime_two = cache.bind(handle_two, counted_build(build_calls.clone()));
+
+        assert!(
+            Arc::ptr_eq(&runtime_one, &runtime_two),
+            "repeat calls for the same still-valid, same-capability principal must reuse \
+             one runtime (and therefore one IdempotencyStore)"
+        );
+        assert_eq!(build_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_binding_cache_rebuilds_when_capabilities_change() {
+        let store = interface_core::AuthorityStore::in_memory();
+        let principal = PrincipalId::from_uuid(uuid!("20000000-0000-0000-0000-000000000002"));
+        let handle_one =
+            issued_handle(&store, principal.clone(), vec![Capability::SessionRead]).await;
+        // Simulates a token rotation that grants an additional capability: same
+        // principal, different capability set.
+        let handle_two = issued_handle(
+            &store,
+            principal,
+            vec![Capability::SessionRead, Capability::SessionWrite],
+        )
+        .await;
+
+        let cache = RuntimeBindingCache::new();
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let counted_build = |calls: Arc<AtomicUsize>| {
+            move |handle: CapabilityHandle| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                AuthenticatedRuntime::new(RuntimeService::default(), handle)
+            }
+        };
+
+        cache.bind(handle_one, counted_build(build_calls.clone()));
+        cache.bind(handle_two, counted_build(build_calls.clone()));
+
+        assert_eq!(
+            build_calls.load(Ordering::SeqCst),
+            2,
+            "a principal presenting a handle with a different capability set must rebuild \
+             the cached binding rather than keep authorizing against the stale set"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_binding_cache_rebuilds_after_the_cached_handle_expires() {
+        let store = interface_core::AuthorityStore::in_memory();
+        let principal = PrincipalId::from_uuid(uuid!("20000000-0000-0000-0000-000000000003"));
+        let short_lived_bearer = store
+            .issue(
+                principal.clone(),
+                vec![Capability::SessionRead],
+                Utc::now() + Duration::milliseconds(1),
+            )
+            .await
+            .expect("token issues")
+            .expose_once();
+        let expiring_handle = store
+            .verify(&short_lived_bearer)
+            .await
+            .expect("issued token verifies before it expires");
+
+        let cache = RuntimeBindingCache::new();
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let counted_build = |calls: Arc<AtomicUsize>| {
+            move |handle: CapabilityHandle| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                AuthenticatedRuntime::new(RuntimeService::default(), handle)
+            }
+        };
+        cache.bind(expiring_handle, counted_build(build_calls.clone()));
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // A fresh, currently-valid handle for the same principal (as a rotated token
+        // would produce) must not be blocked by the now-expired cached entry.
+        let fresh_handle = issued_handle(&store, principal, vec![Capability::SessionRead]).await;
+        cache.bind(fresh_handle, counted_build(build_calls.clone()));
+
+        assert_eq!(
+            build_calls.load(Ordering::SeqCst),
+            2,
+            "a cached binding that is no longer valid_at(now) must not be reused for a \
+             fresh, currently-valid handle from the same principal"
+        );
     }
 }
