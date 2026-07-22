@@ -526,6 +526,129 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     Ok(())
 }
 
+/// Test-only helpers shared by broker integration tests. Not part of the public API.
+#[doc(hidden)]
+pub mod testing {
+    use std::sync::Arc;
+
+    use axum::{
+        body::{to_bytes, Body},
+        http::{request::Builder, StatusCode},
+    };
+    use chrono::{Duration, SecondsFormat, Utc};
+    use config::InterfaceConfig;
+    use interface_core::{Authority, RuntimeInterface, SessionOwnershipRegistry};
+    use sdk_core::{AuthenticatedRuntime, RuntimeService};
+    use tower::ServiceExt;
+    use types::{Capability, PrincipalId, CURRENT_INTERFACE_VERSION};
+    use uuid::Uuid;
+
+    use crate::{router, AppState, EnrolledAuthority, StartupCredential};
+
+    const ADMIN_BEARER: &str = "admin-bootstrap-bearer-0123456789abcdef01";
+
+    /// Builds a router wired to an [`EnrolledAuthority`] with a fixed admin bearer that
+    /// holds `authority:admin` plus the core session/page capabilities. Returns the
+    /// router, the enrolled authority (for direct assertions), and the admin bearer.
+    pub async fn app_with_admin(
+        max_principals: usize,
+    ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
+        let startup = StartupCredential::new(
+            ADMIN_BEARER.to_owned(),
+            PrincipalId::from_uuid(Uuid::nil()),
+            vec![
+                Capability::AuthorityAdmin,
+                Capability::SessionRead,
+                Capability::SessionWrite,
+                Capability::PageRead,
+                Capability::PageWrite,
+            ],
+            Utc::now() + Duration::minutes(30),
+        )
+        .expect("fixed admin startup credential is valid");
+        let authority = Arc::new(
+            EnrolledAuthority::enroll(startup, max_principals)
+                .await
+                .expect("admin authority enrolls"),
+        );
+        let (_ownership, recorder) = SessionOwnershipRegistry::bounded(64);
+        let runtime = RuntimeService::default();
+        let mut interface = InterfaceConfig::default();
+        interface.max_principals = max_principals;
+
+        let app = router(AppState::new(
+            authority.clone() as Arc<dyn Authority>,
+            move |handle| {
+                Arc::new(AuthenticatedRuntime::with_session_ownership(
+                    runtime.clone(),
+                    handle,
+                    recorder.clone(),
+                )) as Arc<dyn RuntimeInterface>
+            },
+            interface,
+        ));
+        (app, authority, ADMIN_BEARER.to_owned())
+    }
+
+    /// Adds the standard authenticated-context headers (authorization, interface
+    /// version, correlation id, deadline) shared by broker integration tests.
+    pub fn context_headers(builder: Builder, bearer: &str) -> Builder {
+        builder
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("x-interface-version", CURRENT_INTERFACE_VERSION)
+            .header("x-correlation-id", Uuid::new_v4().to_string())
+            .header(
+                "x-deadline",
+                (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true),
+            )
+    }
+
+    /// Issues a bearer for `principal` with `capabilities` via `POST /v1/principals`,
+    /// using `admin_bearer` for authorization. Panics with context on failure — this is
+    /// a test helper, not production code.
+    pub async fn issue_bearer(
+        app: &axum::Router,
+        admin_bearer: &str,
+        principal: Uuid,
+        capabilities: &[&str],
+    ) -> String {
+        let body = serde_json::json!({
+            "principalId": principal,
+            "capabilities": capabilities,
+            "expiresAt": (Utc::now() + Duration::minutes(10))
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        });
+        let request = context_headers(axum::http::Request::post("/v1/principals"), admin_bearer)
+            .header("idempotency-key", format!("issue-{principal}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("issue body serializes"),
+            ))
+            .expect("issue request builds");
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router accepts issuance request");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("issuance response body reads");
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "principal issuance failed: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("issuance response is valid JSON");
+        json["bearer"]
+            .as_str()
+            .expect("issuance response carries a bearer")
+            .to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
