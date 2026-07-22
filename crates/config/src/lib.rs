@@ -29,6 +29,8 @@ pub struct InterfaceConfig {
     pub max_rejection_workers: usize,
     #[serde(default = "default_token_records_path", alias = "tokenRecordsPath")]
     pub token_records_path: PathBuf,
+    #[serde(default = "default_max_principals", alias = "maxPrincipals")]
+    pub max_principals: usize,
 }
 
 const fn default_max_request_bytes() -> usize {
@@ -55,6 +57,10 @@ fn default_token_records_path() -> PathBuf {
     PathBuf::from("./data/storage/authorities.json")
 }
 
+const fn default_max_principals() -> usize {
+    16
+}
+
 impl Default for InterfaceConfig {
     fn default() -> Self {
         Self {
@@ -64,6 +70,7 @@ impl Default for InterfaceConfig {
             max_connections: default_max_connections(),
             max_rejection_workers: default_max_rejection_workers(),
             token_records_path: default_token_records_path(),
+            max_principals: default_max_principals(),
         }
     }
 }
@@ -87,6 +94,9 @@ impl InterfaceConfig {
         }
         if self.token_records_path.as_os_str().is_empty() {
             return Err("interface token_records_path must not be empty");
+        }
+        if self.max_principals == 0 {
+            return Err("interface max_principals must be positive");
         }
         Ok(())
     }
