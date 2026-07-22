@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use interface_core::{AuthorityStore, CapabilityHandle};
+use interface_core::{AuthorityStore, CapabilityHandle, EventStore, RuntimeInterface};
 use mcp_gateway::protocol::{MAX_FRAME_BYTES, MAX_REQUEST_ID_BYTES};
-use mcp_gateway::Server;
+use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{Capability, PrincipalId};
@@ -281,6 +281,44 @@ async fn serve_starts_waiting_work_before_cancel_and_eof_drains_promptly() {
     {
         serde_json::from_slice::<Value>(line).unwrap();
     }
+}
+
+#[tokio::test]
+async fn for_interface_constructor_serves_initialize() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000006")),
+            vec![Capability::SessionRead],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle: CapabilityHandle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime: Arc<dyn RuntimeInterface> = Arc::new(AuthenticatedRuntime::new(
+        RuntimeService::default(),
+        handle.clone(),
+    ));
+    let server = Server::for_interface(
+        runtime,
+        handle,
+        EventStore::new(16),
+        ArtifactResources::default(),
+    );
+
+    let initialized = server
+        .handle_message(request(
+            json!(1),
+            "initialize",
+            json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"test","version":"1"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
 }
 
 async fn initialize_ready(server: &Server) {
