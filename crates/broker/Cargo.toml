@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tower.workspace = true
 url.workspace = true
 uuid.workspace = true
 types = { path = "../types" }
@@ -23,5 +24,4 @@ artifact-store = { path = "../artifact-store" }
 [dev-dependencies]
 futures-util.workspace = true
 interface-conformance = { path = "../interface-conformance" }
-tower.workspace = true
 tempfile.workspace = true
