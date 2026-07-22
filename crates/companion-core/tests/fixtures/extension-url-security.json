@@ -1,0 +1,22 @@
+{
+  "benign": [
+    "https://example.test/search?q=monkey",
+    "https://example.test/search?monkeytokenized=bananas",
+    "https://example.test/committee?secretary=alex&keynote=music",
+    "https://example.test/results?q=api-keyboard",
+    "https://example.test/results?q=monkeytokenized"
+  ],
+  "secret": [
+    "https://user:password@example.test/private",
+    "https://example.test/?token=private-value",
+    "https://example.test/?access_token=private-value",
+    "https://example.test/?api-key=private-value",
+    "https://example.test/?key=private-value",
+    "https://example.test/?authorization=Bearer%20private-value",
+    "https://example.test/?q=Bearer%20private-value",
+    "https://example.test/?q=Basic%09private-value",
+    "https://example.test/?q=Bearer%20",
+    "https://example.test/private-token",
+    "mailto:user@example.test"
+  ]
+}

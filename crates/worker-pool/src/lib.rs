@@ -1,8 +1,10 @@
 mod chromium;
+mod selection;
 mod targeting;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,6 +18,10 @@ use types::{
 };
 
 pub use chromium::ChromiumWorkerFactory;
+pub use selection::{
+    BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
+    SelectedWorkerFactory,
+};
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
     root.join(session_id.0.to_string())
@@ -183,6 +189,8 @@ fn unsupported_error() -> CommandError {
 #[async_trait]
 pub trait WorkerFactory: Send + Sync {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError>;
+
+    async fn release_session(&self, _session_id: &SessionId) {}
 }
 
 #[derive(Clone)]
@@ -198,6 +206,19 @@ struct PoolInner {
 
 struct WorkerEntry {
     worker: OnceCell<Arc<dyn BrowserWorker>>,
+}
+
+struct LeaseLaunchCancellation {
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl Drop for LeaseLaunchCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
 }
 
 impl WorkerEntry {
@@ -262,53 +283,96 @@ impl WorkerPool {
                 .clone()
         };
 
-        let factory = self.inner.factory.clone();
-        let session_for_init = session_id.clone();
-        let result = entry
-            .worker
-            .get_or_try_init(|| async move {
-                let worker = factory.launch(&session_for_init).await?;
-                Ok(worker)
-            })
-            .await;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut cancellation = LeaseLaunchCancellation {
+            cancelled: Arc::clone(&cancelled),
+            armed: true,
+        };
+        let inner = Arc::clone(&self.inner);
+        let task_entry = Arc::clone(&entry);
+        let task_session = session_id.clone();
+        let result = tokio::spawn(async move {
+            let factory = Arc::clone(&inner.factory);
+            let launch_session = task_session.clone();
+            let result = task_entry
+                .worker
+                .get_or_try_init(|| async move {
+                    let worker = factory.launch(&launch_session).await?;
+                    if cancelled.load(Ordering::Acquire) {
+                        let _ = worker.terminate().await;
+                        return Err(resource_error("worker launch caller was cancelled"));
+                    }
+                    Ok(worker)
+                })
+                .await
+                .map(Arc::clone);
+            if result.is_err() {
+                {
+                    let mut entries = inner.entries.lock().await;
+                    if entries
+                        .get(&task_session)
+                        .is_some_and(|current| Arc::ptr_eq(current, &task_entry))
+                    {
+                        entries.remove(&task_session);
+                    }
+                }
+                inner.factory.release_session(&task_session).await;
+            }
+            result.map(|worker| (worker, active_permit))
+        })
+        .await
+        .map_err(|error| resource_error(format!("worker launch task failed: {error}")))?;
+        cancellation.armed = false;
 
         match result {
-            Ok(worker) => Ok(WorkerLease {
-                worker: worker.clone(),
+            Ok((worker, active_permit)) => Ok(WorkerLease {
+                worker,
                 _active_permit: Arc::new(active_permit),
             }),
-            Err(error) => {
-                let mut entries = self.inner.entries.lock().await;
-                if entries
-                    .get(&session_id)
-                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
-                {
-                    entries.remove(&session_id);
-                }
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
     pub async fn release_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
         let entry = self.inner.entries.lock().await.remove(session_id);
-        if let Some(entry) = entry {
-            if let Some(worker) = entry.worker.get() {
-                worker.close().await?;
-            }
-        }
-        Ok(())
+        let factory = Arc::clone(&self.inner.factory);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            let result = if let Some(entry) = entry {
+                if let Some(worker) = entry.worker.get() {
+                    worker.close().await
+                } else {
+                    Ok(())
+                }
+            } else {
+                Ok(())
+            };
+            factory.release_session(&session_id).await;
+            result
+        })
+        .await
+        .map_err(|error| resource_error(format!("worker cleanup task failed: {error}")))?
     }
 
     pub async fn invalidate_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
         let entry = self.inner.entries.lock().await.remove(session_id);
-        let Some(entry) = entry else {
-            return Ok(());
-        };
-        if let Some(worker) = entry.worker.get() {
-            worker.terminate().await?;
-        }
-        Ok(())
+        let factory = Arc::clone(&self.inner.factory);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            let result = if let Some(entry) = entry {
+                if let Some(worker) = entry.worker.get() {
+                    worker.terminate().await
+                } else {
+                    Ok(())
+                }
+            } else {
+                Ok(())
+            };
+            factory.release_session(&session_id).await;
+            result
+        })
+        .await
+        .map_err(|error| resource_error(format!("worker cleanup task failed: {error}")))?
     }
 
     pub async fn active_workers(&self) -> usize {

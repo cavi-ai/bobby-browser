@@ -4,6 +4,9 @@ members = [
   "crates/cli",
   "crates/config",
   "crates/types",
+  "crates/companion-protocol",
+  "crates/companion-core",
+  "crates/firefox-companion",
   "crates/interface-core",
   "crates/sdk-core",
   "crates/session-manager",
@@ -54,6 +57,7 @@ getrandom = "0.3"
 hex = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.29"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"

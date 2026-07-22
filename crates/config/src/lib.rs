@@ -1,6 +1,63 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserEngineConfig {
+    Firefox,
+    Chromium,
+    WebKit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum EnginePreferenceConfig {
+    #[default]
+    ManagedChromium,
+    Exact {
+        engine: BrowserEngineConfig,
+        #[serde(default, alias = "profileId")]
+        profile_id: Option<String>,
+    },
+    Prefer {
+        engines: Vec<BrowserEngineConfig>,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSelectionConfig {
+    #[serde(default)]
+    pub preference: EnginePreferenceConfig,
+    #[serde(default)]
+    pub firefox: Vec<FirefoxCompanionConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirefoxCompanionConfig {
+    pub profile_id: String,
+    pub bidi_url: String,
+    pub profile_dir: PathBuf,
+    pub companion_bind: String,
+    pub descriptor_path: PathBuf,
+    #[serde(default = "default_companion_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_pairing_code_ttl_ms")]
+    pub pairing_code_ttl_ms: u64,
+    #[serde(default = "default_attachment_ttl_ms")]
+    pub attachment_ttl_ms: u64,
+}
+
+const fn default_companion_timeout_ms() -> u64 {
+    5_000
+}
+const fn default_pairing_code_ttl_ms() -> u64 {
+    300_000
+}
+const fn default_attachment_ttl_ms() -> u64 {
+    300_000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -205,7 +262,51 @@ impl Default for AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, InterfaceConfig};
+    use super::{
+        AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
+        InterfaceConfig,
+    };
+
+    #[test]
+    fn missing_browser_selection_defaults_to_managed_chromium() {
+        let parsed: BrowserSelectionConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.preference, EnginePreferenceConfig::ManagedChromium);
+        assert!(parsed.firefox.is_empty());
+    }
+
+    #[test]
+    fn exact_firefox_profile_and_ordered_preferences_parse_from_config() {
+        let exact: BrowserSelectionConfig = serde_json::from_value(serde_json::json!({
+            "preference": { "mode": "exact", "engine": "firefox", "profileId": "profile-a" },
+            "firefox": [{
+                "profileId": "profile-a",
+                "bidiUrl": "ws://127.0.0.1:9222/session",
+                "profileDir": "/profiles/default-release",
+                "companionBind": "127.0.0.1:0",
+                "descriptorPath": "./data/storage/firefox-companion.json"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            exact.preference,
+            EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: Some("profile-a".into()),
+            }
+        );
+        assert_eq!(exact.firefox.len(), 1);
+
+        let prefer: BrowserSelectionConfig = serde_json::from_value(serde_json::json!({
+            "preference": { "mode": "prefer", "engines": ["firefox", "chromium"] }
+        }))
+        .unwrap();
+        assert_eq!(
+            prefer.preference,
+            EnginePreferenceConfig::Prefer {
+                engines: vec![BrowserEngineConfig::Firefox, BrowserEngineConfig::Chromium],
+            }
+        );
+    }
 
     #[test]
     fn http_defaults_deny_private_destinations_and_bound_concurrency() {
