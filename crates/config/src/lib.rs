@@ -158,6 +158,7 @@ pub struct BrowserConfig {
 pub struct StorageConfig {
     pub journal_path: PathBuf,
     pub checkpoints_dir: PathBuf,
+    pub authority_path: PathBuf,
 }
 
 impl Default for AppConfig {
@@ -181,6 +182,7 @@ impl Default for AppConfig {
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
                 checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
+                authority_path: PathBuf::from("./data/storage/authority.json"),
             },
             http: HttpConfig::default(),
             interface: InterfaceConfig::default(),

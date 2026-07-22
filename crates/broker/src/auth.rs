@@ -138,7 +138,11 @@ impl EnrolledAuthority {
         startup: StartupCredential,
         max_principals: usize,
     ) -> Result<Self, StartupCredentialError> {
-        let store = AuthorityStore::with_capacity(max_principals);
+        // `+ 1` reserves a slot for the startup/admin credential itself, so
+        // `max_principals` means "how many *issued* team principals fit" rather than
+        // being silently reduced by one to make room for the startup credential that
+        // every `EnrolledAuthority` already carries.
+        let store = AuthorityStore::with_capacity(max_principals + 1);
         let startup_handle = store
             .enroll_hash(
                 startup.token_hash,
@@ -165,6 +169,24 @@ impl EnrolledAuthority {
         expires_at: DateTime<Utc>,
     ) -> Result<interface_core::IssuedToken, InterfaceError> {
         self.store.issue(principal, capabilities, expires_at).await
+    }
+
+    /// Re-enrolls a record whose bearer already exists elsewhere (restored from disk by
+    /// `PersistentAuthority`, or a freshly generated bearer whose hash the caller already
+    /// computed) directly by hash, discarding the resulting `CapabilityHandle`. Delegates
+    /// to `AuthorityStore::enroll_hash`, so it is still subject to the same expiry check
+    /// and capacity bound as any other enrollment.
+    pub(crate) async fn enroll_restored(
+        &self,
+        hash: [u8; 32],
+        principal: PrincipalId,
+        capabilities: Vec<Capability>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), InterfaceError> {
+        self.store
+            .enroll_hash(hash, principal, capabilities, expires_at)
+            .await
+            .map(|_handle| ())
     }
 }
 
@@ -580,10 +602,22 @@ mod tests {
 
     #[tokio::test]
     async fn capacity_still_bounds_enrollment() {
+        // `max_principals: 1` reserves capacity for exactly one *issued* principal, on
+        // top of the startup credential's own reserved slot (see the `+ 1` in
+        // `EnrolledAuthority::enroll`): the first issuance must succeed and the second
+        // must fail.
         let authority = EnrolledAuthority::enroll(startup(), 1).await.unwrap();
         assert!(authority
             .issue(
                 PrincipalId::from_uuid(Uuid::from_u128(3)),
+                vec![Capability::SessionRead],
+                Utc::now() + Duration::minutes(10),
+            )
+            .await
+            .is_ok());
+        assert!(authority
+            .issue(
+                PrincipalId::from_uuid(Uuid::from_u128(4)),
                 vec![Capability::SessionRead],
                 Utc::now() + Duration::minutes(10),
             )

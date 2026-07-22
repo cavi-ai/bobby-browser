@@ -1,4 +1,5 @@
 mod auth;
+mod authority_persist;
 mod routes;
 
 use std::{
@@ -466,7 +467,6 @@ pub async fn serve_listener_with_rejection_limit(
 }
 
 struct StartupGate {
-    authority: Arc<EnrolledAuthority>,
     handle: CapabilityHandle,
 }
 
@@ -509,9 +509,20 @@ where
     config.validate().map_err(anyhow::Error::msg)?;
     let authority =
         Arc::new(EnrolledAuthority::enroll(startup, config.interface.max_principals).await?);
+    // `PersistentAuthority` wraps a clone of the enrolled authority (its inner
+    // `AuthorityStore` shares the same underlying records via `Arc`, so restoring or
+    // mutating through the persistent wrapper stays visible to `authority` too) so that
+    // `AppState` authenticates and issues through the persisted path while `StartupGate`
+    // keeps its own handle on the un-wrapped `EnrolledAuthority`.
+    let persistent_authority = Arc::new(
+        authority_persist::PersistentAuthority::open(
+            (*authority).clone(),
+            config.storage.authority_path.clone(),
+        )
+        .await?,
+    );
     let gate = StartupGate {
         handle: authority.startup_handle(),
-        authority: authority.clone(),
     };
     gate.validate_at(now())?;
     let runtime = build_runtime(config.clone()).await?;
@@ -535,7 +546,7 @@ where
     let bindings = RuntimeBindingCache::new();
     let app = router(
         AppState::new(
-            gate.authority.clone(),
+            persistent_authority,
             move |handle| {
                 bindings.bind(handle, |handle| {
                     AuthenticatedRuntime::with_session_ownership(
@@ -590,7 +601,13 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
 /// Test-only helpers shared by broker integration tests. Not part of the public API.
 #[doc(hidden)]
 pub mod testing {
-    use std::{cell::Cell, sync::Arc};
+    use std::{
+        cell::Cell,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+    };
 
     use axum::{
         body::{to_bytes, Body},
@@ -604,9 +621,28 @@ pub mod testing {
     use types::{Capability, PrincipalId, CURRENT_INTERFACE_VERSION};
     use uuid::Uuid;
 
-    use crate::{router, AppState, EnrolledAuthority, StartupCredential};
+    use crate::{
+        authority_persist::PersistentAuthority, router, AppState, EnrolledAuthority,
+        StartupCredential,
+    };
 
     const ADMIN_BEARER: &str = "admin-bootstrap-bearer-0123456789abcdef01";
+
+    // `testing` is not `cfg(test)`-gated (it compiles into the production lib so
+    // integration test crates under `tests/` can depend on it), so it cannot pull in
+    // `tempfile`, a dev-dependency. Each call to `app_with_admin` therefore gets its own
+    // path straight under the OS temp dir, disambiguated by process id (distinct test
+    // binaries) plus a process-wide counter (distinct calls within one binary — each
+    // `#[tokio::test]` in a file runs on its own thread, so this must be atomic).
+    static AUTHORITY_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_authority_path() -> std::path::PathBuf {
+        let counter = AUTHORITY_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "bobby-broker-test-authority-{}-{counter}.json",
+            std::process::id()
+        ))
+    }
 
     // Thread-local rather than a process-wide static: `cargo test`'s default harness
     // runs every #[tokio::test] in this file on its own OS thread, and each such test
@@ -654,6 +690,15 @@ pub mod testing {
                 .await
                 .expect("admin authority enrolls"),
         );
+        // Wraps a clone of `authority` the same way `bootstrap_listener_with` does: the
+        // clone shares the underlying `AuthorityStore` records via `Arc`, so this only
+        // adds the persistence path without changing what `authority` (returned below)
+        // observes.
+        let persistent_authority = Arc::new(
+            PersistentAuthority::open((*authority).clone(), unique_authority_path())
+                .await
+                .expect("test authority persistence path opens"),
+        );
         let (_ownership, recorder) = SessionOwnershipRegistry::bounded(64);
         let runtime = RuntimeService::default();
         let mut interface = InterfaceConfig::default();
@@ -667,7 +712,7 @@ pub mod testing {
         // request regardless of caching.
         let bindings = crate::RuntimeBindingCache::new();
         let app = router(AppState::new(
-            authority.clone() as Arc<dyn Authority>,
+            persistent_authority as Arc<dyn Authority>,
             move |handle| {
                 record_bound_principal(handle.principal_id());
                 bindings.bind(handle, |handle| {
@@ -874,7 +919,7 @@ mod tests {
             .issue(
                 principal.clone(),
                 vec![Capability::SessionRead],
-                Utc::now() + Duration::milliseconds(1),
+                Utc::now() + Duration::milliseconds(250),
             )
             .await
             .expect("token issues")
@@ -894,7 +939,7 @@ mod tests {
         };
         cache.bind(expiring_handle, counted_build(build_calls.clone()));
 
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // A fresh, currently-valid handle for the same principal (as a rotated token
         // would produce) must not be blocked by the now-expired cached entry.

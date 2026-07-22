@@ -148,6 +148,7 @@ async fn adaptive_http() {
         storage: StorageConfig {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
         },
         http: HttpConfig {
             allow_loopback: true,

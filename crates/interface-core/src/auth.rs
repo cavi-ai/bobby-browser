@@ -200,6 +200,15 @@ impl IssuedToken {
     pub fn expose_once(self) -> String {
         self.bearer
     }
+
+    /// Authority-internal constructor for callers that mint their own bearer outside
+    /// `AuthorityStore::issue` (e.g. a persistent `Authority` implementation that must
+    /// generate the bearer itself before enrolling only its hash). Not for use outside
+    /// an `Authority` implementation — never construct an `IssuedToken` from bearer
+    /// material that has not already been enrolled by hash.
+    pub fn from_bearer(bearer: String) -> Self {
+        Self { bearer }
+    }
 }
 
 impl fmt::Debug for IssuedToken {
