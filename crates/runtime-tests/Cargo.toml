@@ -9,17 +9,21 @@ async-trait.workspace = true
 axum.workspace = true
 broker = { path = "../broker" }
 checkpoint-store = { path = "../checkpoint-store" }
+companion-protocol = { path = "../companion-protocol" }
 cdp-gateway = { path = "../cdp-gateway" }
 chrono.workspace = true
 config = { path = "../config" }
 futures-util.workspace = true
 interface-conformance = { path = "../interface-conformance" }
 interface-core = { path = "../interface-core" }
+libc = "0.2"
+cli = { path = "../cli" }
 mcp-gateway = { path = "../mcp-gateway" }
 network-engine = { path = "../network-engine" }
 sdk-core = { path = "../sdk-core" }
 session-manager = { path = "../session-manager" }
 page-runtime = { path = "../page-runtime" }
+release-gates = { path = "../release-gates" }
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,6 +33,7 @@ tokio.workspace = true
 tokio-tungstenite = "0.29"
 tower.workspace = true
 types = { path = "../types" }
+url.workspace = true
 uuid.workspace = true
 workflow-journal = { path = "../workflow-journal" }
 worker-pool = { path = "../worker-pool" }

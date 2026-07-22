@@ -156,6 +156,39 @@ cargo test --workspace
 cargo test -p runtime-tests --test browser_vertical_slice -- --ignored --nocapture
 ```
 
+### Installed Firefox companion proof
+
+The native-browser release proof uses a headed installed Firefox, a dedicated
+test profile, the built companion extension, the loopback companion coordinator,
+and Firefox WebDriver BiDi as one workflow. The launcher atomically installs the
+non-secret `com.bobby_browser.companion` Native Messaging manifest and an
+owner-only repo-local wrapper. The wrapper passes the hardened dynamic descriptor
+path explicitly to the native host; Firefox does not need a test-only environment
+variable. Existing different wrapper or manifest files are never overwritten.
+Do not use a personal profile: the proof temporarily links the unpacked extension
+into the specified profile and removes only that owned link during cleanup.
+
+From the repository root, run exactly:
+
+```bash
+BOBBY_FIREFOX_BIN="/Applications/Firefox.app/Contents/MacOS/firefox" \
+BOBBY_FIREFOX_PROFILE="/absolute/path/to/dedicated-test-profile" \
+BOBBY_COMPANION_EXTENSION="$(pwd)/packages/firefox-companion/dist" \
+./scripts/dev/firefox-companion.sh
+```
+
+The launcher fails closed when any required variable or path is absent, builds
+the Rust native host and extension, installs the Native Messaging manifest in
+Firefox's per-user manifest directory, and invokes only the exact ignored
+installed Firefox test. Set `BOBBY_NATIVE_MESSAGING_DIR` to an alternate absolute
+directory for isolated setup/testing. Proof state is bounded to
+`target/firefox-companion-proof`; profile contents and pairing bearer material
+are never printed. A passing proof records Firefox
+and profile identity, verified navigate/inspect/click/typeText operations,
+engine-native click and typing, the exact `Submitted` confirmation, bounded
+timing, and zero redaction findings. Deterministic tests do not substitute for
+this headed proof.
+
 ## Security release certification
 
 Run the authoritative security certification from the repository root:
