@@ -39,9 +39,11 @@ use crate::{
 /// keep the stale guard: newly granted capabilities would never be honored, and once
 /// the first-seen token's expiry passed the principal would fail closed on `/v1/mcp`
 /// forever, even after presenting a fresh, valid bearer.
+type McpServerEntries = HashMap<PrincipalId, (CapabilityHandle, Arc<Server>)>;
+
 #[derive(Clone, Default)]
 pub struct McpServers {
-    entries: Arc<RwLock<HashMap<PrincipalId, (CapabilityHandle, Arc<Server>)>>>,
+    entries: Arc<RwLock<McpServerEntries>>,
 }
 
 impl McpServers {
