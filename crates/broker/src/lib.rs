@@ -223,6 +223,13 @@ pub struct AppState {
     artifacts: ArtifactCatalog,
     interface: InterfaceConfig,
     in_flight_requests: Arc<Semaphore>,
+    // One `Semaphore` per principal, created lazily on a principal's first request.
+    // Bounded in the steady state the same way `RuntimeBindingCache` is (see its doc
+    // comment above): an `Authority` only ever hands out live handles for up to
+    // `max_principals` distinct principals at once, and entries are not evicted on
+    // revoke, so a revoked principal id leaves a stale, harmless entry until the
+    // process exits.
+    principal_permits: Arc<RwLock<HashMap<PrincipalId, Arc<Semaphore>>>>,
 }
 
 impl AppState {
@@ -243,6 +250,7 @@ impl AppState {
             events: EventStore::new(interface.max_event_retention),
             artifacts: ArtifactCatalog::default(),
             in_flight_requests: Arc::new(Semaphore::new(interface.max_connections)),
+            principal_permits: Arc::new(RwLock::new(HashMap::new())),
             interface,
         }
     }
@@ -668,8 +676,24 @@ pub mod testing {
     /// Builds a router wired to an [`EnrolledAuthority`] with a fixed admin bearer that
     /// holds `authority:admin` plus the core session/page capabilities. Returns the
     /// router, the enrolled authority (for direct assertions), and the admin bearer.
+    ///
+    /// Delegates to [`app_with_admin_and_quota`] with the default per-principal
+    /// in-flight quota, to avoid duplicating the router setup below.
     pub async fn app_with_admin(
         max_principals: usize,
+    ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
+        app_with_admin_and_quota(
+            max_principals,
+            InterfaceConfig::default().max_in_flight_per_principal,
+        )
+        .await
+    }
+
+    /// Same as [`app_with_admin`], but overrides `max_in_flight_per_principal` so tests
+    /// can exercise the per-principal in-flight quota under a tight bound.
+    pub async fn app_with_admin_and_quota(
+        max_principals: usize,
+        max_in_flight_per_principal: usize,
     ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
         let startup = StartupCredential::new(
             ADMIN_BEARER.to_owned(),
@@ -703,6 +727,7 @@ pub mod testing {
         let runtime = RuntimeService::default();
         let mut interface = InterfaceConfig::default();
         interface.max_principals = max_principals;
+        interface.max_in_flight_per_principal = max_in_flight_per_principal;
 
         // Mirrors the production binder in `bootstrap_listener_with`: one
         // `AuthenticatedRuntime` (and thus one `IdempotencyStore`) per principal for the
