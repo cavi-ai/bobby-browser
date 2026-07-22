@@ -166,6 +166,27 @@ async fn authenticated(runtime: RuntimeService) -> (AuthenticatedRuntime, Capabi
     (AuthenticatedRuntime::new(runtime, handle.clone()), handle)
 }
 
+/// Same principal/session shape as `authenticated`, but with an explicit capability set so
+/// per-primitive capability gating (file upload/download) can be exercised independent of
+/// the coarse `browser:mutate` grant.
+async fn authenticated_with(
+    runtime: RuntimeService,
+    capabilities: impl IntoIterator<Item = Capability>,
+) -> (AuthenticatedRuntime, CapabilityHandle) {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000001")),
+            capabilities,
+            expiry(),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let handle = authority.verify(&token).await.unwrap();
+    (AuthenticatedRuntime::new(runtime, handle.clone()), handle)
+}
+
 async fn authenticated_with_store(
     runtime: RuntimeService,
     authority: &AuthorityStore,
@@ -669,4 +690,186 @@ async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandon
     assert_eq!(api.submit_dispatch_count(), 0);
     store.abandon(permit).await;
     assert_reservation_released(&store, &context, &request).await;
+}
+
+fn upload_files_envelope() -> CommandEnvelope {
+    CommandEnvelope {
+        command: types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
+            selector: "input[type=file]".into(),
+            target: None,
+            paths: vec!["/tmp/example.txt".into()],
+        }),
+        ..submit_request()
+    }
+}
+
+fn download_url_envelope() -> CommandEnvelope {
+    CommandEnvelope {
+        command: types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
+            url: "https://example.com/file.bin".into(),
+            expected_content_type: None,
+            max_bytes: 1024,
+        }),
+        ..submit_request()
+    }
+}
+
+fn click_and_wait_for_download_envelope() -> CommandEnvelope {
+    CommandEnvelope {
+        command: types::PrimitiveCommand::ClickAndWaitForDownload(
+            types::ClickAndWaitForDownloadCommand {
+                selector: "#download".into(),
+                target: None,
+                timeout_ms: 1_000,
+            },
+        ),
+        ..submit_request()
+    }
+}
+
+#[tokio::test]
+async fn upload_files_without_file_upload_capability_is_denied_before_dispatch() {
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(
+        expiry(),
+        Some(IdempotencyKey::try_from("upload-denied").unwrap()),
+    );
+
+    let error = api
+        .submit(context, upload_files_envelope())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileUpload));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn upload_files_without_file_upload_capability_is_denied_on_the_no_idempotency_path() {
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let error = api
+        .submit(context, upload_files_envelope())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileUpload));
+}
+
+#[tokio::test]
+async fn upload_files_with_file_upload_capability_clears_the_extra_capability_gate() {
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::FileUpload,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    // The extra capability gate is cleared, so this falls through to the no-idempotency-key
+    // early return (`Ok(self.inner.submit(envelope).await)`), which is infallible: any
+    // `Err` here could only have come from the capability gate itself.
+    let outcome = api.submit(context, upload_files_envelope()).await;
+
+    assert!(
+        outcome.is_ok(),
+        "expected the file-upload capability gate to be cleared, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn download_url_without_file_download_capability_is_denied_before_dispatch() {
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(
+        expiry(),
+        Some(IdempotencyKey::try_from("download-denied").unwrap()),
+    );
+
+    let error = api
+        .submit(context, download_url_envelope())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileDownload));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn click_and_wait_for_download_without_file_download_capability_is_denied_before_dispatch() {
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(
+        expiry(),
+        Some(IdempotencyKey::try_from("click-download-denied").unwrap()),
+    );
+
+    let error = api
+        .submit(context, click_and_wait_for_download_envelope())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileDownload));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn non_privileged_command_needs_only_browser_mutate_to_clear_the_extra_capability_gate() {
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    // No idempotency key, so `Err` here could only come from the capability gate.
+    let outcome = api.submit(context, submit_request()).await;
+
+    assert!(
+        outcome.is_ok(),
+        "expected a non-privileged command to clear the extra capability gate, got {outcome:?}"
+    );
 }

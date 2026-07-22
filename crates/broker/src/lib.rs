@@ -709,6 +709,22 @@ pub mod testing {
         max_principals: usize,
         max_in_flight_per_principal: usize,
     ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
+        app_with_admin_and_quota_at(
+            max_principals,
+            max_in_flight_per_principal,
+            unique_authority_path(),
+        )
+        .await
+    }
+
+    /// Same as [`app_with_admin_and_quota`], but pins the on-disk authority persistence
+    /// path so a test can drop the router and rebuild a fresh one over the *same* file —
+    /// proving that a principal issued through the HTTP route survives a restart.
+    pub async fn app_with_admin_and_quota_at(
+        max_principals: usize,
+        max_in_flight_per_principal: usize,
+        authority_path: std::path::PathBuf,
+    ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
         let startup = StartupCredential::new(
             ADMIN_BEARER.to_owned(),
             PrincipalId::from_uuid(Uuid::nil()),
@@ -733,7 +749,7 @@ pub mod testing {
         // adds the persistence path without changing what `authority` (returned below)
         // observes.
         let persistent_authority = Arc::new(
-            PersistentAuthority::open((*authority).clone(), unique_authority_path())
+            PersistentAuthority::open((*authority).clone(), authority_path)
                 .await
                 .expect("test authority persistence path opens"),
         );

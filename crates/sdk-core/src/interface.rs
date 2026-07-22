@@ -10,9 +10,10 @@ use interface_core::{
     IdempotencyStore, InterfaceResult, RuntimeInterface, SessionOwnershipRecorder,
 };
 use types::{
-    CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence, InterfaceError,
-    InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState, RecoveryDecision,
-    RequestContext, RuntimeError, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
+    Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
+    InterfaceError, InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState,
+    PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeError, RuntimeInfo, SessionState,
+    WorkflowCheckpoint, WorkflowId,
 };
 
 use crate::RuntimeService;
@@ -184,6 +185,9 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<CommandOutcome> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::SubmitCommand)?;
+        if let Some(capability) = command_extra_capability(&envelope.command) {
+            self.authorization.require_capability(&ctx, capability)?;
+        }
         self.require_owned_session(&ctx, &envelope.session_id)?;
         let Some(key) = ctx.idempotency_key.clone() else {
             return Ok(self.inner.submit(envelope).await);
@@ -258,6 +262,33 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .recover(&workflow)
             .await
             .map_err(|_| internal_error(&ctx))
+    }
+}
+
+/// Capability required beyond `Capability::BrowserMutate` (already enforced by
+/// `InterfaceOperation::SubmitCommand`) to submit this primitive. `SubmitCommand`
+/// authorizes the coarse "can mutate the browser" grant only; a small set of primitives
+/// are privileged enough (moving files across the host/browser boundary) to need an
+/// additional, explicit capability. The match is exhaustive by variant so that adding a
+/// new `PrimitiveCommand` forces a deliberate decision here rather than silently
+/// inheriting `browser:mutate` as sufficient authorization.
+fn command_extra_capability(command: &PrimitiveCommand) -> Option<Capability> {
+    match command {
+        PrimitiveCommand::UploadFiles(_) => Some(Capability::FileUpload),
+        PrimitiveCommand::DownloadUrl(_) => Some(Capability::FileDownload),
+        PrimitiveCommand::ClickAndWaitForDownload(_) => Some(Capability::FileDownload),
+        PrimitiveCommand::Navigate(_)
+        | PrimitiveCommand::Inspect(_)
+        | PrimitiveCommand::Click(_)
+        | PrimitiveCommand::TypeText(_)
+        | PrimitiveCommand::OpenPage(_)
+        | PrimitiveCommand::ListPages(_)
+        | PrimitiveCommand::ClosePage(_)
+        | PrimitiveCommand::ClickAndWaitForPopup(_)
+        | PrimitiveCommand::WaitFor(_)
+        | PrimitiveCommand::CaptureScreenshot(_)
+        | PrimitiveCommand::SetFocusEmulation(_)
+        | PrimitiveCommand::SetEmulatedMedia(_) => None,
     }
 }
 

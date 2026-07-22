@@ -381,6 +381,65 @@ async fn revocation_invalidates_an_already_issued_handle_before_dispatch() {
     assert_eq!(runtime.calls(), 0);
 }
 
+#[tokio::test]
+async fn require_capability_grants_when_authority_and_context_both_hold_it() {
+    let store = AuthorityStore::in_memory();
+    let token = store
+        .issue(principal(), [Capability::FileUpload], expiry())
+        .await
+        .unwrap()
+        .expose_once();
+    let authority = store.verify(&token).await.unwrap();
+    let context = authority.context(expiry(), None);
+    let api = AuthorizationGuard::new(authority);
+
+    assert!(api
+        .require_capability(&context, Capability::FileUpload)
+        .is_ok());
+}
+
+#[tokio::test]
+async fn require_capability_denies_when_authority_lacks_it_even_if_context_claims_it() {
+    let store = AuthorityStore::in_memory();
+    let token = store
+        .issue(principal(), [Capability::BrowserMutate], expiry())
+        .await
+        .unwrap()
+        .expose_once();
+    let authority = store.verify(&token).await.unwrap();
+    let forged = RequestContext::new_for_test(principal(), [Capability::FileUpload], expiry());
+    let api = AuthorizationGuard::new(authority);
+
+    let error = api
+        .require_capability(&forged, Capability::FileUpload)
+        .unwrap_err();
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileUpload));
+}
+
+#[tokio::test]
+async fn require_capability_denies_when_context_lacks_it_even_if_authority_holds_it() {
+    let store = AuthorityStore::in_memory();
+    let token = store
+        .issue(
+            principal(),
+            [Capability::BrowserMutate, Capability::FileDownload],
+            expiry(),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let authority = store.verify(&token).await.unwrap();
+    let narrow = RequestContext::new_for_test(principal(), [Capability::BrowserMutate], expiry());
+    let api = AuthorizationGuard::new(authority);
+
+    let error = api
+        .require_capability(&narrow, Capability::FileDownload)
+        .unwrap_err();
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileDownload));
+}
+
 #[test]
 fn trusted_session_ownership_recorder_is_bounded_and_cannot_rebind() {
     let (registry, recorder) = SessionOwnershipRegistry::bounded(1);
