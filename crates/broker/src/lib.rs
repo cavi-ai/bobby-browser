@@ -1,5 +1,6 @@
 mod auth;
 mod authority_persist;
+mod mcp_http;
 mod routes;
 
 use std::{
@@ -230,6 +231,7 @@ pub struct AppState {
     // revoke, so a revoked principal id leaves a stale, harmless entry until the
     // process exits.
     principal_permits: Arc<RwLock<HashMap<PrincipalId, Arc<Semaphore>>>>,
+    mcp_servers: mcp_http::McpServers,
 }
 
 impl AppState {
@@ -251,6 +253,7 @@ impl AppState {
             artifacts: ArtifactCatalog::default(),
             in_flight_requests: Arc::new(Semaphore::new(interface.max_connections)),
             principal_permits: Arc::new(RwLock::new(HashMap::new())),
+            mcp_servers: mcp_http::McpServers::default(),
             interface,
         }
     }
@@ -269,9 +272,20 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             auth::authenticate,
         ));
+    // `/v1/mcp` is mounted outside `protected_router()`'s strict-header middleware and
+    // does its own thin bearer-only auth (see `mcp_http::post_mcp`) — standard MCP
+    // clients can only send a static `Authorization` header, not the fresh
+    // `x-deadline`/`x-correlation-id`/`x-interface-version` the other routes require.
+    let mcp = Router::new()
+        .route(
+            "/v1/mcp",
+            axum::routing::post(mcp_http::post_mcp).get(mcp_http::method_not_allowed),
+        )
+        .layer(DefaultBodyLimit::max(state.interface.max_request_bytes));
     Router::new()
         .route("/healthz", get(routes::healthz))
         .merge(protected)
+        .merge(mcp)
         .with_state(state)
 }
 
