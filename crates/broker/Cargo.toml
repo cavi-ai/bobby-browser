@@ -23,6 +23,7 @@ sdk-core = { path = "../sdk-core" }
 config = { path = "../config" }
 interface-core = { path = "../interface-core" }
 artifact-store = { path = "../artifact-store" }
+mcp-gateway = { path = "../mcp-gateway" }
 
 [dev-dependencies]
 futures-util.workspace = true

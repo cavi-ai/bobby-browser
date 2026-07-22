@@ -207,6 +207,7 @@ dependencies = [
  "hex",
  "interface-conformance",
  "interface-core",
+ "mcp-gateway",
  "sdk-core",
  "serde",
  "serde_json",

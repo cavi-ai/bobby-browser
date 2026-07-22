@@ -305,7 +305,7 @@ pub(crate) async fn authenticate(
 /// creating it (bounded by `state.interface.max_in_flight_per_principal`) on first
 /// use. This keeps one team's request burst from starving every other principal's
 /// share of the interface's global in-flight capacity.
-async fn acquire_principal_permit(
+pub(crate) async fn acquire_principal_permit(
     state: &AppState,
     principal: &PrincipalId,
     correlation_id: CorrelationId,
