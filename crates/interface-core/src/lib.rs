@@ -92,6 +92,28 @@ impl AuthorizationGuard {
         Ok(())
     }
 
+    /// Requires a single capability beyond whatever `InterfaceOperation` was already
+    /// authorized. Used at chokepoints (e.g. `AuthenticatedRuntime::submit`) where a
+    /// coarse operation-level capability (`browser:mutate`) is not sufficient on its own
+    /// to authorize a privileged primitive nested inside the request (file upload/download).
+    /// Mirrors the per-capability check in `authorize`: both the live authority and the
+    /// request context must independently carry the capability.
+    pub fn require_capability(
+        &self,
+        ctx: &RequestContext,
+        capability: Capability,
+    ) -> InterfaceResult<()> {
+        if !self.authority.allows(capability) || !ctx.capabilities.contains(capability) {
+            return Err(interface_error(
+                ctx,
+                InterfaceErrorCode::MissingCapability,
+                "required capability is missing",
+                Some(capability),
+            ));
+        }
+        Ok(())
+    }
+
     /// Validates the live credential and request identity without selecting an operation.
     /// Enumeration boundaries use this before filtering entries by capability.
     pub fn validate(&self, ctx: &RequestContext) -> InterfaceResult<()> {
