@@ -23,6 +23,7 @@ sdk-core = { path = "../sdk-core" }
 interface-core = { path = "../interface-core" }
 types = { path = "../types" }
 mcp-gateway = { path = "../mcp-gateway" }
+broker = { path = "../broker" }
 chrono.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
