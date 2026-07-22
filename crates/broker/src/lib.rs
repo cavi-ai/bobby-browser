@@ -739,9 +739,11 @@ pub mod testing {
         );
         let (_ownership, recorder) = SessionOwnershipRegistry::bounded(64);
         let runtime = RuntimeService::default();
-        let mut interface = InterfaceConfig::default();
-        interface.max_principals = max_principals;
-        interface.max_in_flight_per_principal = max_in_flight_per_principal;
+        let interface = InterfaceConfig {
+            max_principals,
+            max_in_flight_per_principal,
+            ..InterfaceConfig::default()
+        };
 
         // Mirrors the production binder in `bootstrap_listener_with`: one
         // `AuthenticatedRuntime` (and thus one `IdempotencyStore`) per principal for the
