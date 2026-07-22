@@ -1107,6 +1107,7 @@ version = "0.1.0"
 dependencies = [
  "artifact-store",
  "async-trait",
+ "broker",
  "chrono",
  "config",
  "interface-core",
