@@ -178,6 +178,7 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             CommandOutcome::Failed {
                 command_id: id.clone(),
                 error: error(ErrorCode::InvalidRequest),
+                evidence: vec![],
             },
             StatusCode::UNPROCESSABLE_ENTITY,
             "failed",
@@ -196,6 +197,7 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             CommandOutcome::Failed {
                 command_id: id,
                 error: error(ErrorCode::Internal),
+                evidence: vec![],
             },
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed",

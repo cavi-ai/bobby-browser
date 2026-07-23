@@ -66,7 +66,7 @@ export type CommandOutcome =
   | { status: "policyDenied"; commandId: Id; error: CommandError }
   | { status: "resourceExhausted"; commandId: Id; error: CommandError; retryAfterMs: number }
   | { status: "restarted"; commandId: Id; priorAttemptId: Id; attemptId: Id; reason: string }
-  | { status: "failed"; commandId: Id; error: CommandError };
+  | { status: "failed"; commandId: Id; error: CommandError; evidence?: Evidence[] };
 
 export type WaitUntil = "commit" | "domContentLoaded" | "interactive" | "networkIdle";
 export interface NavigateCommand { url: string; waitUntil: WaitUntil; timeoutMs: number; }

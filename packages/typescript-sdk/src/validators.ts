@@ -214,7 +214,14 @@ export function isCommandOutcome(value: unknown): value is CommandOutcome {
     case "completed": return hasExactKeys(value, ["status", "commandId", "evidence"]) && isEvidenceArray(value.evidence);
     case "retryableFailure":
     case "policyDenied":
-    case "failed": return hasExactKeys(value, ["status", "commandId", "error"]) && isCommandError(value.error);
+      return hasExactKeys(value, ["status", "commandId", "error"]) && isCommandError(value.error);
+    case "failed":
+      return (
+        (hasExactKeys(value, ["status", "commandId", "error"])
+          || hasExactKeys(value, ["status", "commandId", "error", "evidence"]))
+        && isCommandError(value.error)
+        && (value.evidence === undefined || isEvidenceArray(value.evidence))
+      );
     case "needsReconciliation": return hasExactKeys(value, ["status", "commandId", "error", "evidence"]) && isCommandError(value.error) && isEvidenceArray(value.evidence);
     case "resourceExhausted": return hasExactKeys(value, ["status", "commandId", "error", "retryAfterMs"]) && isCommandError(value.error) && isSafeUnsigned(value.retryAfterMs);
     case "restarted": return hasExactKeys(value, ["status", "commandId", "priorAttemptId", "attemptId", "reason"]) && isUuid(value.priorAttemptId) && isUuid(value.attemptId) && isString(value.reason);

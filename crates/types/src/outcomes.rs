@@ -41,6 +41,8 @@ pub enum CommandOutcome {
     Failed {
         command_id: CommandId,
         error: CommandError,
+        #[serde(default)]
+        evidence: Vec<Evidence>,
     },
 }
 
@@ -212,7 +214,9 @@ impl CommandOutcome {
     pub fn journal_safe(&self) -> Self {
         let mut safe = self.clone();
         match &mut safe {
-            Self::Completed { evidence, .. } | Self::NeedsReconciliation { evidence, .. } => {
+            Self::Completed { evidence, .. }
+            | Self::NeedsReconciliation { evidence, .. }
+            | Self::Failed { evidence, .. } => {
                 *evidence = evidence.iter().map(Evidence::journal_safe).collect();
             }
             _ => {}

@@ -22,6 +22,7 @@ impl PageRuntime {
             return CommandOutcome::Failed {
                 command_id,
                 error: internal_error("command journal is not configured"),
+                evidence: Vec::new(),
             };
         };
         let scan = match journal.history(command_id.clone()).await {
@@ -116,18 +117,24 @@ impl PageRuntime {
     pub async fn execute(&self, envelope: CommandEnvelope) -> CommandOutcome {
         let command_id = envelope.command_id.clone();
         if let Err(error) = self.validate(&envelope).await {
-            return CommandOutcome::Failed { command_id, error };
+            return CommandOutcome::Failed {
+                command_id,
+                error,
+                evidence: Vec::new(),
+            };
         }
         let Some(journal) = &self.journal else {
             return CommandOutcome::Failed {
                 command_id,
                 error: internal_error("command journal is not configured"),
+                evidence: Vec::new(),
             };
         };
         let Some(workers) = &self.workers else {
             return CommandOutcome::Failed {
                 command_id,
                 error: internal_error("browser workers are not configured"),
+                evidence: Vec::new(),
             };
         };
 
@@ -162,7 +169,7 @@ impl PageRuntime {
             Ok(lease) => lease,
             Err(error) => {
                 return self
-                    .finish_failure(&envelope, classify_failure(&envelope, error))
+                    .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
                     .await;
             }
         };
@@ -176,6 +183,7 @@ impl PageRuntime {
                         classify_failure(
                             &envelope,
                             internal_error("page disappeared before dispatch"),
+                            Vec::new(),
                         ),
                     )
                     .await;
@@ -183,9 +191,12 @@ impl PageRuntime {
         };
         let mut execution = match self.adaptive.execute(&envelope, &lease, page_state).await {
             Ok(execution) => execution,
-            Err(error) => {
+            Err(failure) => {
                 return self
-                    .finish_failure(&envelope, classify_failure(&envelope, error))
+                    .finish_failure(
+                        &envelope,
+                        classify_failure(&envelope, failure.error, failure.evidence),
+                    )
                     .await;
             }
         };
@@ -320,7 +331,7 @@ impl PageRuntime {
                 }
             }
             Err(error) => {
-                self.finish_failure(&envelope, classify_failure(&envelope, error))
+                self.finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
                     .await
             }
         }
@@ -603,7 +614,11 @@ impl PageRuntime {
     }
 }
 
-fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandOutcome {
+fn classify_failure(
+    envelope: &CommandEnvelope,
+    error: CommandError,
+    evidence: Vec<Evidence>,
+) -> CommandOutcome {
     if matches!(
         error.code,
         ErrorCode::NetworkPolicyDenied | ErrorCode::PolicyDenied
@@ -616,7 +631,7 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
-            evidence: Vec::new(),
+            evidence,
         }
     } else if error.retryable {
         CommandOutcome::RetryableFailure {
@@ -627,6 +642,7 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
         CommandOutcome::Failed {
             command_id: envelope.command_id.clone(),
             error,
+            evidence,
         }
     }
 }

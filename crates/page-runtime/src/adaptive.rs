@@ -80,6 +80,21 @@ pub struct AdaptiveExecution {
 }
 
 #[derive(Debug)]
+pub struct AdaptiveFailure {
+    pub error: CommandError,
+    pub evidence: Vec<Evidence>,
+}
+
+impl From<CommandError> for AdaptiveFailure {
+    fn from(error: CommandError) -> Self {
+        Self {
+            error,
+            evidence: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct PreparedHttpResult {
     pub state_version: u64,
     pub state: network_engine::ResponseStateDelta,
@@ -143,7 +158,7 @@ impl AdaptivePageEngine {
         envelope: &CommandEnvelope,
         lease: &WorkerLease,
         page: PageState,
-    ) -> Result<AdaptiveExecution, CommandError> {
+    ) -> Result<AdaptiveExecution, AdaptiveFailure> {
         if let RuntimeCommand::Intent(intent) = &envelope.command {
             return execute_intent(envelope, lease, intent).await;
         }
@@ -162,7 +177,7 @@ impl AdaptivePageEngine {
         };
         let page_url = page.url.as_deref().unwrap_or_default();
         match direct.eligibility.classify(command, page_url) {
-            EligibilityDecision::Denied(error) => Err(error),
+            EligibilityDecision::Denied(error) => Err(error.into()),
             EligibilityDecision::Chromium(reason) => {
                 browser_execute(envelope, lease, ExecutionPath::Chromium, reason, 0).await
             }
@@ -191,7 +206,7 @@ impl AdaptivePageEngine {
                             )
                             .await
                         } else {
-                            Err(equivalence_unproven(fallback_reason))
+                            Err(equivalence_unproven(fallback_reason).into())
                         }
                     }
                     HttpCandidate::Inspection {
@@ -308,7 +323,7 @@ async fn execute_intent(
     envelope: &CommandEnvelope,
     lease: &WorkerLease,
     intent: &types::IntentCommand,
-) -> Result<AdaptiveExecution, CommandError> {
+) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
     let browser = WorkerIntentBrowser { lease };
     let vision = VisionContext { enabled: false };
@@ -318,7 +333,7 @@ async fn execute_intent(
             used_browser: true,
             prepared_http: None,
         }),
-        IntentOutcome::Failed { error, .. } => Err(error),
+        IntentOutcome::Failed { error, evidence } => Err(AdaptiveFailure { error, evidence }),
     }
 }
 
@@ -384,7 +399,7 @@ async fn browser_execute(
     path: ExecutionPath,
     reason: ExecutionReason,
     state_version: u64,
-) -> Result<AdaptiveExecution, CommandError> {
+) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
     let RuntimeCommand::Primitive(command) = &envelope.command else {
         unreachable!("intent commands use execute_intent");
@@ -428,7 +443,9 @@ async fn browser_execute(
         PrimitiveCommand::EvaluateJavaScript(command) => {
             lease.worker().evaluate_javascript(page_id, command).await?
         }
-        PrimitiveCommand::DownloadUrl(_) => return Err(equivalence_unproven(reason)),
+        PrimitiveCommand::DownloadUrl(_) => {
+            return Err(equivalence_unproven(reason).into());
+        }
     };
     let (bytes, sha256) = evidence
         .iter()

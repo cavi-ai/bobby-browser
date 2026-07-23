@@ -3,13 +3,13 @@ use serde_json::json;
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, CreateSessionRequest, DownloadUrlCommand, ElementState, ErrorCode,
-    EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy, ExecutionReason,
-    ExecutionRecord, FillIntent, FillValue, InspectCommand, IntentCommand, IntentHints,
-    IntentResolutionPath, ListPagesCommand, LocateIntent, OpenPageCommand, PageId, PrimitiveCommand,
-    RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
-    WaitUntil, WorkflowId,
+    CommandError, CommandId, CommandOutcome, CreateSessionRequest, DownloadUrlCommand, ElementState,
+    ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy,
+    ExecutionReason, ExecutionRecord, FillIntent, FillValue, InspectCommand, IntentCommand,
+    IntentHints, IntentResolutionPath, ListPagesCommand, LocateIntent, OpenPageCommand, PageId,
+    PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec,
+    TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -643,4 +643,62 @@ fn intent_execution_evidence_round_trip() {
     let value = serde_json::to_value(&evidence).unwrap();
     assert_eq!(value["kind"], "intentExecution");
     let _: Evidence = serde_json::from_value(value).unwrap();
+}
+
+#[test]
+fn failed_outcome_deserializes_missing_evidence_as_empty() {
+    let legacy = serde_json::json!({
+        "status": "failed",
+        "commandId": "00000000-0000-4000-8000-000000000001",
+        "error": {
+            "code": "targetNotFound",
+            "message": "targetNotFound",
+            "layer": "page",
+            "retryable": false
+        }
+    });
+    let outcome: CommandOutcome = serde_json::from_value(legacy).unwrap();
+    match outcome {
+        CommandOutcome::Failed { evidence, .. } => assert!(evidence.is_empty()),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+#[test]
+fn failed_outcome_preserves_intent_execution_evidence() {
+    let outcome = CommandOutcome::Failed {
+        command_id: CommandId::new(),
+        error: CommandError {
+            code: ErrorCode::TargetNotFound,
+            message: "targetNotFound".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        },
+        evidence: vec![Evidence::IntentExecution {
+            record: ExecutionRecord {
+                intent_kind: "locate".into(),
+                purpose: Some("Continue".into()),
+                resolution_path: IntentResolutionPath::Deterministic,
+                plan_summary: "role=button name=Continue".into(),
+                candidates: vec![],
+                wait_elapsed_ms: None,
+                verification: "targetNotFound".into(),
+                artifact_ids: vec![],
+                vision_proposal_sha256: None,
+            },
+        }],
+    };
+    let value = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(value["status"], "failed");
+    assert_eq!(value["evidence"][0]["kind"], "intentExecution");
+    let round: CommandOutcome = serde_json::from_value(value).unwrap();
+    match round {
+        CommandOutcome::Failed { evidence, .. } => {
+            assert!(matches!(
+                evidence.as_slice(),
+                [Evidence::IntentExecution { .. }]
+            ));
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
 }
