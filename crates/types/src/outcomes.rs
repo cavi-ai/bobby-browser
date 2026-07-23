@@ -41,6 +41,8 @@ pub enum CommandOutcome {
     Failed {
         command_id: CommandId,
         error: CommandError,
+        #[serde(default)]
+        evidence: Vec<Evidence>,
     },
 }
 
@@ -139,6 +141,30 @@ pub enum Evidence {
         value: serde_json::Value,
         truncated: bool,
     },
+    IntentExecution {
+        record: ExecutionRecord,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IntentResolutionPath {
+    Deterministic,
+    VisionFallback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionRecord {
+    pub intent_kind: String,
+    pub purpose: Option<String>,
+    pub resolution_path: IntentResolutionPath,
+    pub plan_summary: String,
+    pub candidates: Vec<CandidateEvidence>,
+    pub wait_elapsed_ms: Option<u64>,
+    pub verification: String,
+    pub artifact_ids: Vec<String>,
+    pub vision_proposal_sha256: Option<String>,
 }
 
 impl Evidence {
@@ -177,6 +203,7 @@ impl Evidence {
                 }
             }
             Self::BrowserExecution { .. } => {}
+            Self::IntentExecution { .. } => {}
             _ => {}
         }
         safe
@@ -187,7 +214,9 @@ impl CommandOutcome {
     pub fn journal_safe(&self) -> Self {
         let mut safe = self.clone();
         match &mut safe {
-            Self::Completed { evidence, .. } | Self::NeedsReconciliation { evidence, .. } => {
+            Self::Completed { evidence, .. }
+            | Self::NeedsReconciliation { evidence, .. }
+            | Self::Failed { evidence, .. } => {
                 *evidence = evidence.iter().map(Evidence::journal_safe).collect();
             }
             _ => {}
@@ -286,6 +315,11 @@ pub enum ErrorCode {
     HttpTransferFailed,
     HttpStateConflict,
     HttpEquivalenceUnproven,
+    IntentCompileFailed,
+    IntentActionMismatch,
+    ObstructionSuspected,
+    VisionAssistDenied,
+    VisionAssistFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -564,6 +564,8 @@ fn parse_capability(value: &str) -> Option<Capability> {
         "file:upload" => Capability::FileUpload,
         "file:download" => Capability::FileDownload,
         "javascript:evaluate" => Capability::JavascriptEvaluate,
+        "intent:execute" => Capability::IntentExecute,
+        "vision:assist" => Capability::VisionAssist,
         "artifact:read" => Capability::ArtifactRead,
         "artifact:capture" => Capability::ArtifactCapture,
         "recovery:read" => Capability::RecoveryRead,

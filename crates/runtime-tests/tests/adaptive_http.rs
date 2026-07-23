@@ -10,7 +10,7 @@ use session_manager::SessionManager;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, CommandClass, CommandEnvelope, CommandId,
     CommandOutcome, CreateSessionRequest, DownloadUrlCommand, Evidence, ExecutionPath,
-    InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision,
+    InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, RecoveryDecision,
     TargetSpec, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{ChromiumWorkerFactory, WorkerPool};
@@ -83,7 +83,7 @@ fn envelope(
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
         deadline: Utc::now() + Duration::seconds(30),
-        command,
+        command: RuntimeCommand::Primitive(command),
     }
 }
 

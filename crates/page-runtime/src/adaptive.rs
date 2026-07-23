@@ -1,18 +1,123 @@
+use std::sync::Arc;
+
 use artifact_store::{ArtifactStore, PendingArtifact};
+use async_trait::async_trait;
+use intent_engine::{
+    IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext,
+};
 use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
 use types::{
-    CommandEnvelope, CommandError, ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason,
-    PageState, PrimitiveCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ErrorCode, ErrorLayer,
+    Evidence, ExecutionPath, ExecutionReason, PageId, PageState, PrimitiveCommand, RuntimeCommand,
+    TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 use worker_pool::WorkerLease;
+
+/// Session + capability flags for vision escalation. Provider lives on
+/// [`AdaptivePageEngine`]; IntentEngine enforces the deny-by-default double gate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VisionGate {
+    pub session_ok: bool,
+    pub capability_ok: bool,
+}
+
+struct WorkerIntentBrowser<'a> {
+    lease: &'a WorkerLease,
+}
+
+#[async_trait]
+impl IntentBrowser for WorkerIntentBrowser<'_> {
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        self.lease
+            .worker()
+            .collect_candidates(page_id, target)
+            .await
+    }
+
+    async fn click(
+        &self,
+        page_id: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.lease.worker().click(page_id, command).await
+    }
+
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.lease.worker().click_xy(page_id, x, y).await
+    }
+
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.lease.worker().type_text(page_id, command).await
+    }
+
+    async fn upload_files(
+        &self,
+        page_id: &PageId,
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.lease.worker().upload_files(page_id, command).await
+    }
+
+    async fn wait_for(
+        &self,
+        page_id: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.lease.worker().wait_for(page_id, command).await
+    }
+
+    async fn capture_screenshot(
+        &self,
+        page_id: &PageId,
+        command: &CaptureScreenshotCommand,
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        // Worker API returns artifact evidence only; PNG bytes for the vision
+        // provider are not yet plumbed through BrowserWorker (production providers
+        // are out of scope for this phase). Unit tests inject PNG via FakeBrowser.
+        let evidence = self
+            .lease
+            .worker()
+            .capture_screenshot(page_id, command)
+            .await?;
+        Ok((Vec::new(), evidence))
+    }
+}
 
 #[derive(Debug)]
 pub struct AdaptiveExecution {
     pub evidence: Vec<Evidence>,
     pub used_browser: bool,
     pub prepared_http: Option<PreparedHttpResult>,
+}
+
+#[derive(Debug)]
+pub struct AdaptiveFailure {
+    pub error: CommandError,
+    pub evidence: Vec<Evidence>,
+}
+
+impl From<CommandError> for AdaptiveFailure {
+    fn from(error: CommandError) -> Self {
+        Self {
+            error,
+            evidence: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -25,6 +130,7 @@ pub struct PreparedHttpResult {
 #[derive(Clone, Default)]
 pub struct AdaptivePageEngine {
     direct: Option<DirectComponents>,
+    vision_assist: Option<Arc<dyn VisionAssist>>,
 }
 
 #[derive(Clone)]
@@ -53,7 +159,13 @@ impl AdaptivePageEngine {
                 artifacts,
                 network,
             }),
+            vision_assist: None,
         }
+    }
+
+    pub fn with_vision_assist(mut self, assist: Arc<dyn VisionAssist>) -> Self {
+        self.vision_assist = Some(assist);
+        self
     }
 
     pub fn finalize_prepared_artifact(
@@ -79,7 +191,15 @@ impl AdaptivePageEngine {
         envelope: &CommandEnvelope,
         lease: &WorkerLease,
         page: PageState,
-    ) -> Result<AdaptiveExecution, CommandError> {
+        vision_gate: VisionGate,
+    ) -> Result<AdaptiveExecution, AdaptiveFailure> {
+        if let RuntimeCommand::Intent(intent) = &envelope.command {
+            return execute_intent(envelope, lease, intent, vision_gate, self.vision_assist.clone())
+                .await;
+        }
+        let RuntimeCommand::Primitive(command) = &envelope.command else {
+            unreachable!("Intent handled above");
+        };
         let Some(direct) = &self.direct else {
             return browser_execute(
                 envelope,
@@ -91,8 +211,8 @@ impl AdaptivePageEngine {
             .await;
         };
         let page_url = page.url.as_deref().unwrap_or_default();
-        match direct.eligibility.classify(&envelope.command, page_url) {
-            EligibilityDecision::Denied(error) => Err(error),
+        match direct.eligibility.classify(command, page_url) {
+            EligibilityDecision::Denied(error) => Err(error.into()),
             EligibilityDecision::Chromium(reason) => {
                 browser_execute(envelope, lease, ExecutionPath::Chromium, reason, 0).await
             }
@@ -100,7 +220,7 @@ impl AdaptivePageEngine {
                 let page_id = envelope.page_id.as_ref().expect("validated page id");
                 let snapshot = lease.worker().http_state(page_id).await?;
                 let version = snapshot.version;
-                let candidate = match &envelope.command {
+                let candidate = match command {
                     PrimitiveCommand::Inspect(command) => {
                         direct.executor.inspect(&snapshot, command).await?
                     }
@@ -111,7 +231,7 @@ impl AdaptivePageEngine {
                 };
                 match candidate {
                     HttpCandidate::FallbackRequired(fallback_reason) => {
-                        if matches!(envelope.command, PrimitiveCommand::Inspect(_)) {
+                        if matches!(command, PrimitiveCommand::Inspect(_)) {
                             browser_execute(
                                 envelope,
                                 lease,
@@ -121,7 +241,7 @@ impl AdaptivePageEngine {
                             )
                             .await
                         } else {
-                            Err(equivalence_unproven(fallback_reason))
+                            Err(equivalence_unproven(fallback_reason).into())
                         }
                     }
                     HttpCandidate::Inspection {
@@ -234,6 +354,30 @@ fn equivalence_unproven(reason: ExecutionReason) -> CommandError {
     }
 }
 
+async fn execute_intent(
+    envelope: &CommandEnvelope,
+    lease: &WorkerLease,
+    intent: &types::IntentCommand,
+    vision_gate: VisionGate,
+    assist: Option<Arc<dyn VisionAssist>>,
+) -> Result<AdaptiveExecution, AdaptiveFailure> {
+    let page_id = envelope.page_id.as_ref().expect("validated page id");
+    let browser = WorkerIntentBrowser { lease };
+    let vision = VisionContext {
+        session_ok: vision_gate.session_ok,
+        capability_ok: vision_gate.capability_ok,
+        assist,
+    };
+    match IntentEngine::execute(intent, page_id, &browser, &vision).await {
+        IntentOutcome::Completed { evidence } => Ok(AdaptiveExecution {
+            evidence,
+            used_browser: true,
+            prepared_http: None,
+        }),
+        IntentOutcome::Failed { error, evidence } => Err(AdaptiveFailure { error, evidence }),
+    }
+}
+
 fn execution_evidence(
     path: ExecutionPath,
     reason: ExecutionReason,
@@ -296,9 +440,12 @@ async fn browser_execute(
     path: ExecutionPath,
     reason: ExecutionReason,
     state_version: u64,
-) -> Result<AdaptiveExecution, CommandError> {
+) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
-    let mut evidence = match &envelope.command {
+    let RuntimeCommand::Primitive(command) = &envelope.command else {
+        unreachable!("intent commands use execute_intent");
+    };
+    let mut evidence = match command {
         PrimitiveCommand::Navigate(command) => lease.worker().navigate(page_id, command).await?,
         PrimitiveCommand::Inspect(command) => lease.worker().inspect(page_id, command).await?,
         PrimitiveCommand::Click(command) => lease.worker().click(page_id, command).await?,
@@ -337,7 +484,9 @@ async fn browser_execute(
         PrimitiveCommand::EvaluateJavaScript(command) => {
             lease.worker().evaluate_javascript(page_id, command).await?
         }
-        PrimitiveCommand::DownloadUrl(_) => return Err(equivalence_unproven(reason)),
+        PrimitiveCommand::DownloadUrl(_) => {
+            return Err(equivalence_unproven(reason).into());
+        }
     };
     let (bytes, sha256) = evidence
         .iter()

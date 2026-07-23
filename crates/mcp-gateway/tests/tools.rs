@@ -6,8 +6,9 @@ use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{
-    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, Evidence, PrimitiveCommand,
-    SessionId, WorkflowCheckpoint, WorkflowId,
+    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, Evidence, IntentCommand,
+    IntentHints, LocateIntent, PrimitiveCommand, RuntimeCommand, SessionId, WorkflowCheckpoint,
+    WorkflowId,
 };
 use types::{Capability, PrincipalId};
 use uuid::uuid;
@@ -279,6 +280,19 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .len(),
         16
     );
+    let runtime_command = &command_schema["inputSchema"]["$defs"]["RuntimeCommand"]["oneOf"];
+    assert_eq!(runtime_command.as_array().unwrap().len(), 2, "{runtime_command}");
+    assert_eq!(
+        command_schema["inputSchema"]["$defs"]["CommandEnvelope"]["properties"]["command"]["$ref"],
+        "#/$defs/RuntimeCommand"
+    );
+    assert_eq!(
+        command_schema["inputSchema"]["$defs"]["IntentCommand"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,
     // `BrowserExecution`, and `JavaScriptResult` previously were) makes
@@ -287,13 +301,17 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     let evidence_variants = command_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 15, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 16, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert!(
         evidence_kinds.contains(&"javaScriptResult"),
+        "{evidence_kinds:?}"
+    );
+    assert!(
+        evidence_kinds.contains(&"intentExecution"),
         "{evidence_kinds:?}"
     );
 
@@ -305,7 +323,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         session_id: SessionId::new(),
         page_id: None,
         deadline: Utc::now() + Duration::seconds(30),
-        command: PrimitiveCommand::ListPages(types::ListPagesCommand),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(types::ListPagesCommand)),
     };
     let mut envelope_value = serde_json::to_value(envelope).unwrap();
     envelope_value["command"]["unexpected"] = json!(true);
@@ -324,7 +342,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         session_id: SessionId::new(),
         page_id: None,
         deadline: Utc::now() + Duration::seconds(30),
-        command: PrimitiveCommand::TypeText(types::TypeTextCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::TypeText(types::TypeTextCommand {
             selector: "#name".to_owned(),
             target: Some(types::TargetSpec {
                 attributes: [(long_attribute, "value".to_owned())].into_iter().collect(),
@@ -332,7 +350,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             }),
             value: "Ada".to_owned(),
             clear_first: true,
-        }),
+        })),
     };
     let rejected = server
         .handle_message(request(
@@ -504,6 +522,99 @@ async fn checkpoint_save_schema_accepts_evidence_containing_a_javascript_result_
         "schema validation must accept a javaScriptResult evidence item and reach \
          dispatch: {response}"
     );
+}
+
+#[tokio::test]
+async fn command_execute_schema_accepts_locate_intent_envelope() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000022")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let server = Server::new(runtime);
+    initialize(&server).await;
+
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
+            purpose: "Continue".to_owned(),
+            hints: IntentHints::default(),
+        })),
+    };
+
+    let response = server
+        .handle_message(request(
+            70,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":envelope}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
+    assert_ne!(response["error"]["code"], -32602, "{response}");
+}
+
+#[tokio::test]
+async fn command_execute_schema_rejects_locate_purpose_over_256() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000023")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let server = Server::new(runtime.clone());
+    initialize(&server).await;
+
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
+            purpose: "Continue".to_owned(),
+            hints: IntentHints::default(),
+        })),
+    };
+    let mut envelope_value = serde_json::to_value(envelope).unwrap();
+    envelope_value["command"]["input"]["input"]["purpose"] = json!("a".repeat(257));
+
+    let rejected = server
+        .handle_message(request(
+            71,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":envelope_value}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    assert_eq!(runtime.submit_dispatch_count(), 0);
 }
 
 fn assert_closed_typed_objects(schema: &Value) {

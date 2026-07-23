@@ -35,7 +35,8 @@ and expiry are checked again at dispatch, including long-lived MCP and CDP
 connections. Typical least-privilege capabilities include `session:read`,
 `session:write`, `page:read`, `page:write`, `browser:mutate`, `file:upload`,
 `file:download`, `artifact:read`, `artifact:capture`, `recovery:read`,
-`recovery:write`, `javascript:evaluate`, and `authority:admin`.
+`recovery:write`, `javascript:evaluate`, `intent:execute`, `vision:assist`, and
+`authority:admin`.
 
 ## Multi-principal token issuance
 
@@ -73,6 +74,20 @@ gates must pass:
 Execution is bounded: the result is size-capped (`browser.max_js_result_bytes`)
 and the run is time-capped (`browser.max_js_timeout_ms`). A successful run
 returns a `javaScriptResult` evidence item.
+
+## Intent commands
+
+Semantic automation is available through the authenticated SDK and MCP surfaces
+with `intent:execute`. Supported intents: **Locate**, **Fill** (text, select, or
+files), **SubmitAndVerify**, and **WaitForState**.
+
+Vision-assisted resolution is **deny-by-default** and gated like JavaScript
+evaluation: the bearer must hold `vision:assist`, and the session must have
+`executionPolicy.visionAssist = true`; without both grants, escalation is
+rejected with `VisionAssistDenied`.
+
+Playwright, Puppeteer, and raw CDP remain **primitives-only** — there is no
+parallel intent API on those adapters.
 
 ## Rust quick start
 

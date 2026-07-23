@@ -39,6 +39,10 @@ pub enum Capability {
     FileDownload,
     #[serde(rename = "javascript:evaluate")]
     JavascriptEvaluate,
+    #[serde(rename = "intent:execute")]
+    IntentExecute,
+    #[serde(rename = "vision:assist")]
+    VisionAssist,
     #[serde(rename = "artifact:read")]
     ArtifactRead,
     #[serde(rename = "artifact:capture")]
@@ -62,6 +66,8 @@ impl Capability {
             Self::FileUpload => "file:upload",
             Self::FileDownload => "file:download",
             Self::JavascriptEvaluate => "javascript:evaluate",
+            Self::IntentExecute => "intent:execute",
+            Self::VisionAssist => "vision:assist",
             Self::ArtifactRead => "artifact:read",
             Self::ArtifactCapture => "artifact:capture",
             Self::RecoveryRead => "recovery:read",

@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use config::AppConfig;
-use page_runtime::{ExecutionPhaseObserver, PageRuntime};
+use page_runtime::{ExecutionPhaseObserver, PageRuntime, VisionAssist, VisionGate};
 use page_runtime::{RecoveryCoordinator, RecoveryError};
 use session_manager::SessionManager;
 use types::{
     AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CreateSessionRequest,
     ErrorCode, ErrorLayer, Evidence, NavigateCommand, NavigationRequest, NavigationResult,
-    OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RuntimeError, RuntimeInfo,
-    SessionState, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RuntimeCommand, RuntimeError,
+    RuntimeInfo, SessionState, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{ChromiumWorkerFactory, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
@@ -57,14 +57,23 @@ impl RuntimeService {
 
     pub async fn build(config: &AppConfig) -> Result<Self, RuntimeError> {
         let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
-        Self::build_inner(config, factory, None).await
+        Self::build_inner(config, factory, None, None).await
+    }
+
+    /// Build with an injected [`VisionAssist`] provider (test/harness use).
+    pub async fn build_with_vision_assist(
+        config: &AppConfig,
+        assist: Arc<dyn VisionAssist>,
+    ) -> Result<Self, RuntimeError> {
+        let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
+        Self::build_inner(config, factory, None, Some(assist)).await
     }
 
     pub async fn build_with_worker_factory(
         config: &AppConfig,
         factory: Arc<dyn WorkerFactory>,
     ) -> Result<Self, RuntimeError> {
-        Self::build_inner(config, factory, None).await
+        Self::build_inner(config, factory, None, None).await
     }
 
     #[doc(hidden)]
@@ -73,13 +82,14 @@ impl RuntimeService {
         observer: Arc<dyn ExecutionPhaseObserver>,
     ) -> Result<Self, RuntimeError> {
         let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
-        Self::build_inner(config, factory, Some(observer)).await
+        Self::build_inner(config, factory, Some(observer), None).await
     }
 
     async fn build_inner(
         config: &AppConfig,
         factory: Arc<dyn WorkerFactory>,
         observer: Option<Arc<dyn ExecutionPhaseObserver>>,
+        vision_assist: Option<Arc<dyn VisionAssist>>,
     ) -> Result<Self, RuntimeError> {
         let journal = Arc::new(
             JsonlJournal::open(&config.storage.journal_path)
@@ -101,7 +111,7 @@ impl RuntimeService {
             request_timeout_ms: config.http.request_timeout_ms,
             max_concurrent_requests: config.http.max_concurrent_requests,
         };
-        let adaptive = page_runtime::AdaptivePageEngine::new(
+        let mut adaptive = page_runtime::AdaptivePageEngine::new(
             network_engine::EligibilityPolicy::new(network.clone()),
             network_engine::DirectHttpExecutor::new(network.clone()),
             artifact_store::ArtifactStore::new(
@@ -114,6 +124,9 @@ impl RuntimeService {
             ),
             network,
         );
+        if let Some(assist) = vision_assist {
+            adaptive = adaptive.with_vision_assist(assist);
+        }
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
         if let Some(observer) = observer {
@@ -163,6 +176,18 @@ impl RuntimeService {
     }
 
     pub async fn submit(&self, envelope: CommandEnvelope) -> CommandOutcome {
+        self.submit_with_vision_capability(envelope, false).await
+    }
+
+    /// Submit with an explicit vision capability flag from the authenticated principal.
+    /// Session `executionPolicy.visionAssist` is looked up here and threaded into
+    /// IntentEngine as `VisionContext.session_ok`. Vision is deny-by-default: both
+    /// this capability flag and the session grant must be true before the provider runs.
+    pub async fn submit_with_vision_capability(
+        &self,
+        envelope: CommandEnvelope,
+        vision_capability_ok: bool,
+    ) -> CommandOutcome {
         // SECURITY(F4): per-session execution-policy gate. This is the authoritative
         // deny-by-default check for `EvaluateJavaScript` — a session must have explicitly
         // opted in (`ExecutionPolicy.javascript_evaluation == true`) or the command is
@@ -172,7 +197,10 @@ impl RuntimeService {
         // absent session is treated as `javascript_evaluation == false`, not as "skip the
         // gate" — `self.pages.execute` validates against its own independent page
         // registry, not `SessionManager`, so it does not perform this check for us.
-        if matches!(envelope.command, PrimitiveCommand::EvaluateJavaScript(_)) {
+        if matches!(
+            &envelope.command,
+            RuntimeCommand::Primitive(PrimitiveCommand::EvaluateJavaScript(_))
+        ) {
             let allowed = self
                 .sessions
                 .get(&envelope.session_id)
@@ -191,7 +219,25 @@ impl RuntimeService {
                 };
             }
         }
-        self.pages.execute(envelope).await
+
+        let vision_gate = match &envelope.command {
+            RuntimeCommand::Intent(_) => {
+                let session_ok = self
+                    .sessions
+                    .get(&envelope.session_id)
+                    .await
+                    .map(|session| session.execution_policy.vision_assist)
+                    .unwrap_or(false);
+                VisionGate {
+                    session_ok,
+                    capability_ok: vision_capability_ok,
+                }
+            }
+            RuntimeCommand::Primitive(_) => VisionGate::default(),
+        };
+        self.pages
+            .execute_with_vision_gate(envelope, vision_gate)
+            .await
     }
 
     pub async fn checkpoint(
@@ -234,11 +280,11 @@ impl RuntimeService {
             session_id: page.session_id,
             page_id: Some(page.id.clone()),
             deadline: Utc::now() + Duration::milliseconds(timeout_ms as i64),
-            command: PrimitiveCommand::Navigate(NavigateCommand {
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: req.url,
                 wait_until,
                 timeout_ms,
-            }),
+            })),
         };
         match self.submit(envelope).await {
             CommandOutcome::Completed { evidence, .. } => {

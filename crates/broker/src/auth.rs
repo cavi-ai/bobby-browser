@@ -472,6 +472,8 @@ fn parse_capability(value: &str) -> Result<Capability, StartupCredentialError> {
         "file:upload" => Ok(Capability::FileUpload),
         "file:download" => Ok(Capability::FileDownload),
         "javascript:evaluate" => Ok(Capability::JavascriptEvaluate),
+        "intent:execute" => Ok(Capability::IntentExecute),
+        "vision:assist" => Ok(Capability::VisionAssist),
         "artifact:read" => Ok(Capability::ArtifactRead),
         "artifact:capture" => Ok(Capability::ArtifactCapture),
         "recovery:read" => Ok(Capability::RecoveryRead),

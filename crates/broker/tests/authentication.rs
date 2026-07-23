@@ -12,7 +12,7 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tower::ServiceExt;
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, InterfaceError, InterfaceOperation,
-    PrimitiveCommand, PrincipalId, WorkflowId, CURRENT_INTERFACE_VERSION,
+    PrimitiveCommand, RuntimeCommand, PrincipalId, WorkflowId, CURRENT_INTERFACE_VERSION,
 };
 use uuid::uuid;
 
@@ -96,7 +96,7 @@ fn submit_request(token: &str, duplicate_authorization: bool) -> Request<Body> {
         session_id: types::SessionId::new(),
         page_id: None,
         deadline: Utc::now() + Duration::minutes(1),
-        command: PrimitiveCommand::ListPages(types::ListPagesCommand),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(types::ListPagesCommand)),
     };
     let deadline = (Utc::now() + Duration::minutes(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
     let mut request = Request::post("/v1/commands")

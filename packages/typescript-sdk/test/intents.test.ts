@@ -1,0 +1,97 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { MAX_INTENT_PURPOSE_BYTES } from "../src/contracts.js";
+import {
+  assertIntentPurpose,
+  fillEnvelope,
+  locateEnvelope,
+  locateRuntimeCommand,
+  submitAndVerifyEnvelope,
+  waitForStateEnvelope,
+} from "../src/intents.js";
+
+const META = {
+  commandId: "00000000-0000-4000-8000-000000000001",
+  workflowId: "00000000-0000-4000-8000-000000000002",
+  attemptId: "00000000-0000-4000-8000-000000000003",
+  sessionId: "00000000-0000-4000-8000-000000000004",
+  pageId: "00000000-0000-4000-8000-000000000005",
+  deadline: "2026-07-16T12:00:00Z",
+};
+
+test("locateRuntimeCommand matches Rust golden nested wire shape", () => {
+  const command = locateRuntimeCommand({ purpose: "Continue" });
+  assert.deepEqual(command, {
+    kind: "intent",
+    input: {
+      kind: "locate",
+      input: {
+        purpose: "Continue",
+        hints: {
+          role: null,
+          nearText: null,
+          framePath: [],
+          shadowPath: [],
+          allowBestMatch: false,
+        },
+      },
+    },
+  });
+});
+
+test("locateEnvelope builds a full CommandEnvelope for agents", () => {
+  const envelope = locateEnvelope(META, "Continue");
+  assert.equal(envelope.schemaVersion, 2);
+  assert.equal(envelope.commandId, META.commandId);
+  assert.equal(envelope.pageId, META.pageId);
+  assert.deepEqual(envelope.command, locateRuntimeCommand({ purpose: "Continue" }));
+});
+
+test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
+  const fill = fillEnvelope(META, "Email", { kind: "text", text: "a@b.co" });
+  assert.deepEqual(fill.command, {
+    kind: "intent",
+    input: {
+      kind: "fill",
+      input: {
+        purpose: "Email",
+        hints: {
+          role: null,
+          nearText: null,
+          framePath: [],
+          shadowPath: [],
+          allowBestMatch: false,
+        },
+        value: { kind: "text", text: "a@b.co", clearFirst: false },
+      },
+    },
+  });
+
+  const submit = submitAndVerifyEnvelope(META, "Submit application", {
+    condition: { kind: "url", matcher: { kind: "contains", value: "/thanks" } },
+    timeoutMs: 5_000,
+  });
+  assert.deepEqual(submit.command.kind, "intent");
+  if (submit.command.kind !== "intent") throw new Error("expected intent");
+  assert.equal(submit.command.input.kind, "submitAndVerify");
+
+  const wait = waitForStateEnvelope(META, { kind: "document", ready: "interactive" }, 5_000);
+  assert.deepEqual(wait.command, {
+    kind: "intent",
+    input: {
+      kind: "waitForState",
+      input: {
+        condition: { kind: "document", ready: "interactive" },
+        timeoutMs: 5_000,
+      },
+    },
+  });
+});
+
+test("assertIntentPurpose enforces the 256-byte bound", () => {
+  assert.doesNotThrow(() => assertIntentPurpose("a".repeat(MAX_INTENT_PURPOSE_BYTES)));
+  assert.throws(() => assertIntentPurpose(""), /non-empty/);
+  assert.throws(() => assertIntentPurpose("a".repeat(MAX_INTENT_PURPOSE_BYTES + 1)), /256/);
+  assert.throws(() => locateEnvelope(META, "a".repeat(257)), /256/);
+});

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Bobby Browser Companion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Isolated Firefox page observation and interaction companion",
   "browser_specific_settings": {
     "gecko": {
@@ -19,12 +19,19 @@
     "https://*/*"
   ],
   "background": {
-    "scripts": ["background.js"]
+    "scripts": [
+      "background.js"
+    ]
   },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "all_frames": true,
       "match_about_blank": true,
       "run_at": "document_start"

@@ -9,8 +9,10 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
     CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
-    ExecutionPath, InspectCommand, NavigateCommand, PageId, PrimitiveCommand, SessionId,
-    TargetSpec, TypeTextCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
+    ExecutionPath, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId,
+    PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
+    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint,
+    WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan, PreparedResult};
@@ -150,6 +152,51 @@ impl BrowserWorker for FakeWorker {
         Ok(vec![Evidence::Element {
             selector: command.selector.clone(),
             text: Some(command.value.clone()),
+        }])
+    }
+    async fn collect_candidates(
+        &self,
+        _: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        self.events
+            .lock()
+            .await
+            .push("browser:collect_candidates".into());
+        let name = target
+            .accessible_name
+            .clone()
+            .or_else(|| match &target.text {
+                Some(TextMatch::Contains(text) | TextMatch::Exact(text)) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Submit".into());
+        Ok(vec![dom_engine::Candidate {
+            id: "submit".into(),
+            css: Some("#submit".into()),
+            test_id: None,
+            role: target.role.clone().or_else(|| Some("button".into())),
+            name: Some(name.clone()),
+            label: None,
+            text: name,
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+        }])
+    }
+    async fn wait_for(
+        &self,
+        _: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.events.lock().await.push("browser:wait_for".into());
+        Ok(vec![Evidence::Wait {
+            condition: command.condition.clone(),
+            elapsed_ms: 1,
+            observations: 1,
         }])
     }
     async fn close(&self) -> Result<(), CommandError> {
@@ -409,7 +456,20 @@ fn envelope(session: SessionId, page: PageId, command: PrimitiveCommand) -> Comm
         session_id: session,
         page_id: Some(page),
         deadline: Utc::now() + Duration::minutes(1),
-        command,
+        command: RuntimeCommand::Primitive(command),
+    }
+}
+
+fn intent_envelope(session: SessionId, page: PageId, command: IntentCommand) -> CommandEnvelope {
+    CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: session,
+        page_id: Some(page),
+        deadline: Utc::now() + Duration::minutes(1),
+        command: RuntimeCommand::Intent(command),
     }
 }
 
@@ -552,6 +612,80 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
     let reused = runtime.execute(reused_request).await;
     assert!(matches!(reused, CommandOutcome::Failed { error, .. }
         if error.message.contains("does not match")));
+}
+
+#[tokio::test]
+async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = page_runtime::PageRuntime::new_with_checkpoints(journal, workers, store.clone());
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let submit = IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
+        purpose: "Submit application".into(),
+        hints: IntentHints {
+            role: Some("button".into()),
+            ..IntentHints::default()
+        },
+        expected_state: WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains("/thanks".into()),
+            },
+            timeout_ms: 5_000,
+        },
+    });
+    assert_eq!(submit.class(), CommandClass::Boundary);
+    let request = intent_envelope(session.clone(), page.id.clone(), submit);
+
+    let rejected = runtime.execute(request.clone()).await;
+    assert!(matches!(rejected, CommandOutcome::Failed { error, .. }
+        if error.code == ErrorCode::InvalidRequest && error.message.contains("checkpoint")));
+    let observed = events.lock().await.clone();
+    assert!(!observed.iter().any(|event| event.contains("browser:")));
+
+    store
+        .save(&WorkflowCheckpoint {
+            schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            workflow_id: request.workflow_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            session_id: session,
+            page_id: page.id,
+            restart_url: "https://example.test/".into(),
+            current_url: "https://example.test/".into(),
+            cursor: None,
+            boundary_command_id: Some(request.command_id.clone()),
+            recovery_class: CommandClass::Boundary,
+            invariants: Vec::new(),
+            replayable_inputs: Vec::new(),
+            evidence: Vec::new(),
+            recovery_history: Vec::new(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let accepted = runtime.execute(request).await;
+    assert!(matches!(accepted, CommandOutcome::Completed { .. }), "{accepted:?}");
+    let observed = events.lock().await.clone();
+    assert!(observed.iter().any(|event| event == "browser:collect_candidates"));
+    assert!(observed.iter().any(|event| event == "browser:click"));
+    assert!(observed.iter().any(|event| event == "browser:wait_for"));
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
 use tower::ServiceExt;
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandError, CommandId, CommandOutcome, ErrorCode,
-    ErrorLayer, Evidence, InspectCommand, OpenPageRequest, PageState, PrimitiveCommand,
+    ErrorLayer, Evidence, InspectCommand, OpenPageRequest, PageState, PrimitiveCommand, RuntimeCommand,
     PrincipalId, RecoveryDecision, RequestContext, RuntimeInfo, SessionState, WorkflowCheckpoint,
     WorkflowId, CURRENT_INTERFACE_VERSION,
 };
@@ -75,14 +75,14 @@ fn error(code: ErrorCode) -> CommandError {
 
 fn envelope() -> CommandEnvelope {
     CommandEnvelope {
-        schema_version: 1,
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
         session_id: types::SessionId::new(),
         page_id: Some(types::PageId::new()),
         deadline: Utc::now() + Duration::minutes(1),
-        command: PrimitiveCommand::Inspect(InspectCommand::default()),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
     }
 }
 
@@ -178,6 +178,7 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             CommandOutcome::Failed {
                 command_id: id.clone(),
                 error: error(ErrorCode::InvalidRequest),
+                evidence: vec![],
             },
             StatusCode::UNPROCESSABLE_ENTITY,
             "failed",
@@ -196,6 +197,7 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             CommandOutcome::Failed {
                 command_id: id,
                 error: error(ErrorCode::Internal),
+                evidence: vec![],
             },
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed",

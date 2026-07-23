@@ -21,6 +21,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
 use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
 use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
@@ -41,7 +42,10 @@ use types::{
 
 use crate::{
     resolve_upload_paths, session_download_dir,
-    targeting::{resolve_target as resolve_browser_target, resolve_target_with_visibility},
+    targeting::{
+        gather_candidates, resolve_target as resolve_browser_target,
+        resolve_target_with_visibility,
+    },
     BrowserWorker, WorkerFactory,
 };
 
@@ -278,6 +282,29 @@ impl BrowserWorker for ChromiumWorker {
             },
             resolved.evidence,
         ])
+    }
+
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "vision click coordinates must be finite",
+            ));
+        }
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        page.click(Point { x, y })
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(vec![Evidence::Configuration {
+            name: "visionClick".into(),
+            value: format!("{x},{y}"),
+        }])
     }
 
     async fn type_text(
@@ -576,6 +603,18 @@ impl BrowserWorker for ChromiumWorker {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let mut browser = self.browser.lock().await;
+        let browser = browser.as_mut().ok_or_else(closed_error)?;
+        gather_candidates(page, target, Some(browser)).await
     }
 
     async fn capture_screenshot(

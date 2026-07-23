@@ -4,11 +4,11 @@ use chrono::Utc;
 use thiserror::Error;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
-    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand,
+    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand, RuntimeCommand,
 };
 use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
-use crate::PageRuntime;
+use crate::{PageRuntime, VisionGate};
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -22,6 +22,7 @@ impl PageRuntime {
             return CommandOutcome::Failed {
                 command_id,
                 error: internal_error("command journal is not configured"),
+                evidence: Vec::new(),
             };
         };
         let scan = match journal.history(command_id.clone()).await {
@@ -114,20 +115,35 @@ impl PageRuntime {
     }
 
     pub async fn execute(&self, envelope: CommandEnvelope) -> CommandOutcome {
+        self.execute_with_vision_gate(envelope, VisionGate::default())
+            .await
+    }
+
+    pub async fn execute_with_vision_gate(
+        &self,
+        envelope: CommandEnvelope,
+        vision_gate: VisionGate,
+    ) -> CommandOutcome {
         let command_id = envelope.command_id.clone();
         if let Err(error) = self.validate(&envelope).await {
-            return CommandOutcome::Failed { command_id, error };
+            return CommandOutcome::Failed {
+                command_id,
+                error,
+                evidence: Vec::new(),
+            };
         }
         let Some(journal) = &self.journal else {
             return CommandOutcome::Failed {
                 command_id,
                 error: internal_error("command journal is not configured"),
+                evidence: Vec::new(),
             };
         };
         let Some(workers) = &self.workers else {
             return CommandOutcome::Failed {
                 command_id,
                 error: internal_error("browser workers are not configured"),
+                evidence: Vec::new(),
             };
         };
 
@@ -162,7 +178,7 @@ impl PageRuntime {
             Ok(lease) => lease,
             Err(error) => {
                 return self
-                    .finish_failure(&envelope, classify_failure(&envelope, error))
+                    .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
                     .await;
             }
         };
@@ -176,16 +192,24 @@ impl PageRuntime {
                         classify_failure(
                             &envelope,
                             internal_error("page disappeared before dispatch"),
+                            Vec::new(),
                         ),
                     )
                     .await;
             }
         };
-        let mut execution = match self.adaptive.execute(&envelope, &lease, page_state).await {
+        let mut execution = match self
+            .adaptive
+            .execute(&envelope, &lease, page_state, vision_gate)
+            .await
+        {
             Ok(execution) => execution,
-            Err(error) => {
+            Err(failure) => {
                 return self
-                    .finish_failure(&envelope, classify_failure(&envelope, error))
+                    .finish_failure(
+                        &envelope,
+                        classify_failure(&envelope, failure.error, failure.evidence),
+                    )
                     .await;
             }
         };
@@ -261,7 +285,7 @@ impl PageRuntime {
         }
         let evidence = execution.evidence;
         match &envelope.command {
-            PrimitiveCommand::OpenPage(_) => {
+            RuntimeCommand::Primitive(PrimitiveCommand::OpenPage(_)) => {
                 if let Some(Evidence::Page { page_id, url, .. }) = evidence.first() {
                     self.register_page_id(
                         envelope.session_id.clone(),
@@ -271,7 +295,7 @@ impl PageRuntime {
                     .await;
                 }
             }
-            PrimitiveCommand::ClickAndWaitForPopup(_) => {
+            RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForPopup(_)) => {
                 if let Some(Evidence::Popup { page_id, url, .. }) = evidence.first() {
                     self.register_page_id(
                         envelope.session_id.clone(),
@@ -281,8 +305,10 @@ impl PageRuntime {
                     .await;
                 }
             }
-            PrimitiveCommand::ClosePage(command) => self.remove_page(&command.page_id).await,
-            _ => {}
+            RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(command)) => {
+                self.remove_page(&command.page_id).await
+            }
+            RuntimeCommand::Primitive(_) | RuntimeCommand::Intent(_) => {}
         }
 
         if let Err(error) = journal
@@ -294,7 +320,8 @@ impl PageRuntime {
         self.observe_durable_phase(CommandPhase::Verifying).await;
         match self.verify(&envelope, &lease, evidence).await {
             Ok(evidence) => {
-                if let PrimitiveCommand::Navigate(_) = &envelope.command {
+                if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_)) = &envelope.command
+                {
                     if let Some(Evidence::Navigation { url, .. }) = evidence.first() {
                         let _ = self.set_url(page_id, url.clone(), "interactive").await;
                     }
@@ -317,7 +344,7 @@ impl PageRuntime {
                 }
             }
             Err(error) => {
-                self.finish_failure(&envelope, classify_failure(&envelope, error))
+                self.finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
                     .await
             }
         }
@@ -346,7 +373,7 @@ impl PageRuntime {
         if page.session_id != envelope.session_id {
             return Err(validation_error("page does not belong to session"));
         }
-        if let PrimitiveCommand::Navigate(command) = &envelope.command {
+        if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(command)) = &envelope.command {
             if !(command.url.starts_with("http://")
                 || command.url.starts_with("https://")
                 || command.url.starts_with("data:"))
@@ -354,6 +381,8 @@ impl PageRuntime {
                 return Err(validation_error("navigation URL scheme is not supported"));
             }
         }
+        // Boundary primitives (Click { boundary: true }, …) and Boundary intents
+        // (SubmitAndVerify via IntentCommand::class) share this pre-act checkpoint gate.
         if envelope.command.class() == CommandClass::Boundary {
             if let Some(checkpoints) = &self.checkpoints {
                 let checkpoint = checkpoints.load(&envelope.workflow_id).await.map_err(|_| {
@@ -381,7 +410,19 @@ impl PageRuntime {
         evidence: Vec<Evidence>,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page_id = envelope.page_id.as_ref().expect("validated page id");
-        match &envelope.command {
+        let RuntimeCommand::Primitive(command) = &envelope.command else {
+            // IntentEngine owns verify for intent commands.
+            if evidence
+                .iter()
+                .any(|item| matches!(item, Evidence::IntentExecution { .. }))
+            {
+                return Ok(evidence);
+            }
+            return Err(verification_error(
+                "intent command returned no execution record",
+            ));
+        };
+        match command {
             PrimitiveCommand::Navigate(_) => match evidence.first() {
                 Some(Evidence::Navigation { url, .. }) if !url.is_empty() => Ok(evidence),
                 _ => Err(verification_error("navigation returned no final URL")),
@@ -588,7 +629,11 @@ impl PageRuntime {
     }
 }
 
-fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandOutcome {
+fn classify_failure(
+    envelope: &CommandEnvelope,
+    error: CommandError,
+    evidence: Vec<Evidence>,
+) -> CommandOutcome {
     if matches!(
         error.code,
         ErrorCode::NetworkPolicyDenied | ErrorCode::PolicyDenied
@@ -601,7 +646,7 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
-            evidence: Vec::new(),
+            evidence,
         }
     } else if error.retryable {
         CommandOutcome::RetryableFailure {
@@ -612,6 +657,7 @@ fn classify_failure(envelope: &CommandEnvelope, error: CommandError) -> CommandO
         CommandOutcome::Failed {
             command_id: envelope.command_id.clone(),
             error,
+            evidence,
         }
     }
 }
@@ -684,7 +730,10 @@ fn journal_failure(
 
 fn requires_reconciliation(envelope: &CommandEnvelope) -> bool {
     envelope.command.class() == CommandClass::Boundary
-        || matches!(envelope.command, PrimitiveCommand::DownloadUrl(_))
+        || matches!(
+            envelope.command,
+            RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(_))
+        )
 }
 
 fn journal_error(error: JournalError) -> CommandError {

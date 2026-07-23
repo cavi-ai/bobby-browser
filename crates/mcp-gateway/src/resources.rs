@@ -92,7 +92,8 @@ impl ArtifactResources {
         let mut admission = ArtifactAdmission::default();
         let evidence = match outcome {
             CommandOutcome::Completed { evidence, .. }
-            | CommandOutcome::NeedsReconciliation { evidence, .. } => evidence,
+            | CommandOutcome::NeedsReconciliation { evidence, .. }
+            | CommandOutcome::Failed { evidence, .. } => evidence,
             _ => return admission,
         };
         for item in evidence {

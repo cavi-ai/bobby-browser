@@ -16,5 +16,5 @@ export function isInterfaceErrorCode(value: unknown): boolean {
 }
 
 function isCapability(value: unknown): boolean {
-  return value === "session:read" || value === "session:write" || value === "page:read" || value === "page:write" || value === "browser:mutate" || value === "file:upload" || value === "file:download" || value === "javascript:evaluate" || value === "recovery:read" || value === "recovery:write" || value === "artifact:read" || value === "artifact:capture";
+  return value === "session:read" || value === "session:write" || value === "page:read" || value === "page:write" || value === "browser:mutate" || value === "file:upload" || value === "file:download" || value === "javascript:evaluate" || value === "intent:execute" || value === "vision:assist" || value === "recovery:read" || value === "recovery:write" || value === "artifact:read" || value === "artifact:capture";
 }

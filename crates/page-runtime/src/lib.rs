@@ -12,8 +12,9 @@ use types::{CommandPhase, OpenPageRequest, PageId, PageMode, PageState, RuntimeE
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
-pub use adaptive::{AdaptiveExecution, AdaptivePageEngine};
+pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, VisionGate};
 pub use executor::ExecutorError;
+pub use intent_engine::VisionAssist;
 pub use recovery::{evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError};
 
 #[doc(hidden)]

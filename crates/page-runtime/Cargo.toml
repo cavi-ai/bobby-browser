@@ -8,6 +8,8 @@ artifact-store = { path = "../artifact-store" }
 async-trait.workspace = true
 checkpoint-store = { path = "../checkpoint-store" }
 chrono.workspace = true
+dom-engine = { path = "../dom-engine" }
+intent-engine = { path = "../intent-engine" }
 network-engine = { path = "../network-engine" }
 serde_json.workspace = true
 thiserror.workspace = true

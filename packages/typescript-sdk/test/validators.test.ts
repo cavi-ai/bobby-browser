@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   isCommandOutcome,
+  isEvidence,
   isEventBatch,
   isEventGap,
   isPageState,
@@ -54,6 +55,23 @@ function evidenceFixtures(): unknown[] {
     { kind: "wait", condition: { kind: "document", ready: "networkIdle" }, elapsedMs: 1, observations: 1 },
     { kind: "wait", condition: { kind: "networkQuiet", idleMs: 1, maxInFlight: 0 }, elapsedMs: 1, observations: 1 },
     { kind: "screenshot", artifactId: "artifact-1", mediaType: "image/png", width: 1, height: 1, bytes: 4, sha256: SHA },
+    { kind: "configuration", name: "focusEmulation", value: "true" },
+    { kind: "browserExecution", engine: "firefox", browserVersion: "128.0", profileId: ID, interactionPath: "engineNative" },
+    { kind: "javaScriptResult", value: { answer: 42 }, truncated: false },
+    {
+      kind: "intentExecution",
+      record: {
+        intentKind: "locate",
+        purpose: "Continue",
+        resolutionPath: "deterministic",
+        planSummary: "role=button name~Continue",
+        candidates: [],
+        waitElapsedMs: null,
+        verification: "resolved",
+        artifactIds: [],
+        visionProposalSha256: null,
+      },
+    },
   ];
 }
 
@@ -102,7 +120,41 @@ test("deep validators accept every exact public response variant", () => {
     { status: "resourceExhausted", commandId: ID, error: { ...commandError, code: "resourceExhausted" }, retryAfterMs: 0 },
     { status: "restarted", commandId: ID, priorAttemptId: ID, attemptId: ID_2, reason: "retry" },
     { status: "failed", commandId: ID, error: commandError },
+    {
+      status: "failed",
+      commandId: ID,
+      error: { ...commandError, code: "intentCompileFailed" },
+      evidence: [{
+        kind: "intentExecution",
+        record: {
+          intentKind: "locate",
+          purpose: "Continue",
+          resolutionPath: "deterministic",
+          planSummary: "miss",
+          candidates: [],
+          waitElapsedMs: null,
+          verification: "targetNotFound",
+          artifactIds: [],
+          visionProposalSha256: null,
+        },
+      }],
+    },
   ]) assert.equal(isCommandOutcome(outcome), true, JSON.stringify(outcome));
+
+  assert.equal(isEvidence({
+    kind: "intentExecution",
+    record: {
+      intentKind: "locate",
+      purpose: null,
+      resolutionPath: "visionFallback",
+      planSummary: "",
+      candidates: [],
+      waitElapsedMs: 1,
+      verification: "ok",
+      artifactIds: ["a"],
+      visionProposalSha256: SHA,
+    },
+  }), true);
 
   assert.equal(isWorkflowCheckpoint(checkpoint()), true);
   for (const decision of [

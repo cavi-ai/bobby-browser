@@ -37,7 +37,7 @@ use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CommandEnvelope, CommandId, CommandOutcome,
     CorrelationId, CreateSessionRequest, Evidence, IdempotencyKey, InspectCommand,
     InterfaceErrorCode, InterfaceOperation, InterfaceVersion, NavigateCommand, PageId,
-    PrimitiveCommand, PrincipalId, ScreenshotMode, SessionId, WaitUntil, WorkflowId,
+    PrimitiveCommand, RuntimeCommand, PrincipalId, ScreenshotMode, SessionId, WaitUntil, WorkflowId,
     CURRENT_INTERFACE_VERSION,
 };
 
@@ -222,7 +222,7 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
         session_id: session.clone(),
         page_id: Some(page.clone()),
         deadline: Utc::now() + Duration::seconds(20),
-        command,
+        command: RuntimeCommand::Primitive(command),
     }
 }
 
