@@ -279,6 +279,19 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .len(),
         16
     );
+    let runtime_command = &command_schema["inputSchema"]["$defs"]["RuntimeCommand"]["oneOf"];
+    assert_eq!(runtime_command.as_array().unwrap().len(), 2, "{runtime_command}");
+    assert_eq!(
+        command_schema["inputSchema"]["$defs"]["CommandEnvelope"]["properties"]["command"]["$ref"],
+        "#/$defs/RuntimeCommand"
+    );
+    assert_eq!(
+        command_schema["inputSchema"]["$defs"]["IntentCommand"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,
     // `BrowserExecution`, and `JavaScriptResult` previously were) makes
@@ -287,13 +300,17 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     let evidence_variants = command_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 15, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 16, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert!(
         evidence_kinds.contains(&"javaScriptResult"),
+        "{evidence_kinds:?}"
+    );
+    assert!(
+        evidence_kinds.contains(&"intentExecution"),
         "{evidence_kinds:?}"
     );
 
