@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use companion_core::{
     run_native_host, CompanionServer, CompanionServerConfig, CompanionServerHandle,
@@ -616,7 +616,20 @@ pub async fn run() -> Result<()> {
     match cmd.as_str() {
         "serve" => {
             let startup = broker::StartupCredential::from_env()?;
-            let config = AppConfig::default();
+            let config_path = std::env::var("BOBBY_BROWSER_CONFIG")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("./config.toml"));
+            let config_existed = config_path.exists();
+            let config = AppConfig::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            if config_existed {
+                tracing::info!(path = %config_path.display(), "loaded config file");
+            } else {
+                tracing::info!(
+                    path = %config_path.display(),
+                    "config file not found, using built-in defaults"
+                );
+            }
             let selection_json = std::env::var("AUTOMATION_RUNTIME_BROWSER_SELECTION").ok();
             let factory =
                 compose_worker_factory(&config, parse_selection(selection_json.as_deref())?)?;

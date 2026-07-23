@@ -22,6 +22,7 @@ async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
                 page_ids: vec![],
                 created_at: now,
                 last_used_at: now,
+                execution_policy: types::ExecutionPolicy::default(),
             },
             SessionState {
                 id: SessionId::new(),
@@ -30,6 +31,7 @@ async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
                 page_ids: vec![page_a, page_b],
                 created_at: now,
                 last_used_at: now,
+                execution_policy: types::ExecutionPolicy::default(),
             },
         ],
     });

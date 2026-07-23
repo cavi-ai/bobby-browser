@@ -27,6 +27,7 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
             CreateSessionRequest {
                 profile: "rust-conformance".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await

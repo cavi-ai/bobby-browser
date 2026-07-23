@@ -172,9 +172,65 @@ impl InterfaceConfig {
     }
 }
 
+/// Error returned when loading or parsing an [`AppConfig`] from TOML fails.
+#[derive(Debug)]
+pub enum ConfigLoadError {
+    /// The config file could not be read (other than a missing file, which
+    /// is not an error — see [`AppConfig::load`]).
+    Io(std::io::Error),
+    /// The file contents were not valid TOML, or did not match the
+    /// [`AppConfig`] schema.
+    Parse(toml::de::Error),
+    /// The parsed config failed [`AppConfig::validate`].
+    Invalid(&'static str),
+}
+
+impl std::fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigLoadError::Io(err) => write!(f, "failed to read config file: {err}"),
+            ConfigLoadError::Parse(err) => write!(f, "failed to parse config file: {err}"),
+            ConfigLoadError::Invalid(reason) => write!(f, "invalid config: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConfigLoadError::Io(err) => Some(err),
+            ConfigLoadError::Parse(err) => Some(err),
+            ConfigLoadError::Invalid(_) => None,
+        }
+    }
+}
+
 impl AppConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
         self.interface.validate()
+    }
+
+    /// Parse an [`AppConfig`] from a TOML document and validate it.
+    pub fn from_toml_str(text: &str) -> Result<Self, ConfigLoadError> {
+        let config: AppConfig = toml::from_str(text).map_err(ConfigLoadError::Parse)?;
+        config.validate().map_err(ConfigLoadError::Invalid)?;
+        Ok(config)
+    }
+
+    /// Load an [`AppConfig`] from a TOML file at `path`.
+    ///
+    /// A missing file is not an error: built-in defaults ([`AppConfig::default`])
+    /// are returned in that case. Any other I/O failure, parse failure, or
+    /// validation failure is returned as a [`ConfigLoadError`].
+    pub fn load(path: &std::path::Path) -> Result<Self, ConfigLoadError> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AppConfig::default());
+            }
+            Err(err) => return Err(ConfigLoadError::Io(err)),
+        };
+        Self::from_toml_str(&text)
     }
 }
 
@@ -222,6 +278,11 @@ pub struct BrowserConfig {
     pub artifacts_dir: PathBuf,
     pub max_artifact_bytes: usize,
     pub max_screenshot_dimension: u32,
+    pub max_js_result_bytes: usize,
+    /// Hard upper bound, in milliseconds, on a single `EvaluateJavaScript` command's
+    /// `timeout_ms`. Requests exceeding this are clamped, not rejected — a caller cannot
+    /// pin a worker lease open indefinitely by requesting an unbounded timeout.
+    pub max_js_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +309,8 @@ impl Default for AppConfig {
                 artifacts_dir: PathBuf::from("./data/artifacts"),
                 max_artifact_bytes: 8 * 1024 * 1024,
                 max_screenshot_dimension: 16_384,
+                max_js_result_bytes: 64 * 1024,
+                max_js_timeout_ms: 30_000,
             },
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
@@ -263,8 +326,8 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
-        InterfaceConfig,
+        AppConfig, BrowserEngineConfig, BrowserSelectionConfig, ConfigLoadError,
+        EnginePreferenceConfig, InterfaceConfig,
     };
 
     #[test]
@@ -394,5 +457,53 @@ mod tests {
         ] {
             assert!(invalid.validate().is_err());
         }
+    }
+
+    #[test]
+    fn from_toml_str_round_trips_the_default_config() {
+        let text = toml::to_string(&AppConfig::default()).unwrap();
+        let parsed = AppConfig::from_toml_str(&text).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            serde_json::to_value(AppConfig::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn from_toml_str_rejects_a_config_that_fails_validation() {
+        let invalid = AppConfig {
+            interface: InterfaceConfig {
+                max_principals: 0,
+                ..InterfaceConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        let text = toml::to_string(&invalid).unwrap();
+
+        let err = AppConfig::from_toml_str(&text).unwrap_err();
+        assert!(matches!(err, ConfigLoadError::Invalid(_)));
+    }
+
+    #[test]
+    fn from_toml_str_reports_malformed_toml_as_a_parse_error() {
+        let err = AppConfig::from_toml_str("not valid toml === [[[").unwrap_err();
+        assert!(matches!(err, ConfigLoadError::Parse(_)));
+    }
+
+    #[test]
+    fn load_of_a_missing_file_returns_defaults() {
+        let path = std::path::Path::new("/nonexistent/definitely-not-there/config.toml");
+        let config = AppConfig::load(path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::to_value(AppConfig::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn load_of_the_repo_config_toml_parses_and_validates() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.toml");
+        let config = AppConfig::load(&path).expect("repo config.toml must parse and validate");
+        assert!(config.validate().is_ok());
     }
 }

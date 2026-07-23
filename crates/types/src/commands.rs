@@ -47,6 +47,7 @@ pub enum PrimitiveCommand {
     CaptureScreenshot(CaptureScreenshotCommand),
     SetFocusEmulation(SetFocusEmulationCommand),
     SetEmulatedMedia(SetEmulatedMediaCommand),
+    EvaluateJavaScript(EvaluateJavaScriptCommand),
 }
 
 impl PrimitiveCommand {
@@ -90,7 +91,8 @@ impl PrimitiveCommand {
             Self::DownloadUrl(_)
             | Self::TypeText(_)
             | Self::UploadFiles(_)
-            | Self::ClosePage(_) => CommandClass::Reconciliable,
+            | Self::ClosePage(_)
+            | Self::EvaluateJavaScript(_) => CommandClass::Reconciliable,
             Self::ClickAndWaitForPopup(_) | Self::ClickAndWaitForDownload(_) => {
                 CommandClass::Boundary
             }
@@ -309,9 +311,31 @@ pub struct SetEmulatedMediaCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluateJavaScriptCommand {
+    pub expression: String,
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub await_promise: bool,
+}
+
+/// Per-session gate for privileged execution capabilities. Defaults to all-false
+/// (deny-by-default): a session must explicitly opt in to run JavaScript, even if
+/// the bearer token holds the `javascript:evaluate` capability.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionPolicy {
+    #[serde(default)]
+    pub javascript_evaluation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
     pub profile: String,
     pub proxy: Option<String>,
+    #[serde(default)]
+    pub execution_policy: ExecutionPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

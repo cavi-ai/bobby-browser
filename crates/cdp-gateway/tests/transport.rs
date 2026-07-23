@@ -85,6 +85,7 @@ async fn websocket_drains_generation_teardown_events_before_target_disappears() 
             page_ids: vec![types::PageId::new()],
             created_at: now,
             last_used_at: now,
+            execution_policy: types::ExecutionPolicy::default(),
         }],
     });
     let authority = Arc::new(AuthorityStore::in_memory());

@@ -58,6 +58,9 @@ impl EligibilityPolicy {
                     Err(error) => EligibilityDecision::Denied(error),
                 }
             }
+            // The catch-all below already routes `EvaluateJavaScript` (and every other
+            // command class) to Chromium — JavaScript evaluation always requires a live
+            // browser context and can never be satisfied by the direct-HTTP path.
             _ => {
                 let _class: CommandClass = command.class();
                 EligibilityDecision::Chromium(ExecutionReason::IneligibleCommand)

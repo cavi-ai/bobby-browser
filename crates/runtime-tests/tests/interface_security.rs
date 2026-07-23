@@ -808,6 +808,7 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
             CreateSessionRequest {
                 profile: "principal-owner".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await

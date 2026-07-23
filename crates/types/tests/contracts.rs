@@ -3,10 +3,11 @@ use serde_json::json;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, DownloadUrlCommand, ElementState, Evidence, ExecutionPath,
-    ExecutionReason, InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand,
-    ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    CommandId, CommandOutcome, CreateSessionRequest, DownloadUrlCommand, ElementState,
+    EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy, ExecutionReason,
+    InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand, ScreenshotMode,
+    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -401,4 +402,94 @@ fn browser_execution_evidence_is_journal_safe_without_paths_or_content() {
     assert_eq!(value["interactionPath"], "engineNative");
     assert!(value.get("profilePath").is_none());
     assert!(value.get("value").is_none());
+}
+
+#[test]
+fn evaluate_javascript_command_is_reconciliable_and_round_trips_as_camel_case() {
+    let command = PrimitiveCommand::EvaluateJavaScript(EvaluateJavaScriptCommand {
+        expression: "document.title".into(),
+        timeout_ms: 2_000,
+        await_promise: true,
+    });
+
+    assert_eq!(command.class(), CommandClass::Reconciliable);
+    let value = serde_json::to_value(&command).unwrap();
+    assert_eq!(value["kind"], json!("evaluateJavaScript"));
+    assert_eq!(value["input"]["expression"], json!("document.title"));
+    assert_eq!(value["input"]["timeoutMs"], json!(2000));
+    assert_eq!(value["input"]["awaitPromise"], json!(true));
+    let round_tripped: PrimitiveCommand = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+#[test]
+fn evaluate_javascript_command_defaults_await_promise_to_false_when_absent() {
+    let value = json!({
+        "kind": "evaluateJavaScript",
+        "input": {
+            "expression": "1 + 1",
+            "timeoutMs": 500
+        }
+    });
+    let command: PrimitiveCommand = serde_json::from_value(value).unwrap();
+    let PrimitiveCommand::EvaluateJavaScript(command) = command else {
+        panic!("expected EvaluateJavaScript variant");
+    };
+    assert_eq!(command.expression, "1 + 1");
+    assert_eq!(command.timeout_ms, 500);
+    assert!(!command.await_promise);
+}
+
+#[test]
+fn javascript_result_evidence_round_trips_as_camel_case() {
+    let evidence = Evidence::JavaScriptResult {
+        value: json!({"answer": 42}),
+        truncated: false,
+    };
+    let value = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(value["kind"], json!("javaScriptResult"));
+    assert_eq!(value["value"], json!({"answer": 42}));
+    assert_eq!(value["truncated"], json!(false));
+    let round_tripped: Evidence = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+#[test]
+fn execution_policy_defaults_to_deny() {
+    assert!(!ExecutionPolicy::default().javascript_evaluation);
+
+    let value = serde_json::to_value(ExecutionPolicy::default()).unwrap();
+    assert_eq!(value, json!({"javascriptEvaluation": false}));
+
+    let explicit_grant: ExecutionPolicy =
+        serde_json::from_value(json!({"javascriptEvaluation": true})).unwrap();
+    assert!(explicit_grant.javascript_evaluation);
+}
+
+#[test]
+fn execution_policy_field_defaults_when_omitted_from_json() {
+    let policy: ExecutionPolicy = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(policy, ExecutionPolicy::default());
+}
+
+#[test]
+fn create_session_request_without_execution_policy_deserializes_to_default_deny() {
+    let request: CreateSessionRequest = serde_json::from_value(json!({
+        "profile": "default",
+        "proxy": null
+    }))
+    .unwrap();
+    assert_eq!(request.execution_policy, ExecutionPolicy::default());
+    assert!(!request.execution_policy.javascript_evaluation);
+}
+
+#[test]
+fn create_session_request_honors_explicit_execution_policy_grant() {
+    let request: CreateSessionRequest = serde_json::from_value(json!({
+        "profile": "default",
+        "proxy": null,
+        "executionPolicy": {"javascriptEvaluation": true}
+    }))
+    .unwrap();
+    assert!(request.execution_policy.javascript_evaluation);
 }
