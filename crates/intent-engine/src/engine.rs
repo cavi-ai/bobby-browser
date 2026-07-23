@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
-    ExecutionRecord, IntentCommand, PageId, TargetFingerprint, TargetSpec, TypeTextCommand,
-    UploadFilesCommand, WaitForCommand,
+    ExecutionRecord, FillValue, IntentCommand, PageId, TargetFingerprint, TargetSpec,
+    TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 
 use crate::compiler::{compile_intent, IntentPlan};
 use crate::stuck::StuckKind;
-use crate::verify::{execution_record, summarize_target};
+use crate::verify::{compatible, execution_record, summarize_target, verify_fill};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VisionContext {
@@ -100,7 +100,10 @@ impl IntentEngine {
             } => {
                 execute_wait_for_state(page_id, browser, condition, timeout_ms).await
             }
-            IntentPlan::Fill { .. } | IntentPlan::SubmitAndVerify { .. } => IntentOutcome::Failed {
+            IntentPlan::Fill { target, value } => {
+                execute_fill(intent, page_id, browser, target, value).await
+            }
+            IntentPlan::SubmitAndVerify { .. } => IntentOutcome::Failed {
                 error: CommandError {
                     code: ErrorCode::Internal,
                     message: "not yet implemented".into(),
@@ -169,13 +172,7 @@ async fn execute_locate(
             evidence,
             best_match_authorized,
         } => {
-            let fingerprint = TargetFingerprint {
-                page_id: page_id.clone(),
-                frame: None,
-                role: candidate.role.clone(),
-                name: candidate.name.clone(),
-                stable_attributes: candidate.attributes.clone(),
-            };
+            let fingerprint = fingerprint(page_id, &candidate);
             let resolution = Evidence::Resolution {
                 target: Box::new(target),
                 fingerprint: Box::new(fingerprint),
@@ -194,20 +191,272 @@ async fn execute_locate(
                 evidence: vec![resolution, intent_evidence(record)],
             }
         }
-        ResolutionDecision::NotFound => stuck_locate(
+        ResolutionDecision::NotFound => stuck_outcome(
+            "locate",
             StuckKind::TargetMissing,
             purpose,
             plan_summary,
             Vec::new(),
             "targetNotFound",
         ),
-        ResolutionDecision::Ambiguous { candidates } => stuck_locate(
+        ResolutionDecision::Ambiguous { candidates } => stuck_outcome(
+            "locate",
             StuckKind::TargetAmbiguous,
             purpose,
             plan_summary,
             candidates,
             "targetAmbiguous",
         ),
+    }
+}
+
+async fn execute_fill(
+    intent: &IntentCommand,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: TargetSpec,
+    value: FillValue,
+) -> IntentOutcome {
+    let purpose = match intent {
+        IntentCommand::Fill(fill) => Some(fill.purpose.clone()),
+        _ => None,
+    };
+    let plan_summary = format!("{} value={}", summarize_target(&target), fill_kind(&value));
+    let candidates = match browser.collect_candidates(page_id, &target).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: vec![intent_evidence(execution_record(
+                    "fill",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "gatherFailed",
+                ))],
+            };
+        }
+    };
+
+    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::InvalidRequest,
+                    message: error.to_string(),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: vec![intent_evidence(execution_record(
+                    "fill",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "resolveFailed",
+                ))],
+            };
+        }
+    };
+
+    let (candidate, candidate_evidence, best_match_authorized) = match decision {
+        ResolutionDecision::Resolved {
+            candidate,
+            evidence,
+            best_match_authorized,
+        } => (candidate, evidence, best_match_authorized),
+        ResolutionDecision::NotFound => {
+            return stuck_outcome(
+                "fill",
+                StuckKind::TargetMissing,
+                purpose,
+                plan_summary,
+                Vec::new(),
+                "targetNotFound",
+            );
+        }
+        ResolutionDecision::Ambiguous { candidates } => {
+            return stuck_outcome(
+                "fill",
+                StuckKind::TargetAmbiguous,
+                purpose,
+                plan_summary,
+                candidates,
+                "targetAmbiguous",
+            );
+        }
+    };
+
+    if !compatible(&value, &candidate) {
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::IntentActionMismatch,
+                message: format!(
+                    "fill {} is incompatible with resolved control role={:?} type={:?}",
+                    fill_kind(&value),
+                    candidate.role,
+                    candidate.attributes.get("type")
+                ),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: vec![intent_evidence(execution_record(
+                "fill",
+                purpose,
+                plan_summary,
+                vec![candidate_evidence],
+                None,
+                "actionMismatch",
+            ))],
+        };
+    }
+
+    let fingerprint = fingerprint(page_id, &candidate);
+    let resolution = Evidence::Resolution {
+        target: Box::new(target.clone()),
+        fingerprint: Box::new(fingerprint),
+        candidates: vec![candidate_evidence.clone()],
+        best_match_authorized,
+    };
+
+    let mut act_evidence = match act_fill(page_id, browser, &candidate, &value).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: vec![
+                    resolution,
+                    intent_evidence(execution_record(
+                        "fill",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "actFailed",
+                    )),
+                ],
+            };
+        }
+    };
+
+    if let Err(message) = verify_fill(&value, &act_evidence) {
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::VerificationFailed,
+                message,
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: {
+                let mut evidence = vec![resolution];
+                evidence.append(&mut act_evidence);
+                evidence.push(intent_evidence(execution_record(
+                    "fill",
+                    purpose,
+                    plan_summary,
+                    vec![candidate_evidence],
+                    None,
+                    "verifyFailed",
+                )));
+                evidence
+            },
+        };
+    }
+
+    let mut evidence = vec![resolution];
+    evidence.append(&mut act_evidence);
+    evidence.push(intent_evidence(execution_record(
+        "fill",
+        purpose,
+        plan_summary,
+        vec![candidate_evidence],
+        None,
+        "filled",
+    )));
+    IntentOutcome::Completed { evidence }
+}
+
+async fn act_fill(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    candidate: &Candidate,
+    value: &FillValue,
+) -> Result<Vec<Evidence>, CommandError> {
+    let (selector, target) = action_target(candidate);
+    match value {
+        // Worker-pool has no select API; Select is typed via TypeTextCommand.
+        FillValue::Text { text, clear_first } => {
+            browser
+                .type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector,
+                        target: Some(target),
+                        value: text.clone(),
+                        clear_first: *clear_first,
+                    },
+                )
+                .await
+        }
+        FillValue::Select { option } => {
+            browser
+                .type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector,
+                        target: Some(target),
+                        value: option.clone(),
+                        clear_first: true,
+                    },
+                )
+                .await
+        }
+        FillValue::Files { paths } => {
+            browser
+                .upload_files(
+                    page_id,
+                    &UploadFilesCommand {
+                        selector,
+                        target: Some(target),
+                        paths: paths.clone(),
+                    },
+                )
+                .await
+        }
+    }
+}
+
+fn action_target(candidate: &Candidate) -> (String, TargetSpec) {
+    let selector = candidate.css.clone().unwrap_or_default();
+    let target = TargetSpec {
+        css: candidate.css.clone(),
+        test_id: candidate.test_id.clone(),
+        role: candidate.role.clone(),
+        accessible_name: candidate.name.clone(),
+        label: candidate.label.clone(),
+        attributes: candidate.attributes.clone(),
+        ..TargetSpec::default()
+    };
+    (selector, target)
+}
+
+fn fingerprint(page_id: &PageId, candidate: &Candidate) -> TargetFingerprint {
+    TargetFingerprint {
+        page_id: page_id.clone(),
+        frame: None,
+        role: candidate.role.clone(),
+        name: candidate.name.clone(),
+        stable_attributes: candidate.attributes.clone(),
+    }
+}
+
+fn fill_kind(value: &FillValue) -> &'static str {
+    match value {
+        FillValue::Text { .. } => "text",
+        FillValue::Select { .. } => "select",
+        FillValue::Files { .. } => "files",
     }
 }
 
@@ -252,7 +501,8 @@ async fn execute_wait_for_state(
     }
 }
 
-fn stuck_locate(
+fn stuck_outcome(
+    intent_kind: &str,
     kind: StuckKind,
     purpose: Option<String>,
     plan_summary: String,
@@ -267,7 +517,7 @@ fn stuck_locate(
             retryable: false,
         },
         evidence: vec![intent_evidence(execution_record(
-            "locate",
+            intent_kind,
             purpose,
             plan_summary,
             candidates,
