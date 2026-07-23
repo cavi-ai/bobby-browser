@@ -1182,6 +1182,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "intent-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dom-engine",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "types",
+ "uuid",
+]
+
+[[package]]
 name = "interface-conformance"
 version = "0.1.0"
 dependencies = [

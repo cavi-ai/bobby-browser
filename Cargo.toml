@@ -13,6 +13,7 @@ members = [
   "crates/page-runtime",
   "crates/network-engine",
   "crates/dom-engine",
+  "crates/intent-engine",
   "crates/js-engine",
   "crates/artifact-store",
   "crates/checkpoint-store",

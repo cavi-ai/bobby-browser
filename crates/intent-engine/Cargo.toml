@@ -1,0 +1,18 @@
+[package]
+name = "intent-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dom-engine = { path = "../dom-engine" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+types = { path = "../types" }
+
+[dev-dependencies]
+chrono.workspace = true
+uuid.workspace = true
