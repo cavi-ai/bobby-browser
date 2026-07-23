@@ -1,5 +1,5 @@
-/** Exact JSON contracts for broker interface version 2026-07-17. */
-export const INTERFACE_VERSION = "2026-07-17" as const;
+/** Exact JSON contracts for broker interface version 2026-07-23. */
+export const INTERFACE_VERSION = "2026-07-23" as const;
 
 export type Id = string;
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -8,11 +8,13 @@ export interface RuntimeInfo { version: string; capabilities: string[]; active_s
 export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
-export interface CreateSessionRequest { profile: string; proxy: string | null; }
+/** Matches types::ExecutionPolicy (deny-by-default when omitted). */
+export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; }
+export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; }
 export interface OpenPageRequest { session_id: Id; }
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
-export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture";
+export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture";
 export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "internal";
 export interface InterfaceError {
   code: InterfaceErrorCode;
@@ -26,8 +28,11 @@ export interface InterfaceError {
   requiredCapability: Capability | null;
 }
 
-export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven";
+export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed";
 export interface CommandError { code: CommandErrorCode; message: string; layer: ErrorLayer; retryable: boolean; }
+
+/** Byte bound for IntentCommand purpose strings (types::MAX_INTENT_PURPOSE_BYTES). */
+export const MAX_INTENT_PURPOSE_BYTES = 256 as const;
 
 export type ExecutionPath = "directHttp" | "chromium" | "chromiumFallback";
 export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownload" | "ineligibleCommand" | "semanticTargetRequired" | "javascriptRequired" | "unsupportedContentType" | "stateConflict" | "policyRequired";
@@ -43,6 +48,19 @@ export type WaitCondition =
   | { kind: "document"; ready: "commit" | "domContentLoaded" | "interactive" | "networkIdle" }
   | { kind: "networkQuiet"; idleMs: number; maxInFlight: number };
 
+export type IntentResolutionPath = "deterministic" | "visionFallback";
+export interface ExecutionRecord {
+  intentKind: string;
+  purpose: string | null;
+  resolutionPath: IntentResolutionPath;
+  planSummary: string;
+  candidates: CandidateEvidence[];
+  waitElapsedMs: number | null;
+  verification: string;
+  artifactIds: string[];
+  visionProposalSha256: string | null;
+}
+
 /** Every serde(tag = "kind") Evidence variant in the committed Rust contract. */
 export type Evidence =
   | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
@@ -54,9 +72,13 @@ export type Evidence =
   | { kind: "pages"; pages: PageEvidence[] }
   | { kind: "popup"; openerPageId: Id; pageId: Id; url: string; title: string }
   | { kind: "download"; filename: string; path: string; bytes: number; sha256: string }
+  | { kind: "configuration"; name: string; value: string }
   | { kind: "resolution"; target: TargetSpec; fingerprint: TargetFingerprint; candidates: CandidateEvidence[]; bestMatchAuthorized: boolean }
   | { kind: "wait"; condition: WaitCondition; elapsedMs: number; observations: number }
-  | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string };
+  | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string }
+  | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
+  | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
+  | { kind: "intentExecution"; record: ExecutionRecord };
 
 /** Every serde(tag = "status") CommandOutcome variant in the committed Rust contract. */
 export type CommandOutcome =
@@ -66,7 +88,7 @@ export type CommandOutcome =
   | { status: "policyDenied"; commandId: Id; error: CommandError }
   | { status: "resourceExhausted"; commandId: Id; error: CommandError; retryAfterMs: number }
   | { status: "restarted"; commandId: Id; priorAttemptId: Id; attemptId: Id; reason: string }
-  | { status: "failed"; commandId: Id; error: CommandError };
+  | { status: "failed"; commandId: Id; error: CommandError; evidence?: Evidence[] };
 
 export type WaitUntil = "commit" | "domContentLoaded" | "interactive" | "networkIdle";
 export interface NavigateCommand { url: string; waitUntil: WaitUntil; timeoutMs: number; }
@@ -96,7 +118,34 @@ export type PrimitiveCommand =
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }
   | { kind: "captureScreenshot"; input: CaptureScreenshotCommand };
-export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id | null; deadline: string; command: PrimitiveCommand; }
+
+export interface IntentHints {
+  role?: string | null;
+  nearText?: TextMatch | null;
+  framePath?: TargetSpec[];
+  shadowPath?: TargetSpec[];
+  allowBestMatch?: boolean;
+}
+export interface LocateIntent { purpose: string; hints?: IntentHints; }
+export type FillValue =
+  | { kind: "text"; text: string; clearFirst?: boolean }
+  | { kind: "select"; option: string }
+  | { kind: "files"; paths: string[] };
+export interface FillIntent { purpose: string; hints?: IntentHints; value: FillValue; }
+export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
+export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
+export type IntentCommand =
+  | { kind: "locate"; input: LocateIntent }
+  | { kind: "fill"; input: FillIntent }
+  | { kind: "submitAndVerify"; input: SubmitAndVerifyIntent }
+  | { kind: "waitForState"; input: WaitForStateIntent };
+
+/** Nested RuntimeCommand wire shape: `{ kind: "intent"|"primitive", input: … }`. */
+export type RuntimeCommand =
+  | { kind: "primitive"; input: PrimitiveCommand }
+  | { kind: "intent"; input: IntentCommand };
+
+export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id | null; deadline: string; command: RuntimeCommand; }
 
 export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };

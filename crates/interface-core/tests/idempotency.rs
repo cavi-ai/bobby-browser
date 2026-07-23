@@ -538,6 +538,7 @@ fn retryable_failed_helper_remains_explicit_for_future_outcomes() {
     let outcome = CommandOutcome::Failed {
         command_id: CommandId::new(),
         error: command_error(true),
+        evidence: vec![],
     };
     assert!(matches!(outcome, CommandOutcome::Failed { error, .. } if error.retryable));
 

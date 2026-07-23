@@ -6,7 +6,7 @@ use sdk_core::RuntimeService;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
     CreateSessionRequest, ElementState, ErrorCode, Evidence, NavigateCommand, OpenPageRequest,
-    PageId, PrimitiveCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
+    PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
     WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 
@@ -23,7 +23,7 @@ fn envelope(
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
         deadline: Utc::now() + Duration::seconds(30),
-        command,
+        command: RuntimeCommand::Primitive(command),
     }
 }
 

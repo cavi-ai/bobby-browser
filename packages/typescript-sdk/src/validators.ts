@@ -5,6 +5,7 @@ import type {
   EventBatch,
   EventGap,
   Evidence,
+  ExecutionRecord,
   InterfaceEvent,
   JsonValue,
   PageEvidence,
@@ -194,15 +195,32 @@ export function isEvidence(value: unknown): value is Evidence {
     case "resolution": return hasExactKeys(value, ["kind", "target", "fingerprint", "candidates", "bestMatchAuthorized"]) && isTargetSpec(value.target) && isTargetFingerprint(value.fingerprint) && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence) && typeof value.bestMatchAuthorized === "boolean";
     case "wait": return hasExactKeys(value, ["kind", "condition", "elapsedMs", "observations"]) && isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations);
     case "screenshot": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "width", "height", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.width, 4_294_967_295) && isSafeUnsigned(value.height, 4_294_967_295) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
+    case "configuration": return hasExactKeys(value, ["kind", "name", "value"]) && isString(value.name) && isString(value.value);
+    case "browserExecution": return hasExactKeys(value, ["kind", "engine", "browserVersion", "profileId", "interactionPath"]) && isString(value.engine) && isString(value.browserVersion) && isString(value.profileId) && isString(value.interactionPath);
+    case "javaScriptResult": return hasExactKeys(value, ["kind", "value", "truncated"]) && isJsonValue(value.value) && typeof value.truncated === "boolean";
+    case "intentExecution": return hasExactKeys(value, ["kind", "record"]) && isExecutionRecord(value.record);
     default: return false;
   }
+}
+
+function isExecutionRecord(value: unknown): value is ExecutionRecord {
+  return hasExactKeys(value, ["intentKind", "purpose", "resolutionPath", "planSummary", "candidates", "waitElapsedMs", "verification", "artifactIds", "visionProposalSha256"])
+    && isString(value.intentKind)
+    && isNullableString(value.purpose)
+    && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback")
+    && isString(value.planSummary)
+    && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence)
+    && (value.waitElapsedMs === null || isSafeUnsigned(value.waitElapsedMs))
+    && isString(value.verification)
+    && isStringArray(value.artifactIds)
+    && (value.visionProposalSha256 === null || isLowerSha256(value.visionProposalSha256));
 }
 
 function isEvidenceArray(value: unknown): value is Evidence[] { return Array.isArray(value) && value.every(isEvidence); }
 
 export function isCommandError(value: unknown): value is CommandError {
   return hasExactKeys(value, ["code", "message", "layer", "retryable"])
-    && (value.code === "invalidRequest" || value.code === "notFound" || value.code === "deadlineExceeded" || value.code === "browserLaunchFailed" || value.code === "browserCommandFailed" || value.code === "verificationFailed" || value.code === "journalFailed" || value.code === "resourceExhausted" || value.code === "policyDenied" || value.code === "internal" || value.code === "targetNotFound" || value.code === "targetAmbiguous" || value.code === "frameNotFound" || value.code === "shadowRootUnavailable" || value.code === "targetDetached" || value.code === "waitConditionTimedOut" || value.code === "screenshotCaptureFailed" || value.code === "networkPolicyDenied" || value.code === "httpResponseTooLarge" || value.code === "httpTransferFailed" || value.code === "httpStateConflict" || value.code === "httpEquivalenceUnproven")
+    && (value.code === "invalidRequest" || value.code === "notFound" || value.code === "deadlineExceeded" || value.code === "browserLaunchFailed" || value.code === "browserCommandFailed" || value.code === "verificationFailed" || value.code === "journalFailed" || value.code === "resourceExhausted" || value.code === "policyDenied" || value.code === "internal" || value.code === "targetNotFound" || value.code === "targetAmbiguous" || value.code === "frameNotFound" || value.code === "shadowRootUnavailable" || value.code === "targetDetached" || value.code === "waitConditionTimedOut" || value.code === "screenshotCaptureFailed" || value.code === "networkPolicyDenied" || value.code === "httpResponseTooLarge" || value.code === "httpTransferFailed" || value.code === "httpStateConflict" || value.code === "httpEquivalenceUnproven" || value.code === "intentCompileFailed" || value.code === "intentActionMismatch" || value.code === "obstructionSuspected" || value.code === "visionAssistDenied" || value.code === "visionAssistFailed")
     && isString(value.message)
     && (value.layer === "interface" || value.layer === "broker" || value.layer === "workflow" || value.layer === "page" || value.layer === "driver" || value.layer === "browser" || value.layer === "network" || value.layer === "site" || value.layer === "journal")
     && typeof value.retryable === "boolean";
@@ -214,7 +232,14 @@ export function isCommandOutcome(value: unknown): value is CommandOutcome {
     case "completed": return hasExactKeys(value, ["status", "commandId", "evidence"]) && isEvidenceArray(value.evidence);
     case "retryableFailure":
     case "policyDenied":
-    case "failed": return hasExactKeys(value, ["status", "commandId", "error"]) && isCommandError(value.error);
+      return hasExactKeys(value, ["status", "commandId", "error"]) && isCommandError(value.error);
+    case "failed":
+      return (
+        (hasExactKeys(value, ["status", "commandId", "error"])
+          || hasExactKeys(value, ["status", "commandId", "error", "evidence"]))
+        && isCommandError(value.error)
+        && (value.evidence === undefined || isEvidenceArray(value.evidence))
+      );
     case "needsReconciliation": return hasExactKeys(value, ["status", "commandId", "error", "evidence"]) && isCommandError(value.error) && isEvidenceArray(value.evidence);
     case "resourceExhausted": return hasExactKeys(value, ["status", "commandId", "error", "retryAfterMs"]) && isCommandError(value.error) && isSafeUnsigned(value.retryAfterMs);
     case "restarted": return hasExactKeys(value, ["status", "commandId", "priorAttemptId", "attemptId", "reason"]) && isUuid(value.priorAttemptId) && isUuid(value.attemptId) && isString(value.reason);

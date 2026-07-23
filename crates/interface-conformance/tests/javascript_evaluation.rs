@@ -85,7 +85,7 @@ async fn call_tool(server: &Server, id: u64, name: &str, arguments: Value) -> Va
 fn evaluate_javascript_arguments(session_id: &str, page_id: Option<&str>) -> Value {
     json!({
         "envelope": {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "commandId": uuid::Uuid::new_v4(),
             "workflowId": uuid::Uuid::new_v4(),
             "attemptId": uuid::Uuid::new_v4(),
@@ -93,11 +93,14 @@ fn evaluate_javascript_arguments(session_id: &str, page_id: Option<&str>) -> Val
             "pageId": page_id,
             "deadline": (Utc::now() + Duration::seconds(30)).to_rfc3339(),
             "command": {
-                "kind": "evaluateJavaScript",
+                "kind": "primitive",
                 "input": {
-                    "expression": "6 * 7",
-                    "timeoutMs": 5_000,
-                    "awaitPromise": false
+                    "kind": "evaluateJavaScript",
+                    "input": {
+                        "expression": "6 * 7",
+                        "timeoutMs": 5_000,
+                        "awaitPromise": false
+                    }
                 }
             }
         },

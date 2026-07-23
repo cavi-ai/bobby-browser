@@ -7,7 +7,7 @@ use crate::{
     ArtifactId, Capability, CapabilitySet, CommandId, CommandOutcome, ErrorLayer, PrincipalId,
 };
 
-pub const CURRENT_INTERFACE_VERSION: &str = "2026-07-17";
+pub const CURRENT_INTERFACE_VERSION: &str = "2026-07-23";
 
 /// The only interface version accepted by this phase's wire contract.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]

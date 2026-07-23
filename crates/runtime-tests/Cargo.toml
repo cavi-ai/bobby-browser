@@ -14,6 +14,7 @@ cdp-gateway = { path = "../cdp-gateway" }
 chrono.workspace = true
 config = { path = "../config" }
 futures-util.workspace = true
+intent-engine = { path = "../intent-engine" }
 interface-conformance = { path = "../interface-conformance" }
 interface-core = { path = "../interface-core" }
 libc = "0.2"

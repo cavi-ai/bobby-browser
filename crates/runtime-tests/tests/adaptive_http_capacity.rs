@@ -10,7 +10,7 @@ use sdk_core::RuntimeService;
 use std::collections::BTreeMap;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence,
-    ExecutionPath, InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    ExecutionPath, InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand,
     SessionId, WaitUntil, WorkflowId,
 };
 use worker_pool::{ChromiumWorkerFactory, WorkerFactory};
@@ -60,7 +60,7 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
         session_id: session.clone(),
         page_id: Some(page.clone()),
         deadline: Utc::now() + Duration::seconds(10),
-        command,
+        command: RuntimeCommand::Primitive(command),
     }
 }
 

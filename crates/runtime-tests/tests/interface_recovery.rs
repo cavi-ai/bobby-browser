@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValu
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
     CommandPhase, CreateSessionRequest, DownloadUrlCommand, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, PrincipalId, SessionId,
+    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, PrincipalId, SessionId,
     TypeTextCommand, WorkerId, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -298,19 +298,19 @@ async fn broker_disconnect_after_durable_executing_rebuilds_without_guessing() {
     let page: types::PageState =
         serde_json::from_slice(&page_response.bytes().await.unwrap()).unwrap();
     let envelope = CommandEnvelope {
-        schema_version: 1,
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
         session_id: session.id,
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(20),
-        command: PrimitiveCommand::Click(ClickCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#mutate".into(),
             target: None,
             boundary: false,
             expected_url: None,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let request = tokio::spawn({
@@ -442,7 +442,7 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
         .to_owned();
     let command_id = CommandId::new();
     let workflow = WorkflowId::new();
-    let envelope = serde_json::json!({"schemaVersion":1,"commandId":command_id,"workflowId":workflow,"attemptId":AttemptId::new(),"sessionId":session,"pageId":page,"deadline":(Utc::now()+Duration::seconds(20)),"command":{"kind":"click","input":{"selector":"#mutate","target":null,"boundary":false,"expectedUrl":null}}});
+    let envelope = serde_json::json!({"schemaVersion":2,"commandId":command_id,"workflowId":workflow,"attemptId":AttemptId::new(),"sessionId":session,"pageId":page,"deadline":(Utc::now()+Duration::seconds(20)),"command":{"kind":"primitive","input":{"kind":"click","input":{"selector":"#mutate","target":null,"boundary":false,"expectedUrl":null}}}});
     mcp_send(&mut stdin,serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"command_execute","arguments":{"envelope":envelope}}})).await;
     let marker = root.path().join("executing.marker");
     tokio::time::timeout(StdDuration::from_secs(3), async {
@@ -634,12 +634,12 @@ async fn daemon_rebuild_uses_durable_phases_and_never_guesses_after_browser_disp
             session_id: session.id,
             page_id: Some(page.id),
             deadline: Utc::now() + Duration::seconds(10),
-            command: PrimitiveCommand::Click(ClickCommand {
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
                 selector: "#mutate".into(),
                 target: None,
                 boundary: false,
                 expected_url: None,
-            }),
+            })),
         };
         let command_id = envelope.command_id.clone();
         let task = tokio::spawn({
@@ -702,11 +702,11 @@ async fn result_prepared_abort_rebuilds_from_durable_artifact_state() {
         session_id: session.id,
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(10),
-        command: PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
             url: download_fixture().await,
             expected_content_type: Some("application/octet-stream".into()),
             max_bytes: 1024,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let task = tokio::spawn({
@@ -766,12 +766,12 @@ async fn worker_generation_replacement_mid_command_rebuilds_without_guessing() {
         session_id: session.id.clone(),
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(10),
-        command: PrimitiveCommand::Click(ClickCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#mutate".into(),
             target: None,
             boundary: false,
             expected_url: None,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let command = tokio::spawn({
@@ -859,11 +859,11 @@ async fn installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal(
         session_id: session.id,
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(20),
-        command: PrimitiveCommand::Navigate(NavigateCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
             url: harness.site_url(),
             wait_until: types::WaitUntil::DomContentLoaded,
             timeout_ms: 15_000,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let task = tokio::spawn({

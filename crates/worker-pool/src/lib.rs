@@ -14,8 +14,8 @@ use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, EvaluateJavaScriptCommand, Evidence,
     InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, SessionId,
-    SetEmulatedMediaCommand, SetFocusEmulationCommand, TypeTextCommand, UploadFilesCommand,
-    WaitForCommand, WorkerId,
+    SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TypeTextCommand,
+    UploadFilesCommand, WaitForCommand, WorkerId,
 };
 
 pub use chromium::ChromiumWorkerFactory;
@@ -92,6 +92,15 @@ pub trait BrowserWorker: Send + Sync {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
+    /// Coordinate click used by vision fallback proposals.
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
     async fn type_text(
         &self,
         page_id: &PageId,
@@ -138,6 +147,13 @@ pub trait BrowserWorker: Send + Sync {
         _page_id: &PageId,
         _command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn collect_candidates(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
         Err(unsupported_error())
     }
     async fn capture_screenshot(

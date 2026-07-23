@@ -22,13 +22,18 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "profile": string(1, 128),
                 "proxy": nullable(string(0, 2048)),
                 "executionPolicy": object(
-                    json!({"javascriptEvaluation":{"type":"boolean"}}),
+                    json!({
+                        "javascriptEvaluation":{"type":"boolean"},
+                        "visionAssist":{"type":"boolean"}
+                    }),
                     &[]
                 )
             }),
             vec!["profile"],
         ),
         "page_open" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        // Intent surface: agents submit `{ kind: "intent", input: { kind: "locate"|… } }`
+        // inside CommandEnvelope via this tool (no dedicated intent_* tools).
         "command_execute" => (
             json!({
                 "envelope":{"$ref":"#/$defs/CommandEnvelope"},
@@ -62,13 +67,18 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 fn definitions() -> Value {
     json!({
         "CommandEnvelope": object(json!({
-            "schemaVersion":{"type":"integer","const":1},
+            "schemaVersion":{"type":"integer","const":2},
             "commandId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(),
             "pageId":nullable(id()),
             "deadline":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
-            "command":{"$ref":"#/$defs/PrimitiveCommand"}
+            "command":{"$ref":"#/$defs/RuntimeCommand"}
         }), &["schemaVersion","commandId","workflowId","attemptId","sessionId","deadline","command"]),
+        "RuntimeCommand": {"oneOf": runtime_commands()},
         "PrimitiveCommand": {"oneOf": primitive_commands()},
+        "IntentCommand": {"oneOf": intent_commands()},
+        "IntentHints": intent_hints(),
+        "FillValue": {"oneOf": fill_values()},
+        "WaitForCommand": wait_for_command(),
         "TargetSpec": target_spec(),
         "TextMatch": {"oneOf":[
             tagged_content("exact", string(0, MAX_STRING_BYTES)),
@@ -78,6 +88,7 @@ fn definitions() -> Value {
         "WaitCondition": {"oneOf": wait_conditions()},
         "ScreenshotMode": {"oneOf": screenshot_modes()},
         "Evidence": {"oneOf": evidence_variants()},
+        "ExecutionRecord": execution_record(),
         "CheckpointInvariant": {"oneOf":[
             tagged_fields("url", json!({"value":string(1, MAX_URL_BYTES)}), &["value"]),
             tagged_fields("title", json!({"value":string(0, MAX_STRING_BYTES)}), &["value"]),
@@ -101,6 +112,138 @@ fn definitions() -> Value {
             "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
         }), &["schemaVersion","checkpointId","workflowId","attemptId","sessionId","pageId","restartUrl","currentUrl","recoveryClass","invariants","replayableInputs","evidence","createdAt"])
     })
+}
+
+fn runtime_commands() -> Vec<Value> {
+    vec![
+        tagged_input("primitive", json!({"$ref":"#/$defs/PrimitiveCommand"})),
+        tagged_input("intent", json!({"$ref":"#/$defs/IntentCommand"})),
+    ]
+}
+
+fn intent_commands() -> Vec<Value> {
+    vec![
+        tagged_input(
+            "locate",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{"$ref":"#/$defs/IntentHints"}
+                }),
+                &["purpose"],
+            ),
+        ),
+        tagged_input(
+            "fill",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{"$ref":"#/$defs/IntentHints"},
+                    "value":{"$ref":"#/$defs/FillValue"}
+                }),
+                &["purpose", "value"],
+            ),
+        ),
+        tagged_input(
+            "submitAndVerify",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{"$ref":"#/$defs/IntentHints"},
+                    "expectedState":{"$ref":"#/$defs/WaitForCommand"}
+                }),
+                &["purpose", "expectedState"],
+            ),
+        ),
+        tagged_input(
+            "waitForState",
+            object(
+                json!({
+                    "condition":{"$ref":"#/$defs/WaitCondition"},
+                    "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS}
+                }),
+                &["condition", "timeoutMs"],
+            ),
+        ),
+    ]
+}
+
+fn intent_hints() -> Value {
+    object(
+        json!({
+            "role":nullable(string(0, 256)),
+            "nearText":nullable(json!({"$ref":"#/$defs/TextMatch"})),
+            "framePath":array(json!({"$ref":"#/$defs/TargetSpec"}), 16),
+            "shadowPath":array(json!({"$ref":"#/$defs/TargetSpec"}), 16),
+            "allowBestMatch":{"type":"boolean"}
+        }),
+        &[],
+    )
+}
+
+fn fill_values() -> Vec<Value> {
+    vec![
+        tagged_fields(
+            "text",
+            json!({
+                "text":string(0, MAX_STRING_BYTES),
+                "clearFirst":{"type":"boolean"}
+            }),
+            &["text"],
+        ),
+        tagged_fields(
+            "select",
+            json!({"option":string(0, MAX_STRING_BYTES)}),
+            &["option"],
+        ),
+        tagged_fields(
+            "files",
+            json!({"paths":array(string(1, MAX_STRING_BYTES), 64)}),
+            &["paths"],
+        ),
+    ]
+}
+
+fn wait_for_command() -> Value {
+    object(
+        json!({
+            "condition":{"$ref":"#/$defs/WaitCondition"},
+            "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS}
+        }),
+        &["condition", "timeoutMs"],
+    )
+}
+
+fn execution_record() -> Value {
+    object(
+        json!({
+            "intentKind":string(1, 128),
+            "purpose":nullable(string(0, 256)),
+            "resolutionPath":{"type":"string","enum":["deterministic","visionFallback"]},
+            "planSummary":string(0, MAX_STRING_BYTES),
+            "candidates":array(object(json!({
+                "role":nullable(string(0,256)),
+                "name":nullable(string(0,MAX_STRING_BYTES)),
+                "score":{"type":"integer","minimum":-1000000,"maximum":1000000},
+                "reasons":array(string(0,MAX_STRING_BYTES),64)
+            }), &["role","name","score","reasons"]), 64),
+            "waitElapsedMs":nullable(json!({"type":"integer","minimum":0,"maximum":MAX_TIMEOUT_MS})),
+            "verification":string(0, MAX_STRING_BYTES),
+            "artifactIds":array(string(1, 128), 64),
+            "visionProposalSha256":nullable(sha256())
+        }),
+        &[
+            "intentKind",
+            "purpose",
+            "resolutionPath",
+            "planSummary",
+            "candidates",
+            "waitElapsedMs",
+            "verification",
+            "artifactIds",
+            "visionProposalSha256",
+        ],
+    )
 }
 
 fn primitive_commands() -> Vec<Value> {
@@ -404,6 +547,11 @@ fn evidence_variants() -> Vec<Value> {
             "javaScriptResult",
             json!({"value":any_value(),"truncated":{"type":"boolean"}}),
             &["value", "truncated"],
+        ),
+        tagged_fields(
+            "intentExecution",
+            json!({"record":{"$ref":"#/$defs/ExecutionRecord"}}),
+            &["record"],
         ),
     ]
 }

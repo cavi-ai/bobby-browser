@@ -9,7 +9,7 @@ use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClosePageCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PrimitiveCommand, ScreenshotMode, UploadFilesCommand,
+    NavigateCommand, OpenPageRequest, PrimitiveCommand, RuntimeCommand, ScreenshotMode, UploadFilesCommand,
     WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
@@ -67,16 +67,16 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
             measured.push(sample);
         }
         let cleanup = CommandEnvelope {
-            schema_version: 1,
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
             command_id: CommandId::new(),
             workflow_id: WorkflowId::new(),
             attempt_id: AttemptId::new(),
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
             deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
-            command: PrimitiveCommand::ClosePage(ClosePageCommand {
+            command: RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(ClosePageCommand {
                 page_id: page.id.clone(),
-            }),
+            })),
         };
         completed(&runtime.submit(context(), cleanup).await.unwrap());
         drop(runtime);
@@ -106,14 +106,14 @@ async fn run_rust_sample(
     let workflow = WorkflowId::new();
     let attempt = AttemptId::new();
     let envelope = |id: CommandId, command: PrimitiveCommand| CommandEnvelope {
-        schema_version: 1,
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: id,
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
         deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
-        command,
+        command: RuntimeCommand::Primitive(command),
     };
     observed.push("command.navigate");
     completed(
@@ -179,7 +179,7 @@ async fn run_rust_sample(
     observed.push("command.boundary");
     let popup_id = CommandId::new();
     let popup_checkpoint = WorkflowCheckpoint {
-        schema_version: 1,
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
@@ -245,7 +245,7 @@ async fn run_rust_sample(
         .unwrap();
     let boundary_id = CommandId::new();
     let checkpoint = WorkflowCheckpoint {
-        schema_version: 1,
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),

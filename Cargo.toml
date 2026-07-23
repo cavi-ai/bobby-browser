@@ -13,6 +13,7 @@ members = [
   "crates/page-runtime",
   "crates/network-engine",
   "crates/dom-engine",
+  "crates/intent-engine",
   "crates/js-engine",
   "crates/artifact-store",
   "crates/checkpoint-store",
@@ -30,7 +31,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0"
+version = "0.2.0"
 license = "MIT"
 authors = ["OpenAI"]
 

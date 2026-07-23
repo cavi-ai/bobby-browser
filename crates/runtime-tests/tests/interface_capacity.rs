@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, Notify};
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
     CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, OpenPageRequest, PageId,
-    PrimitiveCommand, PrincipalId, SessionId, TypeTextCommand, WorkerId, WorkflowId,
+    PrimitiveCommand, RuntimeCommand, PrincipalId, SessionId, TypeTextCommand, WorkerId, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
@@ -130,18 +130,18 @@ async fn submit_capacity(
 ) -> CommandOutcome {
     runtime
         .submit(CommandEnvelope {
-            schema_version: 1,
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
             command_id: CommandId::new(),
             workflow_id: WorkflowId::new(),
             attempt_id: AttemptId::new(),
             session_id: session,
             page_id: Some(page),
             deadline: Utc::now() + ChronoDuration::seconds(10),
-            command: PrimitiveCommand::Navigate(NavigateCommand {
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: url.into(),
                 wait_until: types::WaitUntil::DomContentLoaded,
                 timeout_ms: 5_000,
-            }),
+            })),
         })
         .await
 }
