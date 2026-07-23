@@ -10,7 +10,7 @@ use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
 use tower::ServiceExt;
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandError, CommandId, CommandOutcome, ErrorCode,
-    ErrorLayer, Evidence, InspectCommand, OpenPageRequest, PageState, PrimitiveCommand,
+    ErrorLayer, Evidence, InspectCommand, OpenPageRequest, PageState, PrimitiveCommand, RuntimeCommand,
     PrincipalId, RecoveryDecision, RequestContext, RuntimeInfo, SessionState, WorkflowCheckpoint,
     WorkflowId, CURRENT_INTERFACE_VERSION,
 };
@@ -82,7 +82,7 @@ fn envelope() -> CommandEnvelope {
         session_id: types::SessionId::new(),
         page_id: Some(types::PageId::new()),
         deadline: Utc::now() + Duration::minutes(1),
-        command: PrimitiveCommand::Inspect(InspectCommand::default()),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
     }
 }
 

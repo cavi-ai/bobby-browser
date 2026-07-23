@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
     CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
-    ExecutionPath, InspectCommand, NavigateCommand, PageId, PrimitiveCommand, SessionId,
+    ExecutionPath, InspectCommand, NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand, SessionId,
     TargetSpec, TypeTextCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -409,7 +409,7 @@ fn envelope(session: SessionId, page: PageId, command: PrimitiveCommand) -> Comm
         session_id: session,
         page_id: Some(page),
         deadline: Utc::now() + Duration::minutes(1),
-        command,
+        command: RuntimeCommand::Primitive(command),
     }
 }
 

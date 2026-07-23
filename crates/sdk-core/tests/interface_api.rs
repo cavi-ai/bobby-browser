@@ -16,7 +16,7 @@ use interface_core::{
 use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
-use types::{
+use types::{RuntimeCommand, 
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
     CreateSessionRequest, Evidence, IdempotencyKey, InspectCommand, InterfaceErrorCode,
     NavigateCommand, OpenPageRequest, PageId, PrincipalId, RequestContext, SessionId,
@@ -218,7 +218,7 @@ fn submit_request() -> CommandEnvelope {
         session_id: SessionId::new(),
         page_id: None,
         deadline: expiry(),
-        command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
     }
 }
 
@@ -329,7 +329,7 @@ async fn runtime_errors_are_mapped_without_dispatch_outcome_flattening() {
                 session_id: session.id,
                 page_id: None,
                 deadline: expiry(),
-                command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+                command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
             },
         )
         .await
@@ -553,7 +553,7 @@ async fn authenticated_submit_replays_retained_outcome_and_conflicts_before_disp
         session_id: SessionId::new(),
         page_id: None,
         deadline: expiry(),
-        command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
     };
 
     let first = api.submit(context.clone(), request.clone()).await.unwrap();
@@ -575,7 +575,7 @@ async fn authenticated_submit_replays_retained_outcome_and_conflicts_before_disp
                 session_id: SessionId::new(),
                 page_id: None,
                 deadline: expiry(),
-                command: types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+                command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
             },
         )
         .await
@@ -701,35 +701,35 @@ async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandon
 
 fn upload_files_envelope() -> CommandEnvelope {
     CommandEnvelope {
-        command: types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
             selector: "input[type=file]".into(),
             target: None,
             paths: vec!["/tmp/example.txt".into()],
-        }),
+        })),
         ..submit_request()
     }
 }
 
 fn download_url_envelope() -> CommandEnvelope {
     CommandEnvelope {
-        command: types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
             url: "https://example.com/file.bin".into(),
             expected_content_type: None,
             max_bytes: 1024,
-        }),
+        })),
         ..submit_request()
     }
 }
 
 fn click_and_wait_for_download_envelope() -> CommandEnvelope {
     CommandEnvelope {
-        command: types::PrimitiveCommand::ClickAndWaitForDownload(
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ClickAndWaitForDownload(
             types::ClickAndWaitForDownloadCommand {
                 selector: "#download".into(),
                 target: None,
                 timeout_ms: 1_000,
             },
-        ),
+        )),
         ..submit_request()
     }
 }
@@ -892,11 +892,11 @@ async fn non_privileged_command_needs_only_browser_mutate_to_clear_the_extra_cap
 fn evaluate_javascript_envelope(session_id: SessionId) -> CommandEnvelope {
     CommandEnvelope {
         session_id,
-        command: types::PrimitiveCommand::EvaluateJavaScript(types::EvaluateJavaScriptCommand {
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::EvaluateJavaScript(types::EvaluateJavaScriptCommand {
             expression: "1 + 1".into(),
             timeout_ms: 1_000,
             await_promise: false,
-        }),
+        })),
         ..submit_request()
     }
 }

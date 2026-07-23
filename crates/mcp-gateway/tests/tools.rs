@@ -6,7 +6,7 @@ use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{
-    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, Evidence, PrimitiveCommand,
+    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, Evidence, PrimitiveCommand, RuntimeCommand,
     SessionId, WorkflowCheckpoint, WorkflowId,
 };
 use types::{Capability, PrincipalId};
@@ -305,7 +305,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         session_id: SessionId::new(),
         page_id: None,
         deadline: Utc::now() + Duration::seconds(30),
-        command: PrimitiveCommand::ListPages(types::ListPagesCommand),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(types::ListPagesCommand)),
     };
     let mut envelope_value = serde_json::to_value(envelope).unwrap();
     envelope_value["command"]["unexpected"] = json!(true);
@@ -324,7 +324,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         session_id: SessionId::new(),
         page_id: None,
         deadline: Utc::now() + Duration::seconds(30),
-        command: PrimitiveCommand::TypeText(types::TypeTextCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::TypeText(types::TypeTextCommand {
             selector: "#name".to_owned(),
             target: Some(types::TargetSpec {
                 attributes: [(long_attribute, "value".to_owned())].into_iter().collect(),
@@ -332,7 +332,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             }),
             value: "Ada".to_owned(),
             clear_first: true,
-        }),
+        })),
     };
     let rejected = server
         .handle_message(request(

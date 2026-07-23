@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickCommand,
     CommandEnvelope, CommandError, CommandId, ErrorLayer, Evidence, InspectCommand,
-    NavigateCommand, PageId, PrimitiveCommand, PrincipalId, SessionId, TypeTextCommand, WorkerId,
+    NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand, PrincipalId, SessionId, TypeTextCommand, WorkerId,
     WorkflowId,
 };
 use uuid::uuid;
@@ -286,9 +286,9 @@ async fn execute_screenshot(server: &Server) -> Value {
         session_id,
         page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
-        command: PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
             mode: types::ScreenshotMode::Viewport,
-        }),
+        })),
     };
     server
         .handle_message(request(
@@ -375,11 +375,11 @@ async fn download_paths_are_replaced_by_authenticated_resources_and_never_expose
         session_id,
         page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
-        command: PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
             selector: "#download".to_owned(),
             target: None,
             timeout_ms: 1_000,
-        }),
+        })),
     };
     let response = server
         .handle_message(request(

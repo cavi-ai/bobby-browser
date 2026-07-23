@@ -8,8 +8,8 @@ use session_manager::SessionManager;
 use types::{
     AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CreateSessionRequest,
     ErrorCode, ErrorLayer, Evidence, NavigateCommand, NavigationRequest, NavigationResult,
-    OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RuntimeError, RuntimeInfo,
-    SessionState, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RuntimeCommand, RuntimeError,
+    RuntimeInfo, SessionState, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{ChromiumWorkerFactory, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
@@ -172,7 +172,10 @@ impl RuntimeService {
         // absent session is treated as `javascript_evaluation == false`, not as "skip the
         // gate" — `self.pages.execute` validates against its own independent page
         // registry, not `SessionManager`, so it does not perform this check for us.
-        if matches!(envelope.command, PrimitiveCommand::EvaluateJavaScript(_)) {
+        if matches!(
+            &envelope.command,
+            RuntimeCommand::Primitive(PrimitiveCommand::EvaluateJavaScript(_))
+        ) {
             let allowed = self
                 .sessions
                 .get(&envelope.session_id)
@@ -234,11 +237,11 @@ impl RuntimeService {
             session_id: page.session_id,
             page_id: Some(page.id.clone()),
             deadline: Utc::now() + Duration::milliseconds(timeout_ms as i64),
-            command: PrimitiveCommand::Navigate(NavigateCommand {
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
                 url: req.url,
                 wait_until,
                 timeout_ms,
-            }),
+            })),
         };
         match self.submit(envelope).await {
             CommandOutcome::Completed { evidence, .. } => {

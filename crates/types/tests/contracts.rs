@@ -5,9 +5,11 @@ use types::{
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
     CommandId, CommandOutcome, CreateSessionRequest, DownloadUrlCommand, ElementState, ErrorCode,
     EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy, ExecutionReason,
-    InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand, ScreenshotMode,
-    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
-    WaitForCommand, WaitUntil, WorkflowId,
+    ExecutionRecord, FillIntent, FillValue, InspectCommand, IntentCommand, IntentHints,
+    IntentResolutionPath, ListPagesCommand, LocateIntent, OpenPageCommand, PageId, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
+    WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -24,7 +26,7 @@ fn test_envelope(command: PrimitiveCommand) -> CommandEnvelope {
         session_id: SessionId::new(),
         page_id: Some(PageId::new()),
         deadline: Utc::now() + chrono::Duration::minutes(1),
-        command,
+        command: RuntimeCommand::Primitive(command),
     }
 }
 
@@ -243,11 +245,11 @@ fn command_envelope_uses_stable_camel_case_json() {
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
         deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
-        command: PrimitiveCommand::Navigate(types::NavigateCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(types::NavigateCommand {
             url: "https://example.com".into(),
             wait_until: WaitUntil::Interactive,
             timeout_ms: 30_000,
-        }),
+        })),
     };
 
     let value = serde_json::to_value(envelope).unwrap();
@@ -255,8 +257,12 @@ fn command_envelope_uses_stable_camel_case_json() {
     assert_eq!(value["commandId"], json!(uuid(1)));
     assert_eq!(value["sessionId"], json!(uuid(4)));
     assert_eq!(value["pageId"], json!(uuid(5)));
-    assert_eq!(value["command"]["kind"], json!("navigate"));
-    assert_eq!(value["command"]["input"]["waitUntil"], json!("interactive"));
+    assert_eq!(value["command"]["kind"], json!("primitive"));
+    assert_eq!(value["command"]["input"]["kind"], json!("navigate"));
+    assert_eq!(
+        value["command"]["input"]["input"]["waitUntil"],
+        json!("interactive")
+    );
 }
 
 #[test]
@@ -269,18 +275,21 @@ fn journal_safe_envelope_removes_all_url_secrets_without_mutating_live_command()
         session_id: SessionId(uuid(4)),
         page_id: Some(PageId(uuid(5))),
         deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
-        command: PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
-            url: "https://alice:pw@example.com/file?token=signed#secret".into(),
-            expected_content_type: None,
-            max_bytes: 10,
-        }),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(
+            types::DownloadUrlCommand {
+                url: "https://alice:pw@example.com/file?token=signed#secret".into(),
+                expected_content_type: None,
+                max_bytes: 10,
+            },
+        )),
     };
     let safe = envelope.journal_safe();
     let safe_json = serde_json::to_string(&safe).unwrap();
     assert!(!safe_json.contains("alice"));
     assert!(!safe_json.contains("signed"));
     assert!(!safe_json.contains("secret"));
-    let PrimitiveCommand::DownloadUrl(live) = &mut envelope.command else {
+    let RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(live)) = &mut envelope.command
+    else {
         unreachable!()
     };
     assert!(live.url.contains("token=signed"));
@@ -535,4 +544,103 @@ fn create_session_request_honors_explicit_execution_policy_grant() {
     }))
     .unwrap();
     assert!(request.execution_policy.javascript_evaluation);
+}
+
+#[test]
+fn intent_commands_round_trip_and_classes() {
+    let locate = IntentCommand::Locate(LocateIntent {
+        purpose: "Continue".into(),
+        hints: IntentHints::default(),
+    });
+    assert_eq!(locate.class(), CommandClass::Replayable);
+
+    let fill = IntentCommand::Fill(FillIntent {
+        purpose: "Email".into(),
+        hints: IntentHints::default(),
+        value: FillValue::Text {
+            text: "a@b.co".into(),
+            clear_first: true,
+        },
+    });
+    assert_eq!(fill.class(), CommandClass::Reconciliable);
+
+    let files = IntentCommand::Fill(FillIntent {
+        purpose: "Resume".into(),
+        hints: IntentHints::default(),
+        value: FillValue::Files {
+            paths: vec!["./data/uploads/cv.pdf".into()],
+        },
+    });
+    assert!(matches!(
+        files,
+        IntentCommand::Fill(FillIntent {
+            value: FillValue::Files { .. },
+            ..
+        })
+    ));
+
+    let submit = IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
+        purpose: "Submit application".into(),
+        hints: IntentHints::default(),
+        expected_state: WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains("/thanks".into()),
+            },
+            timeout_ms: 5_000,
+        },
+    });
+    assert_eq!(submit.class(), CommandClass::Boundary);
+
+    let wait = IntentCommand::WaitForState(WaitForStateIntent {
+        condition: WaitCondition::Document {
+            ready: WaitUntil::Interactive,
+        },
+        timeout_ms: 5_000,
+    });
+    assert_eq!(wait.class(), CommandClass::Replayable);
+
+    let value = serde_json::to_value(&locate).unwrap();
+    assert_eq!(value["kind"], "locate");
+    let _: IntentCommand = serde_json::from_value(value).unwrap();
+}
+
+#[test]
+fn runtime_command_envelope_accepts_intent_and_primitive() {
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + chrono::Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
+            purpose: "Search".into(),
+            hints: IntentHints::default(),
+        })),
+    };
+    let value = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(value["command"]["kind"], "intent");
+    let round: CommandEnvelope = serde_json::from_value(value).unwrap();
+    assert!(matches!(round.command, RuntimeCommand::Intent(_)));
+}
+
+#[test]
+fn intent_execution_evidence_round_trip() {
+    let evidence = Evidence::IntentExecution {
+        record: ExecutionRecord {
+            intent_kind: "locate".into(),
+            purpose: Some("Continue".into()),
+            resolution_path: IntentResolutionPath::Deterministic,
+            plan_summary: "role=button name~Continue".into(),
+            candidates: vec![],
+            wait_elapsed_ms: None,
+            verification: "resolved".into(),
+            artifact_ids: vec![],
+            vision_proposal_sha256: None,
+        },
+    };
+    let value = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(value["kind"], "intentExecution");
+    let _: Evidence = serde_json::from_value(value).unwrap();
 }

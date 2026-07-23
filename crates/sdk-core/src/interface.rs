@@ -11,9 +11,9 @@ use interface_core::{
 };
 use types::{
     Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
-    InterfaceError, InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState,
-    PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeError, RuntimeInfo, SessionState,
-    WorkflowCheckpoint, WorkflowId,
+    FillValue, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
+    OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeCommand,
+    RuntimeError, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
 };
 
 use crate::RuntimeService;
@@ -185,7 +185,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<CommandOutcome> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::SubmitCommand)?;
-        if let Some(capability) = command_extra_capability(&envelope.command) {
+        for capability in command_extra_capabilities(&envelope.command) {
             self.authorization.require_capability(&ctx, capability)?;
         }
         self.require_owned_session(&ctx, &envelope.session_id)?;
@@ -265,31 +265,31 @@ impl RuntimeInterface for AuthenticatedRuntime {
     }
 }
 
-/// Capability required beyond `Capability::BrowserMutate` (already enforced by
-/// `InterfaceOperation::SubmitCommand`) to submit this primitive. `SubmitCommand`
-/// authorizes the coarse "can mutate the browser" grant only; a small set of primitives
-/// are privileged enough (moving files across the host/browser boundary) to need an
-/// additional, explicit capability. The match is exhaustive by variant so that adding a
-/// new `PrimitiveCommand` forces a deliberate decision here rather than silently
+/// Capabilities required beyond `Capability::BrowserMutate` (already enforced by
+/// `InterfaceOperation::SubmitCommand`) to submit this command. `SubmitCommand`
+/// authorizes the coarse "can mutate the browser" grant only; privileged primitives and
+/// all intents need additional, explicit capabilities. The match is exhaustive by variant
+/// so that adding a new command forces a deliberate decision here rather than silently
 /// inheriting `browser:mutate` as sufficient authorization.
-fn command_extra_capability(command: &PrimitiveCommand) -> Option<Capability> {
+fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
     match command {
-        PrimitiveCommand::UploadFiles(_) => Some(Capability::FileUpload),
-        PrimitiveCommand::DownloadUrl(_) => Some(Capability::FileDownload),
-        PrimitiveCommand::ClickAndWaitForDownload(_) => Some(Capability::FileDownload),
-        PrimitiveCommand::EvaluateJavaScript(_) => Some(Capability::JavascriptEvaluate),
-        PrimitiveCommand::Navigate(_)
-        | PrimitiveCommand::Inspect(_)
-        | PrimitiveCommand::Click(_)
-        | PrimitiveCommand::TypeText(_)
-        | PrimitiveCommand::OpenPage(_)
-        | PrimitiveCommand::ListPages(_)
-        | PrimitiveCommand::ClosePage(_)
-        | PrimitiveCommand::ClickAndWaitForPopup(_)
-        | PrimitiveCommand::WaitFor(_)
-        | PrimitiveCommand::CaptureScreenshot(_)
-        | PrimitiveCommand::SetFocusEmulation(_)
-        | PrimitiveCommand::SetEmulatedMedia(_) => None,
+        RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(_)) => {
+            vec![Capability::FileUpload]
+        }
+        RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(_))
+        | RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForDownload(_)) => {
+            vec![Capability::FileDownload]
+        }
+        RuntimeCommand::Primitive(PrimitiveCommand::EvaluateJavaScript(_)) => {
+            vec![Capability::JavascriptEvaluate]
+        }
+        RuntimeCommand::Primitive(_) => vec![],
+        RuntimeCommand::Intent(IntentCommand::Fill(fill))
+            if matches!(fill.value, FillValue::Files { .. }) =>
+        {
+            vec![Capability::IntentExecute, Capability::FileUpload]
+        }
+        RuntimeCommand::Intent(_) => vec![Capability::IntentExecute],
     }
 }
 

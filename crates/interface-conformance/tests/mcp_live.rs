@@ -19,7 +19,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PrimitiveCommand,
+    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PrimitiveCommand, RuntimeCommand,
     ScreenshotMode, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
@@ -183,7 +183,7 @@ async fn run_mcp_sample(
         session_id: sid.clone(),
         page_id: Some(pid.clone()),
         deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
-        command,
+        command: RuntimeCommand::Primitive(command),
     };
     observed.push("command.navigate");
     command(

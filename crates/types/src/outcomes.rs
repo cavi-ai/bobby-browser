@@ -139,6 +139,30 @@ pub enum Evidence {
         value: serde_json::Value,
         truncated: bool,
     },
+    IntentExecution {
+        record: ExecutionRecord,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IntentResolutionPath {
+    Deterministic,
+    VisionFallback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionRecord {
+    pub intent_kind: String,
+    pub purpose: Option<String>,
+    pub resolution_path: IntentResolutionPath,
+    pub plan_summary: String,
+    pub candidates: Vec<CandidateEvidence>,
+    pub wait_elapsed_ms: Option<u64>,
+    pub verification: String,
+    pub artifact_ids: Vec<String>,
+    pub vision_proposal_sha256: Option<String>,
 }
 
 impl Evidence {
@@ -177,6 +201,7 @@ impl Evidence {
                 }
             }
             Self::BrowserExecution { .. } => {}
+            Self::IntentExecution { .. } => {}
             _ => {}
         }
         safe

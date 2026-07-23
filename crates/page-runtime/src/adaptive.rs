@@ -4,7 +4,7 @@ use network_engine::{
 };
 use types::{
     CommandEnvelope, CommandError, ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason,
-    PageState, PrimitiveCommand,
+    PageState, PrimitiveCommand, RuntimeCommand,
 };
 use worker_pool::WorkerLease;
 
@@ -91,7 +91,10 @@ impl AdaptivePageEngine {
             .await;
         };
         let page_url = page.url.as_deref().unwrap_or_default();
-        match direct.eligibility.classify(&envelope.command, page_url) {
+        let RuntimeCommand::Primitive(command) = &envelope.command else {
+            return Err(intent_unsupported());
+        };
+        match direct.eligibility.classify(command, page_url) {
             EligibilityDecision::Denied(error) => Err(error),
             EligibilityDecision::Chromium(reason) => {
                 browser_execute(envelope, lease, ExecutionPath::Chromium, reason, 0).await
@@ -100,7 +103,7 @@ impl AdaptivePageEngine {
                 let page_id = envelope.page_id.as_ref().expect("validated page id");
                 let snapshot = lease.worker().http_state(page_id).await?;
                 let version = snapshot.version;
-                let candidate = match &envelope.command {
+                let candidate = match command {
                     PrimitiveCommand::Inspect(command) => {
                         direct.executor.inspect(&snapshot, command).await?
                     }
@@ -111,7 +114,7 @@ impl AdaptivePageEngine {
                 };
                 match candidate {
                     HttpCandidate::FallbackRequired(fallback_reason) => {
-                        if matches!(envelope.command, PrimitiveCommand::Inspect(_)) {
+                        if matches!(command, PrimitiveCommand::Inspect(_)) {
                             browser_execute(
                                 envelope,
                                 lease,
@@ -234,6 +237,15 @@ fn equivalence_unproven(reason: ExecutionReason) -> CommandError {
     }
 }
 
+fn intent_unsupported() -> CommandError {
+    CommandError {
+        code: ErrorCode::Internal,
+        message: "intent commands are not yet supported".into(),
+        layer: ErrorLayer::Page,
+        retryable: false,
+    }
+}
+
 fn execution_evidence(
     path: ExecutionPath,
     reason: ExecutionReason,
@@ -298,7 +310,10 @@ async fn browser_execute(
     state_version: u64,
 ) -> Result<AdaptiveExecution, CommandError> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
-    let mut evidence = match &envelope.command {
+    let RuntimeCommand::Primitive(command) = &envelope.command else {
+        return Err(intent_unsupported());
+    };
+    let mut evidence = match command {
         PrimitiveCommand::Navigate(command) => lease.worker().navigate(page_id, command).await?,
         PrimitiveCommand::Inspect(command) => lease.worker().inspect(page_id, command).await?,
         PrimitiveCommand::Click(command) => lease.worker().click(page_id, command).await?,

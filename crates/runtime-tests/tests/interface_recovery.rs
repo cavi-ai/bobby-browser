@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValu
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
     CommandPhase, CreateSessionRequest, DownloadUrlCommand, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, PrincipalId, SessionId,
+    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, PrincipalId, SessionId,
     TypeTextCommand, WorkerId, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -305,12 +305,12 @@ async fn broker_disconnect_after_durable_executing_rebuilds_without_guessing() {
         session_id: session.id,
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(20),
-        command: PrimitiveCommand::Click(ClickCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#mutate".into(),
             target: None,
             boundary: false,
             expected_url: None,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let request = tokio::spawn({
@@ -634,12 +634,12 @@ async fn daemon_rebuild_uses_durable_phases_and_never_guesses_after_browser_disp
             session_id: session.id,
             page_id: Some(page.id),
             deadline: Utc::now() + Duration::seconds(10),
-            command: PrimitiveCommand::Click(ClickCommand {
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
                 selector: "#mutate".into(),
                 target: None,
                 boundary: false,
                 expected_url: None,
-            }),
+            })),
         };
         let command_id = envelope.command_id.clone();
         let task = tokio::spawn({
@@ -702,11 +702,11 @@ async fn result_prepared_abort_rebuilds_from_durable_artifact_state() {
         session_id: session.id,
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(10),
-        command: PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
             url: download_fixture().await,
             expected_content_type: Some("application/octet-stream".into()),
             max_bytes: 1024,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let task = tokio::spawn({
@@ -766,12 +766,12 @@ async fn worker_generation_replacement_mid_command_rebuilds_without_guessing() {
         session_id: session.id.clone(),
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(10),
-        command: PrimitiveCommand::Click(ClickCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#mutate".into(),
             target: None,
             boundary: false,
             expected_url: None,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let command = tokio::spawn({
@@ -859,11 +859,11 @@ async fn installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal(
         session_id: session.id,
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(20),
-        command: PrimitiveCommand::Navigate(NavigateCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
             url: harness.site_url(),
             wait_until: types::WaitUntil::DomContentLoaded,
             timeout_ms: 15_000,
-        }),
+        })),
     };
     let command_id = envelope.command_id.clone();
     let task = tokio::spawn({

@@ -34,7 +34,7 @@ use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, CorrelationId, ErrorLayer, InspectCommand,
-    InterfaceError, InterfaceErrorCode, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    InterfaceError, InterfaceErrorCode, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand,
     RecoveryDecision, RequestContext, ScreenshotMode, SessionId, SessionState,
     SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch, TypeTextCommand,
     UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
@@ -903,7 +903,7 @@ impl CdpConnection {
                 let evidence = match self.runtime.submit(ctx.clone(), CommandEnvelope {
                     schema_version:1, command_id:inspect_id.clone(), workflow_id:workflow_id.clone(), attempt_id:attempt_id.clone(),
                     session_id:session_id.clone(), page_id:Some(page_id.clone()), deadline:Utc::now()+Duration::seconds(30),
-                    command:PrimitiveCommand::Inspect(InspectCommand::default()),
+                    command:RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
                 }).await {
                     Ok(CommandOutcome::Completed { evidence, .. }) => evidence,
                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "checkpoint inspection did not complete")),
@@ -993,7 +993,7 @@ impl CdpConnection {
                 let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                     command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                     session_id:session_id.clone(), page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                    command:PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand { mode }) };
+                    command:RuntimeCommand::Primitive(PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand { mode })) };
                 match self.runtime.submit(ctx, envelope).await {
                     Ok(CommandOutcome::Completed { evidence, .. }) => {
                         let screenshot = evidence.iter().find_map(|item| match item {
@@ -1090,7 +1090,7 @@ impl CdpConnection {
                             self.runtime.submit(ctx, CommandEnvelope {
                                 schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                                 session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                                command:PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true }),
+                                command:RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true })),
                             }).await
                         }
                         ("click", "role:button:Continue" | "role:button:Submit") => {
@@ -1098,7 +1098,7 @@ impl CdpConnection {
                             self.runtime.submit(ctx, CommandEnvelope {
                                 schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                                 session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                                command:PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(TargetSpec { role:Some("button".into()), accessible_name:Some(name.to_owned()), ..TargetSpec::default() }), boundary:false, expected_url:None }),
+                                command:RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(TargetSpec { role:Some("button".into()), accessible_name:Some(name.to_owned()), ..TargetSpec::default() }), boundary:false, expected_url:None })),
                             }).await
                         }
                         ("click", "role:link:Open details") => self.submit_boundary(ctx, session_id, page_id, PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
@@ -1132,7 +1132,7 @@ impl CdpConnection {
                             let result = self.runtime.submit(ctx, CommandEnvelope {
                                 schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                                 session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                                command:PrimitiveCommand::UploadFiles(UploadFilesCommand { selector:String::new(), target:Some(TargetSpec { label:Some("Resume".into()), ..TargetSpec::default() }), paths:vec![path.to_string_lossy().into_owned()] }),
+                                command:RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(UploadFilesCommand { selector:String::new(), target:Some(TargetSpec { label:Some("Resume".into()), ..TargetSpec::default() }), paths:vec![path.to_string_lossy().into_owned()] })),
                             }).await;
                             drop(request_dir);
                             result
@@ -1263,7 +1263,7 @@ impl CdpConnection {
                     let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                         command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                         session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                        command:PrimitiveCommand::UploadFiles(UploadFilesCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), paths }) };
+                        command:RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(UploadFilesCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), paths })) };
                     let outcome = self.runtime.submit(ctx, envelope).await;
                     drop(request_dir);
                     return match outcome {
@@ -1289,7 +1289,7 @@ impl CdpConnection {
                     let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                         command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                         session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                        command:PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true }) };
+                        command:RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true })) };
                     return match self.runtime.submit(ctx, envelope).await {
                         Ok(CommandOutcome::Completed { .. }) => CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}})),
                         Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime fill did not complete")),
@@ -1410,7 +1410,7 @@ impl CdpConnection {
                     let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                         command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                         session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                        command:PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(target), boundary:false, expected_url:None }) };
+                        command:RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(target), boundary:false, expected_url:None })) };
                     return match self.runtime.submit(ctx, envelope).await {
                         Ok(CommandOutcome::Completed { .. }) => CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}})),
                         Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime click did not complete")),
@@ -1438,7 +1438,7 @@ impl CdpConnection {
                 let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                     command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                     session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                    command:PrimitiveCommand::Inspect(InspectCommand { selector:None, target:Some(target), include_html:false }) };
+                    command:RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand { selector:None, target:Some(target), include_html:false })) };
                 match self.runtime.submit(ctx, envelope).await {
                     Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Element { .. } | types::Evidence::Inspection { .. })) =>
                         Ok(json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":self.issue_remote_object(request.session_id.as_deref(), &format!("semantic-locator:{}", descriptor)).await}})),
@@ -1503,7 +1503,7 @@ impl CdpConnection {
                     command_id: CommandId::new(), workflow_id: WorkflowId::new(), attempt_id: AttemptId::new(),
                     session_id: SessionId(session_uuid), page_id: Some(PageId(page_uuid)),
                     deadline: Utc::now() + Duration::seconds(30),
-                    command: PrimitiveCommand::Navigate(NavigateCommand { url: url.to_owned(), wait_until: WaitUntil::Interactive, timeout_ms: 30_000 }),
+                    command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand { url: url.to_owned(), wait_until: WaitUntil::Interactive, timeout_ms: 30_000 })),
                 };
                 match self.runtime.submit(ctx, envelope).await {
                     Ok(CommandOutcome::Completed { evidence, .. }) => {
@@ -1555,7 +1555,7 @@ impl CdpConnection {
                 let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                     command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                     session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                    command:PrimitiveCommand::SetFocusEmulation(SetFocusEmulationCommand { enabled }) };
+                    command:RuntimeCommand::Primitive(PrimitiveCommand::SetFocusEmulation(SetFocusEmulationCommand { enabled })) };
                 match self.runtime.submit(ctx, envelope).await {
                     Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Configuration { name, value } if name == "focusEmulation" && value == &enabled.to_string())) => Ok(json!({})),
                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "focus emulation produced no verified evidence")),
@@ -1583,7 +1583,7 @@ impl CdpConnection {
                 let expected = serde_json::to_string(&command).expect("bounded media command serializes");
                 let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                     command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(), session_id, page_id:Some(page_id),
-                    deadline:Utc::now()+Duration::seconds(30), command:PrimitiveCommand::SetEmulatedMedia(command) };
+                    deadline:Utc::now()+Duration::seconds(30), command:RuntimeCommand::Primitive(PrimitiveCommand::SetEmulatedMedia(command)) };
                 match self.runtime.submit(ctx, envelope).await {
                     Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Configuration { name, value } if name == "emulatedMedia" && value == &expected)) => Ok(json!({})),
                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "media emulation produced no verified evidence")),
@@ -1949,7 +1949,7 @@ impl CdpConnection {
                     session_id,
                     page_id: Some(page_id),
                     deadline: Utc::now() + Duration::seconds(30),
-                    command,
+                    command: RuntimeCommand::Primitive(command),
                 },
             )
             .await?;

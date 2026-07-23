@@ -9,7 +9,7 @@ use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
     DownloadUrlCommand, ErrorCode, Evidence, InspectCommand, NavigateCommand, OpenPageRequest,
-    PageId, PrimitiveCommand, SessionId, WaitUntil, WorkflowId,
+    PageId, PrimitiveCommand, RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 
 fn snapshot(url: String) -> HttpStateSnapshot {
@@ -68,7 +68,7 @@ fn envelope(session: &SessionId, page: &PageId, command: PrimitiveCommand) -> Co
         session_id: session.clone(),
         page_id: Some(page.clone()),
         deadline: Utc::now() + Duration::seconds(15),
-        command,
+        command: RuntimeCommand::Primitive(command),
     }
 }
 

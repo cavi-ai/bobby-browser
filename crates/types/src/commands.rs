@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::{AttemptId, CommandId, PageId, SessionId, WorkflowId};
 
+pub const MAX_INTENT_PURPOSE_BYTES: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandEnvelope {
@@ -14,7 +16,7 @@ pub struct CommandEnvelope {
     pub session_id: SessionId,
     pub page_id: Option<PageId>,
     pub deadline: DateTime<Utc>,
-    pub command: PrimitiveCommand,
+    pub command: RuntimeCommand,
 }
 
 impl CommandEnvelope {
@@ -27,6 +29,107 @@ impl CommandEnvelope {
         safe.command.sanitize_urls();
         safe
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "input", rename_all = "camelCase")]
+pub enum RuntimeCommand {
+    Primitive(PrimitiveCommand),
+    Intent(IntentCommand),
+}
+
+impl RuntimeCommand {
+    pub fn class(&self) -> CommandClass {
+        match self {
+            Self::Primitive(command) => command.class(),
+            Self::Intent(command) => command.class(),
+        }
+    }
+
+    pub fn sanitize_urls(&mut self) {
+        match self {
+            Self::Primitive(command) => command.sanitize_urls(),
+            Self::Intent(_) => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "input", rename_all = "camelCase")]
+pub enum IntentCommand {
+    Locate(LocateIntent),
+    Fill(FillIntent),
+    SubmitAndVerify(SubmitAndVerifyIntent),
+    WaitForState(WaitForStateIntent),
+}
+
+impl IntentCommand {
+    pub fn class(&self) -> CommandClass {
+        match self {
+            Self::Locate(_) | Self::WaitForState(_) => CommandClass::Replayable,
+            Self::Fill(_) => CommandClass::Reconciliable,
+            Self::SubmitAndVerify(_) => CommandClass::Boundary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentHints {
+    pub role: Option<String>,
+    pub near_text: Option<TextMatch>,
+    pub frame_path: Vec<TargetSpec>,
+    pub shadow_path: Vec<TargetSpec>,
+    pub allow_best_match: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocateIntent {
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: IntentHints,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FillIntent {
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: IntentHints,
+    pub value: FillValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FillValue {
+    Text {
+        text: String,
+        #[serde(default)]
+        clear_first: bool,
+    },
+    Select {
+        option: String,
+    },
+    Files {
+        paths: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitAndVerifyIntent {
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: IntentHints,
+    pub expected_state: WaitForCommand,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitForStateIntent {
+    pub condition: WaitCondition,
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

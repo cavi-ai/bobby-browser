@@ -9,7 +9,7 @@ use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClosePageCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PrimitiveCommand, ScreenshotMode, UploadFilesCommand,
+    NavigateCommand, OpenPageRequest, PrimitiveCommand, RuntimeCommand, ScreenshotMode, UploadFilesCommand,
     WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
@@ -74,9 +74,9 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
             deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
-            command: PrimitiveCommand::ClosePage(ClosePageCommand {
+            command: RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(ClosePageCommand {
                 page_id: page.id.clone(),
-            }),
+            })),
         };
         completed(&runtime.submit(context(), cleanup).await.unwrap());
         drop(runtime);
@@ -113,7 +113,7 @@ async fn run_rust_sample(
         session_id: session_id.clone(),
         page_id: Some(page_id.clone()),
         deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
-        command,
+        command: RuntimeCommand::Primitive(command),
     };
     observed.push("command.navigate");
     completed(

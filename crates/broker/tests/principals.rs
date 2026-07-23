@@ -6,7 +6,7 @@ use broker::testing::{app_with_admin, context_headers, issue_bearer};
 use chrono::{Duration, SecondsFormat, Utc};
 use tower::ServiceExt;
 use types::{
-    AttemptId, CommandEnvelope, CommandId, InspectCommand, PageId, PrimitiveCommand, SessionId,
+    AttemptId, CommandEnvelope, CommandId, InspectCommand, PageId, PrimitiveCommand, RuntimeCommand, SessionId,
     UploadFilesCommand, WorkflowId,
 };
 use uuid::uuid;
@@ -257,7 +257,7 @@ fn inspect_envelope(session_id: SessionId) -> CommandEnvelope {
         session_id,
         page_id: Some(PageId::new()),
         deadline: Utc::now() + Duration::minutes(1),
-        command: PrimitiveCommand::Inspect(InspectCommand::default()),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
     }
 }
 
@@ -359,11 +359,11 @@ fn upload_files_envelope(session_id: SessionId) -> CommandEnvelope {
         session_id,
         page_id: Some(PageId::new()),
         deadline: Utc::now() + Duration::minutes(1),
-        command: PrimitiveCommand::UploadFiles(UploadFilesCommand {
+        command: RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(UploadFilesCommand {
             selector: "input[type=file]".into(),
             target: None,
             paths: vec!["/tmp/example.txt".into()],
-        }),
+        })),
     }
 }
 
