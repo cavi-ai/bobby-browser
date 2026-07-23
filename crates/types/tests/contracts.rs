@@ -625,6 +625,54 @@ fn runtime_command_envelope_accepts_intent_and_primitive() {
     assert!(matches!(round.command, RuntimeCommand::Intent(_)));
 }
 
+/// Golden wire shape for agents / TypeScript SDK: nested RuntimeCommand → Intent → Locate.
+#[test]
+fn locate_runtime_command_envelope_golden_json() {
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId(uuid(1)),
+        workflow_id: WorkflowId(uuid(2)),
+        attempt_id: AttemptId(uuid(3)),
+        session_id: SessionId(uuid(4)),
+        page_id: Some(PageId(uuid(5))),
+        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
+            purpose: "Continue".into(),
+            hints: IntentHints::default(),
+        })),
+    };
+
+    let value = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "schemaVersion": 1,
+            "commandId": uuid(1),
+            "workflowId": uuid(2),
+            "attemptId": uuid(3),
+            "sessionId": uuid(4),
+            "pageId": uuid(5),
+            "deadline": "2026-07-16T12:00:00Z",
+            "command": {
+                "kind": "intent",
+                "input": {
+                    "kind": "locate",
+                    "input": {
+                        "purpose": "Continue",
+                        "hints": {
+                            "role": null,
+                            "nearText": null,
+                            "framePath": [],
+                            "shadowPath": [],
+                            "allowBestMatch": false
+                        }
+                    }
+                }
+            }
+        })
+    );
+}
+
 #[test]
 fn intent_execution_evidence_round_trip() {
     let evidence = Evidence::IntentExecution {

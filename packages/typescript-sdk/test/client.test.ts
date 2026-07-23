@@ -44,7 +44,10 @@ function envelope(): CommandEnvelope {
     sessionId: SESSION_ID,
     pageId: null,
     deadline: new Date(Date.now() + 10_000).toISOString(),
-    command: { kind: "inspect", input: { selector: null, target: null, includeHtml: false } },
+    command: {
+      kind: "primitive",
+      input: { kind: "inspect", input: { selector: null, target: null, includeHtml: false } },
+    },
   };
 }
 

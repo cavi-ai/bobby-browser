@@ -32,6 +32,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["profile"],
         ),
         "page_open" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        // Intent surface: agents submit `{ kind: "intent", input: { kind: "locate"|… } }`
+        // inside CommandEnvelope via this tool (no dedicated intent_* tools).
         "command_execute" => (
             json!({
                 "envelope":{"$ref":"#/$defs/CommandEnvelope"},
