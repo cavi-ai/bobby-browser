@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use config::AppConfig;
-use page_runtime::{ExecutionPhaseObserver, PageRuntime};
+use page_runtime::{ExecutionPhaseObserver, PageRuntime, VisionGate};
 use page_runtime::{RecoveryCoordinator, RecoveryError};
 use session_manager::SessionManager;
 use types::{
@@ -163,6 +163,18 @@ impl RuntimeService {
     }
 
     pub async fn submit(&self, envelope: CommandEnvelope) -> CommandOutcome {
+        self.submit_with_vision_capability(envelope, false).await
+    }
+
+    /// Submit with an explicit vision capability flag from the authenticated principal.
+    /// Session `executionPolicy.visionAssist` is looked up here and threaded into
+    /// IntentEngine as `VisionContext.session_ok`. Vision is deny-by-default: both
+    /// this capability flag and the session grant must be true before the provider runs.
+    pub async fn submit_with_vision_capability(
+        &self,
+        envelope: CommandEnvelope,
+        vision_capability_ok: bool,
+    ) -> CommandOutcome {
         // SECURITY(F4): per-session execution-policy gate. This is the authoritative
         // deny-by-default check for `EvaluateJavaScript` — a session must have explicitly
         // opted in (`ExecutionPolicy.javascript_evaluation == true`) or the command is
@@ -194,7 +206,25 @@ impl RuntimeService {
                 };
             }
         }
-        self.pages.execute(envelope).await
+
+        let vision_gate = match &envelope.command {
+            RuntimeCommand::Intent(_) => {
+                let session_ok = self
+                    .sessions
+                    .get(&envelope.session_id)
+                    .await
+                    .map(|session| session.execution_policy.vision_assist)
+                    .unwrap_or(false);
+                VisionGate {
+                    session_ok,
+                    capability_ok: vision_capability_ok,
+                }
+            }
+            RuntimeCommand::Primitive(_) => VisionGate::default(),
+        };
+        self.pages
+            .execute_with_vision_gate(envelope, vision_gate)
+            .await
     }
 
     pub async fn checkpoint(

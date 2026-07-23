@@ -1,18 +1,27 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
-    ExecutionRecord, FillValue, IntentCommand, PageId, TargetFingerprint, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    ExecutionRecord, FillValue, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
+    TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 
 use crate::compiler::{compile_intent, IntentPlan};
-use crate::stuck::StuckKind;
-use crate::verify::{compatible, execution_record, summarize_target, verify_fill};
+use crate::stuck::{never_escalates, StuckKind};
+use crate::verify::{
+    compatible, execution_record, execution_record_with_path, summarize_target, verify_fill,
+};
+use crate::vision::{
+    proposal_sha256, VisionAction, VisionAssist, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
+};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct VisionContext {
-    pub enabled: bool,
+    pub session_ok: bool,
+    pub capability_ok: bool,
+    pub assist: Option<Arc<dyn VisionAssist>>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +49,13 @@ pub trait IntentBrowser: Send + Sync {
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
 
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError>;
+
     async fn type_text(
         &self,
         page_id: &PageId,
@@ -62,7 +78,7 @@ pub trait IntentBrowser: Send + Sync {
         &self,
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError>;
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError>;
 }
 
 pub struct IntentEngine;
@@ -72,8 +88,7 @@ impl IntentEngine {
         intent: &IntentCommand,
         page_id: &PageId,
         browser: &dyn IntentBrowser,
-        // Task 4 keeps vision off; Task 7 wires escalation through this context.
-        _vision: &VisionContext,
+        vision: &VisionContext,
     ) -> IntentOutcome {
         let plan = match compile_intent(intent) {
             Ok(plan) => plan,
@@ -92,22 +107,21 @@ impl IntentEngine {
 
         match plan {
             IntentPlan::Locate { target } => {
-                execute_locate(intent, page_id, browser, target).await
+                execute_locate(intent, page_id, browser, vision, target).await
             }
             IntentPlan::WaitForState {
                 condition,
                 timeout_ms,
-            } => {
-                execute_wait_for_state(page_id, browser, condition, timeout_ms).await
-            }
+            } => execute_wait_for_state(page_id, browser, condition, timeout_ms).await,
             IntentPlan::Fill { target, value } => {
-                execute_fill(intent, page_id, browser, target, value).await
+                execute_fill(intent, page_id, browser, vision, target, value).await
             }
             IntentPlan::SubmitAndVerify {
                 target,
                 expected_state,
             } => {
-                execute_submit_and_verify(intent, page_id, browser, target, expected_state).await
+                execute_submit_and_verify(intent, page_id, browser, vision, target, expected_state)
+                    .await
             }
         }
     }
@@ -117,6 +131,7 @@ async fn execute_locate(
     intent: &IntentCommand,
     page_id: &PageId,
     browser: &dyn IntentBrowser,
+    vision: &VisionContext,
     target: TargetSpec,
 ) -> IntentOutcome {
     let purpose = match intent {
@@ -127,17 +142,17 @@ async fn execute_locate(
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
-            return IntentOutcome::Failed {
+            return non_escalating_failure(
                 error,
-                evidence: vec![intent_evidence(execution_record(
+                intent_evidence(execution_record(
                     "locate",
                     purpose,
                     plan_summary,
                     Vec::new(),
                     None,
                     "gatherFailed",
-                ))],
-            };
+                )),
+            );
         }
     };
 
@@ -188,22 +203,34 @@ async fn execute_locate(
                 evidence: vec![resolution, intent_evidence(record)],
             }
         }
-        ResolutionDecision::NotFound => stuck_outcome(
-            "locate",
-            StuckKind::TargetMissing,
-            purpose,
-            plan_summary,
-            Vec::new(),
-            "targetNotFound",
-        ),
-        ResolutionDecision::Ambiguous { candidates } => stuck_outcome(
-            "locate",
-            StuckKind::TargetAmbiguous,
-            purpose,
-            plan_summary,
-            candidates,
-            "targetAmbiguous",
-        ),
+        ResolutionDecision::NotFound => {
+            stuck_outcome(
+                "locate",
+                StuckKind::TargetMissing,
+                purpose,
+                plan_summary,
+                Vec::new(),
+                "targetNotFound",
+                page_id,
+                browser,
+                vision,
+            )
+            .await
+        }
+        ResolutionDecision::Ambiguous { candidates } => {
+            stuck_outcome(
+                "locate",
+                StuckKind::TargetAmbiguous,
+                purpose,
+                plan_summary,
+                candidates,
+                "targetAmbiguous",
+                page_id,
+                browser,
+                vision,
+            )
+            .await
+        }
     }
 }
 
@@ -211,6 +238,7 @@ async fn execute_fill(
     intent: &IntentCommand,
     page_id: &PageId,
     browser: &dyn IntentBrowser,
+    vision: &VisionContext,
     target: TargetSpec,
     value: FillValue,
 ) -> IntentOutcome {
@@ -222,17 +250,17 @@ async fn execute_fill(
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
-            return IntentOutcome::Failed {
+            return non_escalating_failure(
                 error,
-                evidence: vec![intent_evidence(execution_record(
+                intent_evidence(execution_record(
                     "fill",
                     purpose,
                     plan_summary,
                     Vec::new(),
                     None,
                     "gatherFailed",
-                ))],
-            };
+                )),
+            );
         }
     };
 
@@ -272,7 +300,11 @@ async fn execute_fill(
                 plan_summary,
                 Vec::new(),
                 "targetNotFound",
-            );
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
         }
         ResolutionDecision::Ambiguous { candidates } => {
             return stuck_outcome(
@@ -282,7 +314,11 @@ async fn execute_fill(
                 plan_summary,
                 candidates,
                 "targetAmbiguous",
-            );
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
         }
     };
 
@@ -461,6 +497,7 @@ async fn execute_submit_and_verify(
     intent: &IntentCommand,
     page_id: &PageId,
     browser: &dyn IntentBrowser,
+    vision: &VisionContext,
     target: TargetSpec,
     expected_state: WaitForCommand,
 ) -> IntentOutcome {
@@ -476,17 +513,17 @@ async fn execute_submit_and_verify(
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
-            return IntentOutcome::Failed {
+            return non_escalating_failure(
                 error,
-                evidence: vec![intent_evidence(execution_record(
+                intent_evidence(execution_record(
                     "submitAndVerify",
                     purpose,
                     plan_summary,
                     Vec::new(),
                     None,
                     "gatherFailed",
-                ))],
-            };
+                )),
+            );
         }
     };
 
@@ -526,7 +563,11 @@ async fn execute_submit_and_verify(
                 plan_summary,
                 Vec::new(),
                 "targetNotFound",
-            );
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
         }
         ResolutionDecision::Ambiguous { candidates } => {
             return stuck_outcome(
@@ -536,7 +577,11 @@ async fn execute_submit_and_verify(
                 plan_summary,
                 candidates,
                 "targetAmbiguous",
-            );
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
         }
     };
 
@@ -677,30 +722,273 @@ async fn execute_wait_for_state(
     }
 }
 
-fn stuck_outcome(
+fn non_escalating_failure(error: CommandError, evidence: Evidence) -> IntentOutcome {
+    IntentOutcome::Failed {
+        error,
+        evidence: vec![evidence],
+    }
+}
+
+async fn stuck_outcome(
     intent_kind: &str,
     kind: StuckKind,
     purpose: Option<String>,
     plan_summary: String,
     candidates: Vec<types::CandidateEvidence>,
     verification: &str,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
 ) -> IntentOutcome {
-    IntentOutcome::Failed {
-        error: CommandError {
-            code: kind.error_code(),
-            message: verification.to_owned(),
-            layer: ErrorLayer::Page,
-            retryable: false,
-        },
-        evidence: vec![intent_evidence(execution_record(
+    let stuck_code = kind.error_code();
+    let stuck_evidence = intent_evidence(execution_record(
+        intent_kind,
+        purpose.clone(),
+        plan_summary.clone(),
+        candidates.clone(),
+        None,
+        verification,
+    ));
+
+    if never_escalates(stuck_code) || !kind.may_escalate_to_vision() {
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: stuck_code,
+                message: verification.to_owned(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: vec![stuck_evidence],
+        };
+    }
+
+    let gates_open = vision.session_ok && vision.capability_ok;
+    let Some(assist) = vision.assist.as_ref() else {
+        return vision_denied_or_unavailable(gates_open, stuck_evidence, verification);
+    };
+    if !gates_open {
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::VisionAssistDenied,
+                message: format!("vision assist denied; underlying stuck reason: {verification}"),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: vec![stuck_evidence],
+        };
+    }
+
+    escalate_with_vision(
+        intent_kind,
+        kind,
+        purpose,
+        plan_summary,
+        candidates,
+        verification,
+        stuck_evidence,
+        page_id,
+        browser,
+        assist.as_ref(),
+    )
+    .await
+}
+
+fn vision_denied_or_unavailable(
+    gates_open: bool,
+    stuck_evidence: Evidence,
+    verification: &str,
+) -> IntentOutcome {
+    if gates_open {
+        IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: "vision assist provider is not configured".into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: vec![stuck_evidence],
+        }
+    } else {
+        IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::VisionAssistDenied,
+                message: format!("vision assist denied; underlying stuck reason: {verification}"),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: vec![stuck_evidence],
+        }
+    }
+}
+
+async fn escalate_with_vision(
+    intent_kind: &str,
+    kind: StuckKind,
+    purpose: Option<String>,
+    plan_summary: String,
+    candidates: Vec<types::CandidateEvidence>,
+    verification: &str,
+    stuck_evidence: Evidence,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    assist: &dyn VisionAssist,
+) -> IntentOutcome {
+    let (png, mut screenshot_evidence) = match browser
+        .capture_screenshot(
+            page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            },
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::VisionAssistFailed,
+                    message: format!("vision screenshot failed: {}", error.message),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: vec![stuck_evidence],
+            };
+        }
+    };
+
+    let proposal = match assist
+        .propose(VisionProposeRequest {
+            purpose: purpose.clone().unwrap_or_default(),
+            intent_kind: intent_kind.to_owned(),
+            screenshot_png: png,
+            stuck: kind,
+        })
+        .await
+    {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            let mut evidence = vec![stuck_evidence];
+            evidence.append(&mut screenshot_evidence);
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::VisionAssistFailed,
+                    message: format!("vision propose failed: {}", error.message),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence,
+            };
+        }
+    };
+
+    let proposal_hash = proposal_sha256(&proposal);
+    if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+        let mut evidence = vec![stuck_evidence];
+        evidence.append(&mut screenshot_evidence);
+        evidence.push(intent_evidence(execution_record_with_path(
             intent_kind,
             purpose,
             plan_summary,
             candidates,
             None,
-            verification,
-        ))],
+            format!(
+                "visionConfidenceBelowFloor:{:.2}<{VISION_CONFIDENCE_FLOOR}",
+                proposal.confidence
+            ),
+            IntentResolutionPath::VisionFallback,
+            Some(proposal_hash),
+            artifact_ids_from(&screenshot_evidence),
+        )));
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: format!(
+                    "vision proposal confidence {:.2} below floor {VISION_CONFIDENCE_FLOOR}",
+                    proposal.confidence
+                ),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence,
+        };
     }
+
+    let mut act_evidence = match execute_vision_action(page_id, browser, &proposal.action).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            let mut evidence = vec![stuck_evidence];
+            evidence.append(&mut screenshot_evidence);
+            evidence.push(intent_evidence(execution_record_with_path(
+                intent_kind,
+                purpose,
+                plan_summary,
+                candidates,
+                None,
+                format!("visionActFailed:{verification}"),
+                IntentResolutionPath::VisionFallback,
+                Some(proposal_hash),
+                artifact_ids_from(&screenshot_evidence),
+            )));
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::VisionAssistFailed,
+                    message: format!("vision act failed: {}", error.message),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence,
+            };
+        }
+    };
+
+    let mut evidence = screenshot_evidence;
+    evidence.append(&mut act_evidence);
+    let artifact_ids = artifact_ids_from(&evidence);
+    evidence.push(intent_evidence(execution_record_with_path(
+        intent_kind,
+        purpose,
+        plan_summary,
+        candidates,
+        None,
+        "visionFallback",
+        IntentResolutionPath::VisionFallback,
+        Some(proposal_hash),
+        artifact_ids,
+    )));
+    IntentOutcome::Completed { evidence }
+}
+
+async fn execute_vision_action(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    action: &VisionAction,
+) -> Result<Vec<Evidence>, CommandError> {
+    match action {
+        VisionAction::Click { x, y } => browser.click_xy(page_id, *x, *y).await,
+        VisionAction::TypeText { text } => {
+            browser
+                .type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: None,
+                        value: text.clone(),
+                        clear_first: false,
+                    },
+                )
+                .await
+        }
+    }
+}
+
+fn artifact_ids_from(evidence: &[Evidence]) -> Vec<String> {
+    evidence
+        .iter()
+        .filter_map(|item| match item {
+            Evidence::Screenshot { artifact_id, .. } => Some(artifact_id.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn intent_evidence(record: ExecutionRecord) -> Evidence {

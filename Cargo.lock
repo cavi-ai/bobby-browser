@@ -1187,6 +1187,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dom-engine",
+ "hex",
+ "sha2",
  "thiserror",
  "tokio",
  "types",

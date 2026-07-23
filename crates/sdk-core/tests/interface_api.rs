@@ -18,9 +18,10 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
-    CreateSessionRequest, Evidence, IdempotencyKey, InspectCommand, IntentCommand, IntentHints,
-    InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrincipalId,
-    RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId, WorkflowId,
+    CreateSessionRequest, Evidence, FillIntent, FillValue, IdempotencyKey, InspectCommand,
+    IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest,
+    PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId,
+    WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -1091,4 +1092,118 @@ async fn locate_intent_without_intent_execute_capability_is_denied_before_dispat
         Some(Capability::IntentExecute)
     );
     assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+fn fill_files_intent_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope {
+        session_id,
+        command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
+            purpose: "Resume".into(),
+            hints: IntentHints::default(),
+            value: FillValue::Files {
+                paths: vec!["./data/uploads/cv.pdf".into()],
+            },
+        })),
+        ..submit_request()
+    }
+}
+
+#[tokio::test]
+async fn fill_files_intent_without_file_upload_capability_is_denied_before_dispatch() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::IntentExecute,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let error = api
+        .submit(context, fill_files_intent_envelope(session.id))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileUpload));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn locate_intent_does_not_require_vision_assist_upfront() {
+    // Vision is double-gated at escalation time inside IntentEngine. Holding
+    // intent:execute without vision:assist must clear the AuthenticatedRuntime
+    // capability gate so the command can reach PageRuntime.
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: false,
+                vision_assist: true,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(session.execution_policy.vision_assist);
+
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::IntentExecute,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let outcome = api
+        .submit(context, locate_intent_envelope(session.id))
+        .await
+        .unwrap();
+
+    assert!(
+        !matches!(
+            outcome,
+            CommandOutcome::PolicyDenied { .. }
+        ),
+        "vision:assist must not be required upfront for intents; got {outcome:?}"
+    );
+    // MissingCapability would surface as Err; Ok proves the auth gate cleared.
+}
+
+#[tokio::test]
+async fn create_session_stores_vision_assist_execution_policy() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: false,
+                vision_assist: true,
+            },
+        })
+        .await
+        .unwrap();
+
+    assert!(session.execution_policy.vision_assist);
+    let stored = runtime.sessions.get(&session.id).await.unwrap();
+    assert!(stored.execution_policy.vision_assist);
 }

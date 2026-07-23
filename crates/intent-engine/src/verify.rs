@@ -11,16 +11,40 @@ pub fn execution_record(
     wait_elapsed_ms: Option<u64>,
     verification: impl Into<String>,
 ) -> ExecutionRecord {
+    execution_record_with_path(
+        intent_kind,
+        purpose,
+        plan_summary,
+        candidates,
+        wait_elapsed_ms,
+        verification,
+        IntentResolutionPath::Deterministic,
+        None,
+        Vec::new(),
+    )
+}
+
+pub fn execution_record_with_path(
+    intent_kind: impl Into<String>,
+    purpose: Option<String>,
+    plan_summary: impl Into<String>,
+    candidates: Vec<CandidateEvidence>,
+    wait_elapsed_ms: Option<u64>,
+    verification: impl Into<String>,
+    resolution_path: IntentResolutionPath,
+    vision_proposal_sha256: Option<String>,
+    artifact_ids: Vec<String>,
+) -> ExecutionRecord {
     ExecutionRecord {
         intent_kind: intent_kind.into(),
         purpose,
-        resolution_path: IntentResolutionPath::Deterministic,
+        resolution_path,
         plan_summary: plan_summary.into(),
         candidates,
         wait_elapsed_ms,
         verification: verification.into(),
-        artifact_ids: Vec::new(),
-        vision_proposal_sha256: None,
+        artifact_ids,
+        vision_proposal_sha256,
     }
 }
 

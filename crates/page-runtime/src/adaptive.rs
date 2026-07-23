@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use artifact_store::{ArtifactStore, PendingArtifact};
 use async_trait::async_trait;
-use intent_engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
+use intent_engine::{
+    IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext,
+};
 use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
@@ -10,6 +14,14 @@ use types::{
     TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 use worker_pool::WorkerLease;
+
+/// Session + capability flags for vision escalation. Provider lives on
+/// [`AdaptivePageEngine`]; IntentEngine enforces the deny-by-default double gate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VisionGate {
+    pub session_ok: bool,
+    pub capability_ok: bool,
+}
 
 struct WorkerIntentBrowser<'a> {
     lease: &'a WorkerLease,
@@ -34,6 +46,20 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.lease.worker().click(page_id, command).await
+    }
+
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(CommandError {
+            code: ErrorCode::Internal,
+            message: "coordinate click is not implemented on the worker intent adapter".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        })
     }
 
     async fn type_text(
@@ -64,11 +90,16 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         &self,
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.lease
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        // Worker API returns artifact evidence only; PNG bytes for the vision
+        // provider are not yet plumbed through BrowserWorker (production providers
+        // are out of scope for this phase). Unit tests inject PNG via FakeBrowser.
+        let evidence = self
+            .lease
             .worker()
             .capture_screenshot(page_id, command)
-            .await
+            .await?;
+        Ok((Vec::new(), evidence))
     }
 }
 
@@ -104,6 +135,7 @@ pub struct PreparedHttpResult {
 #[derive(Clone, Default)]
 pub struct AdaptivePageEngine {
     direct: Option<DirectComponents>,
+    vision_assist: Option<Arc<dyn VisionAssist>>,
 }
 
 #[derive(Clone)]
@@ -132,7 +164,13 @@ impl AdaptivePageEngine {
                 artifacts,
                 network,
             }),
+            vision_assist: None,
         }
+    }
+
+    pub fn with_vision_assist(mut self, assist: Arc<dyn VisionAssist>) -> Self {
+        self.vision_assist = Some(assist);
+        self
     }
 
     pub fn finalize_prepared_artifact(
@@ -158,9 +196,11 @@ impl AdaptivePageEngine {
         envelope: &CommandEnvelope,
         lease: &WorkerLease,
         page: PageState,
+        vision_gate: VisionGate,
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
         if let RuntimeCommand::Intent(intent) = &envelope.command {
-            return execute_intent(envelope, lease, intent).await;
+            return execute_intent(envelope, lease, intent, vision_gate, self.vision_assist.clone())
+                .await;
         }
         let RuntimeCommand::Primitive(command) = &envelope.command else {
             unreachable!("Intent handled above");
@@ -323,10 +363,16 @@ async fn execute_intent(
     envelope: &CommandEnvelope,
     lease: &WorkerLease,
     intent: &types::IntentCommand,
+    vision_gate: VisionGate,
+    assist: Option<Arc<dyn VisionAssist>>,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
     let browser = WorkerIntentBrowser { lease };
-    let vision = VisionContext { enabled: false };
+    let vision = VisionContext {
+        session_ok: vision_gate.session_ok,
+        capability_ok: vision_gate.capability_ok,
+        assist,
+    };
     match IntentEngine::execute(intent, page_id, &browser, &vision).await {
         IntentOutcome::Completed { evidence } => Ok(AdaptiveExecution {
             evidence,

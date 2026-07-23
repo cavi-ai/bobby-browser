@@ -22,7 +22,10 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "profile": string(1, 128),
                 "proxy": nullable(string(0, 2048)),
                 "executionPolicy": object(
-                    json!({"javascriptEvaluation":{"type":"boolean"}}),
+                    json!({
+                        "javascriptEvaluation":{"type":"boolean"},
+                        "visionAssist":{"type":"boolean"}
+                    }),
                     &[]
                 )
             }),

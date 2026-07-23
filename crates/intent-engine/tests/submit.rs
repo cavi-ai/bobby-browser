@@ -46,6 +46,16 @@ impl IntentBrowser for FakeBrowser {
         Ok(self.click_evidence.clone())
     }
 
+
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("click_xy"))
+    }
+
     async fn type_text(
         &self,
         _page_id: &PageId,
@@ -79,7 +89,7 @@ impl IntentBrowser for FakeBrowser {
         &self,
         _page_id: &PageId,
         _command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
         Err(unsupported("capture_screenshot"))
     }
 }
@@ -153,7 +163,7 @@ async fn submit_and_verify_clicks_boundary_then_waits() {
         &submit("Submit application", Some("button"), expected_state.clone()),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
@@ -208,7 +218,7 @@ async fn submit_and_verify_sets_expected_url_from_exact_wait() {
         &submit("Submit", Some("button"), expected_state),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
@@ -235,14 +245,14 @@ async fn submit_and_verify_missing_target_is_stuck() {
         &submit("Submit application", Some("button"), thanks_wait()),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
     {
         let log = calls.lock().expect("call log");
         assert!(log.clicks.is_empty());

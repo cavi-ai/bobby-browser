@@ -8,7 +8,7 @@ use types::{
 };
 use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
-use crate::PageRuntime;
+use crate::{PageRuntime, VisionGate};
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -115,6 +115,15 @@ impl PageRuntime {
     }
 
     pub async fn execute(&self, envelope: CommandEnvelope) -> CommandOutcome {
+        self.execute_with_vision_gate(envelope, VisionGate::default())
+            .await
+    }
+
+    pub async fn execute_with_vision_gate(
+        &self,
+        envelope: CommandEnvelope,
+        vision_gate: VisionGate,
+    ) -> CommandOutcome {
         let command_id = envelope.command_id.clone();
         if let Err(error) = self.validate(&envelope).await {
             return CommandOutcome::Failed {
@@ -189,7 +198,11 @@ impl PageRuntime {
                     .await;
             }
         };
-        let mut execution = match self.adaptive.execute(&envelope, &lease, page_state).await {
+        let mut execution = match self
+            .adaptive
+            .execute(&envelope, &lease, page_state, vision_gate)
+            .await
+        {
             Ok(execution) => execution,
             Err(failure) => {
                 return self

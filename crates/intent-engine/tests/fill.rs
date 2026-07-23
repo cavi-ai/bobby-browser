@@ -41,6 +41,16 @@ impl IntentBrowser for FakeBrowser {
         Err(unsupported("click"))
     }
 
+
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("click_xy"))
+    }
+
     async fn type_text(
         &self,
         _page_id: &PageId,
@@ -79,7 +89,7 @@ impl IntentBrowser for FakeBrowser {
         &self,
         _page_id: &PageId,
         _command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
         Err(unsupported("capture_screenshot"))
     }
 }
@@ -208,7 +218,7 @@ async fn fill_text_types_and_verifies() {
         ),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
@@ -257,7 +267,7 @@ async fn fill_select_types_option_via_type_text() {
         ),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
@@ -298,7 +308,7 @@ async fn fill_files_uploads_and_verifies() {
         ),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
@@ -337,7 +347,7 @@ async fn fill_files_on_textbox_is_action_mismatch() {
         ),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 

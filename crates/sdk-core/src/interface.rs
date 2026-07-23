@@ -189,8 +189,20 @@ impl RuntimeInterface for AuthenticatedRuntime {
             self.authorization.require_capability(&ctx, capability)?;
         }
         self.require_owned_session(&ctx, &envelope.session_id)?;
+        // Vision assist is gated at escalation time inside IntentEngine, not upfront.
+        // Thread whether this principal holds `vision:assist` so stuck intents can
+        // enforce the capability half of the deny-by-default double gate.
+        let vision_capability_ok = self
+            .authorization
+            .capability_handle()
+            .capabilities()
+            .contains(Capability::VisionAssist)
+            && ctx.capabilities.contains(Capability::VisionAssist);
         let Some(key) = ctx.idempotency_key.clone() else {
-            return Ok(self.inner.submit(envelope).await);
+            return Ok(self
+                .inner
+                .submit_with_vision_capability(envelope, vision_capability_ok)
+                .await);
         };
         let digest = canonical_sha256(&envelope)?;
         let reservation = self
@@ -227,7 +239,10 @@ impl RuntimeInterface for AuthenticatedRuntime {
                     return Err(error);
                 }
                 self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
-                let outcome = self.inner.submit(envelope).await;
+                let outcome = self
+                    .inner
+                    .submit_with_vision_capability(envelope, vision_capability_ok)
+                    .await;
                 self.idempotency
                     .finish(permit, outcome.clone(), Utc::now())
                     .await?;

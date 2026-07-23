@@ -33,6 +33,16 @@ impl IntentBrowser for FakeBrowser {
         Err(unsupported("click"))
     }
 
+
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("click_xy"))
+    }
+
     async fn type_text(
         &self,
         _page_id: &PageId,
@@ -74,7 +84,7 @@ impl IntentBrowser for FakeBrowser {
         &self,
         _page_id: &PageId,
         _command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
         Err(unsupported("capture_screenshot"))
     }
 }
@@ -127,7 +137,7 @@ async fn locate_resolves_single_candidate_deterministically() {
         &locate_continue(),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
@@ -152,7 +162,7 @@ async fn locate_resolves_single_candidate_deterministically() {
 }
 
 #[tokio::test]
-async fn locate_zero_candidates_is_target_not_found_without_vision() {
+async fn locate_zero_candidates_is_vision_assist_denied_when_gates_closed() {
     let browser = FakeBrowser {
         candidates: Arc::new(vec![]),
         wait_ok: true,
@@ -162,14 +172,15 @@ async fn locate_zero_candidates_is_target_not_found_without_vision() {
         &locate_continue(),
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    // Stuck taxonomy allows escalation, but deny-by-default gates are closed.
+    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
     let record = evidence.iter().find_map(|item| match item {
         Evidence::IntentExecution { record } => Some(record),
         _ => None,
@@ -197,7 +208,7 @@ async fn wait_for_state_success_is_deterministic() {
         &intent,
         &page_id,
         &browser,
-        &VisionContext { enabled: false },
+        &VisionContext::default(),
     )
     .await;
 
