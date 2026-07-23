@@ -16,11 +16,11 @@ use interface_core::{
 use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
-use types::{RuntimeCommand, 
+use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
-    CreateSessionRequest, Evidence, IdempotencyKey, InspectCommand, InterfaceErrorCode,
-    NavigateCommand, OpenPageRequest, PageId, PrincipalId, RequestContext, SessionId,
-    TypeTextCommand, WorkerId, WorkflowId,
+    CreateSessionRequest, Evidence, IdempotencyKey, InspectCommand, IntentCommand, IntentHints,
+    InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrincipalId,
+    RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId, WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -1044,4 +1044,51 @@ async fn evaluate_javascript_with_capability_but_js_off_session_is_policy_denied
         matches!(outcome, CommandOutcome::PolicyDenied { .. }),
         "expected PolicyDenied: capability gate cleared, session gate must still block, got {outcome:?}"
     );
+}
+
+fn locate_intent_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope {
+        session_id,
+        command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
+            purpose: "Continue".into(),
+            hints: IntentHints::default(),
+        })),
+        ..submit_request()
+    }
+}
+
+#[tokio::test]
+async fn locate_intent_without_intent_execute_capability_is_denied_before_dispatch() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let error = api
+        .submit(context, locate_intent_envelope(session.id))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(
+        error.required_capability,
+        Some(Capability::IntentExecute)
+    );
+    assert_eq!(api.submit_dispatch_count(), 0);
 }
