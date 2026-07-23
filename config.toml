@@ -35,6 +35,10 @@ max_screenshot_dimension = 16384
 # Maximum size, in bytes, of a JavaScript evaluation result before it is
 # truncated (see `js_engine::bound_result`).
 max_js_result_bytes = 65536
+# Hard upper bound, in milliseconds, on a single JavaScript evaluation's
+# timeout_ms. Requests exceeding this are clamped, not rejected, so a caller
+# cannot pin a worker lease open indefinitely with an unbounded timeout.
+max_js_timeout_ms = 30000
 
 [storage]
 # Append-only command journal.

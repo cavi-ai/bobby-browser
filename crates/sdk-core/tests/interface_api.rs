@@ -880,3 +880,166 @@ async fn non_privileged_command_needs_only_browser_mutate_to_clear_the_extra_cap
         "expected a non-privileged command to clear the extra capability gate, got {outcome:?}"
     );
 }
+
+// F4: RuntimeService's per-session ExecutionPolicy gate for EvaluateJavaScript, and its
+// composition with AuthenticatedRuntime's token capability gate. Both gates fire before any
+// browser dispatch, so these are provable with `RuntimeService::default()` / no worker pool:
+// any outcome other than `PolicyDenied` proves the session gate was cleared, and
+// `pages.execute` on an unconfigured `PageRuntime` can only ever produce `Failed`, never
+// `PolicyDenied` — so a `PolicyDenied` outcome is unambiguous proof the gate (not some
+// downstream failure) produced it.
+
+fn evaluate_javascript_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope {
+        session_id,
+        command: types::PrimitiveCommand::EvaluateJavaScript(types::EvaluateJavaScriptCommand {
+            expression: "1 + 1".into(),
+            timeout_ms: 1_000,
+            await_promise: false,
+        }),
+        ..submit_request()
+    }
+}
+
+#[tokio::test]
+async fn evaluate_javascript_is_policy_denied_for_a_session_that_was_never_created() {
+    // Fail-closed proof: no `create_session` call happened, so `self.sessions.get` returns
+    // `Err(NotFound)` for this session_id. The gate must treat that as deny, not as
+    // "skip the check" — a missing/evicted session must never be treated as an implicit
+    // allow just because there's nothing to look up.
+    let runtime = RuntimeService::default();
+
+    let outcome = runtime
+        .submit(evaluate_javascript_envelope(SessionId::new()))
+        .await;
+
+    assert!(
+        matches!(outcome, CommandOutcome::PolicyDenied { .. }),
+        "expected PolicyDenied (fail-closed) for an unknown session, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn evaluate_javascript_is_policy_denied_when_session_has_not_opted_in() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert!(!session.execution_policy.javascript_evaluation);
+
+    let outcome = runtime
+        .submit(evaluate_javascript_envelope(session.id))
+        .await;
+
+    assert!(
+        matches!(outcome, CommandOutcome::PolicyDenied { .. }),
+        "expected PolicyDenied for a session that has not opted into JS, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn evaluate_javascript_clears_the_session_policy_gate_when_opted_in() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: true,
+            },
+        })
+        .await
+        .unwrap();
+
+    let outcome = runtime
+        .submit(evaluate_javascript_envelope(session.id))
+        .await;
+
+    assert!(
+        !matches!(outcome, CommandOutcome::PolicyDenied { .. }),
+        "expected the session policy gate to be cleared for an opted-in session, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn evaluate_javascript_without_capability_is_denied_before_the_session_gate_runs() {
+    let runtime = RuntimeService::default();
+    // The session explicitly allows JS — proving the capability gate alone is enough to
+    // deny, independent of the session's policy.
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: types::ExecutionPolicy {
+                javascript_evaluation: true,
+            },
+        })
+        .await
+        .unwrap();
+
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let error = api
+        .submit(context, evaluate_javascript_envelope(session.id))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(
+        error.required_capability,
+        Some(Capability::JavascriptEvaluate)
+    );
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn evaluate_javascript_with_capability_but_js_off_session_is_policy_denied() {
+    let runtime = RuntimeService::default();
+    // The session explicitly denies JS (default) — proving the session gate independently
+    // blocks even a token that holds the capability.
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::JavascriptEvaluate,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    // No idempotency key, so this returns `Ok(outcome)` straight from `self.inner.submit`.
+    let outcome = api
+        .submit(context, evaluate_javascript_envelope(session.id))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, CommandOutcome::PolicyDenied { .. }),
+        "expected PolicyDenied: capability gate cleared, session gate must still block, got {outcome:?}"
+    );
+}

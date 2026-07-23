@@ -34,6 +34,7 @@ fn config(root: &tempfile::TempDir) -> AppConfig {
             max_artifact_bytes: 8 * 1024 * 1024,
             max_screenshot_dimension: 16_384,
             max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
         },
         storage: StorageConfig {
             journal_path: root.path().join("commands.jsonl"),

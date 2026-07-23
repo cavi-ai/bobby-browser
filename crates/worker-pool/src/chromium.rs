@@ -103,6 +103,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
                 self.config.max_screenshot_dimension,
             ),
             max_js_result_bytes: self.config.max_js_result_bytes,
+            max_js_timeout_ms: self.config.max_js_timeout_ms,
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
             http_state: Mutex::new(HttpBridgeState::default()),
@@ -119,6 +120,7 @@ struct ChromiumWorker {
     session_id: SessionId,
     artifacts: ArtifactStore,
     max_js_result_bytes: usize,
+    max_js_timeout_ms: u64,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
     http_state: Mutex<HttpBridgeState>,
@@ -711,21 +713,21 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     // SECURITY(F4): the two authoritative deny-by-default gates for JS
-    // evaluation are the token capability check (AuthenticatedRuntime) and
-    // the per-session ExecutionPolicy check (RuntimeService::submit). Both
-    // land in F4, which is not this task. A worker-level backstop was
-    // considered here for defense-in-depth, but ChromiumWorker is launched
-    // via `WorkerFactory::launch(&SessionId)` — it has no access to the
-    // session's ExecutionPolicy, and neither does anything upstream of it in
-    // this crate (page-runtime's `WorkerPool::lease` only threads a
-    // `SessionId`, not session state; session-manager, which owns
-    // `ExecutionPolicy`, isn't even a dependency of worker-pool or
-    // page-runtime today). Threading it in would mean changing the
-    // `WorkerFactory`/`WorkerPool::lease` signatures and pulling session
-    // state into worker-pool — real architectural surface that F4 already
-    // owns (per the design doc: "session storage"). Forcing it here would
-    // duplicate that work ahead of F4 landing it properly, so it is
-    // deliberately deferred rather than half-wired.
+    // evaluation — the token capability check (`AuthenticatedRuntime::submit`)
+    // and the per-session `ExecutionPolicy` check (`RuntimeService::submit`) —
+    // are enforced upstream of this worker; both land before `execute()` ever
+    // reaches a `BrowserWorker`. A worker-level backstop was considered here
+    // for defense-in-depth, but ChromiumWorker is launched via
+    // `WorkerFactory::launch(&SessionId)` — it has no access to the session's
+    // ExecutionPolicy, and neither does anything upstream of it in this crate
+    // (page-runtime's `WorkerPool::lease` only threads a `SessionId`, not
+    // session state; session-manager, which owns `ExecutionPolicy`, isn't
+    // even a dependency of worker-pool or page-runtime today). Threading it
+    // in would mean changing the `WorkerFactory`/`WorkerPool::lease`
+    // signatures and pulling session state into worker-pool — real
+    // architectural surface. The worker-level backstop remains deliberately
+    // absent per that design tradeoff; the two gates above are relied on as
+    // authoritative.
     async fn evaluate_javascript(
         &self,
         page_id: &PageId,
@@ -738,15 +740,19 @@ impl BrowserWorker for ChromiumWorker {
         params.await_promise = Some(command.await_promise);
         params.return_by_value = Some(true);
 
-        let value: serde_json::Value = tokio::time::timeout(
-            Duration::from_millis(command.timeout_ms),
-            page.evaluate(params),
-        )
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))?
-        .map_err(command_failed)?
-        .into_value()
-        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        // DoS clamp: a caller-supplied `timeout_ms` is otherwise unbounded, which would
+        // let a valid (capability- and policy-cleared) caller pin a worker lease open
+        // arbitrarily long. Clamp to the configured ceiling rather than rejecting — the
+        // command still runs, just under the same bound every other evaluation is held to.
+        let timeout_ms = clamp_js_timeout_ms(command.timeout_ms, self.max_js_timeout_ms);
+
+        let value: serde_json::Value =
+            tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(params))
+                .await
+                .map_err(|_| timeout_error(timeout_ms))?
+                .map_err(command_failed)?
+                .into_value()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
 
         let (value, truncated) = js_engine::bound_result(value, self.max_js_result_bytes);
         Ok(vec![Evidence::JavaScriptResult { value, truncated }])
@@ -1259,6 +1265,13 @@ fn closed_error() -> CommandError {
     }
 }
 
+/// DoS clamp for `EvaluateJavaScript::timeout_ms`: bounds a caller-requested timeout to the
+/// configured `max_js_timeout_ms` ceiling so a valid (capability- and policy-cleared) caller
+/// cannot pin a worker lease open indefinitely by requesting an arbitrarily large timeout.
+fn clamp_js_timeout_ms(requested_ms: u64, max_ms: u64) -> u64 {
+    requested_ms.min(max_ms)
+}
+
 fn timeout_error(timeout_ms: u64) -> CommandError {
     CommandError {
         code: ErrorCode::DeadlineExceeded,
@@ -1276,8 +1289,18 @@ mod tests {
         Cookie, CookiePriority, CookieSourceScheme,
     };
 
-    use super::{apply_state_commit, snapshot_cookie, text_matches, HttpBridgeState};
+    use super::{
+        apply_state_commit, clamp_js_timeout_ms, snapshot_cookie, text_matches, HttpBridgeState,
+    };
     use types::{ErrorCode, TextMatch};
+
+    #[test]
+    fn js_timeout_is_clamped_to_the_configured_ceiling_but_never_raised() {
+        assert_eq!(clamp_js_timeout_ms(120_000, 30_000), 30_000);
+        assert_eq!(clamp_js_timeout_ms(5_000, 30_000), 5_000);
+        assert_eq!(clamp_js_timeout_ms(u64::MAX, 30_000), 30_000);
+        assert_eq!(clamp_js_timeout_ms(0, 30_000), 0);
+    }
 
     #[test]
     fn wait_text_matchers_are_bounded_and_deterministic() {
