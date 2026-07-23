@@ -3102,6 +3102,7 @@ dependencies = [
  "config",
  "dom-engine",
  "futures",
+ "js-engine",
  "network-engine",
  "regex",
  "serde",

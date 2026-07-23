@@ -67,6 +67,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             artifacts_dir: artifacts_dir.clone(),
             max_artifact_bytes: 8 * 1024 * 1024,
             max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
         },
         storage: StorageConfig {
             journal_path: root.path().join("commands.jsonl"),

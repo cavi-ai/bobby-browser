@@ -32,6 +32,9 @@ artifacts_dir = "./data/artifacts"
 max_artifact_bytes = 8388608
 # Maximum width/height, in pixels, of a captured screenshot.
 max_screenshot_dimension = 16384
+# Maximum size, in bytes, of a JavaScript evaluation result before it is
+# truncated (see `js_engine::bound_result`).
+max_js_result_bytes = 65536
 
 [storage]
 # Append-only command journal.
