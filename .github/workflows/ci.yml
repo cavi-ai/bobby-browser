@@ -16,6 +16,7 @@ env:
 jobs:
   rust:
     name: build · test · lint
+    if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
