@@ -536,6 +536,7 @@ impl Server {
                         types::CreateSessionRequest {
                             profile: input.profile,
                             proxy: input.proxy,
+                            execution_policy: input.execution_policy,
                         },
                     )
                     .await
@@ -1000,6 +1001,8 @@ struct SessionCreateArgs {
     profile: String,
     #[serde(default)]
     proxy: Option<String>,
+    #[serde(default)]
+    execution_policy: types::ExecutionPolicy,
 }
 
 #[derive(Deserialize)]

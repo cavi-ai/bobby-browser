@@ -277,14 +277,24 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        13
+        16
     );
-    assert_eq!(
-        command_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
-            .as_array()
-            .unwrap()
-            .len(),
-        12
+    // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
+    // hand-listed schema that silently drops a variant (as `Configuration`,
+    // `BrowserExecution`, and `JavaScriptResult` previously were) makes
+    // `checkpoint_save` reject any evidence array containing that variant with
+    // `INVALID_PARAMS`, even though the type itself round-trips fine.
+    let evidence_variants = command_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
+        .as_array()
+        .unwrap();
+    assert_eq!(evidence_variants.len(), 15, "{evidence_variants:?}");
+    let evidence_kinds = evidence_variants
+        .iter()
+        .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        evidence_kinds.contains(&"javaScriptResult"),
+        "{evidence_kinds:?}"
     );
 
     let envelope = CommandEnvelope {
@@ -375,6 +385,125 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         .unwrap();
     assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
     assert_eq!(runtime.checkpoint_dispatch_count(), 0);
+}
+
+// F6: `session_create`'s MCP schema exposes an optional `executionPolicy` object that
+// maps into `CreateSessionRequest.execution_policy`. These two tests prove both sides of
+// deny-by-default at the MCP surface: an explicit grant is honored, and an omitted field
+// falls back to `ExecutionPolicy::default()` (deny).
+
+#[tokio::test]
+async fn session_create_with_execution_policy_grants_javascript_evaluation_on_the_stored_session() {
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+    let response = server
+        .handle_message(request(
+            60,
+            "tools/call",
+            json!({
+                "name":"session_create",
+                "arguments":{
+                    "profile":"fixture",
+                    "executionPolicy":{"javascriptEvaluation":true}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["execution_policy"]["javascriptEvaluation"], true,
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn session_create_without_execution_policy_denies_javascript_evaluation_by_default() {
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+    let response = server
+        .handle_message(request(
+            61,
+            "tools/call",
+            json!({
+                "name":"session_create",
+                "arguments":{"profile":"fixture"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["execution_policy"]["javascriptEvaluation"], false,
+        "{response}"
+    );
+}
+
+// Regression: `evidence_variants()` previously hand-listed only 12 of `Evidence`'s 15
+// variants, so `checkpoint_save`'s `evidence` array (which schema-validates against
+// `$defs/Evidence`) rejected any workflow that ran `evaluateJavaScript` and then tried
+// to checkpoint the resulting `Evidence::JavaScriptResult` — pre-dispatch, with
+// `INVALID_PARAMS`, before `runtime.checkpoint` was ever called.
+#[tokio::test]
+async fn checkpoint_save_schema_accepts_evidence_containing_a_javascript_result_item() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000021")),
+            [Capability::RecoveryWrite],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let server = Server::new(runtime.clone());
+    initialize(&server).await;
+
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: types::PageId::new(),
+        restart_url: "https://example.test/".to_owned(),
+        current_url: "https://example.test/".to_owned(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Reconciliable,
+        invariants: vec![],
+        replayable_inputs: vec![],
+        evidence: vec![],
+        recovery_history: vec![],
+        created_at: Utc::now(),
+    };
+    let evidence = vec![Evidence::JavaScriptResult {
+        value: json!({"answer": 42}),
+        truncated: false,
+    }];
+
+    let response = server
+        .handle_message(request(
+            54,
+            "tools/call",
+            json!({
+                "name":"checkpoint_save",
+                "arguments":{"checkpoint":checkpoint,"evidence":evidence}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // `RuntimeService::default()` has no `RecoveryCoordinator`, so the call still fails
+    // downstream (an interface error, not schema rejection) — the proof here is that
+    // validation let it through to dispatch at all: -32602 would mean the schema
+    // rejected the `javaScriptResult` evidence item before `runtime.checkpoint` ran.
+    assert_ne!(response["error"]["code"], -32602, "{response}");
+    assert_eq!(
+        runtime.checkpoint_dispatch_count(),
+        1,
+        "schema validation must accept a javaScriptResult evidence item and reach \
+         dispatch: {response}"
+    );
 }
 
 fn assert_closed_typed_objects(schema: &Value) {

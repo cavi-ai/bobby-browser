@@ -92,6 +92,7 @@ async fn build_with_worker_factory_consumes_the_injected_factory() {
         .create(CreateSessionRequest {
             profile: "injected".into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();

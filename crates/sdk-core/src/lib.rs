@@ -6,10 +6,10 @@ use page_runtime::{ExecutionPhaseObserver, PageRuntime};
 use page_runtime::{RecoveryCoordinator, RecoveryError};
 use session_manager::SessionManager;
 use types::{
-    AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence,
-    NavigateCommand, NavigationRequest, NavigationResult, OpenPageRequest, PageState,
-    PrimitiveCommand, RecoveryDecision, RuntimeError, RuntimeInfo, SessionState, WaitUntil,
-    WorkflowCheckpoint, WorkflowId,
+    AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CreateSessionRequest,
+    ErrorCode, ErrorLayer, Evidence, NavigateCommand, NavigationRequest, NavigationResult,
+    OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RuntimeError, RuntimeInfo,
+    SessionState, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{ChromiumWorkerFactory, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
@@ -163,6 +163,34 @@ impl RuntimeService {
     }
 
     pub async fn submit(&self, envelope: CommandEnvelope) -> CommandOutcome {
+        // SECURITY(F4): per-session execution-policy gate. This is the authoritative
+        // deny-by-default check for `EvaluateJavaScript` — a session must have explicitly
+        // opted in (`ExecutionPolicy.javascript_evaluation == true`) or the command is
+        // refused here, before it ever reaches `self.pages.execute` / a worker. This is
+        // independent of (and runs after) the token capability gate enforced in
+        // `AuthenticatedRuntime::submit`; both must pass. Fails closed: an unknown or
+        // absent session is treated as `javascript_evaluation == false`, not as "skip the
+        // gate" — `self.pages.execute` validates against its own independent page
+        // registry, not `SessionManager`, so it does not perform this check for us.
+        if matches!(envelope.command, PrimitiveCommand::EvaluateJavaScript(_)) {
+            let allowed = self
+                .sessions
+                .get(&envelope.session_id)
+                .await
+                .map(|session| session.execution_policy.javascript_evaluation)
+                .unwrap_or(false);
+            if !allowed {
+                return CommandOutcome::PolicyDenied {
+                    command_id: envelope.command_id.clone(),
+                    error: CommandError {
+                        code: ErrorCode::PolicyDenied,
+                        message: "javascript evaluation is not permitted for this session".into(),
+                        layer: ErrorLayer::Workflow,
+                        retryable: false,
+                    },
+                };
+            }
+        }
         self.pages.execute(envelope).await
     }
 

@@ -29,6 +29,7 @@ impl SessionManager {
             page_ids: Vec::new(),
             created_at: now,
             last_used_at: now,
+            execution_policy: req.execution_policy,
         };
         if let Some(workers) = &self.workers {
             workers

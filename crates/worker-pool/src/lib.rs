@@ -12,9 +12,10 @@ use network_engine::state::{HttpStateSnapshot, ResponseStateDelta};
 use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, Evidence, InspectCommand, ListPagesCommand,
-    NavigateCommand, OpenPageCommand, PageId, SessionId, SetEmulatedMediaCommand,
-    SetFocusEmulationCommand, TypeTextCommand, UploadFilesCommand, WaitForCommand, WorkerId,
+    ClickCommand, ClosePageCommand, CommandError, EvaluateJavaScriptCommand, Evidence,
+    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, SessionId,
+    SetEmulatedMediaCommand, SetFocusEmulationCommand, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand, WorkerId,
 };
 
 pub use chromium::ChromiumWorkerFactory;
@@ -157,6 +158,16 @@ pub trait BrowserWorker: Send + Sync {
         &self,
         _page_id: &PageId,
         _command: &SetEmulatedMediaCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    // ChromiumWorker overrides this (F3) via chromiumoxide EvaluateParams, bounded by
+    // `timeout_ms` and result-shaped through `js_engine::bound_result`. Every other
+    // worker keeps this default and refuses JS execution.
+    async fn evaluate_javascript(
+        &self,
+        _page_id: &PageId,
+        _command: &EvaluateJavaScriptCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }

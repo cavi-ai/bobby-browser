@@ -41,6 +41,8 @@ fn config(root: &tempfile::TempDir, max_download_bytes: usize) -> AppConfig {
             artifacts_dir: root.path().join("artifacts"),
             max_artifact_bytes: 8 * 1024 * 1024,
             max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
         },
         storage: StorageConfig {
             journal_path: root.path().join("commands.jsonl"),
@@ -87,6 +89,7 @@ async fn session_page(runtime: &RuntimeService, profile: &str) -> (SessionId, Pa
         .create_session(CreateSessionRequest {
             profile: profile.into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();

@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, ElementState, ErrorCode, Evidence, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId,
-    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
-    WaitUntil,
+    ClickCommand, ClosePageCommand, ElementState, ErrorCode, EvaluateJavaScriptCommand, Evidence,
+    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode,
+    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -64,6 +64,8 @@ async fn synchronizes_versioned_http_state() {
         artifacts_dir: root.path().join("artifacts"),
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -229,6 +231,8 @@ async fn correlates_popup_and_download_before_clicking() {
         artifacts_dir: root.path().join("artifacts"),
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -324,6 +328,8 @@ async fn drives_a_real_chromium_page() {
         artifacts_dir: profiles.path().join("artifacts"),
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -417,6 +423,8 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         artifacts_dir: root.path().join("artifacts"),
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -508,6 +516,8 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
         artifacts_dir: root.path().join("artifacts"),
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -586,6 +596,8 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
         artifacts_dir: root.path().join("artifacts"),
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&session_id).await.unwrap();
     let page_id = PageId::new();
@@ -666,6 +678,8 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         artifacts_dir: root.path().join("artifacts"),
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -743,5 +757,131 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         .await
         .unwrap();
     assert!(format!("{evidence:?}").contains("shadow-clicked"));
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 16,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<title>JS eval fixture</title>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    // A small result passes through untouched.
+    let evidence = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "1 + 1".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    match evidence.as_slice() {
+        [Evidence::JavaScriptResult { value, truncated }] => {
+            assert_eq!(value, &serde_json::json!(2));
+            assert!(!truncated);
+        }
+        other => panic!("expected a single JavaScriptResult evidence, got {other:?}"),
+    }
+
+    // A result larger than `max_js_result_bytes` (16 above) is truncated and flagged.
+    let evidence = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "'x'.repeat(1000)".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    match evidence.as_slice() {
+        [Evidence::JavaScriptResult { value, truncated }] => {
+            assert!(truncated);
+            assert!(matches!(value, serde_json::Value::String(_)));
+        }
+        other => panic!("expected a single JavaScriptResult evidence, got {other:?}"),
+    }
+
+    // await_promise=true resolves an awaited promise's value.
+    let evidence = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "Promise.resolve(41 + 1)".into(),
+                timeout_ms: 5_000,
+                await_promise: true,
+            },
+        )
+        .await
+        .unwrap();
+    match evidence.as_slice() {
+        [Evidence::JavaScriptResult { value, truncated }] => {
+            assert_eq!(value, &serde_json::json!(42));
+            assert!(!truncated);
+        }
+        other => panic!("expected a single JavaScriptResult evidence, got {other:?}"),
+    }
+
+    // A JS exception surfaces as a failed (non-panicking) CommandError, not a panic.
+    let error = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "throw new Error('boom')".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+
+    // A near-zero timeout classifies as a deadline-exceeded, retryable error.
+    let error = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "new Promise(() => {})".into(),
+                timeout_ms: 1,
+                await_promise: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+    assert!(error.retryable);
+
     worker.close().await.unwrap();
 }

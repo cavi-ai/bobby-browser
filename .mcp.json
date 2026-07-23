@@ -6,7 +6,6 @@
         "code-review-graph",
         "serve"
       ],
-      "cwd": "/Volumes/MIRZA/workspace/AI/automation-runtime",
       "type": "stdio"
     }
   }

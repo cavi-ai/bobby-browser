@@ -331,6 +331,12 @@ async fn browser_execute(
         PrimitiveCommand::SetEmulatedMedia(command) => {
             lease.worker().set_emulated_media(page_id, command).await?
         }
+        // ChromiumWorker::evaluate_javascript (F3) executes the JS; non-Chromium
+        // workers keep the default unsupported CommandError. The two policy gates
+        // (token capability, session ExecutionPolicy) land in F4.
+        PrimitiveCommand::EvaluateJavaScript(command) => {
+            lease.worker().evaluate_javascript(page_id, command).await?
+        }
         PrimitiveCommand::DownloadUrl(_) => return Err(equivalence_unproven(reason)),
     };
     let (bytes, sha256) = evidence

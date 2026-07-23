@@ -1,16 +1,25 @@
-# Automation Runtime
+# bobby-browser
 
-A browser automation runtime with five authenticated control surfaces:
+A browser automation runtime with authenticated, capability-scoped control
+surfaces:
 
 - Rust SDK
 - TypeScript SDK over HTTP
 - MCP over stdio
+- MCP over streamable HTTP (`POST /v1/mcp`) — the multi-tenant driver surface
 - Playwright over authenticated CDP
 - Puppeteer over authenticated CDP
 
 All adapters use the same capability, idempotency, evidence, checkpoint, and
 event contracts. Authentication and authorization fail closed; credentials are
-never accepted in URLs or query strings.
+never accepted in URLs or query strings. The runtime is **multi-principal**: a
+single instance serves many independent tenants, each with its own
+capability-scoped bearer token, per-principal in-flight quota, and a token store
+that survives restart.
+
+> **Alpha.** The interfaces and contracts described here are stable enough to
+> build against, but may still change before 1.0. See
+> [SECURITY.md](SECURITY.md) for the security model and reporting.
 
 ## Authentication bootstrap
 
@@ -25,8 +34,45 @@ Tokens bind one principal to an explicit capability set and expiry. Revocation
 and expiry are checked again at dispatch, including long-lived MCP and CDP
 connections. Typical least-privilege capabilities include `session:read`,
 `session:write`, `page:read`, `page:write`, `browser:mutate`, `file:upload`,
-`file:download`, `artifact:read`, `artifact:capture`, `recovery:read`, and
-`recovery:write`. JavaScript evaluation requires its own capability.
+`file:download`, `artifact:read`, `artifact:capture`, `recovery:read`,
+`recovery:write`, `javascript:evaluate`, and `authority:admin`.
+
+## Multi-principal token issuance
+
+The bootstrap credential holds `authority:admin` and is the only principal that
+can mint or revoke other tokens, over an authenticated HTTP surface:
+
+- `POST /v1/principals` issues a scoped bearer for a principal. Issuance is
+  capability-bounded: a token cannot mint `authority:admin`, the issued
+  capability set must be a **subset of the issuer's**, and the TTL is capped
+  (90 days). The bearer is returned exactly once in the response body.
+- `DELETE /v1/principals/{id}` revokes a principal; its bearers stop
+  authenticating immediately.
+
+Only SHA-256 hashes of issued bearers are persisted (atomic, owner-only writes),
+so tokens survive a runtime restart while revoked/expired records are compacted
+away. Each principal has an independent in-flight request quota
+(`interface.max_in_flight_per_principal`), so one tenant's burst cannot starve
+another. All issuance requests carry the standard authenticated headers
+(`Authorization`, `X-Interface-Version`, a bounded correlation id, a deadline,
+and an idempotency key for the mutating `POST`).
+
+## JavaScript evaluation
+
+Evaluating arbitrary JavaScript is **deny-by-default** and gated twice; both
+gates must pass:
+
+1. **Token capability** — the bearer must hold `javascript:evaluate`. Without
+   it, an `evaluateJavaScript` command is rejected (`MissingCapability`) before
+   any dispatch.
+2. **Per-session execution policy** — the session must have been created with
+   `executionPolicy.javascriptEvaluation = true`. A session created without an
+   explicit grant (the default) rejects JavaScript with `PolicyDenied`, even if
+   the token holds the capability. An unknown session fails closed.
+
+Execution is bounded: the result is size-capped (`browser.max_js_result_bytes`)
+and the run is time-capped (`browser.max_js_timeout_ms`). A successful run
+returns a `javaScriptResult` evidence item.
 
 ## Rust quick start
 
@@ -78,9 +124,30 @@ without leaking credentials.
 ```json
 {
   "mcpServers": {
-    "automation-runtime": {
+    "bobby-browser": {
       "command": "mcp-gateway",
       "env": { "AUTOMATION_RUNTIME_TOKEN": "${AUTOMATION_RUNTIME_TOKEN}" }
+    }
+  }
+}
+```
+
+## MCP over streamable HTTP
+
+For multi-tenant use, the served runtime exposes the same MCP tool surface over
+streamable HTTP at `POST /v1/mcp` with bearer-only auth — the driver surface for
+any harness that speaks MCP (Claude Code, Codex, OpenClaw, …). Each tenant needs
+only a URL and its scoped token; nothing is shipped to the client. One JSON-RPC
+message per `POST`; `GET` is unsupported. Server state is isolated per principal,
+and a rotated token resets that principal's MCP lifecycle (re-`initialize`).
+
+```json
+{
+  "mcpServers": {
+    "bobby-browser": {
+      "url": "http://127.0.0.1:7777/v1/mcp",
+      "transport": "streamable-http",
+      "headers": { "Authorization": "Bearer ${BOBBY_BROWSER_TOKEN}" }
     }
   }
 }
@@ -134,10 +201,22 @@ profiles, and CPU profiles belong under `benchmarks/raw/` and are ignored. Run
 `pnpm --filter @bobby-browser/interface-conformance test:release`; the concise
 summary printed by that release gate is the reproducible record.
 
+## Configuration
+
+`serve` loads `./config.toml` at startup, overridable with the
+`BOBBY_BROWSER_CONFIG` environment variable. A missing file uses built-in
+defaults; a malformed or invalid file fails startup loudly with the offending
+path named. The committed [`config.toml`](config.toml) documents every field and
+mirrors the `AppConfig` schema (`server`, `browser`, `storage`, `http`,
+`interface`). The bootstrap credential is supplied separately through the
+`AUTOMATION_RUNTIME_BOOTSTRAP_*` environment variables, never the config file.
+
 ## Run
 
 ```bash
 cargo run -p cli -- serve
+# or with an explicit config file:
+BOBBY_BROWSER_CONFIG=/path/to/config.toml cargo run -p cli -- serve
 ```
 
 Then open:

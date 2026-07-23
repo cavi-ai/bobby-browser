@@ -18,6 +18,7 @@ async fn main() {
             CreateSessionRequest {
                 profile: "conformance".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await

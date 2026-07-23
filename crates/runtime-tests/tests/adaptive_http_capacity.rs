@@ -33,6 +33,8 @@ fn config(root: &tempfile::TempDir) -> AppConfig {
             artifacts_dir: root.path().join("artifacts"),
             max_artifact_bytes: 8 * 1024 * 1024,
             max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
         },
         storage: StorageConfig {
             journal_path: root.path().join("commands.jsonl"),
@@ -88,6 +90,7 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
             .create_session(CreateSessionRequest {
                 profile: format!("capacity-{index}"),
                 proxy: None,
+                execution_policy: Default::default(),
             })
             .await
             .unwrap();
