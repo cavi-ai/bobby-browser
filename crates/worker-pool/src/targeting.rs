@@ -372,10 +372,18 @@ async fn open_target_scope(
     })
 }
 
-fn into_candidate(item: BrowserCandidate) -> Candidate {
+fn into_candidate(mut item: BrowserCandidate) -> Candidate {
+    // `data-bobby-target` is a per-gather instrumentation id we inject to
+    // locate elements within a single scan; it is re-assigned on every scan,
+    // so it must never be treated as a stable identity attribute or matched
+    // against in a later resolution pass.
+    item.attributes.remove("data-bobby-target");
+    let css = item
+        .css
+        .filter(|css| !css.contains("data-bobby-target"));
     Candidate {
         id: item.id,
-        css: item.css,
+        css,
         test_id: item.test_id,
         role: item.role,
         name: item.name,
@@ -663,5 +671,54 @@ fn target_error(code: ErrorCode, message: impl std::fmt::Display) -> CommandErro
         message: message.to_string(),
         layer: ErrorLayer::Driver,
         retryable: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn browser_candidate(css: Option<&str>, attributes: BTreeMap<String, String>) -> BrowserCandidate {
+        BrowserCandidate {
+            id: "1".into(),
+            css: css.map(str::to_owned),
+            test_id: None,
+            role: Some("textbox".into()),
+            name: Some("Name".into()),
+            label: None,
+            text: String::new(),
+            attributes,
+            attached: true,
+            visible: true,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn into_candidate_strips_the_per_gather_tracking_attribute_and_selector() {
+        let mut attributes = BTreeMap::new();
+        attributes.insert("data-bobby-target".to_owned(), "bobby-2-7".to_owned());
+        attributes.insert("type".to_owned(), "text".to_owned());
+        let raw = browser_candidate(Some("[data-bobby-target=\"bobby-2-7\"]"), attributes);
+
+        let candidate = into_candidate(raw);
+
+        assert_eq!(candidate.css, None);
+        assert_eq!(
+            candidate.attributes.get("data-bobby-target"),
+            None,
+            "tracking id is reassigned on every scan and must not be used for matching"
+        );
+        assert_eq!(candidate.attributes.get("type"), Some(&"text".to_owned()));
+    }
+
+    #[test]
+    fn into_candidate_preserves_a_real_element_id_selector() {
+        let attributes = BTreeMap::new();
+        let raw = browser_candidate(Some("#resume-upload"), attributes);
+
+        let candidate = into_candidate(raw);
+
+        assert_eq!(candidate.css, Some("#resume-upload".to_owned()));
     }
 }

@@ -67,7 +67,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 fn definitions() -> Value {
     json!({
         "CommandEnvelope": object(json!({
-            "schemaVersion":{"type":"integer","const":1},
+            "schemaVersion":{"type":"integer","const":2},
             "commandId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(),
             "pageId":nullable(id()),
             "deadline":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
