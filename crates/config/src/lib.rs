@@ -278,6 +278,7 @@ pub struct BrowserConfig {
     pub artifacts_dir: PathBuf,
     pub max_artifact_bytes: usize,
     pub max_screenshot_dimension: u32,
+    pub max_js_result_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +305,7 @@ impl Default for AppConfig {
                 artifacts_dir: PathBuf::from("./data/artifacts"),
                 max_artifact_bytes: 8 * 1024 * 1024,
                 max_screenshot_dimension: 16_384,
+                max_js_result_bytes: 64 * 1024,
             },
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),

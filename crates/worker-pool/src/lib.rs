@@ -161,10 +161,9 @@ pub trait BrowserWorker: Send + Sync {
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
-    // TODO(F3): implement for ChromiumWorker via chromiumoxide EvaluateParams, bounded
-    // by `timeout_ms` and result-shaped through `js_engine::bound_result`. Until then
-    // every worker refuses JS execution, which is correct: F1 wires only the types and
-    // the exhaustive-match plumbing, not execution.
+    // ChromiumWorker overrides this (F3) via chromiumoxide EvaluateParams, bounded by
+    // `timeout_ms` and result-shaped through `js_engine::bound_result`. Every other
+    // worker keeps this default and refuses JS execution.
     async fn evaluate_javascript(
         &self,
         _page_id: &PageId,

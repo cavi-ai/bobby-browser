@@ -88,6 +88,7 @@ async fn replaces_chrome_then_resumes_or_restarts_from_verified_state() {
             artifacts_dir: root.path().join("artifacts"),
             max_artifact_bytes: 8 * 1024 * 1024,
             max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
         })),
     ));
     let coordinator = RecoveryCoordinator::with_workers(store.clone(), pool.clone());

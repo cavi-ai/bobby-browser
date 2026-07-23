@@ -331,9 +331,9 @@ async fn browser_execute(
         PrimitiveCommand::SetEmulatedMedia(command) => {
             lease.worker().set_emulated_media(page_id, command).await?
         }
-        // TODO(F3/F5): the worker-pool default returns an unsupported CommandError
-        // until ChromiumWorker gets a real `evaluate_javascript` impl; the two policy
-        // gates (token capability, session ExecutionPolicy) land in F4.
+        // ChromiumWorker::evaluate_javascript (F3) executes the JS; non-Chromium
+        // workers keep the default unsupported CommandError. The two policy gates
+        // (token capability, session ExecutionPolicy) land in F4.
         PrimitiveCommand::EvaluateJavaScript(command) => {
             lease.worker().evaluate_javascript(page_id, command).await?
         }

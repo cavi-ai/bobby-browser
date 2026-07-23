@@ -20,6 +20,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
 };
 use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
 use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
+use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
@@ -32,10 +33,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode,
-    SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    ClickCommand, ClosePageCommand, CommandError, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand,
+    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence,
+    PageId, ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 
 use crate::{
@@ -101,6 +102,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
                 self.config.max_artifact_bytes,
                 self.config.max_screenshot_dimension,
             ),
+            max_js_result_bytes: self.config.max_js_result_bytes,
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
             http_state: Mutex::new(HttpBridgeState::default()),
@@ -116,6 +118,7 @@ struct ChromiumWorker {
     download_dir: PathBuf,
     session_id: SessionId,
     artifacts: ArtifactStore,
+    max_js_result_bytes: usize,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
     http_state: Mutex<HttpBridgeState>,
@@ -705,6 +708,48 @@ impl BrowserWorker for ChromiumWorker {
             value: serde_json::to_string(&command)
                 .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
         }])
+    }
+
+    // SECURITY(F4): the two authoritative deny-by-default gates for JS
+    // evaluation are the token capability check (AuthenticatedRuntime) and
+    // the per-session ExecutionPolicy check (RuntimeService::submit). Both
+    // land in F4, which is not this task. A worker-level backstop was
+    // considered here for defense-in-depth, but ChromiumWorker is launched
+    // via `WorkerFactory::launch(&SessionId)` — it has no access to the
+    // session's ExecutionPolicy, and neither does anything upstream of it in
+    // this crate (page-runtime's `WorkerPool::lease` only threads a
+    // `SessionId`, not session state; session-manager, which owns
+    // `ExecutionPolicy`, isn't even a dependency of worker-pool or
+    // page-runtime today). Threading it in would mean changing the
+    // `WorkerFactory`/`WorkerPool::lease` signatures and pulling session
+    // state into worker-pool — real architectural surface that F4 already
+    // owns (per the design doc: "session storage"). Forcing it here would
+    // duplicate that work ahead of F4 landing it properly, so it is
+    // deliberately deferred rather than half-wired.
+    async fn evaluate_javascript(
+        &self,
+        page_id: &PageId,
+        command: &EvaluateJavaScriptCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+
+        let mut params = EvaluateParams::new(command.expression.clone());
+        params.await_promise = Some(command.await_promise);
+        params.return_by_value = Some(true);
+
+        let value: serde_json::Value = tokio::time::timeout(
+            Duration::from_millis(command.timeout_ms),
+            page.evaluate(params),
+        )
+        .await
+        .map_err(|_| timeout_error(command.timeout_ms))?
+        .map_err(command_failed)?
+        .into_value()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+
+        let (value, truncated) = js_engine::bound_result(value, self.max_js_result_bytes);
+        Ok(vec![Evidence::JavaScriptResult { value, truncated }])
     }
 
     async fn http_state(&self, page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
