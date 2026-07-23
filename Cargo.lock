@@ -1186,15 +1186,10 @@ name = "intent-engine"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
  "dom-engine",
- "serde",
- "serde_json",
- "sha2",
  "thiserror",
  "tokio",
  "types",
- "uuid",
 ]
 
 [[package]]
@@ -1493,6 +1488,8 @@ dependencies = [
  "async-trait",
  "checkpoint-store",
  "chrono",
+ "dom-engine",
+ "intent-engine",
  "network-engine",
  "serde_json",
  "tempfile",

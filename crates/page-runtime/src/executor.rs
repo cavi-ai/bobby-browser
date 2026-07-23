@@ -357,9 +357,6 @@ impl PageRuntime {
                 return Err(validation_error("navigation URL scheme is not supported"));
             }
         }
-        if matches!(envelope.command, RuntimeCommand::Intent(_)) {
-            return Err(validation_error("intent commands are not yet supported"));
-        }
         if envelope.command.class() == CommandClass::Boundary {
             if let Some(checkpoints) = &self.checkpoints {
                 let checkpoint = checkpoints.load(&envelope.workflow_id).await.map_err(|_| {
@@ -388,7 +385,16 @@ impl PageRuntime {
     ) -> Result<Vec<Evidence>, CommandError> {
         let page_id = envelope.page_id.as_ref().expect("validated page id");
         let RuntimeCommand::Primitive(command) = &envelope.command else {
-            return Err(verification_error("intent commands are not yet supported"));
+            // IntentEngine owns verify for intent commands.
+            if evidence
+                .iter()
+                .any(|item| matches!(item, Evidence::IntentExecution { .. }))
+            {
+                return Ok(evidence);
+            }
+            return Err(verification_error(
+                "intent command returned no execution record",
+            ));
         };
         match command {
             PrimitiveCommand::Navigate(_) => match evidence.first() {

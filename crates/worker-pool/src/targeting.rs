@@ -250,27 +250,37 @@ pub async fn resolve_target(
     resolve_target_with_visibility(page_id, page, selector, target, true, browser).await
 }
 
-pub async fn resolve_target_with_visibility(
-    page_id: &PageId,
+/// Gather DOM candidates for intent resolution without choosing a match.
+pub async fn gather_candidates(
     page: &Page,
-    selector: &str,
-    target: Option<&TargetSpec>,
-    require_visible: bool,
+    target: &TargetSpec,
+    browser: Option<&mut Browser>,
+) -> Result<Vec<Candidate>, CommandError> {
+    let scope = open_target_scope(page, target, browser).await?;
+    let raw = collect_candidates(
+        &scope.execution_page,
+        scope.context_id,
+        &scope.shadow_hosts,
+        scope.scope_id,
+    )
+    .await?;
+    Ok(raw.into_iter().map(into_candidate).collect())
+}
+
+struct TargetScope {
+    execution_page: Page,
+    context_id: Option<ExecutionContextId>,
+    shadow_hosts: Vec<String>,
+    scope_id: u64,
+    frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
+    frame_trace: Vec<types::CandidateEvidence>,
+}
+
+async fn open_target_scope(
+    page: &Page,
+    target: &TargetSpec,
     mut browser: Option<&mut Browser>,
-) -> Result<ResolvedTarget, CommandError> {
-    let Some(target) = target else {
-        let element = page.find_element(selector).await.map_err(cdp_error)?;
-        return Ok(ResolvedTarget {
-            native: Some(element),
-            locator: JsLocator {
-                context_id: None,
-                shadow_hosts: Vec::new(),
-                id: String::new(),
-            },
-            execution_page: None,
-            evidence: selector_evidence(page_id, selector),
-        });
-    };
+) -> Result<TargetScope, CommandError> {
     if target.frame_path.len() > 8 || target.shadow_path.len() > 8 {
         return Err(target_error(
             ErrorCode::InvalidRequest,
@@ -278,7 +288,7 @@ pub async fn resolve_target_with_visibility(
         ));
     }
 
-    let scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
+    let scope_id = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
     let main_frame = page
         .mainframe()
         .await
@@ -291,7 +301,7 @@ pub async fn resolve_target_with_visibility(
     let mut frame_trace = Vec::new();
 
     for (index, frame_target) in target.frame_path.iter().enumerate() {
-        let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope).await?;
+        let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?;
         let (candidate, evidence, _) = choose(frame_target, raw, true)?;
         frame_trace.push(evidence);
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -332,7 +342,7 @@ pub async fn resolve_target_with_visibility(
     }
 
     for (index, host_target) in target.shadow_path.iter().enumerate() {
-        let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope).await?;
+        let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?;
         let (candidate, evidence, _) = choose(host_target, raw, true)?;
         let mut prospective = shadow_hosts.clone();
         prospective.push(candidate.id.clone());
@@ -352,9 +362,66 @@ pub async fn resolve_target_with_visibility(
         frame_trace.push(evidence);
     }
 
+    Ok(TargetScope {
+        execution_page,
+        context_id,
+        shadow_hosts,
+        scope_id,
+        frame_id,
+        frame_trace,
+    })
+}
+
+fn into_candidate(item: BrowserCandidate) -> Candidate {
+    Candidate {
+        id: item.id,
+        css: item.css,
+        test_id: item.test_id,
+        role: item.role,
+        name: item.name,
+        label: item.label,
+        text: item.text,
+        attributes: item.attributes,
+        state: CandidateState {
+            attached: item.attached,
+            visible: item.visible,
+            enabled: item.enabled,
+        },
+    }
+}
+
+pub async fn resolve_target_with_visibility(
+    page_id: &PageId,
+    page: &Page,
+    selector: &str,
+    target: Option<&TargetSpec>,
+    require_visible: bool,
+    browser: Option<&mut Browser>,
+) -> Result<ResolvedTarget, CommandError> {
+    let Some(target) = target else {
+        let element = page.find_element(selector).await.map_err(cdp_error)?;
+        return Ok(ResolvedTarget {
+            native: Some(element),
+            locator: JsLocator {
+                context_id: None,
+                shadow_hosts: Vec::new(),
+                id: String::new(),
+            },
+            execution_page: None,
+            evidence: selector_evidence(page_id, selector),
+        });
+    };
+
+    let scope = open_target_scope(page, target, browser).await?;
     let deadline = Instant::now() + Duration::from_secs(2);
     let (candidate, evidence, best_match_authorized) = loop {
-        let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope).await?;
+        let raw = collect_candidates(
+            &scope.execution_page,
+            scope.context_id,
+            &scope.shadow_hosts,
+            scope.scope_id,
+        )
+        .await?;
         match choose(target, raw, require_visible) {
             Ok(resolved) => break resolved,
             Err(error) if error.code == ErrorCode::TargetNotFound && Instant::now() < deadline => {
@@ -364,13 +431,13 @@ pub async fn resolve_target_with_visibility(
         }
     };
     let locator = JsLocator {
-        context_id,
-        shadow_hosts,
+        context_id: scope.context_id,
+        shadow_hosts: scope.shadow_hosts,
         id: candidate.id.clone(),
     };
     let native = if target.frame_path.is_empty() && target.shadow_path.is_empty() {
         match candidate.css.as_deref() {
-            Some(css) => execution_page.find_element(css).await.ok(),
+            Some(css) => scope.execution_page.find_element(css).await.ok(),
             None => None,
         }
     } else {
@@ -378,16 +445,18 @@ pub async fn resolve_target_with_visibility(
     };
     let fingerprint = TargetFingerprint {
         page_id: page_id.clone(),
-        frame: (!target.frame_path.is_empty()).then(|| format!("{:?}", frame_id)),
+        frame: (!target.frame_path.is_empty()).then(|| format!("{:?}", scope.frame_id)),
         role: candidate.role.clone(),
         name: candidate.name.clone(),
         stable_attributes: candidate.attributes.clone(),
     };
+    let mut frame_trace = scope.frame_trace;
     frame_trace.push(evidence);
     Ok(ResolvedTarget {
         native,
         locator,
-        execution_page: (execution_page.target_id() != page.target_id()).then_some(execution_page),
+        execution_page: (scope.execution_page.target_id() != page.target_id())
+            .then_some(scope.execution_page),
         evidence: Evidence::Resolution {
             target: Box::new(target.clone()),
             fingerprint: Box::new(fingerprint),
@@ -402,24 +471,7 @@ fn choose(
     raw: Vec<BrowserCandidate>,
     require_visible: bool,
 ) -> Result<(Candidate, types::CandidateEvidence, bool), CommandError> {
-    let candidates = raw
-        .into_iter()
-        .map(|item| Candidate {
-            id: item.id,
-            css: item.css,
-            test_id: item.test_id,
-            role: item.role,
-            name: item.name,
-            label: item.label,
-            text: item.text,
-            attributes: item.attributes,
-            state: CandidateState {
-                attached: item.attached,
-                visible: item.visible,
-                enabled: item.enabled,
-            },
-        })
-        .collect::<Vec<_>>();
+    let candidates = raw.into_iter().map(into_candidate).collect::<Vec<_>>();
     let policy = ResolutionPolicy {
         require_visible,
         ..ResolutionPolicy::default()

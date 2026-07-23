@@ -41,7 +41,10 @@ use types::{
 
 use crate::{
     resolve_upload_paths, session_download_dir,
-    targeting::{resolve_target as resolve_browser_target, resolve_target_with_visibility},
+    targeting::{
+        gather_candidates, resolve_target as resolve_browser_target,
+        resolve_target_with_visibility,
+    },
     BrowserWorker, WorkerFactory,
 };
 
@@ -576,6 +579,18 @@ impl BrowserWorker for ChromiumWorker {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let mut browser = self.browser.lock().await;
+        let browser = browser.as_mut().ok_or_else(closed_error)?;
+        gather_candidates(page, target, Some(browser)).await
     }
 
     async fn capture_screenshot(
