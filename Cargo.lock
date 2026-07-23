@@ -1927,6 +1927,7 @@ dependencies = [
  "companion-protocol",
  "config",
  "futures-util",
+ "intent-engine",
  "interface-conformance",
  "interface-core",
  "libc",

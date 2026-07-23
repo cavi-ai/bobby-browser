@@ -21,6 +21,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
 use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
 use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
@@ -281,6 +282,29 @@ impl BrowserWorker for ChromiumWorker {
             },
             resolved.evidence,
         ])
+    }
+
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "vision click coordinates must be finite",
+            ));
+        }
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        page.click(Point { x, y })
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(vec![Evidence::Configuration {
+            name: "visionClick".into(),
+            value: format!("{x},{y}"),
+        }])
     }
 
     async fn type_text(

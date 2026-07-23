@@ -50,16 +50,11 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
 
     async fn click_xy(
         &self,
-        _page_id: &PageId,
-        _x: f64,
-        _y: f64,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Err(CommandError {
-            code: ErrorCode::Internal,
-            message: "coordinate click is not implemented on the worker intent adapter".into(),
-            layer: ErrorLayer::Page,
-            retryable: false,
-        })
+        self.lease.worker().click_xy(page_id, x, y).await
     }
 
     async fn type_text(

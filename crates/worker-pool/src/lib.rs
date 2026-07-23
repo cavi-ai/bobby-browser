@@ -92,6 +92,15 @@ pub trait BrowserWorker: Send + Sync {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
+    /// Coordinate click used by vision fallback proposals.
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
     async fn type_text(
         &self,
         page_id: &PageId,
