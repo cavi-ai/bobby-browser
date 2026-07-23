@@ -286,6 +286,11 @@ pub enum ErrorCode {
     HttpTransferFailed,
     HttpStateConflict,
     HttpEquivalenceUnproven,
+    IntentCompileFailed,
+    IntentActionMismatch,
+    ObstructionSuspected,
+    VisionAssistDenied,
+    VisionAssistFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

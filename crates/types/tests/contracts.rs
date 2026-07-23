@@ -1,9 +1,9 @@
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 use types::{
-    AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
+    AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, CreateSessionRequest, DownloadUrlCommand, ElementState,
+    CommandId, CommandOutcome, CreateSessionRequest, DownloadUrlCommand, ElementState, ErrorCode,
     EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy, ExecutionReason,
     InspectCommand, ListPagesCommand, OpenPageCommand, PageId, PrimitiveCommand, ScreenshotMode,
     SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
@@ -455,11 +455,54 @@ fn javascript_result_evidence_round_trips_as_camel_case() {
 }
 
 #[test]
+fn intent_and_vision_capabilities_round_trip() {
+    assert_eq!(
+        serde_json::to_string(&Capability::IntentExecute).unwrap(),
+        "\"intent:execute\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::VisionAssist).unwrap(),
+        "\"vision:assist\""
+    );
+    assert_eq!(Capability::IntentExecute.as_str(), "intent:execute");
+    assert_eq!(Capability::VisionAssist.as_str(), "vision:assist");
+}
+
+#[test]
+fn execution_policy_defaults_deny_vision() {
+    let policy = ExecutionPolicy::default();
+    assert!(!policy.javascript_evaluation);
+    assert!(!policy.vision_assist);
+    let value = serde_json::to_value(&policy).unwrap();
+    assert_eq!(value["visionAssist"], false);
+    let parsed: ExecutionPolicy = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(parsed, ExecutionPolicy::default());
+}
+
+#[test]
+fn intent_error_codes_round_trip() {
+    for code in [
+        ErrorCode::IntentCompileFailed,
+        ErrorCode::IntentActionMismatch,
+        ErrorCode::ObstructionSuspected,
+        ErrorCode::VisionAssistDenied,
+        ErrorCode::VisionAssistFailed,
+    ] {
+        let value = serde_json::to_value(code).unwrap();
+        let parsed: ErrorCode = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, code);
+    }
+}
+
+#[test]
 fn execution_policy_defaults_to_deny() {
     assert!(!ExecutionPolicy::default().javascript_evaluation);
 
     let value = serde_json::to_value(ExecutionPolicy::default()).unwrap();
-    assert_eq!(value, json!({"javascriptEvaluation": false}));
+    assert_eq!(
+        value,
+        json!({"javascriptEvaluation": false, "visionAssist": false})
+    );
 
     let explicit_grant: ExecutionPolicy =
         serde_json::from_value(json!({"javascriptEvaluation": true})).unwrap();

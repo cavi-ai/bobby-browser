@@ -327,6 +327,8 @@ pub struct EvaluateJavaScriptCommand {
 pub struct ExecutionPolicy {
     #[serde(default)]
     pub javascript_evaluation: bool,
+    #[serde(default)]
+    pub vision_assist: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
