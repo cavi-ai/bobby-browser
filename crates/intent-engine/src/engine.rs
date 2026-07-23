@@ -103,15 +103,12 @@ impl IntentEngine {
             IntentPlan::Fill { target, value } => {
                 execute_fill(intent, page_id, browser, target, value).await
             }
-            IntentPlan::SubmitAndVerify { .. } => IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::Internal,
-                    message: "not yet implemented".into(),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence: Vec::new(),
-            },
+            IntentPlan::SubmitAndVerify {
+                target,
+                expected_state,
+            } => {
+                execute_submit_and_verify(intent, page_id, browser, target, expected_state).await
+            }
         }
     }
 }
@@ -457,6 +454,185 @@ fn fill_kind(value: &FillValue) -> &'static str {
         FillValue::Text { .. } => "text",
         FillValue::Select { .. } => "select",
         FillValue::Files { .. } => "files",
+    }
+}
+
+async fn execute_submit_and_verify(
+    intent: &IntentCommand,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: TargetSpec,
+    expected_state: WaitForCommand,
+) -> IntentOutcome {
+    let purpose = match intent {
+        IntentCommand::SubmitAndVerify(submit) => Some(submit.purpose.clone()),
+        _ => None,
+    };
+    let plan_summary = format!(
+        "{} expected_state={}",
+        summarize_target(&target),
+        wait_condition_kind(&expected_state.condition)
+    );
+    let candidates = match browser.collect_candidates(page_id, &target).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: vec![intent_evidence(execution_record(
+                    "submitAndVerify",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "gatherFailed",
+                ))],
+            };
+        }
+    };
+
+    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::InvalidRequest,
+                    message: error.to_string(),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: vec![intent_evidence(execution_record(
+                    "submitAndVerify",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "resolveFailed",
+                ))],
+            };
+        }
+    };
+
+    let (candidate, candidate_evidence, best_match_authorized) = match decision {
+        ResolutionDecision::Resolved {
+            candidate,
+            evidence,
+            best_match_authorized,
+        } => (candidate, evidence, best_match_authorized),
+        ResolutionDecision::NotFound => {
+            return stuck_outcome(
+                "submitAndVerify",
+                StuckKind::TargetMissing,
+                purpose,
+                plan_summary,
+                Vec::new(),
+                "targetNotFound",
+            );
+        }
+        ResolutionDecision::Ambiguous { candidates } => {
+            return stuck_outcome(
+                "submitAndVerify",
+                StuckKind::TargetAmbiguous,
+                purpose,
+                plan_summary,
+                candidates,
+                "targetAmbiguous",
+            );
+        }
+    };
+
+    let fingerprint = fingerprint(page_id, &candidate);
+    let resolution = Evidence::Resolution {
+        target: Box::new(target.clone()),
+        fingerprint: Box::new(fingerprint),
+        candidates: vec![candidate_evidence.clone()],
+        best_match_authorized,
+    };
+
+    let (selector, action_target) = action_target(&candidate);
+    let click = ClickCommand {
+        selector,
+        target: Some(action_target),
+        boundary: true,
+        expected_url: expected_url_from_wait(&expected_state),
+    };
+    let mut click_evidence = match browser.click(page_id, &click).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: vec![
+                    resolution,
+                    intent_evidence(execution_record(
+                        "submitAndVerify",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "actFailed",
+                    )),
+                ],
+            };
+        }
+    };
+
+    let mut wait_evidence = match browser.wait_for(page_id, &expected_state).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: {
+                    let mut evidence = vec![resolution];
+                    evidence.append(&mut click_evidence);
+                    evidence.push(intent_evidence(execution_record(
+                        "submitAndVerify",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "verifyFailed",
+                    )));
+                    evidence
+                },
+            };
+        }
+    };
+
+    let wait_elapsed_ms = wait_evidence.iter().find_map(|item| match item {
+        Evidence::Wait { elapsed_ms, .. } => Some(*elapsed_ms),
+        _ => None,
+    });
+
+    let mut evidence = vec![resolution];
+    evidence.append(&mut click_evidence);
+    evidence.append(&mut wait_evidence);
+    evidence.push(intent_evidence(execution_record(
+        "submitAndVerify",
+        purpose,
+        plan_summary,
+        vec![candidate_evidence],
+        wait_elapsed_ms,
+        "submitted",
+    )));
+    IntentOutcome::Completed { evidence }
+}
+
+fn expected_url_from_wait(wait: &WaitForCommand) -> Option<String> {
+    match &wait.condition {
+        types::WaitCondition::Url {
+            matcher: types::TextMatch::Exact(url),
+        } => Some(url.clone()),
+        _ => None,
+    }
+}
+
+fn wait_condition_kind(condition: &types::WaitCondition) -> &'static str {
+    match condition {
+        types::WaitCondition::Element { .. } => "element",
+        types::WaitCondition::Text { .. } => "text",
+        types::WaitCondition::Value { .. } => "value",
+        types::WaitCondition::Url { .. } => "url",
+        types::WaitCondition::Document { .. } => "document",
+        types::WaitCondition::NetworkQuiet { .. } => "networkQuiet",
     }
 }
 
