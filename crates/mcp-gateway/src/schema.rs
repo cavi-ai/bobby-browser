@@ -20,7 +20,11 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "session_create" => (
             json!({
                 "profile": string(1, 128),
-                "proxy": nullable(string(0, 2048))
+                "proxy": nullable(string(0, 2048)),
+                "executionPolicy": object(
+                    json!({"javascriptEvaluation":{"type":"boolean"}}),
+                    &[]
+                )
             }),
             vec!["profile"],
         ),
@@ -183,6 +187,31 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input(
             "captureScreenshot",
             object(json!({"mode":{"$ref":"#/$defs/ScreenshotMode"}}), &["mode"]),
+        ),
+        tagged_input(
+            "setFocusEmulation",
+            object(json!({"enabled":{"type":"boolean"}}), &["enabled"]),
+        ),
+        tagged_input(
+            "setEmulatedMedia",
+            object(
+                json!({
+                    "media":string(0, 256),
+                    "features":{"type":"object","maxProperties":64,"propertyNames":{"maxLength":128},"additionalProperties":string(0, MAX_STRING_BYTES)}
+                }),
+                &["media", "features"],
+            ),
+        ),
+        tagged_input(
+            "evaluateJavaScript",
+            object(
+                json!({
+                    "expression":string(1, MAX_STRING_BYTES),
+                    "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS},
+                    "awaitPromise":{"type":"boolean"}
+                }),
+                &["expression", "timeoutMs", "awaitPromise"],
+            ),
         ),
     ]
 }
@@ -356,6 +385,26 @@ fn evidence_variants() -> Vec<Value> {
                 "sha256",
             ],
         ),
+        tagged_fields(
+            "configuration",
+            json!({"name":string(0,MAX_STRING_BYTES),"value":string(0,MAX_STRING_BYTES)}),
+            &["name", "value"],
+        ),
+        tagged_fields(
+            "browserExecution",
+            json!({
+                "engine":string(0,MAX_STRING_BYTES),
+                "browserVersion":string(0,MAX_STRING_BYTES),
+                "profileId":string(0,MAX_STRING_BYTES),
+                "interactionPath":string(0,MAX_STRING_BYTES)
+            }),
+            &["engine", "browserVersion", "profileId", "interactionPath"],
+        ),
+        tagged_fields(
+            "javaScriptResult",
+            json!({"value":any_value(),"truncated":{"type":"boolean"}}),
+            &["value", "truncated"],
+        ),
     ]
 }
 
@@ -431,6 +480,12 @@ fn array(items: Value, max: usize) -> Value {
 }
 fn nullable(schema: Value) -> Value {
     json!({"oneOf":[schema,{"type":"null"}]})
+}
+/// An unconstrained schema (no `type`, `oneOf`, `const`, or `enum`) — `validate` accepts
+/// any JSON value against it. Used for `Evidence::JavaScriptResult.value`, which carries
+/// an arbitrary `serde_json::Value` produced by evaluated JavaScript.
+fn any_value() -> Value {
+    json!({})
 }
 fn finite_number() -> Value {
     json!({"type":"number","minimum":-1000000000.0,"maximum":1000000000.0})
