@@ -951,6 +951,7 @@ async fn evaluate_javascript_clears_the_session_policy_gate_when_opted_in() {
             proxy: None,
             execution_policy: types::ExecutionPolicy {
                 javascript_evaluation: true,
+                vision_assist: false,
             },
         })
         .await
@@ -977,6 +978,7 @@ async fn evaluate_javascript_without_capability_is_denied_before_the_session_gat
             proxy: None,
             execution_policy: types::ExecutionPolicy {
                 javascript_evaluation: true,
+                vision_assist: false,
             },
         })
         .await

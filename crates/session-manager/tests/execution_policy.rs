@@ -35,6 +35,7 @@ async fn create_with_explicit_javascript_grant_stores_it_on_the_session() {
             proxy: None,
             execution_policy: ExecutionPolicy {
                 javascript_evaluation: true,
+                vision_assist: false,
             },
         })
         .await
