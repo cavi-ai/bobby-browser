@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{PageId, SessionId};
+use crate::{ExecutionPolicy, PageId, SessionId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PageMode {
@@ -27,6 +27,7 @@ pub struct SessionState {
     pub page_ids: Vec<PageId>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
+    pub execution_policy: ExecutionPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

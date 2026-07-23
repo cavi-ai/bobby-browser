@@ -277,6 +277,7 @@ fn command_extra_capability(command: &PrimitiveCommand) -> Option<Capability> {
         PrimitiveCommand::UploadFiles(_) => Some(Capability::FileUpload),
         PrimitiveCommand::DownloadUrl(_) => Some(Capability::FileDownload),
         PrimitiveCommand::ClickAndWaitForDownload(_) => Some(Capability::FileDownload),
+        PrimitiveCommand::EvaluateJavaScript(_) => Some(Capability::JavascriptEvaluate),
         PrimitiveCommand::Navigate(_)
         | PrimitiveCommand::Inspect(_)
         | PrimitiveCommand::Click(_)

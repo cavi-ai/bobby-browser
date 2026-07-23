@@ -88,6 +88,7 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
             .create_session(CreateSessionRequest {
                 profile: format!("capacity-{index}"),
                 proxy: None,
+                execution_policy: Default::default(),
             })
             .await
             .unwrap();

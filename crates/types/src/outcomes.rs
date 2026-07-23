@@ -135,6 +135,10 @@ pub enum Evidence {
         profile_id: String,
         interaction_path: String,
     },
+    JavaScriptResult {
+        value: serde_json::Value,
+        truncated: bool,
+    },
 }
 
 impl Evidence {

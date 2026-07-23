@@ -397,6 +397,7 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
             runtime.create_session(CreateSessionRequest {
                 profile: format!("warm-{index}"),
                 proxy: None,
+                execution_policy: Default::default(),
             }),
         )
         .await

@@ -299,6 +299,7 @@ async fn runtime_errors_are_mapped_without_dispatch_outcome_flattening() {
             CreateSessionRequest {
                 profile: "interface-test".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await
@@ -371,6 +372,7 @@ async fn authenticated_session_creation_populates_the_trusted_ownership_authorit
             CreateSessionRequest {
                 profile: "owned-session".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await
@@ -426,6 +428,7 @@ async fn session_owned_runtime_hides_and_rejects_another_principals_session() {
             CreateSessionRequest {
                 profile: "owner".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await
@@ -467,6 +470,7 @@ async fn full_ownership_registry_refuses_before_runtime_session_dispatch() {
             CreateSessionRequest {
                 profile: "must-not-dispatch".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await
@@ -488,6 +492,7 @@ async fn runtime_session_failure_releases_the_ownership_reservation() {
             CreateSessionRequest {
                 profile: "fails-once".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await
@@ -498,6 +503,7 @@ async fn runtime_session_failure_releases_the_ownership_reservation() {
             CreateSessionRequest {
                 profile: "reservation-reused".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await
@@ -521,6 +527,7 @@ async fn forced_finalize_failure_rolls_back_the_live_session_and_worker() {
             CreateSessionRequest {
                 profile: "rollback-finalize".into(),
                 proxy: None,
+                execution_policy: Default::default(),
             },
         )
         .await

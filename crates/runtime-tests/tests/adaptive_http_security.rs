@@ -87,6 +87,7 @@ async fn session_page(runtime: &RuntimeService, profile: &str) -> (SessionId, Pa
         .create_session(CreateSessionRequest {
             profile: profile.into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();
