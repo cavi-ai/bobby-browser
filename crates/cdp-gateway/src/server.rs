@@ -901,7 +901,7 @@ impl CdpConnection {
                 let inspect_id = CommandId::new();
                 let command_id = CommandId::new();
                 let evidence = match self.runtime.submit(ctx.clone(), CommandEnvelope {
-                    schema_version:1, command_id:inspect_id.clone(), workflow_id:workflow_id.clone(), attempt_id:attempt_id.clone(),
+                    schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:inspect_id.clone(), workflow_id:workflow_id.clone(), attempt_id:attempt_id.clone(),
                     session_id:session_id.clone(), page_id:Some(page_id.clone()), deadline:Utc::now()+Duration::seconds(30),
                     command:RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
                 }).await {

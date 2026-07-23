@@ -253,7 +253,7 @@ fn command_envelope_uses_stable_camel_case_json() {
     };
 
     let value = serde_json::to_value(envelope).unwrap();
-    assert_eq!(value["schemaVersion"], json!(1));
+    assert_eq!(value["schemaVersion"], json!(2));
     assert_eq!(value["commandId"], json!(uuid(1)));
     assert_eq!(value["sessionId"], json!(uuid(4)));
     assert_eq!(value["pageId"], json!(uuid(5)));
@@ -646,7 +646,7 @@ fn locate_runtime_command_envelope_golden_json() {
     assert_eq!(
         value,
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "commandId": uuid(1),
             "workflowId": uuid(2),
             "attemptId": uuid(3),

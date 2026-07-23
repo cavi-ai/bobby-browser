@@ -31,13 +31,13 @@ async function withServer(
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { "content-type": "application/json", "x-interface-version": "2026-07-17" });
+  response.writeHead(status, { "content-type": "application/json", "x-interface-version": "2026-07-23" });
   response.end(JSON.stringify(body));
 }
 
 function envelope(): CommandEnvelope {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     commandId: COMMAND_ID,
     workflowId: WORKFLOW_ID,
     attemptId: ATTEMPT_ID,

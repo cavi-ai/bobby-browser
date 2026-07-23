@@ -20,7 +20,7 @@ pub struct CommandEnvelope {
 }
 
 impl CommandEnvelope {
-    pub const SCHEMA_VERSION: u16 = 1;
+    pub const SCHEMA_VERSION: u16 = 2;
 
     /// Returns an envelope suitable for durable journals and diagnostics.
     /// The live envelope must remain in memory for execution.

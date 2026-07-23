@@ -15,7 +15,7 @@ fn request_context_and_errors_have_stable_wire_contracts() {
     );
 
     let json = serde_json::to_value(&context).unwrap();
-    assert_eq!(json["interfaceVersion"], "2026-07-17");
+    assert_eq!(json["interfaceVersion"], "2026-07-23");
     assert_eq!(json["capabilities"], json!(["page:write", "session:read"]));
     assert!(json.get("bearerToken").is_none());
 

@@ -75,7 +75,7 @@ fn error(code: ErrorCode) -> CommandError {
 
 fn envelope() -> CommandEnvelope {
     CommandEnvelope {
-        schema_version: 1,
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),

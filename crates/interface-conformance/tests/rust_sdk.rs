@@ -67,7 +67,7 @@ async fn rust_sdk_executes_every_canonical_step_on_real_chrome() {
             measured.push(sample);
         }
         let cleanup = CommandEnvelope {
-            schema_version: 1,
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
             command_id: CommandId::new(),
             workflow_id: WorkflowId::new(),
             attempt_id: AttemptId::new(),
@@ -106,7 +106,7 @@ async fn run_rust_sample(
     let workflow = WorkflowId::new();
     let attempt = AttemptId::new();
     let envelope = |id: CommandId, command: PrimitiveCommand| CommandEnvelope {
-        schema_version: 1,
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: id,
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
@@ -179,7 +179,7 @@ async fn run_rust_sample(
     observed.push("command.boundary");
     let popup_id = CommandId::new();
     let popup_checkpoint = WorkflowCheckpoint {
-        schema_version: 1,
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
@@ -245,7 +245,7 @@ async fn run_rust_sample(
         .unwrap();
     let boundary_id = CommandId::new();
     let checkpoint = WorkflowCheckpoint {
-        schema_version: 1,
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),

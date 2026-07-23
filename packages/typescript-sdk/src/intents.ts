@@ -125,7 +125,7 @@ export function intentEnvelope(meta: IntentEnvelopeMeta, command: RuntimeCommand
     throw new Error('intentEnvelope requires RuntimeCommand with kind "intent"');
   }
   return {
-    schemaVersion: meta.schemaVersion ?? 1,
+    schemaVersion: meta.schemaVersion ?? 2,
     commandId: meta.commandId,
     workflowId: meta.workflowId,
     attemptId: meta.attemptId,

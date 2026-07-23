@@ -298,7 +298,7 @@ async fn broker_disconnect_after_durable_executing_rebuilds_without_guessing() {
     let page: types::PageState =
         serde_json::from_slice(&page_response.bytes().await.unwrap()).unwrap();
     let envelope = CommandEnvelope {
-        schema_version: 1,
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
@@ -442,7 +442,7 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
         .to_owned();
     let command_id = CommandId::new();
     let workflow = WorkflowId::new();
-    let envelope = serde_json::json!({"schemaVersion":1,"commandId":command_id,"workflowId":workflow,"attemptId":AttemptId::new(),"sessionId":session,"pageId":page,"deadline":(Utc::now()+Duration::seconds(20)),"command":{"kind":"click","input":{"selector":"#mutate","target":null,"boundary":false,"expectedUrl":null}}});
+    let envelope = serde_json::json!({"schemaVersion":2,"commandId":command_id,"workflowId":workflow,"attemptId":AttemptId::new(),"sessionId":session,"pageId":page,"deadline":(Utc::now()+Duration::seconds(20)),"command":{"kind":"primitive","input":{"kind":"click","input":{"selector":"#mutate","target":null,"boundary":false,"expectedUrl":null}}}});
     mcp_send(&mut stdin,serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"command_execute","arguments":{"envelope":envelope}}})).await;
     let marker = root.path().join("executing.marker");
     tokio::time::timeout(StdDuration::from_secs(3), async {

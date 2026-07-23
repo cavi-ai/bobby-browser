@@ -176,7 +176,7 @@ async fn run_mcp_sample(
     let workflow = WorkflowId::new();
     let attempt = AttemptId::new();
     let env = |command_id, command| CommandEnvelope {
-        schema_version: 1,
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id,
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
@@ -247,7 +247,7 @@ async fn run_mcp_sample(
     observed.push("command.boundary");
     let popup_id = CommandId::new();
     let popup_checkpoint = WorkflowCheckpoint {
-        schema_version: 1,
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),
@@ -317,7 +317,7 @@ async fn run_mcp_sample(
         .unwrap();
     let boundary_id = CommandId::new();
     let checkpoint = WorkflowCheckpoint {
-        schema_version: 1,
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
         checkpoint_id: CheckpointId::new(),
         workflow_id: workflow.clone(),
         attempt_id: attempt.clone(),

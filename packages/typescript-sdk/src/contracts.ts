@@ -1,5 +1,5 @@
-/** Exact JSON contracts for broker interface version 2026-07-17. */
-export const INTERFACE_VERSION = "2026-07-17" as const;
+/** Exact JSON contracts for broker interface version 2026-07-23. */
+export const INTERFACE_VERSION = "2026-07-23" as const;
 
 export type Id = string;
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
