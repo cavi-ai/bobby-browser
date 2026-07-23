@@ -172,6 +172,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         .create_session(CreateSessionRequest {
             profile: "workflow-primary".into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();
@@ -185,6 +186,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         .create_session(CreateSessionRequest {
             profile: "workflow-secondary".into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();

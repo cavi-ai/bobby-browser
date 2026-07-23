@@ -82,6 +82,7 @@ async fn session_owns_worker_from_creation_through_delete() {
         .create(CreateSessionRequest {
             profile: "default".into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();
@@ -109,6 +110,7 @@ async fn thirty_two_warm_sessions_remain_addressable_with_eight_active_slots() {
                 manager.create(CreateSessionRequest {
                     profile: format!("warm-{index}"),
                     proxy: None,
+                    execution_policy: Default::default(),
                 }),
             )
             .await

@@ -550,6 +550,18 @@ impl PageRuntime {
                     Err(verification_error("media emulation returned no matching configuration evidence"))
                 }
             }
+            PrimitiveCommand::EvaluateJavaScript(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::JavaScriptResult { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "javascript evaluation returned no result evidence",
+                    ))
+                }
+            }
         }
     }
 

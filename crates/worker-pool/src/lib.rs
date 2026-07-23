@@ -12,9 +12,10 @@ use network_engine::state::{HttpStateSnapshot, ResponseStateDelta};
 use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, Evidence, InspectCommand, ListPagesCommand,
-    NavigateCommand, OpenPageCommand, PageId, SessionId, SetEmulatedMediaCommand,
-    SetFocusEmulationCommand, TypeTextCommand, UploadFilesCommand, WaitForCommand, WorkerId,
+    ClickCommand, ClosePageCommand, CommandError, EvaluateJavaScriptCommand, Evidence,
+    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, SessionId,
+    SetEmulatedMediaCommand, SetFocusEmulationCommand, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand, WorkerId,
 };
 
 pub use chromium::ChromiumWorkerFactory;
@@ -157,6 +158,17 @@ pub trait BrowserWorker: Send + Sync {
         &self,
         _page_id: &PageId,
         _command: &SetEmulatedMediaCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    // TODO(F3): implement for ChromiumWorker via chromiumoxide EvaluateParams, bounded
+    // by `timeout_ms` and result-shaped through `js_engine::bound_result`. Until then
+    // every worker refuses JS execution, which is correct: F1 wires only the types and
+    // the exhaustive-match plumbing, not execution.
+    async fn evaluate_javascript(
+        &self,
+        _page_id: &PageId,
+        _command: &EvaluateJavaScriptCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }

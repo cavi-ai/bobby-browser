@@ -536,6 +536,7 @@ impl Server {
                         types::CreateSessionRequest {
                             profile: input.profile,
                             proxy: input.proxy,
+                            execution_policy: Default::default(),
                         },
                     )
                     .await

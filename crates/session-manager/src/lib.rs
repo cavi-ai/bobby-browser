@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tokio::sync::RwLock;
-use types::{CreateSessionRequest, PageId, RuntimeError, SessionId, SessionState};
+use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
 use worker_pool::WorkerPool;
 
 #[derive(Clone, Default)]
@@ -29,6 +29,9 @@ impl SessionManager {
             page_ids: Vec::new(),
             created_at: now,
             last_used_at: now,
+            // TODO(F4): store req.execution_policy once RuntimeService::submit enforces
+            // the per-session gate; wiring it through today would be dead plumbing.
+            execution_policy: ExecutionPolicy::default(),
         };
         if let Some(workers) = &self.workers {
             workers

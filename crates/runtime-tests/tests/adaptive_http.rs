@@ -162,6 +162,7 @@ async fn adaptive_http() {
         .create_session(CreateSessionRequest {
             profile: "adaptive-http-live".into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();
@@ -175,6 +176,7 @@ async fn adaptive_http() {
         .create_session(CreateSessionRequest {
             profile: "adaptive-http-stranger".into(),
             proxy: None,
+            execution_policy: Default::default(),
         })
         .await
         .unwrap();
