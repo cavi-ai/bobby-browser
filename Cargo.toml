@@ -4,6 +4,10 @@ members = [
   "crates/cli",
   "crates/config",
   "crates/types",
+  "crates/companion-protocol",
+  "crates/companion-core",
+  "crates/firefox-companion",
+  "crates/interface-core",
   "crates/sdk-core",
   "crates/session-manager",
   "crates/page-runtime",
@@ -11,10 +15,16 @@ members = [
   "crates/dom-engine",
   "crates/js-engine",
   "crates/artifact-store",
+  "crates/checkpoint-store",
+  "crates/workflow-journal",
   "crates/worker-pool",
   "crates/tracing",
   "crates/cdp-gateway",
   "crates/mcp-gateway",
+  "crates/test-site",
+  "crates/runtime-tests",
+  "crates/interface-conformance",
+  "crates/release-gates",
 ]
 resolver = "2"
 
@@ -26,12 +36,35 @@ authors = ["OpenAI"]
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+chromiumoxide = "0.9.1"
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "stream"] }
+rustix = { version = "1.1.4", features = ["fs"] }
+scraper = "0.23"
+sha2 = "0.10"
+subtle = "2"
+cookie = "0.18"
+encoding_rs = "0.8"
+futures-util = "0.3"
+getrandom = "0.3"
+hex = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.29"
+tempfile = "3"
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-uuid = { version = "1", features = ["serde", "v4"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v4", "macro-diagnostics"] }
+
+[patch.crates-io]
+chromiumoxide = { path = "vendor/chromiumoxide" }

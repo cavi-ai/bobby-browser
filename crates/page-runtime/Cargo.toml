@@ -4,5 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+artifact-store = { path = "../artifact-store" }
+async-trait.workspace = true
+checkpoint-store = { path = "../checkpoint-store" }
+chrono.workspace = true
+network-engine = { path = "../network-engine" }
+serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 types = { path = "../types" }
+worker-pool = { path = "../worker-pool" }
+workflow-journal = { path = "../workflow-journal" }
+
+[dev-dependencies]
+tempfile.workspace = true

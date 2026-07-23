@@ -1,0 +1,17 @@
+[package]
+name = "firefox-companion"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+companion-core = { path = "../companion-core" }
+companion-protocol = { path = "../companion-protocol" }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+types = { path = "../types" }
+url.workspace = true
+worker-pool = { path = "../worker-pool" }

@@ -1,33 +1,85 @@
+# bobby-browser configuration
+#
+# This file mirrors the `AppConfig` schema defined in `crates/config/src/lib.rs`.
+# It is loaded by `cli serve` via `AppConfig::load`:
+#   - the path is read from the `BOBBY_BROWSER_CONFIG` env var, defaulting to
+#     `./config.toml` (this file) if unset;
+#   - if the file does not exist, built-in defaults (`AppConfig::default()`)
+#     are used instead — a missing config file is not an error.
+#
+# The values below are exactly `AppConfig::default()`. Uncomment/edit fields
+# to override; any field you omit falls back to its own default.
+
 [server]
+# Bind address and port for the broker's HTTP interface.
 host = "127.0.0.1"
 port = 7777
 
-[cdp]
-enabled = true
-port = 9222
-
-[mcp]
-enabled = true
-stdio = true
-http = true
-http_port = 7788
-
-[sessions]
-default_ttl_seconds = 1800
-max_sessions = 100
-max_pages_per_session = 20
-
-[workers]
-max_concurrency = 32
-queue_capacity = 10000
-
-[cache]
-enabled = true
-directory = "./data/cache"
+[browser]
+# Directory holding per-profile browser state.
+profiles_dir = "./data/profiles"
+# Run browsers headless (no visible window).
+headless = true
+# Maximum number of concurrently active browser workers.
+max_active = 8
+# Filesystem roots that file-upload inputs are allowed to read from.
+upload_roots = ["./data/uploads"]
+# Directory browser downloads are written to.
+downloads_dir = "./data/downloads"
+# Directory for other browser-produced artifacts (e.g. screenshots).
+artifacts_dir = "./data/artifacts"
+# Maximum size, in bytes, of a single stored artifact.
+max_artifact_bytes = 8388608
+# Maximum width/height, in pixels, of a captured screenshot.
+max_screenshot_dimension = 16384
+# Maximum size, in bytes, of a JavaScript evaluation result before it is
+# truncated (see `js_engine::bound_result`).
+max_js_result_bytes = 65536
+# Hard upper bound, in milliseconds, on a single JavaScript evaluation's
+# timeout_ms. Requests exceeding this are clamped, not rejected, so a caller
+# cannot pin a worker lease open indefinitely with an unbounded timeout.
+max_js_timeout_ms = 30000
 
 [storage]
-directory = "./data/storage"
+# Append-only command journal.
+journal_path = "./data/storage/commands.jsonl"
+# Directory holding periodic journal checkpoints.
+checkpoints_dir = "./data/storage/checkpoints"
+# Authority (credential) record storage.
+authority_path = "./data/storage/authority.json"
 
-[logging]
-level = "info"
-json = true
+[http]
+# Whether outbound HTTP requests may target loopback addresses.
+allow_loopback = false
+# Whether outbound HTTP requests may target private/internal networks.
+allow_private_network = false
+# Maximum redirects followed per outbound request.
+max_redirects = 5
+# Maximum total response header size, in bytes.
+max_header_bytes = 65536
+# Maximum request body size, in bytes.
+max_body_bytes = 8388608
+# Maximum download size, in bytes.
+max_download_bytes = 67108864
+# Per-request timeout, in milliseconds.
+request_timeout_ms = 30000
+# Maximum number of outbound HTTP requests in flight at once.
+max_concurrent_requests = 8
+
+[interface]
+# Maximum size, in bytes, of a single interface request.
+max_request_bytes = 1048576
+# Maximum number of events returned in one event-batch read.
+max_event_batch = 256
+# Maximum number of events retained per session for replay.
+max_event_retention = 16384
+# Maximum number of concurrent interface connections.
+max_connections = 64
+# Worker pool size for rejecting/failing requests.
+max_rejection_workers = 16
+# Where issued principal/authority records are persisted.
+token_records_path = "./data/storage/authorities.json"
+# Maximum number of enrolled principals.
+max_principals = 16
+# Maximum requests in flight per principal at once.
+max_in_flight_per_principal = 8
