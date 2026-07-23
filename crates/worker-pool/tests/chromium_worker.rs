@@ -65,6 +65,7 @@ async fn synchronizes_versioned_http_state() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -231,6 +232,7 @@ async fn correlates_popup_and_download_before_clicking() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -327,6 +329,7 @@ async fn drives_a_real_chromium_page() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -421,6 +424,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -513,6 +517,7 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -592,6 +597,7 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&session_id).await.unwrap();
     let page_id = PageId::new();
@@ -673,6 +679,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
@@ -770,6 +777,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
         max_artifact_bytes: 8 * 1024 * 1024,
         max_screenshot_dimension: 16_384,
         max_js_result_bytes: 16,
+        max_js_timeout_ms: 30_000,
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();

@@ -279,6 +279,10 @@ pub struct BrowserConfig {
     pub max_artifact_bytes: usize,
     pub max_screenshot_dimension: u32,
     pub max_js_result_bytes: usize,
+    /// Hard upper bound, in milliseconds, on a single `EvaluateJavaScript` command's
+    /// `timeout_ms`. Requests exceeding this are clamped, not rejected — a caller cannot
+    /// pin a worker lease open indefinitely by requesting an unbounded timeout.
+    pub max_js_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,6 +310,7 @@ impl Default for AppConfig {
                 max_artifact_bytes: 8 * 1024 * 1024,
                 max_screenshot_dimension: 16_384,
                 max_js_result_bytes: 64 * 1024,
+                max_js_timeout_ms: 30_000,
             },
             storage: StorageConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
