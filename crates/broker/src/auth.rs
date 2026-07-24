@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use interface_core::{Authority, AuthorityStore, AuthorizationGuard, CapabilityHandle};
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::Instrument;
 use types::{
     Capability, CorrelationId, ErrorLayer, IdempotencyKey, InterfaceError, InterfaceErrorCode,
     InterfaceVersion, PrincipalId, RequestContext,
@@ -248,10 +249,18 @@ pub(crate) async fn authenticate(
     let mut context = handle.context(parsed.deadline, parsed.idempotency_key);
     context.interface_version = parsed.interface_version;
     context.correlation_id = parsed.correlation_id;
-    let correlation_header = serde_json::to_value(&context.correlation_id)
+    let correlation_id_string = serde_json::to_value(&context.correlation_id)
         .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .and_then(|value| HeaderValue::from_str(&value).ok());
+        .and_then(|value| value.as_str().map(str::to_owned));
+    let span = tracing::info_span!(
+        "request",
+        correlation_id = correlation_id_string.as_deref().unwrap_or("unknown"),
+        principal_hash = observability::fields::principal_hash(&principal_id.as_uuid().to_string()),
+        interface_version = types::CURRENT_INTERFACE_VERSION,
+    );
+    let correlation_header = correlation_id_string
+        .as_ref()
+        .and_then(|value| HeaderValue::from_str(value).ok());
     let runtime = (state.bind_runtime)(handle.clone());
     request.extensions_mut().insert(AuthenticatedRequest {
         handle,
@@ -266,29 +275,37 @@ pub(crate) async fn authenticate(
         .context
         .correlation_id
         .clone();
-    let mut response = match state.in_flight_requests.clone().try_acquire_owned() {
-        Err(_) => ProtocolError::from(interface_error(
-            InterfaceErrorCode::ResourceExhausted,
-            "interface in-flight request capacity exhausted",
-            correlation_id.clone(),
-            Some(1_000),
-        ))
-        .into_response(),
-        // `_global_permit` and `_principal_permit` are both held across
-        // `next.run(request).await` below: they are dropped only once this match arm's
-        // value (the response) has been produced.
-        Ok(_global_permit) => {
-            match acquire_principal_permit(&state, &principal_id, correlation_id.clone()).await {
-                Err(error) => error.into_response(),
-                Ok(_principal_permit) => {
-                    match crate::routes::validate_request_boundary(&state, &mut request).await {
-                        Err(error) => error.into_response(),
-                        Ok(()) => next.run(request).await,
+    let mut response = async {
+        let response = match state.in_flight_requests.clone().try_acquire_owned() {
+            Err(_) => ProtocolError::from(interface_error(
+                InterfaceErrorCode::ResourceExhausted,
+                "interface in-flight request capacity exhausted",
+                correlation_id.clone(),
+                Some(1_000),
+            ))
+            .into_response(),
+            // `_global_permit` and `_principal_permit` are both held across
+            // `next.run(request).await` below: they are dropped only once this match arm's
+            // value (the response) has been produced.
+            Ok(_global_permit) => {
+                match acquire_principal_permit(&state, &principal_id, correlation_id.clone()).await
+                {
+                    Err(error) => error.into_response(),
+                    Ok(_principal_permit) => {
+                        match crate::routes::validate_request_boundary(&state, &mut request).await
+                        {
+                            Err(error) => error.into_response(),
+                            Ok(()) => next.run(request).await,
+                        }
                     }
                 }
             }
-        }
-    };
+        };
+        tracing::info!(status = response.status().as_u16(), "request.completed");
+        response
+    }
+    .instrument(span)
+    .await;
     response.headers_mut().insert(
         "x-interface-version",
         HeaderValue::from_static(types::CURRENT_INTERFACE_VERSION),

@@ -43,7 +43,13 @@ pub fn init(
     match (config.format, config.sink) {
         (config::LogFormat::Json, config::LogSink::Stdout) => {
             registry
-                .with(fmt::layer().json().with_writer(std::io::stdout))
+                .with(
+                    fmt::layer()
+                        .json()
+                        .with_current_span(true)
+                        .with_span_list(true)
+                        .with_writer(std::io::stdout),
+                )
                 .init();
         }
         (config::LogFormat::Pretty, config::LogSink::Stdout) => {
@@ -74,6 +80,8 @@ pub mod test_support {
             let records = sink.records.clone();
             let layer = tracing_subscriber::fmt::layer()
                 .json()
+                .with_current_span(true)
+                .with_span_list(true)
                 .with_writer(move || CaptureWriter(records.clone()));
             let subscriber = tracing_subscriber::registry().with(layer);
             let guard = tracing::subscriber::set_default(subscriber);
