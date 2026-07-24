@@ -25,5 +25,8 @@ url.workspace = true
 artifact-store = { path = "../artifact-store" }
 companion-protocol = { path = "../companion-protocol" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 test-site = { path = "../test-site" }
