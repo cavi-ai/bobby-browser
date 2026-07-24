@@ -139,6 +139,10 @@ impl IntentEngine {
                 )
                 .await
             }
+            IntentPlan::DismissObstruction { target, timeout_ms } => {
+                execute_dismiss_obstruction(intent, page_id, browser, vision, target, timeout_ms)
+                    .await
+            }
         }
     }
 }
@@ -846,6 +850,203 @@ async fn execute_follow(
     IntentOutcome::Completed { evidence }
 }
 
+/// Interval between re-resolution polls while waiting for a dismissed
+/// obstruction to leave the DOM or become hidden. Mirrors the 25ms cadence
+/// `worker-pool`'s `wait_for` primitive already uses.
+const DISMISS_POLL_INTERVAL_MS: u64 = 25;
+
+async fn execute_dismiss_obstruction(
+    intent: &IntentCommand,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    target: TargetSpec,
+    timeout_ms: u64,
+) -> IntentOutcome {
+    let purpose = match intent {
+        IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
+        _ => None,
+    };
+    let plan_summary = format!("{} timeout_ms={timeout_ms}", summarize_target(&target));
+    let candidates = match browser.collect_candidates(page_id, &target).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return non_escalating_failure(
+                error,
+                intent_evidence(execution_record(
+                    "dismissObstruction",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "gatherFailed",
+                )),
+            );
+        }
+    };
+
+    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::InvalidRequest,
+                    message: error.to_string(),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: vec![intent_evidence(execution_record(
+                    "dismissObstruction",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "resolveFailed",
+                ))],
+            };
+        }
+    };
+
+    let (candidate, candidate_evidence, best_match_authorized) = match decision {
+        ResolutionDecision::Resolved {
+            candidate,
+            evidence,
+            best_match_authorized,
+        } => (candidate, evidence, best_match_authorized),
+        ResolutionDecision::NotFound => {
+            return stuck_outcome(
+                "dismissObstruction",
+                StuckKind::TargetMissing,
+                purpose,
+                plan_summary,
+                Vec::new(),
+                "targetNotFound",
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
+        }
+        ResolutionDecision::Ambiguous { candidates } => {
+            return stuck_outcome(
+                "dismissObstruction",
+                StuckKind::TargetAmbiguous,
+                purpose,
+                plan_summary,
+                candidates,
+                "targetAmbiguous",
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
+        }
+    };
+
+    let fingerprint = fingerprint(page_id, &candidate);
+    let resolution = Evidence::Resolution {
+        target: Box::new(target.clone()),
+        fingerprint: Box::new(fingerprint),
+        candidates: vec![candidate_evidence.clone()],
+        best_match_authorized,
+    };
+
+    let (selector, action_target) = action_target(&candidate);
+    let click = ClickCommand {
+        selector,
+        target: Some(action_target),
+        // DismissObstructionIntent has no caller-supplied boundary flag: it is
+        // always CommandClass::Reconciliable, so the underlying act never
+        // needs a pre-established checkpoint.
+        boundary: false,
+        expected_url: None,
+    };
+    let mut click_evidence = match browser.click(page_id, &click).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: vec![
+                    resolution,
+                    intent_evidence(execution_record(
+                        "dismissObstruction",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "actFailed",
+                    )),
+                ],
+            };
+        }
+    };
+
+    let gone = wait_until_gone(page_id, browser, &target, timeout_ms).await;
+    if !gone {
+        let mut prior_evidence = vec![resolution];
+        prior_evidence.append(&mut click_evidence);
+        return stuck_outcome_with_prior_evidence(
+            "dismissObstruction",
+            StuckKind::ObstructionSuspected,
+            purpose,
+            plan_summary,
+            vec![candidate_evidence],
+            "obstructionPersisted",
+            page_id,
+            browser,
+            vision,
+            prior_evidence,
+        )
+        .await;
+    }
+
+    let mut evidence = vec![resolution];
+    evidence.append(&mut click_evidence);
+    evidence.push(intent_evidence(execution_record(
+        "dismissObstruction",
+        purpose,
+        plan_summary,
+        vec![candidate_evidence],
+        None,
+        "dismissed",
+    )));
+    IntentOutcome::Completed { evidence }
+}
+
+/// Polls the same target that was just acted on until it is gone — either
+/// removed from the DOM entirely, or still present but no longer visible.
+/// Unlike `WaitCondition::Element`, this checks both `Detached` and `Hidden`
+/// semantics in one pass, since real dismiss affordances do either (remove
+/// the node vs. toggle a hidden class) and callers supply no expectation.
+async fn wait_until_gone(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+    timeout_ms: u64,
+) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        if is_gone(page_id, browser, target).await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(DISMISS_POLL_INTERVAL_MS)).await;
+    }
+}
+
+async fn is_gone(page_id: &PageId, browser: &dyn IntentBrowser, target: &TargetSpec) -> bool {
+    let Ok(candidates) = browser.collect_candidates(page_id, target).await else {
+        return false;
+    };
+    match resolve_candidates(target, &candidates, &ResolutionPolicy::default()) {
+        Ok(ResolutionDecision::NotFound) => true,
+        Ok(ResolutionDecision::Resolved { candidate, .. }) => !candidate.state.visible,
+        _ => false,
+    }
+}
+
 fn expected_url_from_wait(wait: &WaitForCommand) -> Option<String> {
     match &wait.condition {
         types::WaitCondition::Url {
@@ -925,6 +1126,36 @@ async fn stuck_outcome(
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
 ) -> IntentOutcome {
+    stuck_outcome_with_prior_evidence(
+        intent_kind,
+        kind,
+        purpose,
+        plan_summary,
+        candidates,
+        verification,
+        page_id,
+        browser,
+        vision,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Same as `stuck_outcome`, but preserves evidence already gathered before the
+/// intent got stuck (e.g. resolution + a completed act that did not have its
+/// intended effect, as with `DismissObstructionIntent`'s post-click check).
+async fn stuck_outcome_with_prior_evidence(
+    intent_kind: &str,
+    kind: StuckKind,
+    purpose: Option<String>,
+    plan_summary: String,
+    candidates: Vec<types::CandidateEvidence>,
+    verification: &str,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    prior_evidence: Vec<Evidence>,
+) -> IntentOutcome {
     let stuck_code = kind.error_code();
     let stuck_evidence = intent_evidence(execution_record(
         intent_kind,
@@ -936,6 +1167,8 @@ async fn stuck_outcome(
     ));
 
     if never_escalates(stuck_code) || !kind.may_escalate_to_vision() {
+        let mut evidence = prior_evidence;
+        evidence.push(stuck_evidence);
         return IntentOutcome::Failed {
             error: CommandError {
                 code: stuck_code,
@@ -943,15 +1176,17 @@ async fn stuck_outcome(
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
-            evidence: vec![stuck_evidence],
+            evidence,
         };
     }
 
     let gates_open = vision.session_ok && vision.capability_ok;
     let Some(assist) = vision.assist.as_ref() else {
-        return vision_denied_or_unavailable(gates_open, stuck_evidence, verification);
+        return vision_denied_or_unavailable(gates_open, prior_evidence, stuck_evidence, verification);
     };
     if !gates_open {
+        let mut evidence = prior_evidence;
+        evidence.push(stuck_evidence);
         return IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,
@@ -959,7 +1194,7 @@ async fn stuck_outcome(
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
-            evidence: vec![stuck_evidence],
+            evidence,
         };
     }
 
@@ -971,6 +1206,7 @@ async fn stuck_outcome(
         candidates,
         verification,
         stuck_evidence,
+        prior_evidence,
         page_id,
         browser,
         assist.as_ref(),
@@ -980,9 +1216,12 @@ async fn stuck_outcome(
 
 fn vision_denied_or_unavailable(
     gates_open: bool,
+    prior_evidence: Vec<Evidence>,
     stuck_evidence: Evidence,
     verification: &str,
 ) -> IntentOutcome {
+    let mut evidence = prior_evidence;
+    evidence.push(stuck_evidence);
     if gates_open {
         IntentOutcome::Failed {
             error: CommandError {
@@ -991,7 +1230,7 @@ fn vision_denied_or_unavailable(
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
-            evidence: vec![stuck_evidence],
+            evidence,
         }
     } else {
         IntentOutcome::Failed {
@@ -1001,7 +1240,7 @@ fn vision_denied_or_unavailable(
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
-            evidence: vec![stuck_evidence],
+            evidence,
         }
     }
 }
@@ -1014,10 +1253,17 @@ async fn escalate_with_vision(
     candidates: Vec<types::CandidateEvidence>,
     verification: &str,
     stuck_evidence: Evidence,
+    prior_evidence: Vec<Evidence>,
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     assist: &dyn VisionAssist,
 ) -> IntentOutcome {
+    // `stuck_evidence` documents why the deterministic path failed; callers
+    // only need that record when the intent still fails after vision, so it
+    // is only prefixed onto failure evidence, not the final Completed one.
+    let mut base_evidence = prior_evidence.clone();
+    base_evidence.push(stuck_evidence);
+
     let (png, mut screenshot_evidence) = match browser
         .capture_screenshot(
             page_id,
@@ -1036,7 +1282,7 @@ async fn escalate_with_vision(
                     layer: ErrorLayer::Page,
                     retryable: false,
                 },
-                evidence: vec![stuck_evidence],
+                evidence: base_evidence,
             };
         }
     };
@@ -1052,7 +1298,7 @@ async fn escalate_with_vision(
     {
         Ok(proposal) => proposal,
         Err(error) => {
-            let mut evidence = vec![stuck_evidence];
+            let mut evidence = base_evidence;
             evidence.append(&mut screenshot_evidence);
             return IntentOutcome::Failed {
                 error: CommandError {
@@ -1068,7 +1314,7 @@ async fn escalate_with_vision(
 
     let proposal_hash = proposal_sha256(&proposal);
     if proposal.confidence < VISION_CONFIDENCE_FLOOR {
-        let mut evidence = vec![stuck_evidence];
+        let mut evidence = base_evidence;
         evidence.append(&mut screenshot_evidence);
         evidence.push(intent_evidence(execution_record_with_path(
             intent_kind,
@@ -1101,7 +1347,7 @@ async fn escalate_with_vision(
     let mut act_evidence = match execute_vision_action(page_id, browser, &proposal.action).await {
         Ok(evidence) => evidence,
         Err(error) => {
-            let mut evidence = vec![stuck_evidence];
+            let mut evidence = base_evidence;
             evidence.append(&mut screenshot_evidence);
             evidence.push(intent_evidence(execution_record_with_path(
                 intent_kind,
@@ -1126,7 +1372,8 @@ async fn escalate_with_vision(
         }
     };
 
-    let mut evidence = screenshot_evidence;
+    let mut evidence = prior_evidence;
+    evidence.append(&mut screenshot_evidence);
     evidence.append(&mut act_evidence);
     let artifact_ids = artifact_ids_from(&evidence);
     evidence.push(intent_evidence(execution_record_with_path(

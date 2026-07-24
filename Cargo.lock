@@ -3119,6 +3119,7 @@ dependencies = [
  "dom-engine",
  "futures",
  "js-engine",
+ "libc",
  "network-engine",
  "regex",
  "serde",

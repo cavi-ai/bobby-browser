@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MAX_INTENT_PURPOSE_BYTES } from "../src/contracts.js";
+import { DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS, MAX_INTENT_PURPOSE_BYTES } from "../src/contracts.js";
 import {
   assertIntentPurpose,
+  dismissObstructionEnvelope,
+  dismissObstructionRuntimeCommand,
   fillEnvelope,
   followEnvelope,
   followRuntimeCommand,
@@ -147,6 +149,50 @@ test("followEnvelope forwards boundary:true verbatim", () => {
           timeoutMs: 5_000,
         },
         boundary: true,
+      },
+    },
+  });
+});
+
+test("dismissObstructionRuntimeCommand matches Rust golden nested wire shape", () => {
+  const command = dismissObstructionRuntimeCommand({ purpose: "Cookie notice close button" });
+  assert.deepEqual(command, {
+    kind: "intent",
+    input: {
+      kind: "dismissObstruction",
+      input: {
+        purpose: "Cookie notice close button",
+        hints: {
+          role: null,
+          nearText: null,
+          framePath: [],
+          shadowPath: [],
+          allowBestMatch: false,
+        },
+        timeoutMs: DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS,
+      },
+    },
+  });
+});
+
+test("dismissObstructionEnvelope forwards an explicit timeoutMs verbatim", () => {
+  const envelope = dismissObstructionEnvelope(META, "Cookie notice close button", {
+    timeoutMs: 3_000,
+  });
+  assert.deepEqual(envelope.command, {
+    kind: "intent",
+    input: {
+      kind: "dismissObstruction",
+      input: {
+        purpose: "Cookie notice close button",
+        hints: {
+          role: null,
+          nearText: null,
+          framePath: [],
+          shadowPath: [],
+          allowBestMatch: false,
+        },
+        timeoutMs: 3_000,
       },
     },
   });

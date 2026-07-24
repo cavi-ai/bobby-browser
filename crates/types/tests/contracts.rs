@@ -3,13 +3,13 @@ use serde_json::json;
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandError, CommandId, CommandOutcome, CreateSessionRequest, DownloadUrlCommand,
-    ElementState, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath,
-    ExecutionPolicy, ExecutionReason, ExecutionRecord, FillIntent, FillValue, FollowIntent,
-    InspectCommand, IntentCommand, IntentHints, IntentResolutionPath, ListPagesCommand,
-    LocateIntent, OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode,
-    SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
+    CommandError, CommandId, CommandOutcome, CreateSessionRequest, DismissObstructionIntent,
+    DownloadUrlCommand, ElementState, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
+    ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, FillIntent, FillValue,
+    FollowIntent, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
+    ListPagesCommand, LocateIntent, OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand,
+    ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -704,6 +704,97 @@ fn follow_runtime_command_envelope_golden_json() {
     assert!(matches!(
         round.command,
         RuntimeCommand::Intent(IntentCommand::Follow(_))
+    ));
+}
+
+#[test]
+fn dismiss_obstruction_intent_is_always_reconciliable() {
+    let dismiss = IntentCommand::DismissObstruction(DismissObstructionIntent {
+        purpose: "Cookie notice close button".into(),
+        hints: IntentHints::default(),
+        timeout_ms: 5_000,
+    });
+    assert_eq!(dismiss.class(), CommandClass::Reconciliable);
+
+    let value = serde_json::to_value(&dismiss).unwrap();
+    assert_eq!(value["kind"], "dismissObstruction");
+    let round: IntentCommand = serde_json::from_value(value).unwrap();
+    assert_eq!(round.class(), CommandClass::Reconciliable);
+}
+
+#[test]
+fn dismiss_obstruction_intent_timeout_ms_defaults_when_omitted() {
+    let value = json!({
+        "purpose": "Cookie notice close button",
+        "hints": {
+            "role": null,
+            "nearText": null,
+            "framePath": [],
+            "shadowPath": [],
+            "allowBestMatch": false
+        }
+    });
+    let intent: DismissObstructionIntent = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        intent.timeout_ms,
+        types::DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS
+    );
+}
+
+/// Golden wire shape for agents / TypeScript SDK: nested RuntimeCommand -> Intent -> DismissObstruction.
+#[test]
+fn dismiss_obstruction_runtime_command_envelope_golden_json() {
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId(uuid(1)),
+        workflow_id: WorkflowId(uuid(2)),
+        attempt_id: AttemptId(uuid(3)),
+        session_id: SessionId(uuid(4)),
+        page_id: Some(PageId(uuid(5))),
+        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        command: RuntimeCommand::Intent(IntentCommand::DismissObstruction(
+            DismissObstructionIntent {
+                purpose: "Cookie notice close button".into(),
+                hints: IntentHints::default(),
+                timeout_ms: 5_000,
+            },
+        )),
+    };
+
+    let value = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "schemaVersion": 2,
+            "commandId": uuid(1),
+            "workflowId": uuid(2),
+            "attemptId": uuid(3),
+            "sessionId": uuid(4),
+            "pageId": uuid(5),
+            "deadline": "2026-07-16T12:00:00Z",
+            "command": {
+                "kind": "intent",
+                "input": {
+                    "kind": "dismissObstruction",
+                    "input": {
+                        "purpose": "Cookie notice close button",
+                        "hints": {
+                            "role": null,
+                            "nearText": null,
+                            "framePath": [],
+                            "shadowPath": [],
+                            "allowBestMatch": false
+                        },
+                        "timeoutMs": 5000
+                    }
+                }
+            }
+        })
+    );
+    let round: CommandEnvelope = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        round.command,
+        RuntimeCommand::Intent(IntentCommand::DismissObstruction(_))
     ));
 }
 

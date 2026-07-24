@@ -62,13 +62,14 @@ pub enum IntentCommand {
     SubmitAndVerify(SubmitAndVerifyIntent),
     WaitForState(WaitForStateIntent),
     Follow(FollowIntent),
+    DismissObstruction(DismissObstructionIntent),
 }
 
 impl IntentCommand {
     pub fn class(&self) -> CommandClass {
         match self {
             Self::Locate(_) | Self::WaitForState(_) => CommandClass::Replayable,
-            Self::Fill(_) => CommandClass::Reconciliable,
+            Self::Fill(_) | Self::DismissObstruction(_) => CommandClass::Reconciliable,
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
             Self::Follow(intent) => {
                 if intent.boundary {
@@ -155,6 +156,31 @@ pub struct FollowIntent {
     pub expected_destination: WaitForCommand,
     #[serde(default)]
     pub boundary: bool,
+}
+
+pub const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS: u64 = 5_000;
+
+fn default_dismiss_timeout_ms() -> u64 {
+    DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS
+}
+
+/// Activate a described dismiss/close control to clear an obstruction (popup,
+/// overlay, cookie banner) and verify the target becomes detached or hidden.
+///
+/// There is no caller-supplied boundary flag: dismissing an obstruction is
+/// never treated as a mutating action, so this intent is always
+/// `CommandClass::Reconciliable`. Verification is built in — the engine
+/// re-resolves the same target after acting and requires it to be gone
+/// (removed from the DOM or no longer visible), not a caller-supplied
+/// expected post-dismiss state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissObstructionIntent {
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: IntentHints,
+    #[serde(default = "default_dismiss_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

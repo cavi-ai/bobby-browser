@@ -26,6 +26,10 @@ pub enum IntentPlan {
         expected_destination: WaitForCommand,
         boundary: bool,
     },
+    DismissObstruction {
+        target: TargetSpec,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +72,13 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                 target: compile_target(purpose, &intent.hints),
                 expected_destination: intent.expected_destination.clone(),
                 boundary: intent.boundary,
+            })
+        }
+        IntentCommand::DismissObstruction(intent) => {
+            let purpose = validate_purpose(&intent.purpose)?;
+            Ok(IntentPlan::DismissObstruction {
+                target: compile_target(purpose, &intent.hints),
+                timeout_ms: intent.timeout_ms,
             })
         }
     }

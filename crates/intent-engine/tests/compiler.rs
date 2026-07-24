@@ -1,7 +1,7 @@
 use intent_engine::{compile_intent, IntentPlan};
 use types::{
-    FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints, LocateIntent, TextMatch,
-    WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
+    DismissObstructionIntent, FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints,
+    LocateIntent, TextMatch, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
 };
 
 #[test]
@@ -96,6 +96,28 @@ fn compile_follow_carries_target_expected_destination_and_boundary_flag() {
     assert_eq!(target.accessible_name.as_deref(), Some("Details"));
     assert_eq!(expected_destination.timeout_ms, 5_000);
     assert!(boundary);
+}
+
+#[test]
+fn compile_dismiss_obstruction_carries_target_and_timeout() {
+    let plan = compile_intent(&IntentCommand::DismissObstruction(DismissObstructionIntent {
+        purpose: "Cookie notice close button".into(),
+        hints: IntentHints {
+            role: Some("button".into()),
+            ..IntentHints::default()
+        },
+        timeout_ms: 3_000,
+    }))
+    .expect("compile");
+    let IntentPlan::DismissObstruction { target, timeout_ms } = plan else {
+        panic!("expected DismissObstruction plan");
+    };
+    assert_eq!(target.role.as_deref(), Some("button"));
+    assert_eq!(
+        target.accessible_name.as_deref(),
+        Some("Cookie notice close button")
+    );
+    assert_eq!(timeout_ms, 3_000);
 }
 
 #[test]
