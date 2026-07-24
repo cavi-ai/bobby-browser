@@ -239,7 +239,10 @@ pub(crate) async fn authenticate(
     };
     let handle = match state.authority.authenticate(&bearer, Utc::now()).await {
         Ok(handle) => handle,
-        Err(error) => return ProtocolError::from(error).into_response(),
+        Err(error) => {
+            tracing::warn!(error = ?error, "auth.authentication_failed");
+            return ProtocolError::from(error).into_response();
+        }
     };
     let parsed = match parse_context_headers(request.headers()) {
         Ok(parsed) => parsed,

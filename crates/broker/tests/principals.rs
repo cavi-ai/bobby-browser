@@ -77,6 +77,66 @@ async fn admin_issues_and_revokes_a_principal() {
 }
 
 #[tokio::test]
+async fn principal_issuance_and_revocation_emit_audit_events() {
+    let sink = observability::test_support::CaptureSink::install();
+    let (app, _authority, admin_bearer) = app_with_admin(8).await;
+    let principal = uuid!("10000000-0000-0000-0000-000000000061");
+    let expires_at =
+        (Utc::now() + Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Millis, true);
+
+    let issue_body = serde_json::json!({
+        "principalId": principal,
+        "capabilities": ["session:read"],
+        "expiresAt": expires_at,
+    });
+    let issue_request = context_headers(Request::post("/v1/principals"), &admin_bearer)
+        .header("idempotency-key", "issue-principal-61")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&issue_body).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(issue_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(
+        sink.events()
+            .iter()
+            .any(|event| event["fields"]["message"] == "principal.issued"),
+        "principal.issued audit event recorded"
+    );
+
+    let delete_request = context_headers(
+        Request::delete(format!("/v1/principals/{principal}")),
+        &admin_bearer,
+    )
+    .body(Body::empty())
+    .unwrap();
+    let response = app.clone().oneshot(delete_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        sink.events()
+            .iter()
+            .any(|event| event["fields"]["message"] == "principal.revoked"),
+        "principal.revoked audit event recorded"
+    );
+}
+
+#[tokio::test]
+async fn bearer_token_never_appears_in_any_emitted_record() {
+    let sink = observability::test_support::CaptureSink::install();
+    let (app, _authority, admin_bearer) = app_with_admin(4).await;
+    let request = context_headers(Request::get("/v1/runtime"), &admin_bearer)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for event in sink.events() {
+        assert!(
+            !event.to_string().contains(&admin_bearer),
+            "bearer token leaked into telemetry record: {event}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn issuance_is_bounded() {
     let (app, _authority, admin_bearer) = app_with_admin(8).await;
     let valid_expiry =

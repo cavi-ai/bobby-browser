@@ -81,6 +81,7 @@ impl AuthorizationGuard {
         self.validate(ctx)?;
         for capability in operation.required() {
             if !self.authority.allows(*capability) || !ctx.capabilities.contains(*capability) {
+                tracing::warn!(capability = ?capability, "authz.capability_denied");
                 return Err(interface_error(
                     ctx,
                     InterfaceErrorCode::MissingCapability,
@@ -104,6 +105,7 @@ impl AuthorizationGuard {
         capability: Capability,
     ) -> InterfaceResult<()> {
         if !self.authority.allows(capability) || !ctx.capabilities.contains(capability) {
+            tracing::warn!(capability = ?capability, "authz.capability_denied");
             return Err(interface_error(
                 ctx,
                 InterfaceErrorCode::MissingCapability,

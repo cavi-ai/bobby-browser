@@ -1408,6 +1408,7 @@ async fn stuck_outcome_with_prior_evidence(
     if !gates_open {
         let mut evidence = prior_evidence;
         evidence.push(stuck_evidence);
+        tracing::warn!(intent = intent_kind, "policy.vision_denied");
         return IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,
@@ -1454,6 +1455,7 @@ fn vision_denied_or_unavailable(
             evidence,
         }
     } else {
+        tracing::warn!("policy.vision_denied");
         IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,

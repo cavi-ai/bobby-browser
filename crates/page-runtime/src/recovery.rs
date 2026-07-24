@@ -220,6 +220,14 @@ impl RecoveryCoordinator {
             decision: decision.clone(),
         });
         self.store.save(&checkpoint).await?;
+        tracing::info!(
+            outcome = match &decision {
+                RecoveryDecision::Resumed { .. } => "resumed",
+                RecoveryDecision::NeedsReconciliation { .. } => "needs_reconciliation",
+                RecoveryDecision::Restarted { .. } => "restarted",
+            },
+            "checkpoint.reconciled"
+        );
         Ok(decision)
     }
 }

@@ -208,6 +208,7 @@ impl RuntimeService {
                 .map(|session| session.execution_policy.javascript_evaluation)
                 .unwrap_or(false);
             if !allowed {
+                tracing::warn!(session_id = %envelope.session_id.0, "policy.javascript_denied");
                 return CommandOutcome::PolicyDenied {
                     command_id: envelope.command_id.clone(),
                     error: CommandError {

@@ -64,6 +64,9 @@ impl CheckpointStore {
         if result.is_err() {
             let _ = tokio::fs::remove_file(&temporary).await;
         }
+        if result.is_ok() {
+            tracing::info!(workflow_id = %checkpoint.workflow_id.0, "checkpoint.established");
+        }
         result
     }
 
