@@ -63,12 +63,15 @@ pub enum IntentCommand {
     WaitForState(WaitForStateIntent),
     Follow(FollowIntent),
     DismissObstruction(DismissObstructionIntent),
+    Extract(ExtractIntent),
 }
 
 impl IntentCommand {
     pub fn class(&self) -> CommandClass {
         match self {
-            Self::Locate(_) | Self::WaitForState(_) => CommandClass::Replayable,
+            Self::Locate(_) | Self::WaitForState(_) | Self::Extract(_) => {
+                CommandClass::Replayable
+            }
             Self::Fill(_) | Self::DismissObstruction(_) => CommandClass::Reconciliable,
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
             Self::Follow(intent) => {
@@ -181,6 +184,46 @@ pub struct DismissObstructionIntent {
     pub hints: IntentHints,
     #[serde(default = "default_dismiss_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+/// What to read off a resolved field's candidate. `Href` is a named
+/// convenience over the common "attribute=href" case; anything else goes
+/// through `Attribute` directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ExtractValueKind {
+    Text,
+    Attribute { attribute: String },
+    Href,
+}
+
+/// One named field to extract, resolved independently of every other field
+/// in the same `ExtractIntent` — effectively a per-field `LocateIntent` that
+/// also names what to read off the result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractField {
+    pub name: String,
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: IntentHints,
+    pub value: ExtractValueKind,
+}
+
+/// Schema-bounded structured extraction: resolve every named field and read
+/// its value. Never mutates the page, so this intent is always
+/// `CommandClass::Replayable`.
+///
+/// Resolution is best-effort per field, not all-or-nothing: a field that
+/// cannot be resolved (deterministically, or via vision when permitted) is
+/// reported missing in that field's evidence rather than failing the whole
+/// command. Callers get whatever the page currently offers instead of a
+/// result blocked on the least-available field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractIntent {
+    pub purpose: String,
+    pub fields: Vec<ExtractField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

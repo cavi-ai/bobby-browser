@@ -144,6 +144,21 @@ pub enum Evidence {
     IntentExecution {
         record: ExecutionRecord,
     },
+    /// Result of resolving one named field of an `ExtractIntent`. Emitted
+    /// once per field, in field order, alongside a `Resolution` evidence
+    /// entry when the field resolved (deterministically or via vision).
+    /// `value: None` means the field could not be resolved; `errorCode`
+    /// then carries why (e.g. `targetNotFound`, `targetAmbiguous`,
+    /// `visionAssistDenied`, `visionAssistFailed`) without failing the rest
+    /// of the extraction.
+    Extraction {
+        field: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        resolution_path: IntentResolutionPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<ErrorCode>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +219,7 @@ impl Evidence {
             }
             Self::BrowserExecution { .. } => {}
             Self::IntentExecution { .. } => {}
+            Self::Extraction { .. } => {}
             _ => {}
         }
         safe

@@ -80,7 +80,8 @@ export type Evidence =
   | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string }
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
-  | { kind: "intentExecution"; record: ExecutionRecord };
+  | { kind: "intentExecution"; record: ExecutionRecord }
+  | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 
 /** Every serde(tag = "status") CommandOutcome variant in the committed Rust contract. */
 export type CommandOutcome =
@@ -140,13 +141,27 @@ export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: numbe
 export interface FollowIntent { purpose: string; hints?: IntentHints; expectedDestination: WaitForCommand; boundary?: boolean; }
 /** No boundary flag: dismissing an obstruction is always CommandClass.Reconciliable. Verification is built in (target must become detached or hidden), not caller-supplied. */
 export interface DismissObstructionIntent { purpose: string; hints?: IntentHints; timeoutMs?: number; }
+/** Href is a named convenience over the common attribute="href" case. */
+export type ExtractValueKind =
+  | { kind: "text" }
+  | { kind: "attribute"; attribute: string }
+  | { kind: "href" };
+/** One named field, resolved independently of every other field in the same ExtractIntent. */
+export interface ExtractField { name: string; purpose: string; hints?: IntentHints; value: ExtractValueKind; }
+/**
+ * Schema-bounded structured extraction: always CommandClass.Replayable (never mutates the page).
+ * Resolution is best-effort per field, not all-or-nothing: a field that cannot be resolved is
+ * reported missing in that field's Extraction evidence rather than failing the whole command.
+ */
+export interface ExtractIntent { purpose: string; fields: ExtractField[]; }
 export type IntentCommand =
   | { kind: "locate"; input: LocateIntent }
   | { kind: "fill"; input: FillIntent }
   | { kind: "submitAndVerify"; input: SubmitAndVerifyIntent }
   | { kind: "waitForState"; input: WaitForStateIntent }
   | { kind: "follow"; input: FollowIntent }
-  | { kind: "dismissObstruction"; input: DismissObstructionIntent };
+  | { kind: "dismissObstruction"; input: DismissObstructionIntent }
+  | { kind: "extract"; input: ExtractIntent };
 
 /** Nested RuntimeCommand wire shape: `{ kind: "intent"|"primitive", input: … }`. */
 export type RuntimeCommand =

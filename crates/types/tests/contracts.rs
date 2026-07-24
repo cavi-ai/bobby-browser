@@ -5,11 +5,12 @@ use types::{
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
     CommandError, CommandId, CommandOutcome, CreateSessionRequest, DismissObstructionIntent,
     DownloadUrlCommand, ElementState, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
-    ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, FillIntent, FillValue,
-    FollowIntent, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
-    ListPagesCommand, LocateIntent, OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand,
-    ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
+    ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent,
+    ExtractValueKind, FillIntent, FillValue, FollowIntent, InspectCommand, IntentCommand,
+    IntentHints, IntentResolutionPath, ListPagesCommand, LocateIntent, OpenPageCommand, PageId,
+    PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent,
+    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -795,6 +796,150 @@ fn dismiss_obstruction_runtime_command_envelope_golden_json() {
     assert!(matches!(
         round.command,
         RuntimeCommand::Intent(IntentCommand::DismissObstruction(_))
+    ));
+}
+
+#[test]
+fn extract_intent_is_always_replayable_and_round_trips() {
+    let extract = IntentCommand::Extract(ExtractIntent {
+        purpose: "Profile summary".into(),
+        fields: vec![
+            ExtractField {
+                name: "displayName".into(),
+                purpose: "Display name".into(),
+                hints: IntentHints::default(),
+                value: ExtractValueKind::Text,
+            },
+            ExtractField {
+                name: "profileLink".into(),
+                purpose: "Profile link".into(),
+                hints: IntentHints {
+                    role: Some("link".into()),
+                    ..IntentHints::default()
+                },
+                value: ExtractValueKind::Href,
+            },
+            ExtractField {
+                name: "userId".into(),
+                purpose: "Profile link".into(),
+                hints: IntentHints::default(),
+                value: ExtractValueKind::Attribute {
+                    attribute: "data-user-id".into(),
+                },
+            },
+        ],
+    });
+    assert_eq!(extract.class(), CommandClass::Replayable);
+
+    let value = serde_json::to_value(&extract).unwrap();
+    assert_eq!(value["kind"], "extract");
+    assert_eq!(value["input"]["fields"][0]["name"], "displayName");
+    assert_eq!(value["input"]["fields"][0]["value"]["kind"], "text");
+    assert_eq!(value["input"]["fields"][1]["value"]["kind"], "href");
+    assert_eq!(value["input"]["fields"][2]["value"]["kind"], "attribute");
+    assert_eq!(
+        value["input"]["fields"][2]["value"]["attribute"],
+        "data-user-id"
+    );
+    let round: IntentCommand = serde_json::from_value(value).unwrap();
+    assert_eq!(round.class(), CommandClass::Replayable);
+}
+
+/// Golden wire shape for agents / TypeScript SDK: nested RuntimeCommand -> Intent -> Extract.
+#[test]
+fn extract_runtime_command_envelope_golden_json() {
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId(uuid(1)),
+        workflow_id: WorkflowId(uuid(2)),
+        attempt_id: AttemptId(uuid(3)),
+        session_id: SessionId(uuid(4)),
+        page_id: Some(PageId(uuid(5))),
+        deadline: Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap(),
+        command: RuntimeCommand::Intent(IntentCommand::Extract(ExtractIntent {
+            purpose: "Profile summary".into(),
+            fields: vec![ExtractField {
+                name: "displayName".into(),
+                purpose: "Display name".into(),
+                hints: IntentHints::default(),
+                value: ExtractValueKind::Text,
+            }],
+        })),
+    };
+
+    let value = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "schemaVersion": 2,
+            "commandId": uuid(1),
+            "workflowId": uuid(2),
+            "attemptId": uuid(3),
+            "sessionId": uuid(4),
+            "pageId": uuid(5),
+            "deadline": "2026-07-16T12:00:00Z",
+            "command": {
+                "kind": "intent",
+                "input": {
+                    "kind": "extract",
+                    "input": {
+                        "purpose": "Profile summary",
+                        "fields": [{
+                            "name": "displayName",
+                            "purpose": "Display name",
+                            "hints": {
+                                "role": null,
+                                "nearText": null,
+                                "framePath": [],
+                                "shadowPath": [],
+                                "allowBestMatch": false
+                            },
+                            "value": {"kind": "text"}
+                        }]
+                    }
+                }
+            }
+        })
+    );
+    let round: CommandEnvelope = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        round.command,
+        RuntimeCommand::Intent(IntentCommand::Extract(_))
+    ));
+}
+
+#[test]
+fn extraction_evidence_round_trips_with_and_without_a_value() {
+    let resolved = Evidence::Extraction {
+        field: "displayName".into(),
+        value: Some("Ada Lovelace".into()),
+        resolution_path: IntentResolutionPath::Deterministic,
+        error_code: None,
+    };
+    let value = serde_json::to_value(&resolved).unwrap();
+    assert_eq!(value["kind"], "extraction");
+    assert_eq!(value["value"], "Ada Lovelace");
+    assert!(value.get("errorCode").is_none());
+    let round: Evidence = serde_json::from_value(value).unwrap();
+    assert!(matches!(round, Evidence::Extraction { value: Some(_), .. }));
+
+    let missing = Evidence::Extraction {
+        field: "profileLink".into(),
+        value: None,
+        resolution_path: IntentResolutionPath::Deterministic,
+        error_code: Some(ErrorCode::VisionAssistDenied),
+    };
+    let value = serde_json::to_value(&missing).unwrap();
+    assert_eq!(value["errorCode"], "visionAssistDenied");
+    assert!(value.get("value").is_none());
+    let round: Evidence = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        round,
+        Evidence::Extraction {
+            value: None,
+            error_code: Some(ErrorCode::VisionAssistDenied),
+            ..
+        }
     ));
 }
 
