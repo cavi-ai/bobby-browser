@@ -79,7 +79,17 @@ returns a `javaScriptResult` evidence item.
 
 Semantic automation is available through the authenticated SDK and MCP surfaces
 with `intent:execute`. Supported intents: **Locate**, **Fill** (text, select, or
-files), **SubmitAndVerify**, and **WaitForState**.
+files), **SubmitAndVerify**, **WaitForState**, and **Follow**.
+
+`Follow` activates a described link/control and verifies the resulting
+destination against an `expected_destination` wait condition. Unlike
+`SubmitAndVerify`, which is always treated as a boundary action, `Follow`
+carries a caller-supplied `boundary: bool` flag (mirroring `ClickCommand`):
+set `boundary: true` when activating the control may perform a
+mutating/side-effecting action (e.g. "Sign out"), which requires a matching
+`WorkflowCheckpoint` established beforehand via the Inspect → Checkpoint →
+Follow dance; leave it `false` (the default) for ordinary same-tab navigation,
+which runs without a pre-established checkpoint.
 
 Vision-assisted resolution is **deny-by-default** and gated like JavaScript
 evaluation: the bearer must hold `vision:assist`, and the session must have
