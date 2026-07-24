@@ -1,0 +1,57 @@
+{
+  "title": "bobby-browser",
+  "version": "0.2.0",
+  "sections": [
+    {
+      "title": "Introduction",
+      "pages": [
+        { "title": "Overview", "path": "introduction/overview.md" },
+        { "title": "Installation", "path": "introduction/installation.md" },
+        { "title": "Quickstart", "path": "introduction/quickstart.md" }
+      ]
+    },
+    {
+      "title": "Concepts",
+      "pages": [
+        { "title": "Multi-principal runtime", "path": "concepts/multi-principal.md" },
+        { "title": "Capabilities", "path": "concepts/capabilities.md" },
+        { "title": "Evidence and checkpoints", "path": "concepts/evidence-checkpoints.md" }
+      ]
+    },
+    {
+      "title": "Control surfaces",
+      "pages": [
+        { "title": "Rust SDK", "path": "surfaces/rust-sdk.md" },
+        { "title": "TypeScript SDK", "path": "surfaces/typescript-sdk.md" },
+        { "title": "MCP stdio", "path": "surfaces/mcp-stdio.md" },
+        { "title": "MCP over HTTP", "path": "surfaces/mcp-http.md" },
+        { "title": "Authenticated CDP", "path": "surfaces/cdp.md" }
+      ]
+    },
+    {
+      "title": "Guides",
+      "pages": [
+        { "title": "Authentication", "path": "guides/auth.md" },
+        { "title": "JavaScript evaluation", "path": "guides/javascript-eval.md" },
+        { "title": "Intent commands", "path": "guides/intents.md" },
+        { "title": "Events and recovery", "path": "guides/events-recovery.md" },
+        { "title": "Configuration", "path": "guides/configuration.md" },
+        { "title": "Run the server", "path": "guides/run.md" }
+      ]
+    },
+    {
+      "title": "Security",
+      "pages": [
+        { "title": "Security model", "path": "security/model.md" },
+        { "title": "Reporting vulnerabilities", "path": "security/reporting.md" }
+      ]
+    },
+    {
+      "title": "Release",
+      "pages": [
+        { "title": "Version and support", "path": "release/version-and-support.md" },
+        { "title": "MIT license", "path": "release/license.md" }
+      ]
+    }
+  ]
+}

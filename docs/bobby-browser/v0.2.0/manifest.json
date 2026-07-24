@@ -1,0 +1,8 @@
+{
+  "package": "bobby-browser",
+  "product": "bobby-browser",
+  "version": "0.2.0",
+  "contentSha256": "b309b93816618805d9c65ca18c0a78abdee7cf253159adcb67739ef966008830",
+  "publicBasePath": "/docs/bobby-browser/v0.2.0",
+  "stableAlias": "/docs/bobby-browser"
+}
