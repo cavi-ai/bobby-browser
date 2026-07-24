@@ -98,6 +98,13 @@ async fn replaces_chrome_then_resumes_or_restarts_from_verified_state() {
     let first = pool.lease(session_id.clone()).await.unwrap();
     let first_worker_id = first.worker_id();
     first.worker().open_page(page_id.clone()).await.unwrap();
+    // `WorkerPool::lease` hands out a fresh semaphore permit on every call
+    // (the pool is capacity-1 here), while the underlying worker stays warm
+    // in the pool's session entry regardless of how many leases are
+    // outstanding. Dropping this lease releases only the permit, not the
+    // browser; holding it open across the `navigate`/`recover` calls below
+    // would deadlock them against this same capacity-1 semaphore forever.
+    drop(first);
 
     let root_url = format!("{}/", fixture.base_url());
     let evidence = navigate(&pool, &session_id, &page_id, &root_url).await;
