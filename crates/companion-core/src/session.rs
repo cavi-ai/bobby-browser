@@ -4,6 +4,7 @@ use companion_protocol::{
     ActionRequest, AttachmentGrant, BrowserTarget, CompanionEvent, CompanionRequest, GrantedPage,
     PageBindingDiscovered, TargetDiscovery, TargetKind, PROTOCOL_VERSION,
 };
+use observability::locks::lock_recovering;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex as TaskMutex},
@@ -382,22 +383,20 @@ impl SessionCoordinator {
     }
 
     fn retire_binding_releases(&self, connection_id: Uuid) {
-        self.binding_releases
-            .lock()
-            .expect("page-binding release mutex poisoned")
-            .retain(|_, release| {
-                let retire = *release
-                    .connection_id
-                    .lock()
-                    .expect("page-binding release connection mutex poisoned")
-                    == Some(connection_id);
+        lock_recovering(&self.binding_releases, "session.page_binding_release").retain(
+            |_, release| {
+                let retire = *lock_recovering(
+                    &release.connection_id,
+                    "session.page_binding_release_connection",
+                ) == Some(connection_id);
                 if retire {
                     release
                         .result
                         .send_replace(Some(Err(CompanionSessionError::ConnectionClosed)));
                 }
                 !retire
-            });
+            },
+        );
     }
 
     fn remove_connection_state(
@@ -608,18 +607,16 @@ impl SessionCoordinator {
             page_id: page_id.clone(),
         };
         let (mut result, owned) = {
-            let mut releases = self
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned");
+            let mut releases =
+                lock_recovering(&self.binding_releases, "session.page_binding_release");
             let current = releases.get(&key).cloned();
             if let Some(release) = current {
                 let completed = release.result.borrow().clone();
                 if matches!(completed, Some(Err(_))) {
-                    let connection_id = *release
-                        .connection_id
-                        .lock()
-                        .expect("page-binding release connection mutex poisoned");
+                    let connection_id = *lock_recovering(
+                        &release.connection_id,
+                        "session.page_binding_release_connection",
+                    );
                     let (result, receiver) = watch::channel(None);
                     let release = Arc::new(PageBindingRelease {
                         result,
@@ -655,9 +652,8 @@ impl SessionCoordinator {
                 )
                 .await;
                 if outcome.is_ok() {
-                    let mut releases = binding_releases
-                        .lock()
-                        .expect("page-binding release mutex poisoned");
+                    let mut releases =
+                        lock_recovering(&binding_releases, "session.page_binding_release");
                     if releases
                         .get(&key)
                         .is_some_and(|current| Arc::ptr_eq(current, &release))
@@ -687,11 +683,11 @@ impl SessionCoordinator {
         page_id: &PageId,
         republish: bool,
     ) -> Result<(), CompanionSessionError> {
-        if release
-            .connection_id
-            .lock()
-            .expect("page-binding release connection mutex poisoned")
-            .is_none()
+        if lock_recovering(
+            &release.connection_id,
+            "session.page_binding_release_connection",
+        )
+        .is_none()
         {
             let connection_id = {
                 let mut state = state.lock().await;
@@ -708,10 +704,10 @@ impl SessionCoordinator {
                 release.result.send_replace(Some(Ok(())));
                 return Ok(());
             };
-            *release
-                .connection_id
-                .lock()
-                .expect("page-binding release connection mutex poisoned") = Some(connection_id);
+            *lock_recovering(
+                &release.connection_id,
+                "session.page_binding_release_connection",
+            ) = Some(connection_id);
         }
         let grant_update = match acquire_grant_update(grant_updates).await {
             Ok(grant_update) => grant_update,
@@ -732,11 +728,10 @@ impl SessionCoordinator {
                         Ok(())
                     };
                 };
-                *release
-                    .connection_id
-                    .lock()
-                    .expect("page-binding release connection mutex poisoned") =
-                    Some(record.connection_id);
+                *lock_recovering(
+                    &release.connection_id,
+                    "session.page_binding_release_connection",
+                ) = Some(record.connection_id);
                 let contains_page = record
                     .grant
                     .pages
@@ -2268,11 +2263,11 @@ mod tests {
             "the terminal publication result must release the global grant gate"
         );
         assert_eq!(
-            coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned")
-                .len(),
+            lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release"
+            )
+            .len(),
             1,
             "the failed publication remains available for a real retry"
         );
@@ -2382,11 +2377,11 @@ mod tests {
         assert_eq!(first, Ok(()));
         assert_eq!(retry, Ok(()));
         assert!(
-            coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned")
-                .is_empty(),
+            lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release"
+            )
+            .is_empty(),
             "an already-missing grant must not leave unassociated retry state"
         );
     }
@@ -2432,11 +2427,11 @@ mod tests {
         assert_eq!(ticket_result, Err(CompanionSessionError::BindingExpired));
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if coordinator
-                    .binding_releases
-                    .lock()
-                    .expect("page-binding release mutex poisoned")
-                    .is_empty()
+                if lock_recovering(
+                    &coordinator.binding_releases,
+                    "session.page_binding_release",
+                )
+                .is_empty()
                 {
                     break;
                 }
@@ -2481,11 +2476,11 @@ mod tests {
         .expect("owned release publication must have a terminal deadline");
         assert_eq!(failed, Err(CompanionSessionError::QueueClosed));
         assert_eq!(
-            coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned")
-                .len(),
+            lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release"
+            )
+            .len(),
             1
         );
 
@@ -2510,11 +2505,11 @@ mod tests {
         };
         assert!(!reduced.pages.iter().any(|page| page.page_id == page_id));
         assert!(
-            coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned")
-                .is_empty(),
+            lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release"
+            )
+            .is_empty(),
             "successful retry must retire its failed release record"
         );
     }
@@ -2551,10 +2546,10 @@ mod tests {
             Err(CompanionSessionError::QueueClosed)
         );
         let failed_release = {
-            let releases = coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned");
+            let releases = lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release",
+            );
             assert_eq!(releases.len(), 1);
             Arc::clone(releases.values().next().unwrap())
         };
@@ -2579,10 +2574,10 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let replaced = {
-                    let releases = coordinator
-                        .binding_releases
-                        .lock()
-                        .expect("page-binding release mutex poisoned");
+                    let releases = lock_recovering(
+                        &coordinator.binding_releases,
+                        "session.page_binding_release",
+                    );
                     releases
                         .values()
                         .next()
@@ -2600,11 +2595,11 @@ mod tests {
         let reconnected = reconnect.await.unwrap();
         assert!(retry.await.unwrap().is_err());
         assert!(
-            coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned")
-                .is_empty(),
+            lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release"
+            )
+            .is_empty(),
             "replacing a connection must retire its failed release records"
         );
         coordinator
@@ -2644,21 +2639,21 @@ mod tests {
             Err(CompanionSessionError::QueueClosed)
         );
         assert_eq!(
-            coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned")
-                .len(),
+            lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release"
+            )
+            .len(),
             1
         );
 
         coordinator.unregister(&profile_id, reconnected).await;
         assert!(
-            coordinator
-                .binding_releases
-                .lock()
-                .expect("page-binding release mutex poisoned")
-                .is_empty(),
+            lock_recovering(
+                &coordinator.binding_releases,
+                "session.page_binding_release"
+            )
+            .is_empty(),
             "unregister must retire every failed release record for the connection"
         );
     }

@@ -295,8 +295,7 @@ pub(crate) async fn authenticate(
                 {
                     Err(error) => error.into_response(),
                     Ok(_principal_permit) => {
-                        match crate::routes::validate_request_boundary(&state, &mut request).await
-                        {
+                        match crate::routes::validate_request_boundary(&state, &mut request).await {
                             Err(error) => error.into_response(),
                             Ok(()) => next.run(request).await,
                         }

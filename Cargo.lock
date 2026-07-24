@@ -448,6 +448,7 @@ dependencies = [
  "axum",
  "companion-protocol",
  "futures-util",
+ "observability",
  "serde",
  "serde_json",
  "thiserror",

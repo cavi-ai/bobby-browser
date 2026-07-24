@@ -1,5 +1,7 @@
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+pub mod locks;
+
 pub mod fields {
     //! Standard field names. Bearer tokens, page content, and JS source are
     //! NEVER valid field values.

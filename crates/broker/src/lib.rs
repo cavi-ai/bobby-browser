@@ -81,10 +81,8 @@ impl RuntimeBindingCache {
         build: impl FnOnce(CapabilityHandle) -> AuthenticatedRuntime,
     ) -> Arc<AuthenticatedRuntime> {
         let principal = handle.principal_id().clone();
-        let mut entries = self
-            .entries
-            .lock()
-            .expect("runtime binding cache mutex is not poisoned");
+        let mut entries =
+            observability::locks::lock_recovering(&self.entries, "broker.runtime_binding_cache");
         if let Some((cached_handle, runtime)) = entries.get(&principal) {
             if cached_handle.capabilities() == handle.capabilities()
                 && cached_handle.is_valid_at(chrono::Utc::now())
