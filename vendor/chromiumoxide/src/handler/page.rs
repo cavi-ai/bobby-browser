@@ -297,6 +297,33 @@ impl PageInner {
         Ok(resp.result)
     }
 
+    /// Like [`Self::call_js_fn`], but requests the result by value (JSON)
+    /// instead of a remote object reference. Used for scripts that return
+    /// plain data (e.g. an array of collected records) rather than a DOM
+    /// handle.
+    pub async fn call_js_fn_by_value(
+        &self,
+        function_declaration: impl Into<String>,
+        await_promise: bool,
+        remote_object_id: RemoteObjectId,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .execute(
+                CallFunctionOnParams::builder()
+                    .object_id(remote_object_id)
+                    .function_declaration(function_declaration)
+                    .return_by_value(true)
+                    .await_promise(await_promise)
+                    .build()
+                    .unwrap(),
+            )
+            .await?;
+        resp.result
+            .result
+            .value
+            .ok_or_else(|| CdpError::msg("call_js_fn_by_value returned no value"))
+    }
+
     pub async fn evaluate_expression(
         &self,
         evaluate: impl Into<EvaluateParams>,

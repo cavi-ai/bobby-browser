@@ -507,6 +507,28 @@ impl Page {
         Element::from_nodes(&self.inner, &node_ids).await
     }
 
+    /// Resolves a node discovered out-of-band (e.g. via `DOM.describeNode`
+    /// with `pierce: true`, which can see nodes inside closed shadow roots
+    /// that `find_element`'s selector-based lookup cannot reach) into an
+    /// `Element` handle.
+    ///
+    /// Prefer [`Self::element_from_backend_node_id`] for pierce-discovered
+    /// nodes: pierce trees return `nodeId`s that are not registered with the
+    /// frontend, so resolving by `nodeId` fails with "Could not find node
+    /// with given id".
+    pub async fn element_from_node_id(&self, node_id: NodeId) -> Result<Element> {
+        Element::new(Arc::clone(&self.inner), node_id).await
+    }
+
+    /// Resolves a pierce-discovered (or otherwise out-of-band) node into an
+    /// `Element` handle via its stable `backendNodeId`.
+    pub async fn element_from_backend_node_id(
+        &self,
+        backend_node_id: BackendNodeId,
+    ) -> Result<Element> {
+        Element::from_backend_node_id(Arc::clone(&self.inner), backend_node_id).await
+    }
+
     /// Returns the first element in the document which matches the given xpath
     /// selector.
     ///

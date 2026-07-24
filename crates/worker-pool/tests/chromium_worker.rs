@@ -762,6 +762,136 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn resolves_ambient_and_explicit_closed_shadow_roots() {
+    let fixture = test_site::spawn().await;
+    let host = test_site::spawn_frame_host(&fixture.base_url()).await;
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: host.base_url(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Ambient purpose-based match inside a closed root (no shadow_path).
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("button".into()),
+                    accessible_name: Some("Closed Inside".into()),
+                    ..TargetSpec::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = worker
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: None,
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(format!("{evidence:?}").contains("closed-shadow-clicked"));
+
+    // Explicit shadow_path into a closed root.
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("button".into()),
+                    accessible_name: Some("Closed Inside".into()),
+                    shadow_path: vec![Box::new(TargetSpec {
+                        css: Some("#closed-host".into()),
+                        ..TargetSpec::default()
+                    })],
+                    ..TargetSpec::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Mixed open-then-closed nesting via explicit shadow_path.
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("button".into()),
+                    accessible_name: Some("Mixed Closed Inside".into()),
+                    shadow_path: vec![
+                        Box::new(TargetSpec {
+                            css: Some("#mixed-host".into()),
+                            ..TargetSpec::default()
+                        }),
+                        Box::new(TargetSpec {
+                            css: Some("#inner-closed-host".into()),
+                            ..TargetSpec::default()
+                        }),
+                    ],
+                    ..TargetSpec::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = worker
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: None,
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(format!("{evidence:?}").contains("mixed-closed-clicked"));
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
