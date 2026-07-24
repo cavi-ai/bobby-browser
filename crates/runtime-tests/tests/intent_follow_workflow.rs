@@ -109,6 +109,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -131,6 +132,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
             authority_path: root.join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     };
     RuntimeService::build(&config).await.unwrap()
 }

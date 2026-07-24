@@ -146,6 +146,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -168,6 +169,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             authority_path: root.path().join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
     let first_session = runtime

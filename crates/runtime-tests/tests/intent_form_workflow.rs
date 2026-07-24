@@ -125,6 +125,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -147,6 +148,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
             authority_path: root.path().join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     };
 
     let runtime = RuntimeService::build(&config).await.unwrap();

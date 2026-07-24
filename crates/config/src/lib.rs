@@ -67,6 +67,8 @@ pub struct AppConfig {
     pub http: HttpConfig,
     #[serde(default)]
     pub interface: InterfaceConfig,
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +267,12 @@ impl Default for HttpConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default = "default_shutdown_timeout_ms")]
+    pub shutdown_timeout_ms: u64,
+}
+
+const fn default_shutdown_timeout_ms() -> u64 {
+    10_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +306,7 @@ impl Default for AppConfig {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 7777,
+                shutdown_timeout_ms: 10_000,
             },
             browser: BrowserConfig {
                 executable: None,
@@ -319,6 +328,7 @@ impl Default for AppConfig {
             },
             http: HttpConfig::default(),
             interface: InterfaceConfig::default(),
+            observability: ObservabilityConfig::default(),
         }
     }
 }
@@ -506,4 +516,44 @@ mod tests {
         let config = AppConfig::load(&path).expect("repo config.toml must parse and validate");
         assert!(config.validate().is_ok());
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservabilityConfig {
+    #[serde(default = "default_observability_level")]
+    pub level: String,
+    #[serde(default)]
+    pub format: LogFormat,
+    #[serde(default)]
+    pub sink: LogSink,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            level: default_observability_level(),
+            format: LogFormat::default(),
+            sink: LogSink::default(),
+        }
+    }
+}
+
+fn default_observability_level() -> String {
+    "info".to_string()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogFormat {
+    #[default]
+    Json,
+    Pretty,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogSink {
+    #[default]
+    Stdout,
 }

@@ -19,7 +19,7 @@ members = [
   "crates/checkpoint-store",
   "crates/workflow-journal",
   "crates/worker-pool",
-  "crates/tracing",
+  "crates/observability",
   "crates/cdp-gateway",
   "crates/mcp-gateway",
   "crates/test-site",

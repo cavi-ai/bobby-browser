@@ -20,6 +20,7 @@ fn config(root: &tempfile::TempDir) -> AppConfig {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -48,6 +49,7 @@ fn config(root: &tempfile::TempDir) -> AppConfig {
             ..HttpConfig::default()
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     }
 }
 

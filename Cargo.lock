@@ -58,7 +58,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "types",
  "uuid",
 ]
@@ -148,7 +148,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing 0.1.44",
+ "tracing",
 ]
 
 [[package]]
@@ -167,7 +167,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
- "tracing 0.1.44",
+ "tracing",
 ]
 
 [[package]]
@@ -297,7 +297,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tower",
- "tracing 0.1.44",
+ "tracing",
  "types",
  "uuid",
 ]
@@ -357,7 +357,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "url",
  "which",
  "windows-registry",
@@ -427,11 +427,11 @@ dependencies = [
  "config",
  "firefox-companion",
  "libc",
+ "observability",
  "serde",
  "serde_json",
  "tokio",
- "tracing 0.1.44",
- "tracing-subscriber",
+ "tracing",
  "types",
  "url",
  "uuid",
@@ -450,7 +450,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-tungstenite",
- "tracing 0.1.44",
+ "tracing",
  "types",
  "url",
  "uuid",
@@ -622,7 +622,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "types",
 ]
 
@@ -1041,7 +1041,7 @@ dependencies = [
  "socket2",
  "tokio",
  "tower-service",
- "tracing 0.1.44",
+ "tracing",
 ]
 
 [[package]]
@@ -1258,7 +1258,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "types",
 ]
 
@@ -1385,7 +1385,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "types",
  "uuid",
  "worker-pool",
@@ -1441,7 +1441,7 @@ dependencies = [
  "test-site",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "types",
  "url",
 ]
@@ -1474,6 +1474,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "observability"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1644,7 +1660,7 @@ dependencies = [
  "socket2",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "web-time",
 ]
 
@@ -1666,7 +1682,7 @@ dependencies = [
  "slab",
  "thiserror",
  "tinyvec",
- "tracing 0.1.44",
+ "tracing",
  "web-time",
 ]
 
@@ -1680,7 +1696,7 @@ dependencies = [
  "libc",
  "once_cell",
  "socket2",
- "tracing 0.1.44",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -2560,7 +2576,7 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
- "tracing 0.1.44",
+ "tracing",
 ]
 
 [[package]]
@@ -2608,19 +2624,6 @@ dependencies = [
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing 0.1.44",
- "types",
 ]
 
 [[package]]
@@ -2680,7 +2683,7 @@ dependencies = [
  "sharded-slab",
  "smallvec",
  "thread_local",
- "tracing 0.1.44",
+ "tracing",
  "tracing-core",
  "tracing-log",
  "tracing-serde",
@@ -3129,7 +3132,7 @@ dependencies = [
  "test-site",
  "thiserror",
  "tokio",
- "tracing 0.1.44",
+ "tracing",
  "types",
  "url",
 ]
