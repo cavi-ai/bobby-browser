@@ -79,8 +79,8 @@ returns a `javaScriptResult` evidence item.
 
 Semantic automation is available through the authenticated SDK and MCP surfaces
 with `intent:execute`. Supported intents: **Locate**, **Fill** (text, select, or
-files), **SubmitAndVerify**, **WaitForState**, **Follow**, and
-**DismissObstruction**.
+files), **SubmitAndVerify**, **WaitForState**, **Follow**,
+**DismissObstruction**, and **Extract**.
 
 `Follow` activates a described link/control and verifies the resulting
 destination against an `expected_destination` wait condition. Unlike
@@ -101,6 +101,16 @@ dismissing an obstruction is never treated as a mutating action, so this
 intent is always `CommandClass::Reconciliable`. If the obstruction persists
 after the click, the intent fails with `ObstructionSuspected` and may escalate
 to vision assist (subject to the same deny-by-default gating below).
+
+`Extract` resolves a caller-named set of fields against the page and reads a
+declared value off each — `text` (innerText), `href`, or a named `attribute`.
+Each field is resolved independently (its own `purpose`/`hints`, effectively a
+per-field `Locate`), so a page missing one field doesn't block the rest: the
+command always completes, and a field that can't be resolved deterministically
+or via vision is reported missing (with an error code) in that field's
+`Extraction` evidence rather than failing the whole intent. `Extract` never
+mutates the page, so it is always `CommandClass::Replayable` — no `boundary`
+flag, and safe to retry freely.
 
 Vision-assisted resolution is **deny-by-default** and gated like JavaScript
 evaluation: the bearer must hold `vision:assist`, and the session must have

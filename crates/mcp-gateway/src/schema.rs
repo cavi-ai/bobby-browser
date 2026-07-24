@@ -78,6 +78,8 @@ fn definitions() -> Value {
         "IntentCommand": {"oneOf": intent_commands()},
         "IntentHints": intent_hints(),
         "FillValue": {"oneOf": fill_values()},
+        "ExtractField": extract_field(),
+        "ExtractValueKind": {"oneOf": extract_value_kinds()},
         "WaitForCommand": wait_for_command(),
         "TargetSpec": target_spec(),
         "TextMatch": {"oneOf":[
@@ -188,6 +190,45 @@ fn intent_commands() -> Vec<Value> {
                 &["purpose"],
             ),
         ),
+        tagged_input(
+            "extract",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "fields":{
+                        "type":"array",
+                        "items":{"$ref":"#/$defs/ExtractField"},
+                        "minItems":1,
+                        "maxItems":MAX_COLLECTION_ITEMS
+                    }
+                }),
+                &["purpose", "fields"],
+            ),
+        ),
+    ]
+}
+
+fn extract_field() -> Value {
+    object(
+        json!({
+            "name":string(1, 256),
+            "purpose":string(1, 256),
+            "hints":{"$ref":"#/$defs/IntentHints"},
+            "value":{"$ref":"#/$defs/ExtractValueKind"}
+        }),
+        &["name", "purpose", "value"],
+    )
+}
+
+fn extract_value_kinds() -> Vec<Value> {
+    vec![
+        tagged_fields("text", json!({}), &[]),
+        tagged_fields(
+            "attribute",
+            json!({"attribute":string(1, 256)}),
+            &["attribute"],
+        ),
+        tagged_fields("href", json!({}), &[]),
     ]
 }
 
@@ -576,7 +617,31 @@ fn evidence_variants() -> Vec<Value> {
             json!({"record":{"$ref":"#/$defs/ExecutionRecord"}}),
             &["record"],
         ),
+        tagged_fields(
+            "extraction",
+            json!({
+                "field":string(1, 256),
+                "value":nullable(string(0, MAX_STRING_BYTES)),
+                "resolutionPath":{"type":"string","enum":["deterministic","visionFallback"]},
+                "errorCode":nullable(error_code())
+            }),
+            &["field", "value", "resolutionPath", "errorCode"],
+        ),
     ]
+}
+
+/// Must match `types::ErrorCode`'s camelCase serde output variant-for-variant.
+fn error_code() -> Value {
+    json!({"type":"string","enum":[
+        "invalidRequest","notFound","deadlineExceeded","browserLaunchFailed",
+        "browserCommandFailed","verificationFailed","journalFailed","resourceExhausted",
+        "policyDenied","internal","targetNotFound","targetAmbiguous","frameNotFound",
+        "shadowRootUnavailable","targetDetached","waitConditionTimedOut",
+        "screenshotCaptureFailed","networkPolicyDenied","httpResponseTooLarge",
+        "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
+        "intentCompileFailed","intentActionMismatch","obstructionSuspected",
+        "visionAssistDenied","visionAssistFailed"
+    ]})
 }
 
 fn page_evidence_properties() -> Value {

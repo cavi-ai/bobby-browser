@@ -6,6 +6,8 @@ import {
   assertIntentPurpose,
   dismissObstructionEnvelope,
   dismissObstructionRuntimeCommand,
+  extractEnvelope,
+  extractRuntimeCommand,
   fillEnvelope,
   followEnvelope,
   followRuntimeCommand,
@@ -193,6 +195,109 @@ test("dismissObstructionEnvelope forwards an explicit timeoutMs verbatim", () =>
           allowBestMatch: false,
         },
         timeoutMs: 3_000,
+      },
+    },
+  });
+});
+
+test("extractRuntimeCommand matches Rust golden nested wire shape", () => {
+  const command = extractRuntimeCommand({
+    purpose: "Profile summary",
+    fields: [
+      { name: "displayName", purpose: "Display name", value: { kind: "text" } },
+      { name: "profileLink", purpose: "Profile link", value: { kind: "href" } },
+    ],
+  });
+  assert.deepEqual(command, {
+    kind: "intent",
+    input: {
+      kind: "extract",
+      input: {
+        purpose: "Profile summary",
+        fields: [
+          {
+            name: "displayName",
+            purpose: "Display name",
+            hints: {
+              role: null,
+              nearText: null,
+              framePath: [],
+              shadowPath: [],
+              allowBestMatch: false,
+            },
+            value: { kind: "text" },
+          },
+          {
+            name: "profileLink",
+            purpose: "Profile link",
+            hints: {
+              role: null,
+              nearText: null,
+              framePath: [],
+              shadowPath: [],
+              allowBestMatch: false,
+            },
+            value: { kind: "href" },
+          },
+        ],
+      },
+    },
+  });
+});
+
+test("extractRuntimeCommand rejects an empty field list", () => {
+  assert.throws(() => extractRuntimeCommand({ purpose: "Profile summary", fields: [] }), /at least one field/);
+});
+
+test("extractRuntimeCommand rejects duplicate field names", () => {
+  assert.throws(
+    () =>
+      extractRuntimeCommand({
+        purpose: "Profile summary",
+        fields: [
+          { name: "displayName", purpose: "Display name", value: { kind: "text" } },
+          { name: "displayName", purpose: "Secondary name", value: { kind: "text" } },
+        ],
+      }),
+    /duplicate extract field name/,
+  );
+});
+
+test("extractRuntimeCommand rejects an empty field name", () => {
+  assert.throws(
+    () =>
+      extractRuntimeCommand({
+        purpose: "Profile summary",
+        fields: [{ name: "   ", purpose: "Display name", value: { kind: "text" } }],
+      }),
+    /field name must not be empty/,
+  );
+});
+
+test("extractEnvelope builds a full CommandEnvelope with an attribute field", () => {
+  const envelope = extractEnvelope(META, "Profile summary", [
+    { name: "userId", purpose: "User id", value: { kind: "attribute", attribute: "data-user-id" } },
+  ]);
+  assert.deepEqual(envelope.command, {
+    kind: "intent",
+    input: {
+      kind: "extract",
+      input: {
+        purpose: "Profile summary",
+        fields: [
+          {
+            name: "userId",
+            purpose: "User id",
+            hints: {
+              role: null,
+              nearText: null,
+              framePath: [],
+              shadowPath: [],
+              allowBestMatch: false,
+            },
+            value: { kind: "attribute", attribute: "data-user-id" },
+          },
+        ],
       },
     },
   });

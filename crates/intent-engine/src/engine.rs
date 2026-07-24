@@ -4,11 +4,12 @@ use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
-    ExecutionRecord, FillValue, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
-    TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    ExecutionRecord, ExtractValueKind, FillValue, IntentCommand, IntentResolutionPath, PageId,
+    ScreenshotMode, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand,
 };
 
-use crate::compiler::{compile_intent, IntentPlan};
+use crate::compiler::{compile_intent, ExtractFieldPlan, IntentPlan};
 use crate::stuck::{never_escalates, StuckKind};
 use crate::verify::{
     compatible, execution_record, execution_record_with_path, summarize_target, verify_fill,
@@ -142,6 +143,9 @@ impl IntentEngine {
             IntentPlan::DismissObstruction { target, timeout_ms } => {
                 execute_dismiss_obstruction(intent, page_id, browser, vision, target, timeout_ms)
                     .await
+            }
+            IntentPlan::Extract { fields } => {
+                execute_extract(intent, page_id, browser, vision, fields).await
             }
         }
     }
@@ -1047,6 +1051,223 @@ async fn is_gone(page_id: &PageId, browser: &dyn IntentBrowser, target: &TargetS
     }
 }
 
+/// Schema-bounded structured extraction. Each field is resolved and read
+/// independently: a field that cannot be resolved (deterministically, or via
+/// vision when permitted) is recorded as missing in its own `Extraction`
+/// evidence rather than failing the whole command, so this always returns
+/// `Completed` — the caller inspects per-field evidence to see what came
+/// back.
+async fn execute_extract(
+    intent: &IntentCommand,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    fields: Vec<ExtractFieldPlan>,
+) -> IntentOutcome {
+    let purpose = match intent {
+        IntentCommand::Extract(extract) => Some(extract.purpose.clone()),
+        _ => None,
+    };
+    let plan_summary = format!(
+        "fields=[{}]",
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    let mut evidence = Vec::new();
+    let mut missing_fields = Vec::new();
+    for field in &fields {
+        let mut field_evidence = resolve_extract_field(page_id, browser, vision, field).await;
+        if matches!(
+            field_evidence.last(),
+            Some(Evidence::Extraction { value: None, .. })
+        ) {
+            missing_fields.push(field.name.clone());
+        }
+        evidence.append(&mut field_evidence);
+    }
+
+    let verification = if missing_fields.is_empty() {
+        "extracted".to_owned()
+    } else {
+        format!("extractedPartial:missing={}", missing_fields.join(","))
+    };
+    evidence.push(intent_evidence(execution_record(
+        "extract",
+        purpose,
+        plan_summary,
+        Vec::new(),
+        None,
+        verification,
+    )));
+    IntentOutcome::Completed { evidence }
+}
+
+/// Resolves and reads one `ExtractIntent` field. Always returns evidence
+/// ending in exactly one `Evidence::Extraction` for `field.name`, preceded by
+/// a `Evidence::Resolution` when the field was found (deterministically or
+/// via vision).
+async fn resolve_extract_field(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    field: &ExtractFieldPlan,
+) -> Vec<Evidence> {
+    let candidates = match browser.collect_candidates(page_id, &field.target).await {
+        Ok(candidates) => candidates,
+        Err(error) => return vec![missing_extraction(&field.name, Some(error.code))],
+    };
+
+    match resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default()) {
+        Ok(ResolutionDecision::Resolved {
+            candidate,
+            evidence,
+            best_match_authorized,
+        }) => {
+            let fingerprint = fingerprint(page_id, &candidate);
+            let resolution = Evidence::Resolution {
+                target: Box::new(field.target.clone()),
+                fingerprint: Box::new(fingerprint),
+                candidates: vec![evidence],
+                best_match_authorized,
+            };
+            let value = extract_value_from_candidate(&field.value, &candidate);
+            vec![
+                resolution,
+                Evidence::Extraction {
+                    field: field.name.clone(),
+                    value,
+                    resolution_path: IntentResolutionPath::Deterministic,
+                    error_code: None,
+                },
+            ]
+        }
+        Ok(ResolutionDecision::NotFound) => {
+            escalate_extract_field_with_vision(
+                page_id,
+                browser,
+                vision,
+                field,
+                StuckKind::TargetMissing,
+                ErrorCode::TargetNotFound,
+            )
+            .await
+        }
+        Ok(ResolutionDecision::Ambiguous { .. }) => {
+            escalate_extract_field_with_vision(
+                page_id,
+                browser,
+                vision,
+                field,
+                StuckKind::TargetAmbiguous,
+                ErrorCode::TargetAmbiguous,
+            )
+            .await
+        }
+        Err(_) => vec![missing_extraction(&field.name, Some(ErrorCode::InvalidRequest))],
+    }
+}
+
+/// Attempts a vision-proposed value for a field the deterministic resolver
+/// could not place, under the same double-gate rule every other intent's
+/// vision fallback uses. Unlike the click-oriented escalation path, success
+/// here never touches the page — the proposal's text becomes the field's
+/// value directly.
+async fn escalate_extract_field_with_vision(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    field: &ExtractFieldPlan,
+    stuck: StuckKind,
+    deterministic_fallback_code: ErrorCode,
+) -> Vec<Evidence> {
+    if never_escalates(deterministic_fallback_code) || !stuck.may_escalate_to_vision() {
+        return vec![missing_extraction(&field.name, Some(deterministic_fallback_code))];
+    }
+
+    let gates_open = vision.session_ok && vision.capability_ok;
+    let Some(assist) = vision.assist.as_ref() else {
+        let code = if gates_open {
+            ErrorCode::VisionAssistFailed
+        } else {
+            ErrorCode::VisionAssistDenied
+        };
+        return vec![missing_extraction(&field.name, Some(code))];
+    };
+    if !gates_open {
+        return vec![missing_extraction(&field.name, Some(ErrorCode::VisionAssistDenied))];
+    }
+
+    let (png, mut screenshot_evidence) = match browser
+        .capture_screenshot(
+            page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            },
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => return vec![missing_extraction(&field.name, Some(ErrorCode::VisionAssistFailed))],
+    };
+
+    let proposal = match assist
+        .propose(VisionProposeRequest {
+            purpose: field.purpose.clone(),
+            intent_kind: "extract".to_owned(),
+            screenshot_png: png,
+            stuck,
+        })
+        .await
+    {
+        Ok(proposal) => proposal,
+        Err(_) => {
+            screenshot_evidence.push(missing_extraction(
+                &field.name,
+                Some(ErrorCode::VisionAssistFailed),
+            ));
+            return screenshot_evidence;
+        }
+    };
+
+    let value = match &proposal.action {
+        VisionAction::ExtractValue { value } if proposal.confidence >= VISION_CONFIDENCE_FLOOR => {
+            Some(value.clone())
+        }
+        _ => None,
+    };
+    let error_code = value.is_none().then_some(ErrorCode::VisionAssistFailed);
+
+    let mut evidence = screenshot_evidence;
+    evidence.push(Evidence::Extraction {
+        field: field.name.clone(),
+        value,
+        resolution_path: IntentResolutionPath::VisionFallback,
+        error_code,
+    });
+    evidence
+}
+
+fn missing_extraction(field: &str, error_code: Option<ErrorCode>) -> Evidence {
+    Evidence::Extraction {
+        field: field.to_owned(),
+        value: None,
+        resolution_path: IntentResolutionPath::Deterministic,
+        error_code,
+    }
+}
+
+fn extract_value_from_candidate(kind: &ExtractValueKind, candidate: &Candidate) -> Option<String> {
+    match kind {
+        ExtractValueKind::Text => Some(candidate.text.clone()),
+        ExtractValueKind::Attribute { attribute } => candidate.attributes.get(attribute).cloned(),
+        ExtractValueKind::Href => candidate.attributes.get("href").cloned(),
+    }
+}
+
 fn expected_url_from_wait(wait: &WaitForCommand) -> Option<String> {
     match &wait.condition {
         types::WaitCondition::Url {
@@ -1410,6 +1631,15 @@ async fn execute_vision_action(
                 )
                 .await
         }
+        // `ExtractValue` is read-only and only ever consumed directly by
+        // `resolve_extract_field`'s own vision path, never by this
+        // act-on-the-page dispatcher.
+        VisionAction::ExtractValue { .. } => Err(CommandError {
+            code: ErrorCode::VisionAssistFailed,
+            message: "extractValue vision action is not an actionable page operation".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        }),
     }
 }
 
