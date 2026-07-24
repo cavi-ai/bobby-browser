@@ -152,9 +152,13 @@ mod tests {
         let path = registry_dir.path().join("unverified.pid");
         std::fs::write(&path, pid.to_string()).unwrap();
 
-        super::reap_orphaned_processes(registry_dir.path(), |_| false, |_| {
-            panic!("must never signal a process that failed identity verification");
-        });
+        super::reap_orphaned_processes(
+            registry_dir.path(),
+            |_| false,
+            |_| {
+                panic!("must never signal a process that failed identity verification");
+            },
+        );
 
         // The stale registry entry is still cleared even though the process
         // it referenced was left alone.

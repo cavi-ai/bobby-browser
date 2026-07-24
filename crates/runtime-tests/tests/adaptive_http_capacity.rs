@@ -10,8 +10,8 @@ use sdk_core::RuntimeService;
 use std::collections::BTreeMap;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence,
-    ExecutionPath, InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand,
-    SessionId, WaitUntil, WorkflowId,
+    ExecutionPath, InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 use worker_pool::{ChromiumWorkerFactory, WorkerFactory};
 

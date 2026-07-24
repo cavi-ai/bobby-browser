@@ -79,10 +79,7 @@ async fn reinitialize_resets_the_session_lifecycle() {
         response.get("error").is_none(),
         "re-initialize is accepted: {response}"
     );
-    assert_eq!(
-        response["result"]["protocolVersion"],
-        json!("2025-11-25")
-    );
+    assert_eq!(response["result"]["protocolVersion"], json!("2025-11-25"));
 
     // The lifecycle was genuinely reset: tool traffic before the new
     // handshake completes is rejected as not-initialized.

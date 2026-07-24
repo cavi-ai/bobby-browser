@@ -6,8 +6,8 @@ use sdk_core::RuntimeService;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
     CreateSessionRequest, ElementState, ErrorCode, Evidence, NavigateCommand, OpenPageRequest,
-    PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
-    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch,
+    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 
 fn envelope(

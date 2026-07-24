@@ -10,7 +10,11 @@ use types::{
     RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 
-fn intent_envelope(session_id: &SessionId, page_id: &PageId, command: IntentCommand) -> CommandEnvelope {
+fn intent_envelope(
+    session_id: &SessionId,
+    page_id: &PageId,
+    command: IntentCommand,
+) -> CommandEnvelope {
     CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
@@ -23,7 +27,12 @@ fn intent_envelope(session_id: &SessionId, page_id: &PageId, command: IntentComm
     }
 }
 
-async fn completed_navigate(runtime: &RuntimeService, session_id: &SessionId, page_id: &PageId, url: String) {
+async fn completed_navigate(
+    runtime: &RuntimeService,
+    session_id: &SessionId,
+    page_id: &PageId,
+    url: String,
+) {
     match runtime
         .submit(CommandEnvelope {
             schema_version: CommandEnvelope::SCHEMA_VERSION,

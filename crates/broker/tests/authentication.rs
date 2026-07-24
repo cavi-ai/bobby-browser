@@ -12,7 +12,7 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use tower::ServiceExt;
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, InterfaceError, InterfaceOperation,
-    PrimitiveCommand, RuntimeCommand, PrincipalId, WorkflowId, CURRENT_INTERFACE_VERSION,
+    PrimitiveCommand, PrincipalId, RuntimeCommand, WorkflowId, CURRENT_INTERFACE_VERSION,
 };
 use uuid::uuid;
 

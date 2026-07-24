@@ -7,8 +7,9 @@ use types::{
     AttemptId, CheckpointId, CheckpointInvariant, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
     CommandId, CommandOutcome, CommandPhase, CreateSessionRequest, Evidence, InspectCommand,
-    ListPagesCommand, NavigateCommand, OpenPageCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand,
-    SessionId, TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    ListPagesCommand, NavigateCommand, OpenPageCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    RuntimeCommand, SessionId, TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint,
+    WorkflowId,
 };
 use workflow_journal::{CommandJournal, JsonlJournal};
 
@@ -67,7 +68,9 @@ async fn submit_boundary(
             session_id: session_id.clone(),
             page_id: Some(page_id.clone()),
             deadline: Utc::now() + Duration::seconds(30),
-            command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
+            command: RuntimeCommand::Primitive(
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ),
         })
         .await
     {
@@ -312,7 +315,9 @@ async fn completes_dynamic_form_with_durable_evidence() {
             session_id: first_session.id.clone(),
             page_id: Some(page.id.clone()),
             deadline: Utc::now() + Duration::seconds(30),
-            command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
+            command: RuntimeCommand::Primitive(
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ),
         })
         .await
     {

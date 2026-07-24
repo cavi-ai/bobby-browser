@@ -6,8 +6,8 @@ use broker::testing::{app_with_admin, context_headers, issue_bearer};
 use chrono::{Duration, SecondsFormat, Utc};
 use tower::ServiceExt;
 use types::{
-    AttemptId, CommandEnvelope, CommandId, InspectCommand, PageId, PrimitiveCommand, RuntimeCommand, SessionId,
-    UploadFilesCommand, WorkflowId,
+    AttemptId, CommandEnvelope, CommandId, InspectCommand, PageId, PrimitiveCommand,
+    RuntimeCommand, SessionId, UploadFilesCommand, WorkflowId,
 };
 use uuid::uuid;
 

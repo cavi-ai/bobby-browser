@@ -299,7 +299,9 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
             session_id: session.id.clone(),
             page_id: Some(page.id.clone()),
             deadline: Utc::now() + Duration::seconds(30),
-            command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand::default())),
+            command: RuntimeCommand::Primitive(
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ),
         })
         .await
     {

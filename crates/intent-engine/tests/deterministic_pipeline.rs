@@ -33,7 +33,6 @@ impl IntentBrowser for FakeBrowser {
         Err(unsupported("click"))
     }
 
-
     async fn click_xy(
         &self,
         _page_id: &PageId,
@@ -204,13 +203,8 @@ async fn wait_for_state_success_is_deterministic() {
         },
         timeout_ms: 1_000,
     });
-    let outcome = IntentEngine::execute(
-        &intent,
-        &page_id,
-        &browser,
-        &VisionContext::default(),
-    )
-    .await;
+    let outcome =
+        IntentEngine::execute(&intent, &page_id, &browser, &VisionContext::default()).await;
 
     let IntentOutcome::Completed { evidence } = outcome else {
         panic!("expected Completed, got {outcome:?}");

@@ -43,8 +43,7 @@ use types::{
 use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
-        gather_candidates, resolve_target as resolve_browser_target,
-        resolve_target_with_visibility,
+        gather_candidates, resolve_target as resolve_browser_target, resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };

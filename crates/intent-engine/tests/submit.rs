@@ -46,7 +46,6 @@ impl IntentBrowser for FakeBrowser {
         Ok(self.click_evidence.clone())
     }
 
-
     async fn click_xy(
         &self,
         _page_id: &PageId,
@@ -188,7 +187,9 @@ async fn submit_and_verify_clicks_boundary_then_waits() {
     assert_eq!(record.resolution_path, IntentResolutionPath::Deterministic);
     assert_eq!(record.verification, "submitted");
     assert_eq!(record.wait_elapsed_ms, Some(12));
-    assert!(evidence.iter().any(|item| matches!(item, Evidence::Resolution { .. })));
+    assert!(evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::Resolution { .. })));
 }
 
 #[tokio::test]
