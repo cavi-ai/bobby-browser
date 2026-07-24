@@ -79,7 +79,8 @@ returns a `javaScriptResult` evidence item.
 
 Semantic automation is available through the authenticated SDK and MCP surfaces
 with `intent:execute`. Supported intents: **Locate**, **Fill** (text, select, or
-files), **SubmitAndVerify**, **WaitForState**, and **Follow**.
+files), **SubmitAndVerify**, **WaitForState**, **Follow**, and
+**DismissObstruction**.
 
 `Follow` activates a described link/control and verifies the resulting
 destination against an `expected_destination` wait condition. Unlike
@@ -90,6 +91,16 @@ mutating/side-effecting action (e.g. "Sign out"), which requires a matching
 `WorkflowCheckpoint` established beforehand via the Inspect → Checkpoint →
 Follow dance; leave it `false` (the default) for ordinary same-tab navigation,
 which runs without a pre-established checkpoint.
+
+`DismissObstruction` activates a described dismiss/close control (a cookie
+banner, overlay, or popup) and confirms the target actually left the page —
+removed from the DOM or no longer visible — by re-resolving it after the
+click, polling every 25ms up to `timeout_ms` (default 5,000ms). Verification
+is built in, not caller-supplied: there is no `boundary` flag, since
+dismissing an obstruction is never treated as a mutating action, so this
+intent is always `CommandClass::Reconciliable`. If the obstruction persists
+after the click, the intent fails with `ObstructionSuspected` and may escalate
+to vision assist (subject to the same deny-by-default gating below).
 
 Vision-assisted resolution is **deny-by-default** and gated like JavaScript
 evaluation: the bearer must hold `vision:assist`, and the session must have

@@ -385,6 +385,39 @@ pub async fn spawn() -> FixtureServer {
             get(|| async { Html("<!doctype html><title>Details</title><p id='details-page'>Details page</p>") }),
         )
         .route(
+            "/obstructed",
+            get(|| async {
+                Html(
+                    r#"<!doctype html><title>Obstructed</title>
+                    <div id="page-content"><button id="primary-action" type="button">Primary action</button></div>
+                    <div id="cookie-banner" role="dialog" aria-label="Cookie notice">
+                      <p>We use cookies.</p>
+                      <button id="cookie-close" aria-label="Close cookie notice" type="button">Close</button>
+                    </div>
+                    <script>
+                      document.querySelector('#cookie-close').addEventListener('click', () => {
+                        document.querySelector('#cookie-banner').remove();
+                      });
+                    </script>"#,
+                )
+            }),
+        )
+        .route(
+            "/obstructed-stuck",
+            get(|| async {
+                Html(
+                    r#"<!doctype html><title>Obstructed Stuck</title>
+                    <div id="cookie-banner" role="dialog" aria-label="Cookie notice">
+                      <p>We use cookies.</p>
+                      <button id="cookie-close" aria-label="Close cookie notice" type="button">Close</button>
+                    </div>
+                    <script>
+                      document.querySelector('#cookie-close').addEventListener('click', () => {});
+                    </script>"#,
+                )
+            }),
+        )
+        .route(
             "/drift",
             get({
                 let drift_requests = drift_requests.clone();

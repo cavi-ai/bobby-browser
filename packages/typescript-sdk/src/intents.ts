@@ -6,8 +6,10 @@
  * `{ kind: "intent", input: { kind: "locate", input: { … } } }`.
  */
 import {
+  DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS,
   MAX_INTENT_PURPOSE_BYTES,
   type CommandEnvelope,
+  type DismissObstructionIntent,
   type FillIntent,
   type FillValue,
   type FollowIntent,
@@ -137,6 +139,21 @@ export function followRuntimeCommand(input: FollowIntent): RuntimeCommand {
   };
 }
 
+export function dismissObstructionRuntimeCommand(input: DismissObstructionIntent): RuntimeCommand {
+  assertIntentPurpose(input.purpose);
+  return {
+    kind: "intent",
+    input: {
+      kind: "dismissObstruction",
+      input: {
+        purpose: input.purpose,
+        hints: withHints(input.hints),
+        timeoutMs: input.timeoutMs ?? DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS,
+      },
+    },
+  };
+}
+
 export function intentEnvelope(meta: IntentEnvelopeMeta, command: RuntimeCommand): CommandEnvelope {
   if (command.kind !== "intent") {
     throw new Error('intentEnvelope requires RuntimeCommand with kind "intent"');
@@ -191,6 +208,21 @@ export function followEnvelope(
       expectedDestination,
       hints: options?.hints,
       boundary: options?.boundary,
+    }),
+  );
+}
+
+export function dismissObstructionEnvelope(
+  meta: IntentEnvelopeMeta,
+  purpose: string,
+  options?: { hints?: IntentHints; timeoutMs?: number },
+): CommandEnvelope {
+  return intentEnvelope(
+    meta,
+    dismissObstructionRuntimeCommand({
+      purpose,
+      hints: options?.hints,
+      timeoutMs: options?.timeoutMs,
     }),
   );
 }

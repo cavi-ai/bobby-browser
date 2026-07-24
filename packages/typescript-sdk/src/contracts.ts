@@ -33,6 +33,8 @@ export interface CommandError { code: CommandErrorCode; message: string; layer: 
 
 /** Byte bound for IntentCommand purpose strings (types::MAX_INTENT_PURPOSE_BYTES). */
 export const MAX_INTENT_PURPOSE_BYTES = 256 as const;
+/** Matches types::DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS. */
+export const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS = 5_000 as const;
 
 export type ExecutionPath = "directHttp" | "chromium" | "chromiumFallback";
 export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownload" | "ineligibleCommand" | "semanticTargetRequired" | "javascriptRequired" | "unsupportedContentType" | "stateConflict" | "policyRequired";
@@ -136,12 +138,15 @@ export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; e
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
 /** boundary mirrors ClickCommand.boundary: set true when activating the control may perform a mutating/side-effecting action. */
 export interface FollowIntent { purpose: string; hints?: IntentHints; expectedDestination: WaitForCommand; boundary?: boolean; }
+/** No boundary flag: dismissing an obstruction is always CommandClass.Reconciliable. Verification is built in (target must become detached or hidden), not caller-supplied. */
+export interface DismissObstructionIntent { purpose: string; hints?: IntentHints; timeoutMs?: number; }
 export type IntentCommand =
   | { kind: "locate"; input: LocateIntent }
   | { kind: "fill"; input: FillIntent }
   | { kind: "submitAndVerify"; input: SubmitAndVerifyIntent }
   | { kind: "waitForState"; input: WaitForStateIntent }
-  | { kind: "follow"; input: FollowIntent };
+  | { kind: "follow"; input: FollowIntent }
+  | { kind: "dismissObstruction"; input: DismissObstructionIntent };
 
 /** Nested RuntimeCommand wire shape: `{ kind: "intent"|"primitive", input: … }`. */
 export type RuntimeCommand =

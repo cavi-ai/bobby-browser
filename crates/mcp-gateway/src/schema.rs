@@ -177,6 +177,17 @@ fn intent_commands() -> Vec<Value> {
                 &["purpose", "expectedDestination"],
             ),
         ),
+        tagged_input(
+            "dismissObstruction",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{"$ref":"#/$defs/IntentHints"},
+                    "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS}
+                }),
+                &["purpose"],
+            ),
+        ),
     ]
 }
 

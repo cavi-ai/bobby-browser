@@ -6,9 +6,10 @@ use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{
-    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, Evidence, FollowIntent,
-    IntentCommand, IntentHints, LocateIntent, PrimitiveCommand, RuntimeCommand, SessionId,
-    TextMatch, WaitCondition, WaitForCommand, WorkflowCheckpoint, WorkflowId,
+    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, DismissObstructionIntent,
+    Evidence, FollowIntent, IntentCommand, IntentHints, LocateIntent, PrimitiveCommand,
+    RuntimeCommand, SessionId, TextMatch, WaitCondition, WaitForCommand, WorkflowCheckpoint,
+    WorkflowId,
 };
 use types::{Capability, PrincipalId};
 use uuid::uuid;
@@ -295,7 +296,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        5
+        6
     );
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,
@@ -719,6 +720,108 @@ async fn command_execute_schema_rejects_follow_missing_expected_destination() {
     let rejected = server
         .handle_message(request(
             73,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":envelope_value}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    assert_eq!(runtime.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn command_execute_schema_accepts_dismiss_obstruction_intent_envelope() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000026")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let server = Server::new(runtime);
+    initialize(&server).await;
+
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::DismissObstruction(
+            DismissObstructionIntent {
+                purpose: "Cookie notice close button".to_owned(),
+                hints: IntentHints::default(),
+                timeout_ms: 5_000,
+            },
+        )),
+    };
+
+    let response = server
+        .handle_message(request(
+            74,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":envelope}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
+    assert_ne!(response["error"]["code"], -32602, "{response}");
+}
+
+#[tokio::test]
+async fn command_execute_schema_rejects_dismiss_obstruction_missing_purpose() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000027")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let server = Server::new(runtime.clone());
+    initialize(&server).await;
+
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::DismissObstruction(
+            DismissObstructionIntent {
+                purpose: "Cookie notice close button".to_owned(),
+                hints: IntentHints::default(),
+                timeout_ms: 5_000,
+            },
+        )),
+    };
+    let mut envelope_value = serde_json::to_value(envelope).unwrap();
+    envelope_value["command"]["input"]["input"]
+        .as_object_mut()
+        .unwrap()
+        .remove("purpose");
+
+    let rejected = server
+        .handle_message(request(
+            75,
             "tools/call",
             json!({
                 "name":"command_execute",
