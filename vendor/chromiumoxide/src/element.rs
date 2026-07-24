@@ -9,7 +9,7 @@ use futures::{Future, FutureExt, Stream, future};
 
 use chromiumoxide_cdp::cdp::browser_protocol::dom::{
     BackendNodeId, DescribeNodeParams, GetBoxModelParams, GetContentQuadsParams, Node, NodeId,
-    ResolveNodeParams,
+    RequestNodeParams, ResolveNodeParams,
 };
 use chromiumoxide_cdp::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, CaptureScreenshotParams, Viewport,
@@ -49,6 +49,20 @@ impl Element {
             .node
             .backend_node_id;
 
+        Self::from_backend_node_id(tab, backend_node_id).await
+    }
+
+    /// Resolves an `Element` from a stable backend node id.
+    ///
+    /// Prefer this over [`Self::new`] when the node was discovered via
+    /// `DOM.describeNode` with `pierce: true`: pierce trees return `nodeId`s
+    /// that are not registered with the frontend, so a follow-up
+    /// `describeNode({nodeId})` fails with "Could not find node with given
+    /// id". `backendNodeId` is always valid regardless.
+    pub(crate) async fn from_backend_node_id(
+        tab: Arc<PageInner>,
+        backend_node_id: BackendNodeId,
+    ) -> Result<Self> {
         let resp = tab
             .execute(
                 ResolveNodeParams::builder()
@@ -61,7 +75,20 @@ impl Element {
             .result
             .object
             .object_id
-            .ok_or_else(|| CdpError::msg(format!("No object Id found for {node_id:?}")))?;
+            .ok_or_else(|| {
+                CdpError::msg(format!(
+                    "No object Id found for backend node {backend_node_id:?}"
+                ))
+            })?;
+
+        // Push the node into the frontend map so QuerySelector-based helpers
+        // (find_element) have a usable node_id.
+        let node_id = tab
+            .execute(RequestNodeParams::new(remote_object_id.clone()))
+            .await?
+            .result
+            .node_id;
+
         Ok(Self {
             remote_object_id,
             backend_node_id,
@@ -205,6 +232,24 @@ impl Element {
             .call_js_fn("function() { return this; }", false)
             .await?;
         element_json.result.value.ok_or(CdpError::NotFound)
+    }
+
+    /// Like [`Self::call_js_fn`], but requests the result by value (JSON)
+    /// instead of a remote object reference. Used for scripts that return
+    /// plain data bound to this element (e.g. `this` as the root of a
+    /// closed shadow tree) rather than a DOM handle.
+    pub async fn call_js_fn_by_value(
+        &self,
+        function_declaration: impl Into<String>,
+        await_promise: bool,
+    ) -> Result<serde_json::Value> {
+        self.tab
+            .call_js_fn_by_value(
+                function_declaration,
+                await_promise,
+                self.remote_object_id.clone(),
+            )
+            .await
     }
 
     /// Calls [focus](https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/focus) on the element.
