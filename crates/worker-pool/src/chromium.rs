@@ -41,7 +41,7 @@ use types::{
 };
 
 use crate::{
-    resolve_upload_paths, session_download_dir,
+    process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
         gather_candidates, resolve_target as resolve_browser_target,
         resolve_target_with_visibility,
@@ -155,12 +155,11 @@ impl WorkerFactory for ChromiumWorkerFactory {
 
 /// Shared, machine-wide directory Chromium PID registrations live in when a
 /// caller doesn't provide an explicit one (`ChromiumWorkerFactory::new`).
+/// This directory, and everything below, is Chromium-specific plumbing on
+/// top of the engine-agnostic `process_registry` module — see that module's
+/// doc comment for why the underlying mechanism isn't Chrome-specific.
 fn default_pid_registry_dir() -> PathBuf {
     std::env::temp_dir().join("bobby-browser-chromium-workers")
-}
-
-fn chrome_pid_registry_path(registry_dir: &Path, worker_id: &WorkerId) -> PathBuf {
-    registry_dir.join(format!("{}.pid", worker_id.0))
 }
 
 /// Records `pid` as the Chrome process backing `worker_id`, so a *future*
@@ -169,14 +168,11 @@ fn chrome_pid_registry_path(registry_dir: &Path, worker_id: &WorkerId) -> PathBu
 /// `close`/`terminate` on it. Returns `None` on any I/O failure — recording
 /// is best-effort and never blocks a launch.
 fn register_chrome_pid(registry_dir: &Path, worker_id: &WorkerId, pid: u32) -> Option<PathBuf> {
-    std::fs::create_dir_all(registry_dir).ok()?;
-    let path = chrome_pid_registry_path(registry_dir, worker_id);
-    std::fs::write(&path, pid.to_string()).ok()?;
-    Some(path)
+    process_registry::register_pid(registry_dir, &worker_id.0.to_string(), pid)
 }
 
 fn unregister_chrome_pid(path: &Path) {
-    let _ = std::fs::remove_file(path);
+    process_registry::unregister_pid(path);
 }
 
 static ORPHAN_REAP_ONCE: Once = Once::new();
@@ -190,81 +186,24 @@ fn reap_orphaned_chrome_processes_once(registry_dir: &Path) {
     ORPHAN_REAP_ONCE.call_once(|| reap_orphaned_chrome_processes(&registry_dir));
 }
 
-/// Self-healing backstop for Chrome processes orphaned by a previous
-/// instance of this runtime (or its test suite) that exited without running
-/// its own cleanup — a SIGKILL, an OOM kill, or a crash all skip `close`,
-/// `terminate`, and chromiumoxide's `kill_on_drop` alike, since none of that
-/// teardown code ever gets to run. There is no portable way for *this*
-/// process to guarantee its own children die when it is killed (Linux's
-/// `PR_SET_PDEATHSIG` isn't available on macOS), so instead every orphan is
-/// tracked by PID in `registry_dir` and reaped by whichever process starts
-/// next: launch registers a PID file, clean shutdown removes it, and this
-/// sweep kills and removes whatever is left over. Every entry is verified to
-/// actually be a Chrome/Chromium process (see `is_running_chrome_process`)
-/// before being killed, so a PID that has since been reused by an unrelated
-/// process is never touched — its stale registry entry is simply removed.
+/// Chrome-specific entry point into `process_registry::reap_orphaned_processes`:
+/// every registry entry is verified to actually be a Chrome/Chromium process
+/// (`is_running_chrome_process`) before it's killed, so a PID that has since
+/// been reused by an unrelated process is never touched.
 fn reap_orphaned_chrome_processes(registry_dir: &Path) {
-    reap_orphaned_chrome_processes_with(registry_dir, is_running_chrome_process, kill_process);
+    process_registry::reap_orphaned_processes(
+        registry_dir,
+        is_running_chrome_process,
+        process_registry::kill_process,
+    );
 }
 
-fn reap_orphaned_chrome_processes_with(
-    registry_dir: &Path,
-    is_chrome: impl Fn(u32) -> bool,
-    kill: impl Fn(u32),
-) {
-    let Ok(entries) = std::fs::read_dir(registry_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("pid") {
-            continue;
-        }
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                if is_chrome(pid) {
-                    kill(pid);
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&path);
-    }
-}
-
-#[cfg(unix)]
+/// Matches on a "chrom" substring rather than an exact name since the
+/// Chrome/Chromium binary name varies by platform and channel
+/// (`google-chrome-stable`, `Google Chrome`, `chromium`, ...).
 fn is_running_chrome_process(pid: u32) -> bool {
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-        .map(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .to_ascii_lowercase()
-                    .contains("chrom")
-        })
-        .unwrap_or(false)
+    process_registry::process_command_name(pid).is_some_and(|name| name.contains("chrom"))
 }
-
-#[cfg(not(unix))]
-fn is_running_chrome_process(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(unix)]
-fn kill_process(pid: u32) {
-    if let Ok(pid) = i32::try_from(pid) {
-        // SAFETY: `kill` is a plain signal-delivery syscall; passing a
-        // caller-supplied PID can at worst fail with ESRCH/EPERM, which we
-        // deliberately ignore (best-effort reap of an already-verified
-        // Chrome process).
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process(_pid: u32) {}
 
 struct ChromiumWorker {
     id: WorkerId,
@@ -1494,57 +1433,10 @@ mod tests {
     };
     use types::{ErrorCode, TextMatch};
 
-    #[cfg(unix)]
-    #[test]
-    fn reap_kills_a_verified_live_process_and_clears_stale_entries() {
-        use std::process::Command;
-        use tempfile::tempdir;
-
-        let registry_dir = tempdir().unwrap();
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = child.id();
-        let live_path = registry_dir.path().join("live.pid");
-        std::fs::write(&live_path, pid.to_string()).unwrap();
-        // A malformed entry alongside the real one must still be cleared,
-        // not just skipped.
-        let malformed_path = registry_dir.path().join("malformed.pid");
-        std::fs::write(&malformed_path, "not-a-pid").unwrap();
-        // Non-`.pid` files in the registry directory are left untouched.
-        let unrelated_path = registry_dir.path().join("notes.txt");
-        std::fs::write(&unrelated_path, "unrelated").unwrap();
-
-        super::reap_orphaned_chrome_processes_with(registry_dir.path(), |_| true, super::kill_process);
-
-        assert!(!live_path.exists());
-        assert!(!malformed_path.exists());
-        assert!(unrelated_path.exists());
-        let status = child.wait().unwrap();
-        assert!(!status.success(), "killed process must exit unsuccessfully");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reap_never_signals_a_process_that_fails_identity_verification() {
-        use std::process::Command;
-        use tempfile::tempdir;
-
-        let registry_dir = tempdir().unwrap();
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = child.id();
-        let path = registry_dir.path().join("unverified.pid");
-        std::fs::write(&path, pid.to_string()).unwrap();
-
-        super::reap_orphaned_chrome_processes_with(registry_dir.path(), |_| false, |_| {
-            panic!("must never signal a process that failed identity verification");
-        });
-
-        // The stale registry entry is still cleared even though the process
-        // it referenced was left alone.
-        assert!(!path.exists());
-        assert!(matches!(child.try_wait(), Ok(None)));
-        child.kill().unwrap();
-        let _ = child.wait();
-    }
+    // The underlying reap/register/kill mechanics are engine-agnostic and
+    // tested directly in `process_registry`. These tests cover only the
+    // Chrome-specific layer on top: the PID-registry key derivation
+    // (`WorkerId`-keyed) and the "chrom" identity check.
 
     #[test]
     fn register_and_unregister_chrome_pid_round_trip_through_the_filesystem() {
@@ -1555,10 +1447,7 @@ mod tests {
         let worker_id = WorkerId::new();
         let path = super::register_chrome_pid(registry_dir.path(), &worker_id, 4_242)
             .expect("registering a PID under a writable directory must succeed");
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap().trim(),
-            "4242"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "4242");
 
         super::unregister_chrome_pid(&path);
         assert!(!path.exists());
@@ -1573,15 +1462,17 @@ mod tests {
         assert!(super::register_chrome_pid(&unwritable, &worker_id, 1).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn reap_tolerates_a_missing_registry_directory() {
-        // Must not panic when nothing has ever launched a worker into this
-        // registry directory yet.
-        super::reap_orphaned_chrome_processes_with(
-            &PathBuf::from("/this/path/does/not/exist"),
-            |_| true,
-            |_| panic!("nothing to kill in a missing directory"),
-        );
+    fn is_running_chrome_process_matches_on_a_chrom_substring_not_an_exact_name() {
+        use std::process::Command;
+
+        // `sleep` never contains "chrom", so a live non-Chrome process must
+        // be identified as not Chrome.
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        assert!(!super::is_running_chrome_process(child.id()));
+        child.kill().unwrap();
+        let _ = child.wait();
     }
 
     #[test]

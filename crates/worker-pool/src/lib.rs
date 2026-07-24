@@ -1,4 +1,5 @@
 mod chromium;
+pub mod process_registry;
 mod selection;
 mod targeting;
 
