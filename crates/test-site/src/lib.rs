@@ -21,6 +21,7 @@ const INDEX: &str = r#"<!doctype html>
       <input id="resume" type="file">
     </main>
     <a id="root-popup" href="/popup" target="_blank">Open details</a>
+    <a id="details-link" href="/details">Details</a>
     <iframe name="download-frame" hidden></iframe>
     <a id="download" href="/download" target="download-frame">Download fixture</a>
     <script>
@@ -378,6 +379,10 @@ pub async fn spawn() -> FixtureServer {
         .route(
             "/popup",
             get(|| async { Html("<title>Popup</title><p id='details'>Details</p>") }),
+        )
+        .route(
+            "/details",
+            get(|| async { Html("<!doctype html><title>Details</title><p id='details-page'>Details page</p>") }),
         )
         .route(
             "/drift",

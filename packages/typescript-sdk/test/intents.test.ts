@@ -5,6 +5,8 @@ import { MAX_INTENT_PURPOSE_BYTES } from "../src/contracts.js";
 import {
   assertIntentPurpose,
   fillEnvelope,
+  followEnvelope,
+  followRuntimeCommand,
   locateEnvelope,
   locateRuntimeCommand,
   submitAndVerifyEnvelope,
@@ -84,6 +86,67 @@ test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
       input: {
         condition: { kind: "document", ready: "interactive" },
         timeoutMs: 5_000,
+      },
+    },
+  });
+});
+
+test("followRuntimeCommand matches Rust golden nested wire shape", () => {
+  const command = followRuntimeCommand({
+    purpose: "Details",
+    expectedDestination: {
+      condition: { kind: "url", matcher: { kind: "contains", value: "/details" } },
+      timeoutMs: 5_000,
+    },
+  });
+  assert.deepEqual(command, {
+    kind: "intent",
+    input: {
+      kind: "follow",
+      input: {
+        purpose: "Details",
+        hints: {
+          role: null,
+          nearText: null,
+          framePath: [],
+          shadowPath: [],
+          allowBestMatch: false,
+        },
+        expectedDestination: {
+          condition: { kind: "url", matcher: { kind: "contains", value: "/details" } },
+          timeoutMs: 5_000,
+        },
+        boundary: false,
+      },
+    },
+  });
+});
+
+test("followEnvelope forwards boundary:true verbatim", () => {
+  const envelope = followEnvelope(
+    META,
+    "Sign out",
+    { condition: { kind: "url", matcher: { kind: "contains", value: "/signed-out" } }, timeoutMs: 5_000 },
+    { boundary: true },
+  );
+  assert.deepEqual(envelope.command, {
+    kind: "intent",
+    input: {
+      kind: "follow",
+      input: {
+        purpose: "Sign out",
+        hints: {
+          role: null,
+          nearText: null,
+          framePath: [],
+          shadowPath: [],
+          allowBestMatch: false,
+        },
+        expectedDestination: {
+          condition: { kind: "url", matcher: { kind: "contains", value: "/signed-out" } },
+          timeoutMs: 5_000,
+        },
+        boundary: true,
       },
     },
   });

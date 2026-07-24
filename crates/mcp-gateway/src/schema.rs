@@ -165,6 +165,18 @@ fn intent_commands() -> Vec<Value> {
                 &["condition", "timeoutMs"],
             ),
         ),
+        tagged_input(
+            "follow",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{"$ref":"#/$defs/IntentHints"},
+                    "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
+                    "boundary":{"type":"boolean"}
+                }),
+                &["purpose", "expectedDestination"],
+            ),
+        ),
     ]
 }
 

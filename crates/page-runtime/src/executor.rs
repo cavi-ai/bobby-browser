@@ -382,7 +382,8 @@ impl PageRuntime {
             }
         }
         // Boundary primitives (Click { boundary: true }, …) and Boundary intents
-        // (SubmitAndVerify via IntentCommand::class) share this pre-act checkpoint gate.
+        // (SubmitAndVerify, or Follow when the caller sets boundary: true, via
+        // IntentCommand::class) share this pre-act checkpoint gate.
         if envelope.command.class() == CommandClass::Boundary {
             if let Some(checkpoints) = &self.checkpoints {
                 let checkpoint = checkpoints.load(&envelope.workflow_id).await.map_err(|_| {

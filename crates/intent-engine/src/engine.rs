@@ -123,6 +123,22 @@ impl IntentEngine {
                 execute_submit_and_verify(intent, page_id, browser, vision, target, expected_state)
                     .await
             }
+            IntentPlan::Follow {
+                target,
+                expected_destination,
+                boundary,
+            } => {
+                execute_follow(
+                    intent,
+                    page_id,
+                    browser,
+                    vision,
+                    target,
+                    expected_destination,
+                    boundary,
+                )
+                .await
+            }
         }
     }
 }
@@ -657,6 +673,175 @@ async fn execute_submit_and_verify(
         vec![candidate_evidence],
         wait_elapsed_ms,
         "submitted",
+    )));
+    IntentOutcome::Completed { evidence }
+}
+
+async fn execute_follow(
+    intent: &IntentCommand,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    target: TargetSpec,
+    expected_destination: WaitForCommand,
+    boundary: bool,
+) -> IntentOutcome {
+    let purpose = match intent {
+        IntentCommand::Follow(follow) => Some(follow.purpose.clone()),
+        _ => None,
+    };
+    let plan_summary = format!(
+        "{} expected_destination={}",
+        summarize_target(&target),
+        wait_condition_kind(&expected_destination.condition)
+    );
+    let candidates = match browser.collect_candidates(page_id, &target).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return non_escalating_failure(
+                error,
+                intent_evidence(execution_record(
+                    "follow",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "gatherFailed",
+                )),
+            );
+        }
+    };
+
+    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::InvalidRequest,
+                    message: error.to_string(),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: vec![intent_evidence(execution_record(
+                    "follow",
+                    purpose,
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "resolveFailed",
+                ))],
+            };
+        }
+    };
+
+    let (candidate, candidate_evidence, best_match_authorized) = match decision {
+        ResolutionDecision::Resolved {
+            candidate,
+            evidence,
+            best_match_authorized,
+        } => (candidate, evidence, best_match_authorized),
+        ResolutionDecision::NotFound => {
+            return stuck_outcome(
+                "follow",
+                StuckKind::TargetMissing,
+                purpose,
+                plan_summary,
+                Vec::new(),
+                "targetNotFound",
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
+        }
+        ResolutionDecision::Ambiguous { candidates } => {
+            return stuck_outcome(
+                "follow",
+                StuckKind::TargetAmbiguous,
+                purpose,
+                plan_summary,
+                candidates,
+                "targetAmbiguous",
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
+        }
+    };
+
+    let fingerprint = fingerprint(page_id, &candidate);
+    let resolution = Evidence::Resolution {
+        target: Box::new(target.clone()),
+        fingerprint: Box::new(fingerprint),
+        candidates: vec![candidate_evidence.clone()],
+        best_match_authorized,
+    };
+
+    let (selector, action_target) = action_target(&candidate);
+    let click = ClickCommand {
+        selector,
+        target: Some(action_target),
+        boundary,
+        expected_url: expected_url_from_wait(&expected_destination),
+    };
+    let mut click_evidence = match browser.click(page_id, &click).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: vec![
+                    resolution,
+                    intent_evidence(execution_record(
+                        "follow",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "actFailed",
+                    )),
+                ],
+            };
+        }
+    };
+
+    let mut wait_evidence = match browser.wait_for(page_id, &expected_destination).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return IntentOutcome::Failed {
+                error,
+                evidence: {
+                    let mut evidence = vec![resolution];
+                    evidence.append(&mut click_evidence);
+                    evidence.push(intent_evidence(execution_record(
+                        "follow",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "verifyFailed",
+                    )));
+                    evidence
+                },
+            };
+        }
+    };
+
+    let wait_elapsed_ms = wait_evidence.iter().find_map(|item| match item {
+        Evidence::Wait { elapsed_ms, .. } => Some(*elapsed_ms),
+        _ => None,
+    });
+
+    let mut evidence = vec![resolution];
+    evidence.append(&mut click_evidence);
+    evidence.append(&mut wait_evidence);
+    evidence.push(intent_evidence(execution_record(
+        "follow",
+        purpose,
+        plan_summary,
+        vec![candidate_evidence],
+        wait_elapsed_ms,
+        "followed",
     )));
     IntentOutcome::Completed { evidence }
 }

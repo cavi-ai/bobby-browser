@@ -61,6 +61,7 @@ pub enum IntentCommand {
     Fill(FillIntent),
     SubmitAndVerify(SubmitAndVerifyIntent),
     WaitForState(WaitForStateIntent),
+    Follow(FollowIntent),
 }
 
 impl IntentCommand {
@@ -69,6 +70,13 @@ impl IntentCommand {
             Self::Locate(_) | Self::WaitForState(_) => CommandClass::Replayable,
             Self::Fill(_) => CommandClass::Reconciliable,
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
+            Self::Follow(intent) => {
+                if intent.boundary {
+                    CommandClass::Boundary
+                } else {
+                    CommandClass::Reconciliable
+                }
+            }
         }
     }
 }
@@ -130,6 +138,23 @@ pub struct SubmitAndVerifyIntent {
 pub struct WaitForStateIntent {
     pub condition: WaitCondition,
     pub timeout_ms: u64,
+}
+
+/// Activate a described link/control and verify the resulting destination.
+///
+/// `boundary` mirrors `ClickCommand.boundary`: the caller judges whether the
+/// activated control may perform a mutating/side-effecting action (e.g. "Sign
+/// out") and therefore needs the pre-established checkpoint gate, or is
+/// ordinary navigation that can run without one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowIntent {
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: IntentHints,
+    pub expected_destination: WaitForCommand,
+    #[serde(default)]
+    pub boundary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
