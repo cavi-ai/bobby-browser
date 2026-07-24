@@ -21,6 +21,11 @@ pub enum IntentPlan {
         condition: WaitCondition,
         timeout_ms: u64,
     },
+    Follow {
+        target: TargetSpec,
+        expected_destination: WaitForCommand,
+        boundary: bool,
+    },
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +62,14 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
             condition: intent.condition.clone(),
             timeout_ms: intent.timeout_ms,
         }),
+        IntentCommand::Follow(intent) => {
+            let purpose = validate_purpose(&intent.purpose)?;
+            Ok(IntentPlan::Follow {
+                target: compile_target(purpose, &intent.hints),
+                expected_destination: intent.expected_destination.clone(),
+                boundary: intent.boundary,
+            })
+        }
     }
 }
 

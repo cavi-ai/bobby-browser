@@ -9,10 +9,10 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
     CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
-    ExecutionPath, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId,
-    PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
-    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint,
-    WorkflowId,
+    ExecutionPath, FollowIntent, InspectCommand, IntentCommand, IntentHints, NavigateCommand,
+    PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec,
+    TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan, PreparedResult};
@@ -681,9 +681,137 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
         .unwrap();
 
     let accepted = runtime.execute(request).await;
-    assert!(matches!(accepted, CommandOutcome::Completed { .. }), "{accepted:?}");
+    assert!(
+        matches!(accepted, CommandOutcome::Completed { .. }),
+        "{accepted:?}"
+    );
     let observed = events.lock().await.clone();
-    assert!(observed.iter().any(|event| event == "browser:collect_candidates"));
+    assert!(observed
+        .iter()
+        .any(|event| event == "browser:collect_candidates"));
+    assert!(observed.iter().any(|event| event == "browser:click"));
+    assert!(observed.iter().any(|event| event == "browser:wait_for"));
+}
+
+fn follow(purpose: &str, boundary: bool) -> IntentCommand {
+    IntentCommand::Follow(FollowIntent {
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+        expected_destination: WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains("/details".into()),
+            },
+            timeout_ms: 5_000,
+        },
+        boundary,
+    })
+}
+
+#[tokio::test]
+async fn follow_with_boundary_true_requires_matching_checkpoint_before_boundary_act() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = page_runtime::PageRuntime::new_with_checkpoints(journal, workers, store.clone());
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let intent = follow("Sign out", true);
+    assert_eq!(intent.class(), CommandClass::Boundary);
+    let request = intent_envelope(session.clone(), page.id.clone(), intent);
+
+    let rejected = runtime.execute(request.clone()).await;
+    assert!(matches!(rejected, CommandOutcome::Failed { error, .. }
+        if error.code == ErrorCode::InvalidRequest && error.message.contains("checkpoint")));
+    let observed = events.lock().await.clone();
+    assert!(!observed.iter().any(|event| event.contains("browser:")));
+
+    store
+        .save(&WorkflowCheckpoint {
+            schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            workflow_id: request.workflow_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            session_id: session,
+            page_id: page.id,
+            restart_url: "https://example.test/".into(),
+            current_url: "https://example.test/".into(),
+            cursor: None,
+            boundary_command_id: Some(request.command_id.clone()),
+            recovery_class: CommandClass::Boundary,
+            invariants: Vec::new(),
+            replayable_inputs: Vec::new(),
+            evidence: Vec::new(),
+            recovery_history: Vec::new(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let accepted = runtime.execute(request).await;
+    assert!(
+        matches!(accepted, CommandOutcome::Completed { .. }),
+        "{accepted:?}"
+    );
+    let observed = events.lock().await.clone();
+    assert!(observed
+        .iter()
+        .any(|event| event == "browser:collect_candidates"));
+    assert!(observed.iter().any(|event| event == "browser:click"));
+    assert!(observed.iter().any(|event| event == "browser:wait_for"));
+}
+
+#[tokio::test]
+async fn follow_with_boundary_false_runs_without_any_pre_established_checkpoint() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = page_runtime::PageRuntime::new_with_checkpoints(journal, workers, store);
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let intent = follow("Details", false);
+    assert_eq!(intent.class(), CommandClass::Reconciliable);
+    let request = intent_envelope(session, page.id, intent);
+
+    let accepted = runtime.execute(request).await;
+    assert!(
+        matches!(accepted, CommandOutcome::Completed { .. }),
+        "{accepted:?}"
+    );
+    let observed = events.lock().await.clone();
+    assert!(observed
+        .iter()
+        .any(|event| event == "browser:collect_candidates"));
     assert!(observed.iter().any(|event| event == "browser:click"));
     assert!(observed.iter().any(|event| event == "browser:wait_for"));
 }

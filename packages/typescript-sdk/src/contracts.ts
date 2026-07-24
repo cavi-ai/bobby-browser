@@ -134,11 +134,14 @@ export type FillValue =
 export interface FillIntent { purpose: string; hints?: IntentHints; value: FillValue; }
 export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
+/** boundary mirrors ClickCommand.boundary: set true when activating the control may perform a mutating/side-effecting action. */
+export interface FollowIntent { purpose: string; hints?: IntentHints; expectedDestination: WaitForCommand; boundary?: boolean; }
 export type IntentCommand =
   | { kind: "locate"; input: LocateIntent }
   | { kind: "fill"; input: FillIntent }
   | { kind: "submitAndVerify"; input: SubmitAndVerifyIntent }
-  | { kind: "waitForState"; input: WaitForStateIntent };
+  | { kind: "waitForState"; input: WaitForStateIntent }
+  | { kind: "follow"; input: FollowIntent };
 
 /** Nested RuntimeCommand wire shape: `{ kind: "intent"|"primitive", input: … }`. */
 export type RuntimeCommand =

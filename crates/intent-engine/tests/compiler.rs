@@ -1,7 +1,7 @@
 use intent_engine::{compile_intent, IntentPlan};
 use types::{
-    FillIntent, FillValue, IntentCommand, IntentHints, LocateIntent, TextMatch, WaitCondition,
-    WaitForStateIntent, WaitUntil,
+    FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints, LocateIntent, TextMatch,
+    WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
 };
 
 #[test]
@@ -65,6 +65,37 @@ fn compile_fill_maps_purpose_to_text_when_role_absent() {
             clear_first: true,
         } if text == "a@b.co"
     ));
+}
+
+#[test]
+fn compile_follow_carries_target_expected_destination_and_boundary_flag() {
+    let plan = compile_intent(&IntentCommand::Follow(FollowIntent {
+        purpose: "Details".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+        expected_destination: WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains("/details".into()),
+            },
+            timeout_ms: 5_000,
+        },
+        boundary: true,
+    }))
+    .expect("compile");
+    let IntentPlan::Follow {
+        target,
+        expected_destination,
+        boundary,
+    } = plan
+    else {
+        panic!("expected Follow plan");
+    };
+    assert_eq!(target.role.as_deref(), Some("link"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Details"));
+    assert_eq!(expected_destination.timeout_ms, 5_000);
+    assert!(boundary);
 }
 
 #[test]

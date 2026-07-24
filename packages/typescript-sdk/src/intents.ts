@@ -10,6 +10,7 @@ import {
   type CommandEnvelope,
   type FillIntent,
   type FillValue,
+  type FollowIntent,
   type Id,
   type IntentHints,
   type LocateIntent,
@@ -120,6 +121,22 @@ export function waitForStateRuntimeCommand(input: WaitForStateIntent): RuntimeCo
   };
 }
 
+export function followRuntimeCommand(input: FollowIntent): RuntimeCommand {
+  assertIntentPurpose(input.purpose);
+  return {
+    kind: "intent",
+    input: {
+      kind: "follow",
+      input: {
+        purpose: input.purpose,
+        hints: withHints(input.hints),
+        expectedDestination: input.expectedDestination,
+        boundary: input.boundary ?? false,
+      },
+    },
+  };
+}
+
 export function intentEnvelope(meta: IntentEnvelopeMeta, command: RuntimeCommand): CommandEnvelope {
   if (command.kind !== "intent") {
     throw new Error('intentEnvelope requires RuntimeCommand with kind "intent"');
@@ -159,4 +176,21 @@ export function waitForStateEnvelope(
   timeoutMs: number,
 ): CommandEnvelope {
   return intentEnvelope(meta, waitForStateRuntimeCommand({ condition, timeoutMs }));
+}
+
+export function followEnvelope(
+  meta: IntentEnvelopeMeta,
+  purpose: string,
+  expectedDestination: FollowIntent["expectedDestination"],
+  options?: { hints?: IntentHints; boundary?: boolean },
+): CommandEnvelope {
+  return intentEnvelope(
+    meta,
+    followRuntimeCommand({
+      purpose,
+      expectedDestination,
+      hints: options?.hints,
+      boundary: options?.boundary,
+    }),
+  );
 }
