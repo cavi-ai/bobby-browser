@@ -515,12 +515,20 @@ pub async fn spawn_frame_host(child_url: &str) -> FixtureServer {
                     r#"<!doctype html><title>Frame Host</title>
                     <iframe name="outer" aria-label="Outer" srcdoc='<iframe name="fixture" aria-label="Cross" src="{child_url}"></iframe>'></iframe>
                     <div id="host"></div>
+                    <div id="closed-host"></div>
+                    <div id="mixed-host"></div>
                     <button id="old-action" aria-label="Drift action" onclick="this.outerHTML='<button aria-label=&quot;Drift action&quot; onclick=&quot;document.querySelector(\'#status\').textContent=\'ready\'&quot;>replacement</button>'">initial</button>
                     <p id="status">waiting</p>
                     <button aria-label="Ambiguous">one</button><button aria-label="Ambiguous">two</button>
                     <script>
                       const root = host.attachShadow({{mode:'open'}});
                       root.innerHTML = `<button aria-label="Inside" onclick="document.title='shadow-clicked'">inside</button>`;
+                      const closed = document.getElementById('closed-host').attachShadow({{mode:'closed'}});
+                      closed.innerHTML = `<button aria-label="Closed Inside" onclick="document.title='closed-shadow-clicked'">closed</button>`;
+                      const mixedOpen = document.getElementById('mixed-host').attachShadow({{mode:'open'}});
+                      mixedOpen.innerHTML = `<div id="inner-closed-host"></div>`;
+                      const mixedClosed = mixedOpen.getElementById('inner-closed-host').attachShadow({{mode:'closed'}});
+                      mixedClosed.innerHTML = `<button aria-label="Mixed Closed Inside" onclick="document.title='mixed-closed-clicked'">mixed</button>`;
                     </script>"#
                 ))
             }

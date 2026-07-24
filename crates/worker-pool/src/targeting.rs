@@ -1,14 +1,20 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chromiumoxide::browser::Browser;
-use chromiumoxide::cdp::browser_protocol::dom::{RequestNodeParams, SetFileInputFilesParams};
+use chromiumoxide::cdp::browser_protocol::dom::{
+    BackendNodeId, DescribeNodeParams, Node as CdpNode, RequestNodeParams, SetFileInputFilesParams,
+    ShadowRootType,
+};
 use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, GetFrameTreeParams, Viewport,
 };
 use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
-use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, ExecutionContextId};
+use chromiumoxide::cdp::js_protocol::runtime::{
+    EvaluateParams, ExecutionContextId, RemoteObjectId,
+};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Element, Page};
 use dom_engine::{
@@ -27,9 +33,22 @@ pub struct ResolvedTarget {
     pub evidence: Evidence,
 }
 
+/// Where a [`JsLocator`]'s `find(root, id)` lookups are rooted.
+///
+/// `ClosedRoot` anchors execution at a specific closed shadow root `Element`
+/// handle (resolved via CDP-native traversal, see [`discover_closed_shadow_roots`]
+/// and [`discover_closed_root_for_candidate`]) instead of a document/frame
+/// execution context, since `document.querySelector` and friends cannot see
+/// into closed shadow trees but a live handle already inside one can.
+#[derive(Clone)]
+enum LocatorScope {
+    Context(Option<ExecutionContextId>),
+    ClosedRoot(Arc<Element>),
+}
+
 #[derive(Clone)]
 struct JsLocator {
-    context_id: Option<ExecutionContextId>,
+    scope: LocatorScope,
     shadow_hosts: Vec<String>,
     id: String,
 }
@@ -192,17 +211,7 @@ impl ResolvedTarget {
             return Ok(());
         }
         let expression = locator_expression(&self.locator, "return el")?;
-        let mut params = EvaluateParams::new(expression);
-        params.context_id = self.locator.context_id;
-        params.return_by_value = Some(false);
-        let object_id = page
-            .evaluate(params)
-            .await
-            .map_err(cdp_error)?
-            .object()
-            .object_id
-            .clone()
-            .ok_or_else(|| target_error(ErrorCode::TargetDetached, "target has no live object"))?;
+        let object_id = resolve_object_id_scoped(page, &self.locator.scope, expression).await?;
         let node_id = page
             .execute(RequestNodeParams::new(object_id))
             .await
@@ -228,7 +237,7 @@ impl ResolvedTarget {
     ) -> Result<T, CommandError> {
         let page = self.execution_page(page);
         let expression = locator_expression(&self.locator, operation)?;
-        evaluate_in_context(page, self.locator.context_id, expression).await
+        eval_scoped(page, &self.locator.scope, expression).await
     }
 }
 
@@ -257,9 +266,10 @@ pub async fn gather_candidates(
     browser: Option<&mut Browser>,
 ) -> Result<Vec<Candidate>, CommandError> {
     let scope = open_target_scope(page, target, browser).await?;
-    let raw = collect_candidates(
+    let scope_ref = scope.locator_scope();
+    let (raw, _owners) = collect_candidates_merged(
         &scope.execution_page,
-        scope.context_id,
+        &scope_ref,
         &scope.shadow_hosts,
         scope.scope_id,
     )
@@ -271,9 +281,22 @@ struct TargetScope {
     execution_page: Page,
     context_id: Option<ExecutionContextId>,
     shadow_hosts: Vec<String>,
+    /// Set once shadow_path traversal enters a closed shadow root; from that
+    /// point on, further gathers/lookups are scoped to this `Element`
+    /// instead of `context_id` (see [`discover_closed_root_for_candidate`]).
+    closed_root: Option<Arc<Element>>,
     scope_id: u64,
     frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
     frame_trace: Vec<types::CandidateEvidence>,
+}
+
+impl TargetScope {
+    fn locator_scope(&self) -> LocatorScope {
+        match &self.closed_root {
+            Some(element) => LocatorScope::ClosedRoot(Arc::clone(element)),
+            None => LocatorScope::Context(self.context_id),
+        }
+    }
 }
 
 async fn open_target_scope(
@@ -341,24 +364,59 @@ async fn open_target_scope(
         shadow_hosts.clear();
     }
 
+    let mut closed_root: Option<Arc<Element>> = None;
+
     for (index, host_target) in target.shadow_path.iter().enumerate() {
-        let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?;
+        let scope_ref = match &closed_root {
+            Some(element) => LocatorScope::ClosedRoot(Arc::clone(element)),
+            None => LocatorScope::Context(context_id),
+        };
+        let raw = match &scope_ref {
+            LocatorScope::Context(_) => {
+                collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?
+            }
+            LocatorScope::ClosedRoot(element) => {
+                let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
+                collect_candidates_within(element, &shadow_hosts, nested_scope).await?
+            }
+        };
         let (candidate, evidence, _) = choose(host_target, raw, true)?;
         let mut prospective = shadow_hosts.clone();
         prospective.push(candidate.id.clone());
-        let has_root: bool = evaluate_in_context(
+        let has_root: bool = eval_scoped(
             &execution_page,
-            context_id,
-            scope_expression(&prospective, "return !!root")?,
+            &scope_ref,
+            scoped_expression(&scope_ref, &prospective, "return !!root")?,
         )
         .await?;
-        if !has_root {
+        if has_root {
+            shadow_hosts.push(candidate.id);
+            frame_trace.push(evidence);
+            continue;
+        }
+
+        // The candidate has no *open* root; check whether CDP-native pierce
+        // discovery can see a *closed* one directly on this host before
+        // giving up (see module docs on `discover_closed_root_for_candidate`).
+        let discovered = discover_closed_root_for_candidate(
+            &execution_page,
+            &scope_ref,
+            &shadow_hosts,
+            &candidate.id,
+        )
+        .await?;
+        let Some(root_backend_id) = discovered else {
             return Err(target_error(
                 ErrorCode::ShadowRootUnavailable,
-                format!("shadow path component {index} has no open root"),
+                format!("shadow path component {index} has no attached shadow root"),
             ));
-        }
-        shadow_hosts.push(candidate.id);
+        };
+        let element = execution_page
+            .element_from_backend_node_id(root_backend_id)
+            .await
+            .map_err(cdp_error)?;
+        closed_root = Some(Arc::new(element));
+        shadow_hosts.clear();
         frame_trace.push(evidence);
     }
 
@@ -366,6 +424,7 @@ async fn open_target_scope(
         execution_page,
         context_id,
         shadow_hosts,
+        closed_root,
         scope_id,
         frame_id,
         frame_trace,
@@ -411,7 +470,7 @@ pub async fn resolve_target_with_visibility(
         return Ok(ResolvedTarget {
             native: Some(element),
             locator: JsLocator {
-                context_id: None,
+                scope: LocatorScope::Context(None),
                 shadow_hosts: Vec::new(),
                 id: String::new(),
             },
@@ -421,32 +480,44 @@ pub async fn resolve_target_with_visibility(
     };
 
     let scope = open_target_scope(page, target, browser).await?;
+    let base_scope = scope.locator_scope();
     let deadline = Instant::now() + Duration::from_secs(2);
-    let (candidate, evidence, best_match_authorized) = loop {
-        let raw = collect_candidates(
+    let (candidate, evidence, best_match_authorized, owner) = loop {
+        let (raw, owners) = collect_candidates_merged(
             &scope.execution_page,
-            scope.context_id,
+            &base_scope,
             &scope.shadow_hosts,
             scope.scope_id,
         )
         .await?;
         match choose(target, raw, require_visible) {
-            Ok(resolved) => break resolved,
+            Ok((candidate, evidence, best_match_authorized)) => {
+                let owner = owners.get(&candidate.id).cloned();
+                break (candidate, evidence, best_match_authorized, owner);
+            }
             Err(error) if error.code == ErrorCode::TargetNotFound && Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
             Err(error) => return Err(error),
         }
     };
+    // Candidates gathered ambiently from a closed shadow root (see
+    // `collect_candidates_merged`) must be located relative to that root's
+    // own element handle, not the outer document/frame context.
+    let (locator_scope, locator_shadow_hosts) = match &owner {
+        Some(element) => (LocatorScope::ClosedRoot(Arc::clone(element)), Vec::new()),
+        None => (base_scope.clone(), scope.shadow_hosts.clone()),
+    };
     let locator = JsLocator {
-        context_id: scope.context_id,
-        shadow_hosts: scope.shadow_hosts,
+        scope: locator_scope,
+        shadow_hosts: locator_shadow_hosts,
         id: candidate.id.clone(),
     };
     let native = if target.frame_path.is_empty() && target.shadow_path.is_empty() {
-        match candidate.css.as_deref() {
-            Some(css) => scope.execution_page.find_element(css).await.ok(),
-            None => None,
+        match (&owner, candidate.css.as_deref()) {
+            (Some(element), Some(css)) => element.find_element(css).await.ok(),
+            (None, Some(css)) => scope.execution_page.find_element(css).await.ok(),
+            _ => None,
         }
     } else {
         None
@@ -517,18 +588,169 @@ async fn collect_candidates(
     shadow_hosts: &[String],
     scope: u64,
 ) -> Result<Vec<BrowserCandidate>, CommandError> {
-    let prefix = format!("bobby-{scope}-");
-    let prefix = serde_json::to_string(&prefix)
-        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
-    let operation = format!(
-        r#"let n=0,out=[]; const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>x.innerText.trim()).join(' '):null;const role=el.getAttribute('role')||({{BUTTON:'button',A:'link',IFRAME:'iframe',INPUT:el.type==='checkbox'?'checkbox':'textbox',TEXTAREA:'textbox',SELECT:'combobox'}}[el.tagName]||null);const name=el.getAttribute('aria-label')||label||el.innerText?.trim()||el.value||null;const attributes={{}};for(const a of el.attributes)if(a.name==='name'||a.name==='type'||a.name==='src'||a.name==='href'||a.name==='value'||a.name.startsWith('data-'))attributes[a.name]=a.value;const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
-    );
+    let operation = candidate_collector_operation(scope)?;
     evaluate_in_context(
         page,
         context_id,
         scope_expression(shadow_hosts, &operation)?,
     )
     .await
+}
+
+/// Same gather as [`collect_candidates`], but rooted at an already-resolved
+/// closed shadow root `Element` instead of `document` — a closed root's
+/// contents are invisible to plain `document.querySelector`, but this
+/// existing collector script works unchanged once bound as `this`.
+async fn collect_candidates_within(
+    element: &Element,
+    shadow_hosts: &[String],
+    scope: u64,
+) -> Result<Vec<BrowserCandidate>, CommandError> {
+    let operation = candidate_collector_operation(scope)?;
+    let function_declaration = closed_root_scope_expression(shadow_hosts, &operation)?;
+    let value = element
+        .call_js_fn_by_value(function_declaration, false)
+        .await
+        .map_err(cdp_error)?;
+    serde_json::from_value(value).map_err(|error| target_error(ErrorCode::InvalidRequest, error))
+}
+
+/// Gathers candidates at the given scope, then additionally discovers and
+/// gathers from every closed shadow root reachable within that scope (see
+/// [`discover_closed_shadow_roots`]), merging both into one candidate list
+/// so ordinary purpose-based matching sees inside closed shadow DOM the same
+/// way it already sees inside open shadow DOM. Returns the merged
+/// candidates alongside a map from candidate id to the closed-root `Element`
+/// it was gathered from (only populated for closed-root-origin candidates),
+/// so a winning candidate can be relocated for later Act calls.
+async fn collect_candidates_merged(
+    page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+    gather_scope_id: u64,
+) -> Result<(Vec<BrowserCandidate>, HashMap<String, Arc<Element>>), CommandError> {
+    let mut candidates = match scope {
+        LocatorScope::Context(context_id) => {
+            collect_candidates(page, *context_id, shadow_hosts, gather_scope_id).await?
+        }
+        LocatorScope::ClosedRoot(element) => {
+            collect_candidates_within(element, shadow_hosts, gather_scope_id).await?
+        }
+    };
+
+    let mut owners = HashMap::new();
+    let closed_roots = discover_closed_shadow_roots(page, scope, shadow_hosts).await?;
+    for root in closed_roots {
+        let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
+        let mut nested = collect_candidates_within(&root, &[], nested_scope).await?;
+        for candidate in &nested {
+            owners.insert(candidate.id.clone(), Arc::clone(&root));
+        }
+        candidates.append(&mut nested);
+    }
+    Ok((candidates, owners))
+}
+
+/// Discovers every closed shadow root reachable within the given scope via
+/// `DOM.describeNode(pierce: true)`, resolving each into a live `Element`
+/// handle. CDP can see closed roots at the backend level regardless of the
+/// JS-level "closed" restriction — this is exactly how DevTools itself
+/// inspects them — so this requires no page-prototype patching.
+async fn discover_closed_shadow_roots(
+    page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+) -> Result<Vec<Arc<Element>>, CommandError> {
+    let object_id = scope_root_object_id(page, scope, shadow_hosts).await?;
+    let described = page
+        .execute(
+            DescribeNodeParams::builder()
+                .object_id(object_id)
+                .depth(-1)
+                .pierce(true)
+                .build(),
+        )
+        .await
+        .map_err(cdp_error)?;
+    let mut backend_ids = Vec::new();
+    collect_closed_shadow_root_ids(&described.result.node, &mut backend_ids);
+    let mut roots = Vec::with_capacity(backend_ids.len());
+    for backend_node_id in backend_ids {
+        let element = page
+            .element_from_backend_node_id(backend_node_id)
+            .await
+            .map_err(cdp_error)?;
+        roots.push(Arc::new(element));
+    }
+    Ok(roots)
+}
+
+/// Walks a `DOM.describeNode(pierce: true)` tree collecting the
+/// `backendNodeId` of every *closed* shadow root found. Uses backend ids
+/// (not frontend `nodeId`s) because pierce trees return `nodeId`s that are
+/// not registered with the frontend. Deliberately never descends into
+/// `content_document` (iframe content), preserving the existing "frames
+/// require an explicit `frame_path`" boundary — only `.children` (same-tree
+/// DOM descendants) and `.shadow_roots` are followed.
+fn collect_closed_shadow_root_ids(node: &CdpNode, out: &mut Vec<BackendNodeId>) {
+    if let Some(shadow_roots) = &node.shadow_roots {
+        for root in shadow_roots {
+            if matches!(root.shadow_root_type, Some(ShadowRootType::Closed)) {
+                out.push(root.backend_node_id);
+            }
+            collect_closed_shadow_root_ids(root, out);
+        }
+    }
+    if let Some(children) = &node.children {
+        for child in children {
+            collect_closed_shadow_root_ids(child, out);
+        }
+    }
+}
+
+/// Checks whether a specific already-resolved candidate (identified by its
+/// per-gather `data-bobby-target` id) itself hosts a closed shadow root,
+/// used by the explicit `shadow_path` fallback when the open-root check
+/// (`!!root`) fails. Returns the closed root's `BackendNodeId` if one is
+/// attached.
+async fn discover_closed_root_for_candidate(
+    page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+    candidate_id: &str,
+) -> Result<Option<BackendNodeId>, CommandError> {
+    let id = serde_json::to_string(candidate_id)
+        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+    let operation = format!("const el=find(root,{id});return el;");
+    let expression = scoped_expression(scope, shadow_hosts, &operation)?;
+    let object_id = resolve_object_id_scoped(page, scope, expression).await?;
+    let described = page
+        .execute(
+            DescribeNodeParams::builder()
+                .object_id(object_id)
+                .depth(1)
+                .pierce(true)
+                .build(),
+        )
+        .await
+        .map_err(cdp_error)?;
+    Ok(described
+        .result
+        .node
+        .shadow_roots
+        .into_iter()
+        .flatten()
+        .find(|root| matches!(root.shadow_root_type, Some(ShadowRootType::Closed)))
+        .map(|root| root.backend_node_id))
+}
+
+fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
+    let prefix = format!("bobby-{scope}-");
+    let prefix = serde_json::to_string(&prefix)
+        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+    Ok(format!(
+        r#"let n=0,out=[]; const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>x.innerText.trim()).join(' '):null;const role=el.getAttribute('role')||({{BUTTON:'button',A:'link',IFRAME:'iframe',INPUT:el.type==='checkbox'?'checkbox':'textbox',TEXTAREA:'textbox',SELECT:'combobox'}}[el.tagName]||null);const name=el.getAttribute('aria-label')||label||el.innerText?.trim()||el.value||null;const attributes={{}};for(const a of el.attributes)if(a.name==='name'||a.name==='type'||a.name==='src'||a.name==='href'||a.name==='value'||a.name.startsWith('data-'))attributes[a.name]=a.value;const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
+    ))
 }
 
 async fn find_child_frame(
@@ -609,23 +831,136 @@ async fn find_oopif(
     Ok(Some((page, frame)))
 }
 
-fn scope_expression(shadow_hosts: &[String], operation: &str) -> Result<String, CommandError> {
+/// The `find`-by-id helper plus the shadow_hosts descent loop, shared by
+/// both the document-rooted and closed-root-rooted expression builders.
+/// Leaves a mutable `root` binding in scope for the caller's `operation` to
+/// use, having already descended through any open shadow hosts named in
+/// `shadow_hosts`. Further-nested *open* shadow roots inside a closed root
+/// are handled transparently here too, since `el.shadowRoot` still resolves
+/// once you're already inside — only the outermost "closed" boundary needs
+/// CDP-native traversal to cross.
+fn descend_shadow_hosts_snippet(shadow_hosts: &[String]) -> Result<String, CommandError> {
     let hosts = serde_json::to_string(shadow_hosts)
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
     Ok(format!(
-        r#"(()=>{{const find=(root,id)=>{{for(const el of root.querySelectorAll('*')){{if(el.getAttribute('data-bobby-target')===id)return el;if(el.shadowRoot){{const found=find(el.shadowRoot,id);if(found)return found}}}}return null}};let root=document;for(const id of {hosts}){{const host=find(root,id);if(!host||!host.shadowRoot)return false;root=host.shadowRoot}};{operation}}})()"#
+        r#"const find=(root,id)=>{{for(const el of root.querySelectorAll('*')){{if(el.getAttribute('data-bobby-target')===id)return el;if(el.shadowRoot){{const found=find(el.shadowRoot,id);if(found)return found}}}}return null}};for(const id of {hosts}){{const host=find(root,id);if(!host||!host.shadowRoot)return false;root=host.shadowRoot}}"#
     ))
+}
+
+/// Builds a bare expression suitable for `Runtime.evaluate`, rooted at
+/// `document`.
+fn scope_expression(shadow_hosts: &[String], operation: &str) -> Result<String, CommandError> {
+    let descend = descend_shadow_hosts_snippet(shadow_hosts)?;
+    Ok(format!("(()=>{{let root=document;{descend};{operation}}})()"))
+}
+
+/// Builds a `function() {...}` declaration suitable for
+/// `Runtime.callFunctionOn` against a closed-root `Element`'s object id,
+/// rooted at `this`.
+fn closed_root_scope_expression(shadow_hosts: &[String], operation: &str) -> Result<String, CommandError> {
+    let descend = descend_shadow_hosts_snippet(shadow_hosts)?;
+    Ok(format!("function(){{let root=this;{descend};{operation}}}"))
+}
+
+fn scoped_expression(
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+    operation: &str,
+) -> Result<String, CommandError> {
+    match scope {
+        LocatorScope::Context(_) => scope_expression(shadow_hosts, operation),
+        LocatorScope::ClosedRoot(_) => closed_root_scope_expression(shadow_hosts, operation),
+    }
 }
 
 fn locator_expression(locator: &JsLocator, operation: &str) -> Result<String, CommandError> {
     let id = serde_json::to_string(&locator.id)
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
-    scope_expression(
-        &locator.shadow_hosts,
-        &format!(
-            "const el=find(root,{id});if(!el||!el.isConnected)throw new Error('target detached');{operation}"
-        ),
-    )
+    let full_operation = format!(
+        "const el=find(root,{id});if(!el||!el.isConnected)throw new Error('target detached');{operation}"
+    );
+    scoped_expression(&locator.scope, &locator.shadow_hosts, &full_operation)
+}
+
+/// Evaluates `expression` (already shaped by [`scoped_expression`]/
+/// [`locator_expression`] for the given scope) and deserializes the result.
+async fn eval_scoped<T: DeserializeOwned>(
+    page: &Page,
+    scope: &LocatorScope,
+    expression: String,
+) -> Result<T, CommandError> {
+    match scope {
+        LocatorScope::Context(context_id) => evaluate_in_context(page, *context_id, expression).await,
+        LocatorScope::ClosedRoot(element) => {
+            let value = element
+                .call_js_fn_by_value(expression, false)
+                .await
+                .map_err(cdp_error)?;
+            serde_json::from_value(value)
+                .map_err(|error| target_error(ErrorCode::InvalidRequest, error))
+        }
+    }
+}
+
+/// Resolves `expression` to a live object handle (rather than an inlined
+/// JSON value), used where a `RemoteObjectId`/`NodeId` is needed for a
+/// follow-up CDP call (e.g. `DOM.requestNode`, `DOM.describeNode`).
+async fn resolve_object_id_scoped(
+    page: &Page,
+    scope: &LocatorScope,
+    expression: String,
+) -> Result<RemoteObjectId, CommandError> {
+    match scope {
+        LocatorScope::Context(context_id) => {
+            let mut params = EvaluateParams::new(expression);
+            params.context_id = *context_id;
+            params.return_by_value = Some(false);
+            page.evaluate(params)
+                .await
+                .map_err(cdp_error)?
+                .object()
+                .object_id
+                .clone()
+                .ok_or_else(|| target_error(ErrorCode::TargetDetached, "target has no live object"))
+        }
+        LocatorScope::ClosedRoot(element) => element
+            .call_js_fn(expression, false)
+            .await
+            .map_err(cdp_error)?
+            .result
+            .object_id
+            .clone()
+            .ok_or_else(|| target_error(ErrorCode::TargetDetached, "target has no live object")),
+    }
+}
+
+/// Resolves the object id of the current scope's root (`document`, the
+/// `root` reached after descending `shadow_hosts`, or `this` for a
+/// closed-root scope), used as the anchor for closed-shadow-root discovery.
+async fn scope_root_object_id(
+    page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+) -> Result<RemoteObjectId, CommandError> {
+    match scope {
+        LocatorScope::Context(_) if shadow_hosts.is_empty() => {
+            resolve_object_id_scoped(page, scope, "document".to_string()).await
+        }
+        LocatorScope::Context(_) => {
+            resolve_object_id_scoped(page, scope, scope_expression(shadow_hosts, "return root")?).await
+        }
+        LocatorScope::ClosedRoot(element) if shadow_hosts.is_empty() => {
+            Ok(element.remote_object_id.clone())
+        }
+        LocatorScope::ClosedRoot(_) => {
+            resolve_object_id_scoped(
+                page,
+                scope,
+                closed_root_scope_expression(shadow_hosts, "return root")?,
+            )
+            .await
+        }
+    }
 }
 
 async fn evaluate_in_context<T: DeserializeOwned>(
@@ -720,5 +1055,98 @@ mod tests {
         let candidate = into_candidate(raw);
 
         assert_eq!(candidate.css, Some("#resume-upload".to_owned()));
+    }
+
+    fn cdp_node(
+        id: i64,
+        shadow_root_type: Option<ShadowRootType>,
+        children: Vec<CdpNode>,
+        shadow_roots: Vec<CdpNode>,
+        content_document: Option<CdpNode>,
+    ) -> CdpNode {
+        use chromiumoxide::cdp::browser_protocol::dom::BackendNodeId;
+
+        let mut builder = CdpNode::builder()
+            .node_id(chromiumoxide::cdp::browser_protocol::dom::NodeId::new(id))
+            .backend_node_id(BackendNodeId::new(id))
+            .node_type(1)
+            .node_name("DIV")
+            .local_name("div")
+            .node_value("")
+            .childrens(children)
+            .shadow_roots(shadow_roots);
+        if let Some(kind) = shadow_root_type {
+            builder = builder.shadow_root_type(kind);
+        }
+        if let Some(document) = content_document {
+            builder = builder.content_document(document);
+        }
+        builder.build().expect("synthetic CDP node")
+    }
+
+    #[test]
+    fn collect_closed_shadow_root_ids_finds_closed_roots_and_skips_open_and_iframe_content() {
+        // Tree:
+        //   document
+        //   ├─ host-open  → open shadow (id 2) with child
+        //   ├─ host-closed → closed shadow (id 4)
+        //   └─ iframe      → content_document with a closed shadow (id 99) that must be ignored
+        let open_root = cdp_node(2, Some(ShadowRootType::Open), Vec::new(), Vec::new(), None);
+        let closed_root = cdp_node(4, Some(ShadowRootType::Closed), Vec::new(), Vec::new(), None);
+        let nested_closed_in_iframe =
+            cdp_node(99, Some(ShadowRootType::Closed), Vec::new(), Vec::new(), None);
+        let iframe_document = cdp_node(
+            98,
+            None,
+            vec![cdp_node(
+                97,
+                None,
+                Vec::new(),
+                vec![nested_closed_in_iframe],
+                None,
+            )],
+            Vec::new(),
+            None,
+        );
+        let tree = cdp_node(
+            1,
+            None,
+            vec![
+                cdp_node(3, None, Vec::new(), vec![open_root], None),
+                cdp_node(5, None, Vec::new(), vec![closed_root], None),
+                cdp_node(6, None, Vec::new(), Vec::new(), Some(iframe_document)),
+            ],
+            Vec::new(),
+            None,
+        );
+
+        let mut found = Vec::new();
+        collect_closed_shadow_root_ids(&tree, &mut found);
+
+        assert_eq!(found, vec![BackendNodeId::new(4)]);
+    }
+
+    #[test]
+    fn collect_closed_shadow_root_ids_walks_nested_closed_roots() {
+        let inner_closed = cdp_node(20, Some(ShadowRootType::Closed), Vec::new(), Vec::new(), None);
+        let outer_closed = cdp_node(
+            10,
+            Some(ShadowRootType::Closed),
+            vec![cdp_node(11, None, Vec::new(), vec![inner_closed], None)],
+            Vec::new(),
+            None,
+        );
+        let tree = cdp_node(
+            1,
+            None,
+            vec![cdp_node(2, None, Vec::new(), vec![outer_closed], None)],
+            Vec::new(),
+            None,
+        );
+
+        let mut found = Vec::new();
+        collect_closed_shadow_root_ids(&tree, &mut found);
+
+        assert_eq!(found, vec![BackendNodeId::new(10), BackendNodeId::new(20)]);
     }
 }
