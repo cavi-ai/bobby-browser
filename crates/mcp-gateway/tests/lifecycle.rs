@@ -78,7 +78,7 @@ async fn initialize_must_be_first_and_negotiates_2025_11_25() {
 }
 
 #[tokio::test]
-async fn rejects_batches_wrong_jsonrpc_and_duplicate_initialize_without_losing_ids() {
+async fn rejects_batches_and_wrong_jsonrpc_while_reinitialize_resets_without_losing_ids() {
     let server = fixture_server(vec![Capability::SessionRead]).await;
 
     assert_eq!(
@@ -105,6 +105,8 @@ async fn rejects_batches_wrong_jsonrpc_and_duplicate_initialize_without_losing_i
         .await
         .unwrap();
     assert!(first.get("result").is_some());
+    // A re-`initialize` is a session reset (not -32600): reconnecting
+    // streamable-HTTP clients call `initialize` on every connect.
     let duplicate = server
         .handle_message(request(
             json!(10),
@@ -118,7 +120,15 @@ async fn rejects_batches_wrong_jsonrpc_and_duplicate_initialize_without_losing_i
         .await
         .unwrap();
     assert_eq!(duplicate["id"], 10);
-    assert_eq!(duplicate["error"]["code"], -32600);
+    assert!(duplicate.get("error").is_none(), "{duplicate}");
+    assert!(duplicate["result"]["protocolVersion"].is_string());
+    // The lifecycle genuinely reset: traffic before the new handshake
+    // completes is gated as not-initialized.
+    let gated = server
+        .handle_message(request(json!(11), "tools/list", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(gated["error"]["code"], -32002);
 }
 
 #[tokio::test]

@@ -73,6 +73,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -95,6 +96,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
             authority_path: root.path().join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     };
 
     let runtime = RuntimeService::build_with_vision_assist(&config, assist)

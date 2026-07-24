@@ -41,7 +41,6 @@ impl IntentBrowser for FakeBrowser {
         Err(unsupported("click"))
     }
 
-
     async fn click_xy(
         &self,
         _page_id: &PageId,
@@ -318,7 +317,10 @@ async fn fill_files_uploads_and_verifies() {
     {
         let log = calls.lock().expect("call log");
         assert_eq!(log.upload_files.len(), 1);
-        assert_eq!(log.upload_files[0].paths, vec!["/tmp/resume.txt".to_owned()]);
+        assert_eq!(
+            log.upload_files[0].paths,
+            vec!["/tmp/resume.txt".to_owned()]
+        );
         assert!(log.type_text.is_empty());
     }
     assert!(evidence.iter().any(|item| matches!(

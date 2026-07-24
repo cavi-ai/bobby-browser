@@ -34,8 +34,8 @@ use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, CorrelationId, ErrorLayer, InspectCommand,
-    InterfaceError, InterfaceErrorCode, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand,
-    RecoveryDecision, RequestContext, ScreenshotMode, SessionId, SessionState,
+    InterfaceError, InterfaceErrorCode, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    RecoveryDecision, RequestContext, RuntimeCommand, ScreenshotMode, SessionId, SessionState,
     SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch, TypeTextCommand,
     UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };

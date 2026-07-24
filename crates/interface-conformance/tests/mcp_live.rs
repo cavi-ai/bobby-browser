@@ -19,8 +19,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PrimitiveCommand, RuntimeCommand,
-    ScreenshotMode, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]

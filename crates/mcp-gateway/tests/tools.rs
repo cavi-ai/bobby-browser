@@ -58,6 +58,54 @@ fn request(id: u64, method: &str, params: Value) -> Value {
 }
 
 #[tokio::test]
+async fn reinitialize_resets_the_session_lifecycle() {
+    // MCP clients reconnect by sending `initialize` again; a re-initialize is
+    // a session reset, not a protocol error (streamable-HTTP transports like
+    // OpenClaw's bundle-mcp client call initialize on every connect).
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(
+            90,
+            "initialize",
+            json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"reconnect","version":"1"}
+            }),
+        ))
+        .await
+        .expect("re-initialize returns a response");
+    assert!(
+        response.get("error").is_none(),
+        "re-initialize is accepted: {response}"
+    );
+    assert_eq!(response["result"]["protocolVersion"], json!("2025-11-25"));
+
+    // The lifecycle was genuinely reset: tool traffic before the new
+    // handshake completes is rejected as not-initialized.
+    let early = server
+        .handle_message(request(91, "tools/list", json!({})))
+        .await
+        .expect("tools/list returns a response");
+    assert_eq!(early["error"]["code"], json!(-32002));
+
+    // Completing the handshake restores full traffic.
+    server
+        .handle_message(json!({
+            "jsonrpc":"2.0","method":"notifications/initialized","params":{}
+        }))
+        .await;
+    let list = server
+        .handle_message(request(92, "tools/list", json!({})))
+        .await
+        .expect("tools/list after re-handshake returns a response");
+    assert!(
+        list.get("error").is_none(),
+        "tools/list works after re-handshake: {list}"
+    );
+}
+
+#[tokio::test]
 async fn tools_are_capability_filtered_sorted_and_have_closed_schemas() {
     let server = fixture_server(vec![Capability::SessionRead, Capability::PageWrite]).await;
     let response = server

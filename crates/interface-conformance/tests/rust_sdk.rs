@@ -9,8 +9,8 @@ use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClosePageCommand, CommandClass,
     CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PrimitiveCommand, RuntimeCommand, ScreenshotMode, UploadFilesCommand,
-    WaitUntil, WorkflowCheckpoint, WorkflowId,
+    NavigateCommand, OpenPageRequest, PrimitiveCommand, RuntimeCommand, ScreenshotMode,
+    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 #[tokio::test]

@@ -9,9 +9,9 @@ use interface_core::{
     SessionOwnershipRecordError, SessionOwnershipRegistry,
 };
 use sha2::{Digest, Sha256};
-use types::{RuntimeCommand, 
+use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, InterfaceErrorCode,
-    InterfaceOperation, PrincipalId, RequestContext, SessionId, WorkflowId,
+    InterfaceOperation, PrincipalId, RequestContext, RuntimeCommand, SessionId, WorkflowId,
 };
 use uuid::uuid;
 
@@ -32,7 +32,9 @@ fn envelope() -> CommandEnvelope {
         session_id: SessionId::new(),
         page_id: None,
         deadline: expiry(),
-        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(
+            types::ListPagesCommand,
+        )),
     }
 }
 

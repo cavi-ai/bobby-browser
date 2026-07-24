@@ -1,7 +1,7 @@
 use intent_engine::{compile_intent, CompileError, IntentPlan};
 use types::{
-    DismissObstructionIntent, ExtractField, ExtractIntent, ExtractValueKind, FillIntent,
-    FillValue, FollowIntent, IntentCommand, IntentHints, LocateIntent, TextMatch, WaitCondition,
+    DismissObstructionIntent, ExtractField, ExtractIntent, ExtractValueKind, FillIntent, FillValue,
+    FollowIntent, IntentCommand, IntentHints, LocateIntent, TextMatch, WaitCondition,
     WaitForCommand, WaitForStateIntent, WaitUntil,
 };
 
@@ -101,14 +101,16 @@ fn compile_follow_carries_target_expected_destination_and_boundary_flag() {
 
 #[test]
 fn compile_dismiss_obstruction_carries_target_and_timeout() {
-    let plan = compile_intent(&IntentCommand::DismissObstruction(DismissObstructionIntent {
-        purpose: "Cookie notice close button".into(),
-        hints: IntentHints {
-            role: Some("button".into()),
-            ..IntentHints::default()
+    let plan = compile_intent(&IntentCommand::DismissObstruction(
+        DismissObstructionIntent {
+            purpose: "Cookie notice close button".into(),
+            hints: IntentHints {
+                role: Some("button".into()),
+                ..IntentHints::default()
+            },
+            timeout_ms: 3_000,
         },
-        timeout_ms: 3_000,
-    }))
+    ))
     .expect("compile");
     let IntentPlan::DismissObstruction { target, timeout_ms } = plan else {
         panic!("expected DismissObstruction plan");
@@ -149,11 +151,17 @@ fn compile_extract_resolves_each_field_to_its_own_target_and_value_kind() {
     };
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0].name, "displayName");
-    assert_eq!(fields[0].target.text, Some(TextMatch::Contains("Display name".into())));
+    assert_eq!(
+        fields[0].target.text,
+        Some(TextMatch::Contains("Display name".into()))
+    );
     assert!(matches!(fields[0].value, ExtractValueKind::Text));
     assert_eq!(fields[1].name, "profileLink");
     assert_eq!(fields[1].target.role.as_deref(), Some("link"));
-    assert_eq!(fields[1].target.accessible_name.as_deref(), Some("Profile link"));
+    assert_eq!(
+        fields[1].target.accessible_name.as_deref(),
+        Some("Profile link")
+    );
     assert!(matches!(fields[1].value, ExtractValueKind::Href));
 }
 

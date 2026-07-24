@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 chrono.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 types = { path = "../types" }
 worker-pool = { path = "../worker-pool" }
 
