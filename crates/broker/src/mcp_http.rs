@@ -20,10 +20,11 @@ use crate::{
 
 /// One [`mcp_gateway::Server`] per principal, cached for the life of the process.
 ///
-/// This gives each principal its own MCP lifecycle (`initialize` is a once-per-session
-/// handshake — see `mcp_gateway::Server`'s `Lifecycle` state machine), matching the
-/// fleet model of one principal per team driver agent: a driver initializes once and
-/// keeps issuing `tools/call` against the same negotiated session.
+/// This gives each principal its own MCP lifecycle (see `mcp_gateway::Server`'s
+/// `Lifecycle` state machine), matching the fleet model of one principal per team
+/// driver agent. A client that reconnects re-sends `initialize`; the server treats
+/// that as a session reset rather than an error, so reconnecting drivers recover
+/// without a process restart or token rotation.
 ///
 /// Bounded the same way `RuntimeBindingCache` and `AppState::principal_permits` are: an
 /// `Authority` only ever hands out live handles for up to `max_principals` distinct

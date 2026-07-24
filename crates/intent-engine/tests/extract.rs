@@ -169,7 +169,11 @@ async fn extract_resolves_every_field_deterministically_and_reads_declared_value
     link_attrs.insert("href".to_owned(), "/users/42".to_owned());
     let browser = FakeBrowser {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([
-            vec![candidate(DISPLAY_NAME_FIELD, "Ada Lovelace", BTreeMap::new())],
+            vec![candidate(
+                DISPLAY_NAME_FIELD,
+                "Ada Lovelace",
+                BTreeMap::new(),
+            )],
             vec![candidate(PROFILE_LINK_FIELD, "View profile", link_attrs)],
         ]))),
         ..FakeBrowser::default()
@@ -215,18 +219,24 @@ async fn extract_resolves_every_field_deterministically_and_reads_declared_value
     let record = record.expect("IntentExecution evidence");
     assert_eq!(record.intent_kind, "extract");
     assert_eq!(record.verification, "extracted");
-    assert!(evidence
-        .iter()
-        .filter(|item| matches!(item, Evidence::Resolution { .. }))
-        .count()
-        >= 2);
+    assert!(
+        evidence
+            .iter()
+            .filter(|item| matches!(item, Evidence::Resolution { .. }))
+            .count()
+            >= 2
+    );
 }
 
 #[tokio::test]
 async fn extract_marks_a_field_missing_without_failing_the_whole_command() {
     let browser = FakeBrowser {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([
-            vec![candidate(DISPLAY_NAME_FIELD, "Ada Lovelace", BTreeMap::new())],
+            vec![candidate(
+                DISPLAY_NAME_FIELD,
+                "Ada Lovelace",
+                BTreeMap::new(),
+            )],
             vec![],
         ]))),
         ..FakeBrowser::default()

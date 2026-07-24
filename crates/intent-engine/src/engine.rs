@@ -1167,7 +1167,10 @@ async fn resolve_extract_field(
             )
             .await
         }
-        Err(_) => vec![missing_extraction(&field.name, Some(ErrorCode::InvalidRequest))],
+        Err(_) => vec![missing_extraction(
+            &field.name,
+            Some(ErrorCode::InvalidRequest),
+        )],
     }
 }
 
@@ -1185,7 +1188,10 @@ async fn escalate_extract_field_with_vision(
     deterministic_fallback_code: ErrorCode,
 ) -> Vec<Evidence> {
     if never_escalates(deterministic_fallback_code) || !stuck.may_escalate_to_vision() {
-        return vec![missing_extraction(&field.name, Some(deterministic_fallback_code))];
+        return vec![missing_extraction(
+            &field.name,
+            Some(deterministic_fallback_code),
+        )];
     }
 
     let gates_open = vision.session_ok && vision.capability_ok;
@@ -1198,7 +1204,10 @@ async fn escalate_extract_field_with_vision(
         return vec![missing_extraction(&field.name, Some(code))];
     };
     if !gates_open {
-        return vec![missing_extraction(&field.name, Some(ErrorCode::VisionAssistDenied))];
+        return vec![missing_extraction(
+            &field.name,
+            Some(ErrorCode::VisionAssistDenied),
+        )];
     }
 
     let (png, mut screenshot_evidence) = match browser
@@ -1211,7 +1220,12 @@ async fn escalate_extract_field_with_vision(
         .await
     {
         Ok(result) => result,
-        Err(_) => return vec![missing_extraction(&field.name, Some(ErrorCode::VisionAssistFailed))],
+        Err(_) => {
+            return vec![missing_extraction(
+                &field.name,
+                Some(ErrorCode::VisionAssistFailed),
+            )]
+        }
     };
 
     let proposal = match assist
@@ -1403,11 +1417,17 @@ async fn stuck_outcome_with_prior_evidence(
 
     let gates_open = vision.session_ok && vision.capability_ok;
     let Some(assist) = vision.assist.as_ref() else {
-        return vision_denied_or_unavailable(gates_open, prior_evidence, stuck_evidence, verification);
+        return vision_denied_or_unavailable(
+            gates_open,
+            prior_evidence,
+            stuck_evidence,
+            verification,
+        );
     };
     if !gates_open {
         let mut evidence = prior_evidence;
         evidence.push(stuck_evidence);
+        tracing::warn!(intent = intent_kind, "policy.vision_denied");
         return IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,
@@ -1454,6 +1474,7 @@ fn vision_denied_or_unavailable(
             evidence,
         }
     } else {
+        tracing::warn!("policy.vision_denied");
         IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,

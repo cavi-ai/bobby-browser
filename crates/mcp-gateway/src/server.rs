@@ -123,9 +123,6 @@ impl Server {
 
         if method == "initialize" {
             id.as_ref()?;
-            if *lifecycle != Lifecycle::AwaitingInitialize {
-                return id.map(|id| error(id, INVALID_REQUEST, "Invalid Request", None));
-            }
             if !params
                 .get("capabilities")
                 .is_some_and(bounded_client_capabilities_value)
@@ -148,6 +145,13 @@ impl Server {
                     )
                 });
             }
+            // A re-`initialize` from any prior lifecycle state is a session
+            // reset, not a protocol error: MCP clients over streamable HTTP
+            // call `initialize` on every reconnect, and rejecting it strands
+            // a principal behind its own once-per-process handshake. Reset
+            // clears stale cancellation state from the previous session;
+            // in-flight work from that session keeps running to completion.
+            self.pending_cancellations.lock().await.clear();
             *lifecycle = Lifecycle::AwaitingInitializedNotification;
             return id.map(|id| {
                 success(

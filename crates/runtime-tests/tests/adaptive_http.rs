@@ -10,8 +10,8 @@ use session_manager::SessionManager;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, CommandClass, CommandEnvelope, CommandId,
     CommandOutcome, CreateSessionRequest, DownloadUrlCommand, Evidence, ExecutionPath,
-    InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, RecoveryDecision,
-    TargetSpec, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    InspectCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision,
+    RuntimeCommand, TargetSpec, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{ChromiumWorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
@@ -131,6 +131,7 @@ async fn adaptive_http() {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -158,6 +159,7 @@ async fn adaptive_http() {
             ..HttpConfig::default()
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     };
     let (runtime, workers, artifacts) = build_runtime(&config).await;
     let session = runtime

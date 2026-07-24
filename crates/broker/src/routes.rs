@@ -322,6 +322,7 @@ async fn issue_principal(
         )
         .await
         .map_err(ProtocolError::from)?;
+    tracing::info!("principal.issued");
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -351,6 +352,7 @@ async fn revoke_principal(
         .revoke(&principal)
         .await
         .map_err(ProtocolError::from)?;
+    tracing::info!("principal.revoked");
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

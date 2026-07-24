@@ -37,8 +37,8 @@ use types::{
     AttemptId, Capability, CaptureScreenshotCommand, CommandEnvelope, CommandId, CommandOutcome,
     CorrelationId, CreateSessionRequest, Evidence, IdempotencyKey, InspectCommand,
     InterfaceErrorCode, InterfaceOperation, InterfaceVersion, NavigateCommand, PageId,
-    PrimitiveCommand, RuntimeCommand, PrincipalId, ScreenshotMode, SessionId, WaitUntil, WorkflowId,
-    CURRENT_INTERFACE_VERSION,
+    PrimitiveCommand, PrincipalId, RuntimeCommand, ScreenshotMode, SessionId, WaitUntil,
+    WorkflowId, CURRENT_INTERFACE_VERSION,
 };
 
 const SECRET: &str = "release-gate-secret-that-must-never-escape";

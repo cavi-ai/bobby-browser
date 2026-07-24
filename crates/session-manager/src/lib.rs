@@ -41,6 +41,7 @@ impl SessionManager {
             .write()
             .await
             .insert(session.id.clone(), session.clone());
+        tracing::info!(session_id = %session.id.0, "session.created");
         Ok(session)
     }
 
@@ -55,6 +56,7 @@ impl SessionManager {
                 .await
                 .map_err(|error| RuntimeError::Internal(error.message))?;
         }
+        tracing::info!(session_id = %id.0, "session.deleted");
         Ok(())
     }
 

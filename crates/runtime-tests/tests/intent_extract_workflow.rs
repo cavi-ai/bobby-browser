@@ -10,7 +10,11 @@ use types::{
     RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 
-fn intent_envelope(session_id: &SessionId, page_id: &PageId, command: IntentCommand) -> CommandEnvelope {
+fn intent_envelope(
+    session_id: &SessionId,
+    page_id: &PageId,
+    command: IntentCommand,
+) -> CommandEnvelope {
     CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
@@ -23,7 +27,12 @@ fn intent_envelope(session_id: &SessionId, page_id: &PageId, command: IntentComm
     }
 }
 
-async fn completed_navigate(runtime: &RuntimeService, session_id: &SessionId, page_id: &PageId, url: String) {
+async fn completed_navigate(
+    runtime: &RuntimeService,
+    session_id: &SessionId,
+    page_id: &PageId,
+    url: String,
+) {
     match runtime
         .submit(CommandEnvelope {
             schema_version: CommandEnvelope::SCHEMA_VERSION,
@@ -84,6 +93,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -106,6 +116,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
             authority_path: root.join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     };
     RuntimeService::build(&config).await.unwrap()
 }

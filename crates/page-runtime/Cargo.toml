@@ -14,6 +14,7 @@ network-engine = { path = "../network-engine" }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 types = { path = "../types" }
 worker-pool = { path = "../worker-pool" }
 workflow-journal = { path = "../workflow-journal" }

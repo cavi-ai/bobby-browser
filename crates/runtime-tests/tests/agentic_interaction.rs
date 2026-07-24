@@ -6,8 +6,8 @@ use sdk_core::RuntimeService;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
     CreateSessionRequest, ElementState, ErrorCode, Evidence, NavigateCommand, OpenPageRequest,
-    PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
-    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, TargetSpec, TextMatch,
+    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 
 fn envelope(
@@ -54,6 +54,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
+            shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
             executable: Some(PathBuf::from(
@@ -76,6 +77,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             authority_path: root.path().join("authority.json"),
         },
         interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
     let session = runtime

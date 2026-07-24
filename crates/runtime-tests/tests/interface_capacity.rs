@@ -22,7 +22,8 @@ use tokio::sync::{Mutex, Notify};
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
     CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, OpenPageRequest, PageId,
-    PrimitiveCommand, RuntimeCommand, PrincipalId, SessionId, TypeTextCommand, WorkerId, WorkflowId,
+    PrimitiveCommand, PrincipalId, RuntimeCommand, SessionId, TypeTextCommand, WorkerId,
+    WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;

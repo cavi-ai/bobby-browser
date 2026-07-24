@@ -8,8 +8,8 @@ use types::{
     ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent,
     ExtractValueKind, FillIntent, FillValue, FollowIntent, InspectCommand, IntentCommand,
     IntentHints, IntentResolutionPath, ListPagesCommand, LocateIntent, OpenPageCommand, PageId,
-    PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent,
-    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec,
+    TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
     WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;

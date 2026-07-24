@@ -18,8 +18,8 @@ use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValu
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
     CommandPhase, CreateSessionRequest, DownloadUrlCommand, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, PrincipalId, SessionId,
-    TypeTextCommand, WorkerId, WorkflowId,
+    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, PrincipalId, RuntimeCommand,
+    SessionId, TypeTextCommand, WorkerId, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;

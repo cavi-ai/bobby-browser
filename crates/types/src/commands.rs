@@ -69,9 +69,7 @@ pub enum IntentCommand {
 impl IntentCommand {
     pub fn class(&self) -> CommandClass {
         match self {
-            Self::Locate(_) | Self::WaitForState(_) | Self::Extract(_) => {
-                CommandClass::Replayable
-            }
+            Self::Locate(_) | Self::WaitForState(_) | Self::Extract(_) => CommandClass::Replayable,
             Self::Fill(_) | Self::DismissObstruction(_) => CommandClass::Reconciliable,
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
             Self::Follow(intent) => {

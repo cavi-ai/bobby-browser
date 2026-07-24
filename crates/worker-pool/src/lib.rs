@@ -353,10 +353,13 @@ impl WorkerPool {
         cancellation.armed = false;
 
         match result {
-            Ok((worker, active_permit)) => Ok(WorkerLease {
-                worker,
-                _active_permit: Arc::new(active_permit),
-            }),
+            Ok((worker, active_permit)) => {
+                tracing::info!(session_id = %session_id.0, "worker.leased");
+                Ok(WorkerLease {
+                    worker,
+                    _active_permit: Arc::new(active_permit),
+                })
+            }
             Err(error) => Err(error),
         }
     }
@@ -376,6 +379,9 @@ impl WorkerPool {
                 Ok(())
             };
             factory.release_session(&session_id).await;
+            if result.is_ok() {
+                tracing::info!(session_id = %session_id.0, "worker.released");
+            }
             result
         })
         .await

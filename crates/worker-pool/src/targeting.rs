@@ -437,9 +437,7 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
     // so it must never be treated as a stable identity attribute or matched
     // against in a later resolution pass.
     item.attributes.remove("data-bobby-target");
-    let css = item
-        .css
-        .filter(|css| !css.contains("data-bobby-target"));
+    let css = item.css.filter(|css| !css.contains("data-bobby-target"));
     Candidate {
         id: item.id,
         css,
@@ -851,13 +849,18 @@ fn descend_shadow_hosts_snippet(shadow_hosts: &[String]) -> Result<String, Comma
 /// `document`.
 fn scope_expression(shadow_hosts: &[String], operation: &str) -> Result<String, CommandError> {
     let descend = descend_shadow_hosts_snippet(shadow_hosts)?;
-    Ok(format!("(()=>{{let root=document;{descend};{operation}}})()"))
+    Ok(format!(
+        "(()=>{{let root=document;{descend};{operation}}})()"
+    ))
 }
 
 /// Builds a `function() {...}` declaration suitable for
 /// `Runtime.callFunctionOn` against a closed-root `Element`'s object id,
 /// rooted at `this`.
-fn closed_root_scope_expression(shadow_hosts: &[String], operation: &str) -> Result<String, CommandError> {
+fn closed_root_scope_expression(
+    shadow_hosts: &[String],
+    operation: &str,
+) -> Result<String, CommandError> {
     let descend = descend_shadow_hosts_snippet(shadow_hosts)?;
     Ok(format!("function(){{let root=this;{descend};{operation}}}"))
 }
@@ -890,7 +893,9 @@ async fn eval_scoped<T: DeserializeOwned>(
     expression: String,
 ) -> Result<T, CommandError> {
     match scope {
-        LocatorScope::Context(context_id) => evaluate_in_context(page, *context_id, expression).await,
+        LocatorScope::Context(context_id) => {
+            evaluate_in_context(page, *context_id, expression).await
+        }
         LocatorScope::ClosedRoot(element) => {
             let value = element
                 .call_js_fn_by_value(expression, false)
@@ -947,7 +952,8 @@ async fn scope_root_object_id(
             resolve_object_id_scoped(page, scope, "document".to_string()).await
         }
         LocatorScope::Context(_) => {
-            resolve_object_id_scoped(page, scope, scope_expression(shadow_hosts, "return root")?).await
+            resolve_object_id_scoped(page, scope, scope_expression(shadow_hosts, "return root")?)
+                .await
         }
         LocatorScope::ClosedRoot(element) if shadow_hosts.is_empty() => {
             Ok(element.remote_object_id.clone())
@@ -1013,7 +1019,10 @@ fn target_error(code: ErrorCode, message: impl std::fmt::Display) -> CommandErro
 mod tests {
     use super::*;
 
-    fn browser_candidate(css: Option<&str>, attributes: BTreeMap<String, String>) -> BrowserCandidate {
+    fn browser_candidate(
+        css: Option<&str>,
+        attributes: BTreeMap<String, String>,
+    ) -> BrowserCandidate {
         BrowserCandidate {
             id: "1".into(),
             css: css.map(str::to_owned),
@@ -1092,9 +1101,20 @@ mod tests {
         //   ├─ host-closed → closed shadow (id 4)
         //   └─ iframe      → content_document with a closed shadow (id 99) that must be ignored
         let open_root = cdp_node(2, Some(ShadowRootType::Open), Vec::new(), Vec::new(), None);
-        let closed_root = cdp_node(4, Some(ShadowRootType::Closed), Vec::new(), Vec::new(), None);
-        let nested_closed_in_iframe =
-            cdp_node(99, Some(ShadowRootType::Closed), Vec::new(), Vec::new(), None);
+        let closed_root = cdp_node(
+            4,
+            Some(ShadowRootType::Closed),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let nested_closed_in_iframe = cdp_node(
+            99,
+            Some(ShadowRootType::Closed),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
         let iframe_document = cdp_node(
             98,
             None,
@@ -1128,7 +1148,13 @@ mod tests {
 
     #[test]
     fn collect_closed_shadow_root_ids_walks_nested_closed_roots() {
-        let inner_closed = cdp_node(20, Some(ShadowRootType::Closed), Vec::new(), Vec::new(), None);
+        let inner_closed = cdp_node(
+            20,
+            Some(ShadowRootType::Closed),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
         let outer_closed = cdp_node(
             10,
             Some(ShadowRootType::Closed),

@@ -195,10 +195,7 @@ fn dismiss(purpose: &str, role: Option<&str>, timeout_ms: u64) -> IntentCommand 
 async fn dismiss_clicks_close_control_then_completes_once_it_is_removed_from_the_dom() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = FakeBrowser {
-        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([
-            vec![still_present()],
-            vec![],
-        ]))),
+        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![still_present()], vec![]]))),
         calls: Arc::clone(&calls),
         click_evidence: vec![Evidence::Element {
             selector: "#dismiss-overlay".into(),

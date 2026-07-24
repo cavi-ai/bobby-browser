@@ -219,7 +219,9 @@ fn submit_request() -> CommandEnvelope {
         session_id: SessionId::new(),
         page_id: None,
         deadline: expiry(),
-        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(
+            types::ListPagesCommand,
+        )),
     }
 }
 
@@ -330,7 +332,9 @@ async fn runtime_errors_are_mapped_without_dispatch_outcome_flattening() {
                 session_id: session.id,
                 page_id: None,
                 deadline: expiry(),
-                command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
+                command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(
+                    types::ListPagesCommand,
+                )),
             },
         )
         .await
@@ -554,7 +558,9 @@ async fn authenticated_submit_replays_retained_outcome_and_conflicts_before_disp
         session_id: SessionId::new(),
         page_id: None,
         deadline: expiry(),
-        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(
+            types::ListPagesCommand,
+        )),
     };
 
     let first = api.submit(context.clone(), request.clone()).await.unwrap();
@@ -576,7 +582,9 @@ async fn authenticated_submit_replays_retained_outcome_and_conflicts_before_disp
                 session_id: SessionId::new(),
                 page_id: None,
                 deadline: expiry(),
-                command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(types::ListPagesCommand)),
+                command: RuntimeCommand::Primitive(types::PrimitiveCommand::ListPages(
+                    types::ListPagesCommand,
+                )),
             },
         )
         .await
@@ -702,22 +710,26 @@ async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandon
 
 fn upload_files_envelope() -> CommandEnvelope {
     CommandEnvelope {
-        command: RuntimeCommand::Primitive(types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
-            selector: "input[type=file]".into(),
-            target: None,
-            paths: vec!["/tmp/example.txt".into()],
-        })),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::UploadFiles(
+            types::UploadFilesCommand {
+                selector: "input[type=file]".into(),
+                target: None,
+                paths: vec!["/tmp/example.txt".into()],
+            },
+        )),
         ..submit_request()
     }
 }
 
 fn download_url_envelope() -> CommandEnvelope {
     CommandEnvelope {
-        command: RuntimeCommand::Primitive(types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
-            url: "https://example.com/file.bin".into(),
-            expected_content_type: None,
-            max_bytes: 1024,
-        })),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::DownloadUrl(
+            types::DownloadUrlCommand {
+                url: "https://example.com/file.bin".into(),
+                expected_content_type: None,
+                max_bytes: 1024,
+            },
+        )),
         ..submit_request()
     }
 }
@@ -893,11 +905,13 @@ async fn non_privileged_command_needs_only_browser_mutate_to_clear_the_extra_cap
 fn evaluate_javascript_envelope(session_id: SessionId) -> CommandEnvelope {
     CommandEnvelope {
         session_id,
-        command: RuntimeCommand::Primitive(types::PrimitiveCommand::EvaluateJavaScript(types::EvaluateJavaScriptCommand {
-            expression: "1 + 1".into(),
-            timeout_ms: 1_000,
-            await_promise: false,
-        })),
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::EvaluateJavaScript(
+            types::EvaluateJavaScriptCommand {
+                expression: "1 + 1".into(),
+                timeout_ms: 1_000,
+                await_promise: false,
+            },
+        )),
         ..submit_request()
     }
 }
@@ -1087,10 +1101,7 @@ async fn locate_intent_without_intent_execute_capability_is_denied_before_dispat
         .unwrap_err();
 
     assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
-    assert_eq!(
-        error.required_capability,
-        Some(Capability::IntentExecute)
-    );
+    assert_eq!(error.required_capability, Some(Capability::IntentExecute));
     assert_eq!(api.submit_dispatch_count(), 0);
 }
 
@@ -1179,10 +1190,7 @@ async fn locate_intent_does_not_require_vision_assist_upfront() {
         .unwrap();
 
     assert!(
-        !matches!(
-            outcome,
-            CommandOutcome::PolicyDenied { .. }
-        ),
+        !matches!(outcome, CommandOutcome::PolicyDenied { .. }),
         "vision:assist must not be required upfront for intents; got {outcome:?}"
     );
     // MissingCapability would surface as Err; Ok proves the auth gate cleared.

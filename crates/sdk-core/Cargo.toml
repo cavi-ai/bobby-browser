@@ -17,6 +17,7 @@ page-runtime = { path = "../page-runtime" }
 network-engine = { path = "../network-engine" }
 worker-pool = { path = "../worker-pool" }
 workflow-journal = { path = "../workflow-journal" }
+tracing.workspace = true
 
 [dev-dependencies]
 checkpoint-store = { path = "../checkpoint-store" }

@@ -604,11 +604,6 @@ pub fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
 }
 
 pub async fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .json()
-        .init();
-
     let cmd = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "serve".to_string());
@@ -622,6 +617,7 @@ pub async fn run() -> Result<()> {
             let config_existed = config_path.exists();
             let config = AppConfig::load(&config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let _telemetry = observability::init(&config.observability)?;
             if config_existed {
                 tracing::info!(path = %config_path.display(), "loaded config file");
             } else {
@@ -635,7 +631,10 @@ pub async fn run() -> Result<()> {
                 compose_worker_factory(&config, parse_selection(selection_json.as_deref())?)?;
             broker::serve_with_worker_factory(config, startup, factory).await?
         }
-        "firefox-native-host" => run_configured_native_host().await?,
+        "firefox-native-host" => {
+            let _telemetry = observability::init(&Default::default())?;
+            run_configured_native_host().await?
+        }
         "install-firefox-native-host" => install_configured_native_host()?,
         "doctor" => println!("ok"),
         other => {

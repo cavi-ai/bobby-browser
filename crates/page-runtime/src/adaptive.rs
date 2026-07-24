@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use artifact_store::{ArtifactStore, PendingArtifact};
 use async_trait::async_trait;
-use intent_engine::{
-    IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext,
-};
+use intent_engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext};
 use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
@@ -194,8 +192,14 @@ impl AdaptivePageEngine {
         vision_gate: VisionGate,
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
         if let RuntimeCommand::Intent(intent) = &envelope.command {
-            return execute_intent(envelope, lease, intent, vision_gate, self.vision_assist.clone())
-                .await;
+            return execute_intent(
+                envelope,
+                lease,
+                intent,
+                vision_gate,
+                self.vision_assist.clone(),
+            )
+            .await;
         }
         let RuntimeCommand::Primitive(command) = &envelope.command else {
             unreachable!("Intent handled above");
