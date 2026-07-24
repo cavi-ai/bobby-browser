@@ -474,7 +474,80 @@ pub async fn serve_listener_with_rejection_limit(
     max_rejection_workers: usize,
     rejection_stats: RejectionWorkerStats,
 ) -> io::Result<()> {
-    axum::serve(
+    serve_listener_graceful(
+        listener,
+        app,
+        max_connections,
+        max_rejection_workers,
+        rejection_stats,
+        std::future::pending(),
+        std::future::pending(),
+    )
+    .await
+}
+
+/// Resolves on the first SIGINT/SIGTERM; a second signal force-exits with code
+/// 130. Each call registers independent handlers, so two callers (the graceful
+/// shutdown trigger and the drain deadline) both resolve on the same signal.
+pub async fn shutdown_signal() {
+    use tokio::signal;
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = signal::ctrl_c() => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown.signal_received");
+    tokio::spawn(async {
+        #[cfg(unix)]
+        {
+            let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+            tokio::select! {
+                _ = signal::ctrl_c() => {},
+                _ = term.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = signal::ctrl_c().await;
+        }
+        tracing::warn!("shutdown.forced");
+        std::process::exit(130);
+    });
+}
+
+/// Waits for the shutdown signal, then for `drain_timeout` — the deadline by
+/// which in-flight work must finish before the server gives up draining.
+async fn drain_after_signal(drain_timeout: std::time::Duration) {
+    shutdown_signal().await;
+    tokio::time::sleep(drain_timeout).await;
+}
+
+/// Serves `app` on `listener`, stopping acceptance when `shutdown` resolves
+/// and returning when `drain_deadline` resolves even if in-flight work is
+/// still outstanding.
+pub async fn serve_listener_graceful<Shutdown, Drain>(
+    listener: TcpListener,
+    app: Router,
+    max_connections: usize,
+    max_rejection_workers: usize,
+    rejection_stats: RejectionWorkerStats,
+    shutdown: Shutdown,
+    drain_deadline: Drain,
+) -> io::Result<()>
+where
+    Shutdown: std::future::Future<Output = ()> + Send + 'static,
+    Drain: std::future::Future<Output = ()> + Send + 'static,
+{
+    let server = axum::serve(
         ConnectionLimitedListener::new(
             listener,
             max_connections,
@@ -483,7 +556,14 @@ pub async fn serve_listener_with_rejection_limit(
         )?,
         app,
     )
-    .await
+    .with_graceful_shutdown(shutdown);
+    tokio::select! {
+        result = server => result,
+        _ = drain_deadline => {
+            tracing::warn!("shutdown.drain_timeout_expired");
+            Ok(())
+        }
+    }
 }
 
 struct StartupGate {
@@ -591,6 +671,7 @@ where
 pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
     let max_connections = config.interface.max_connections;
     let max_rejection_workers = config.interface.max_rejection_workers;
+    let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
     let (app, listener) = bootstrap_listener_with(
         config,
         startup,
@@ -607,12 +688,14 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         },
     )
     .await?;
-    serve_listener_with_rejection_limit(
+    serve_listener_graceful(
         listener,
         app,
         max_connections,
         max_rejection_workers,
         RejectionWorkerStats::default(),
+        shutdown_signal(),
+        drain_after_signal(shutdown_timeout),
     )
     .await?;
     Ok(())
@@ -849,6 +932,7 @@ pub async fn serve_with_worker_factory(
 ) -> anyhow::Result<()> {
     let max_connections = config.interface.max_connections;
     let max_rejection_workers = config.interface.max_rejection_workers;
+    let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
     let (app, listener) = bootstrap_listener_with(
         config,
         startup,
@@ -865,12 +949,14 @@ pub async fn serve_with_worker_factory(
         },
     )
     .await?;
-    serve_listener_with_rejection_limit(
+    serve_listener_graceful(
         listener,
         app,
         max_connections,
         max_rejection_workers,
         RejectionWorkerStats::default(),
+        shutdown_signal(),
+        drain_after_signal(shutdown_timeout),
     )
     .await?;
     Ok(())
