@@ -25,3 +25,8 @@ node_modules/
 ./gemini
 .superpowers/
 docs/superpowers/plans/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+QODER.md
+docs/superpowers/specs/

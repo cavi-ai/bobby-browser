@@ -5,6 +5,11 @@
   "engines": {
     "node": ">=22"
   },
+  "scripts": {
+    "docs:build": "node scripts/docs/build-bobby-browser.mjs",
+    "docs:verify": "node scripts/docs/verify-bobby-browser.mjs",
+    "docs:test": "node --test scripts/docs/bobby-browser-docs.test.mjs"
+  },
   "devDependencies": {
     "typescript": "7.0.2"
   }
