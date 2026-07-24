@@ -296,7 +296,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        6
+        7
     );
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,
@@ -306,7 +306,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     let evidence_variants = command_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 16, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 17, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
@@ -319,6 +319,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         evidence_kinds.contains(&"intentExecution"),
         "{evidence_kinds:?}"
     );
+    assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
 
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
@@ -822,6 +823,117 @@ async fn command_execute_schema_rejects_dismiss_obstruction_missing_purpose() {
     let rejected = server
         .handle_message(request(
             75,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":envelope_value}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    assert_eq!(runtime.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn command_execute_schema_accepts_extract_intent_envelope() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000028")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let server = Server::new(runtime);
+    initialize(&server).await;
+
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Extract(types::ExtractIntent {
+            purpose: "Profile summary".to_owned(),
+            fields: vec![
+                types::ExtractField {
+                    name: "displayName".to_owned(),
+                    purpose: "Display name".to_owned(),
+                    hints: IntentHints::default(),
+                    value: types::ExtractValueKind::Text,
+                },
+                types::ExtractField {
+                    name: "profileLink".to_owned(),
+                    purpose: "Profile link".to_owned(),
+                    hints: IntentHints::default(),
+                    value: types::ExtractValueKind::Href,
+                },
+            ],
+        })),
+    };
+
+    let response = server
+        .handle_message(request(
+            76,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":envelope}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
+    assert_ne!(response["error"]["code"], -32602, "{response}");
+}
+
+#[tokio::test]
+async fn command_execute_schema_rejects_extract_with_empty_fields() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000029")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let server = Server::new(runtime.clone());
+    initialize(&server).await;
+
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Extract(types::ExtractIntent {
+            purpose: "Profile summary".to_owned(),
+            fields: vec![types::ExtractField {
+                name: "displayName".to_owned(),
+                purpose: "Display name".to_owned(),
+                hints: IntentHints::default(),
+                value: types::ExtractValueKind::Text,
+            }],
+        })),
+    };
+    let mut envelope_value = serde_json::to_value(envelope).unwrap();
+    envelope_value["command"]["input"]["input"]["fields"] = json!([]);
+
+    let rejected = server
+        .handle_message(request(
+            77,
             "tools/call",
             json!({
                 "name":"command_execute",

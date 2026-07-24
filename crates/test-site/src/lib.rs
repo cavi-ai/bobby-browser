@@ -418,6 +418,16 @@ pub async fn spawn() -> FixtureServer {
             }),
         )
         .route(
+            "/profile",
+            get(|| async {
+                Html(
+                    r#"<!doctype html><title>Profile</title>
+                    <h1 id="display-name" role="heading" data-user-id="42">Ada Lovelace</h1>
+                    <a id="profile-link" href="/profile/42">View profile</a>"#,
+                )
+            }),
+        )
+        .route(
             "/drift",
             get({
                 let drift_requests = drift_requests.clone();

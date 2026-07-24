@@ -1,7 +1,8 @@
-use intent_engine::{compile_intent, IntentPlan};
+use intent_engine::{compile_intent, CompileError, IntentPlan};
 use types::{
-    DismissObstructionIntent, FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints,
-    LocateIntent, TextMatch, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
+    DismissObstructionIntent, ExtractField, ExtractIntent, ExtractValueKind, FillIntent,
+    FillValue, FollowIntent, IntentCommand, IntentHints, LocateIntent, TextMatch, WaitCondition,
+    WaitForCommand, WaitForStateIntent, WaitUntil,
 };
 
 #[test]
@@ -118,6 +119,90 @@ fn compile_dismiss_obstruction_carries_target_and_timeout() {
         Some("Cookie notice close button")
     );
     assert_eq!(timeout_ms, 3_000);
+}
+
+#[test]
+fn compile_extract_resolves_each_field_to_its_own_target_and_value_kind() {
+    let plan = compile_intent(&IntentCommand::Extract(ExtractIntent {
+        purpose: "Profile summary".into(),
+        fields: vec![
+            ExtractField {
+                name: "displayName".into(),
+                purpose: "Display name".into(),
+                hints: IntentHints::default(),
+                value: ExtractValueKind::Text,
+            },
+            ExtractField {
+                name: "profileLink".into(),
+                purpose: "Profile link".into(),
+                hints: IntentHints {
+                    role: Some("link".into()),
+                    ..IntentHints::default()
+                },
+                value: ExtractValueKind::Href,
+            },
+        ],
+    }))
+    .expect("compile");
+    let IntentPlan::Extract { fields } = plan else {
+        panic!("expected Extract plan");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name, "displayName");
+    assert_eq!(fields[0].target.text, Some(TextMatch::Contains("Display name".into())));
+    assert!(matches!(fields[0].value, ExtractValueKind::Text));
+    assert_eq!(fields[1].name, "profileLink");
+    assert_eq!(fields[1].target.role.as_deref(), Some("link"));
+    assert_eq!(fields[1].target.accessible_name.as_deref(), Some("Profile link"));
+    assert!(matches!(fields[1].value, ExtractValueKind::Href));
+}
+
+#[test]
+fn compile_extract_rejects_empty_field_list() {
+    let err = compile_intent(&IntentCommand::Extract(ExtractIntent {
+        purpose: "Profile summary".into(),
+        fields: vec![],
+    }))
+    .expect_err("no fields");
+    assert_eq!(err, CompileError::NoExtractFields);
+}
+
+#[test]
+fn compile_extract_rejects_empty_field_name() {
+    let err = compile_intent(&IntentCommand::Extract(ExtractIntent {
+        purpose: "Profile summary".into(),
+        fields: vec![ExtractField {
+            name: "   ".into(),
+            purpose: "Display name".into(),
+            hints: IntentHints::default(),
+            value: ExtractValueKind::Text,
+        }],
+    }))
+    .expect_err("empty field name");
+    assert_eq!(err, CompileError::EmptyFieldName);
+}
+
+#[test]
+fn compile_extract_rejects_duplicate_field_names() {
+    let err = compile_intent(&IntentCommand::Extract(ExtractIntent {
+        purpose: "Profile summary".into(),
+        fields: vec![
+            ExtractField {
+                name: "displayName".into(),
+                purpose: "Display name".into(),
+                hints: IntentHints::default(),
+                value: ExtractValueKind::Text,
+            },
+            ExtractField {
+                name: "displayName".into(),
+                purpose: "Secondary name".into(),
+                hints: IntentHints::default(),
+                value: ExtractValueKind::Text,
+            },
+        ],
+    }))
+    .expect_err("duplicate field name");
+    assert_eq!(err, CompileError::DuplicateFieldName("displayName".into()));
 }
 
 #[test]

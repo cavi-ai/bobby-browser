@@ -10,6 +10,8 @@ import {
   MAX_INTENT_PURPOSE_BYTES,
   type CommandEnvelope,
   type DismissObstructionIntent,
+  type ExtractField,
+  type ExtractIntent,
   type FillIntent,
   type FillValue,
   type FollowIntent,
@@ -154,6 +156,41 @@ export function dismissObstructionRuntimeCommand(input: DismissObstructionIntent
   };
 }
 
+export function extractRuntimeCommand(input: ExtractIntent): RuntimeCommand {
+  assertIntentPurpose(input.purpose);
+  if (input.fields.length === 0) {
+    throw new Error("extract intent must include at least one field");
+  }
+  const seenNames = new Set<string>();
+  const fields: ExtractField[] = input.fields.map((field) => {
+    assertIntentPurpose(field.purpose);
+    const name = field.name.trim();
+    if (name.length === 0) {
+      throw new Error("extract field name must not be empty");
+    }
+    if (seenNames.has(name)) {
+      throw new Error(`duplicate extract field name: ${name}`);
+    }
+    seenNames.add(name);
+    return {
+      name,
+      purpose: field.purpose,
+      hints: withHints(field.hints),
+      value: field.value,
+    };
+  });
+  return {
+    kind: "intent",
+    input: {
+      kind: "extract",
+      input: {
+        purpose: input.purpose,
+        fields,
+      },
+    },
+  };
+}
+
 export function intentEnvelope(meta: IntentEnvelopeMeta, command: RuntimeCommand): CommandEnvelope {
   if (command.kind !== "intent") {
     throw new Error('intentEnvelope requires RuntimeCommand with kind "intent"');
@@ -225,4 +262,12 @@ export function dismissObstructionEnvelope(
       timeoutMs: options?.timeoutMs,
     }),
   );
+}
+
+export function extractEnvelope(
+  meta: IntentEnvelopeMeta,
+  purpose: string,
+  fields: ExtractField[],
+): CommandEnvelope {
+  return intentEnvelope(meta, extractRuntimeCommand({ purpose, fields }));
 }

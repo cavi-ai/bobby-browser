@@ -31,6 +31,11 @@ pub struct VisionProposal {
 pub enum VisionAction {
     Click { x: f64, y: f64 },
     TypeText { text: String },
+    /// A read of a value the caller asked to extract, proposed by reading
+    /// the screenshot rather than acting on the page. Only valid in
+    /// response to an `ExtractIntent` field escalation; other intents never
+    /// produce or accept this action.
+    ExtractValue { value: String },
 }
 
 pub fn proposal_sha256(proposal: &VisionProposal) -> String {
@@ -45,6 +50,10 @@ pub fn proposal_sha256(proposal: &VisionProposal) -> String {
         VisionAction::TypeText { text } => {
             hasher.update(b"type");
             hasher.update(text.as_bytes());
+        }
+        VisionAction::ExtractValue { value } => {
+            hasher.update(b"extract");
+            hasher.update(value.as_bytes());
         }
     }
     hex::encode(hasher.finalize())
