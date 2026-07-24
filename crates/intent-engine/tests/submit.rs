@@ -155,6 +155,7 @@ async fn submit_and_verify_clicks_boundary_then_waits() {
             condition: expected_state.condition.clone(),
             elapsed_ms: 12,
             observations: 1,
+            excluded_classes: Vec::new(),
         }],
     };
     let page_id = PageId::new();
@@ -212,6 +213,7 @@ async fn submit_and_verify_sets_expected_url_from_exact_wait() {
             condition: expected_state.condition.clone(),
             elapsed_ms: 3,
             observations: 1,
+            excluded_classes: Vec::new(),
         }],
     };
     let page_id = PageId::new();

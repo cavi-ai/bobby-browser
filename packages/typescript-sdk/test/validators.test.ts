@@ -54,6 +54,7 @@ function evidenceFixtures(): unknown[] {
     { kind: "wait", condition: { kind: "url", matcher: { kind: "exact", value: "https://example.test/" } }, elapsedMs: 1, observations: 1 },
     { kind: "wait", condition: { kind: "document", ready: "networkIdle" }, elapsedMs: 1, observations: 1 },
     { kind: "wait", condition: { kind: "networkQuiet", idleMs: 1, maxInFlight: 0 }, elapsedMs: 1, observations: 1 },
+    { kind: "wait", condition: { kind: "networkQuiet", idleMs: 50, maxInFlight: 0, ignoreUrlSubstrings: ["analytics"], ignoreResourceTypes: ["Image"], ignoreLongLived: true }, elapsedMs: 10, observations: 2, excludedClasses: ["urlSubstring:analytics", "eventSource"] },
     { kind: "screenshot", artifactId: "artifact-1", mediaType: "image/png", width: 1, height: 1, bytes: 4, sha256: SHA },
     { kind: "configuration", name: "focusEmulation", value: "true" },
     { kind: "browserExecution", engine: "firefox", browserVersion: "128.0", profileId: ID, interactionPath: "engineNative" },

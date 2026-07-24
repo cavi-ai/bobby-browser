@@ -436,6 +436,88 @@ pub enum ElementState {
     Disabled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum NetworkResourceType {
+    Document,
+    Stylesheet,
+    Image,
+    Media,
+    Font,
+    Script,
+    TextTrack,
+    #[serde(rename = "XHR", alias = "Xhr")]
+    Xhr,
+    Fetch,
+    Prefetch,
+    EventSource,
+    WebSocket,
+    Manifest,
+    SignedExchange,
+    Ping,
+    #[serde(rename = "CSPViolationReport")]
+    CspViolationReport,
+    Preflight,
+    #[serde(rename = "FedCM")]
+    FedCm,
+    Other,
+}
+
+impl NetworkResourceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Document => "Document",
+            Self::Stylesheet => "Stylesheet",
+            Self::Image => "Image",
+            Self::Media => "Media",
+            Self::Font => "Font",
+            Self::Script => "Script",
+            Self::TextTrack => "TextTrack",
+            Self::Xhr => "XHR",
+            Self::Fetch => "Fetch",
+            Self::Prefetch => "Prefetch",
+            Self::EventSource => "EventSource",
+            Self::WebSocket => "WebSocket",
+            Self::Manifest => "Manifest",
+            Self::SignedExchange => "SignedExchange",
+            Self::Ping => "Ping",
+            Self::CspViolationReport => "CSPViolationReport",
+            Self::Preflight => "Preflight",
+            Self::FedCm => "FedCM",
+            Self::Other => "Other",
+        }
+    }
+}
+
+impl std::str::FromStr for NetworkResourceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Document" | "document" => Ok(Self::Document),
+            "Stylesheet" | "stylesheet" => Ok(Self::Stylesheet),
+            "Image" | "image" => Ok(Self::Image),
+            "Media" | "media" => Ok(Self::Media),
+            "Font" | "font" => Ok(Self::Font),
+            "Script" | "script" => Ok(Self::Script),
+            "TextTrack" | "textTrack" | "texttrack" => Ok(Self::TextTrack),
+            "XHR" | "Xhr" | "xhr" => Ok(Self::Xhr),
+            "Fetch" | "fetch" => Ok(Self::Fetch),
+            "Prefetch" | "prefetch" => Ok(Self::Prefetch),
+            "EventSource" | "eventSource" | "eventsource" => Ok(Self::EventSource),
+            "WebSocket" | "webSocket" | "websocket" => Ok(Self::WebSocket),
+            "Manifest" | "manifest" => Ok(Self::Manifest),
+            "SignedExchange" | "signedExchange" => Ok(Self::SignedExchange),
+            "Ping" | "ping" => Ok(Self::Ping),
+            "CSPViolationReport" | "cspViolationReport" => Ok(Self::CspViolationReport),
+            "Preflight" | "preflight" => Ok(Self::Preflight),
+            "FedCM" | "FedCm" | "fedCM" => Ok(Self::FedCm),
+            "Other" | "other" => Ok(Self::Other),
+            other => Err(format!("unknown network resource type: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum WaitCondition {
@@ -458,8 +540,31 @@ pub enum WaitCondition {
         ready: WaitUntil,
     },
     NetworkQuiet {
+        #[serde(rename = "idleMs", alias = "idle_ms")]
         idle_ms: u64,
+        #[serde(rename = "maxInFlight", alias = "max_in_flight")]
         max_in_flight: usize,
+        #[serde(
+            default,
+            rename = "ignoreUrlSubstrings",
+            alias = "ignore_url_substrings",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        ignore_url_substrings: Vec<String>,
+        #[serde(
+            default,
+            rename = "ignoreResourceTypes",
+            alias = "ignore_resource_types",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        ignore_resource_types: Vec<NetworkResourceType>,
+        #[serde(
+            default,
+            rename = "ignoreLongLived",
+            alias = "ignore_long_lived",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        ignore_long_lived: bool,
     },
 }
 

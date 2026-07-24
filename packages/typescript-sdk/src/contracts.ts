@@ -48,7 +48,35 @@ export type WaitCondition =
   | { kind: "text" | "value"; target: TargetSpec; matcher: TextMatch }
   | { kind: "url"; matcher: TextMatch }
   | { kind: "document"; ready: "commit" | "domContentLoaded" | "interactive" | "networkIdle" }
-  | { kind: "networkQuiet"; idleMs: number; maxInFlight: number };
+  | {
+      kind: "networkQuiet";
+      idleMs: number;
+      maxInFlight: number;
+      ignoreUrlSubstrings?: string[];
+      ignoreResourceTypes?: NetworkResourceType[];
+      ignoreLongLived?: boolean;
+    };
+
+export type NetworkResourceType =
+  | "Document"
+  | "Stylesheet"
+  | "Image"
+  | "Media"
+  | "Font"
+  | "Script"
+  | "TextTrack"
+  | "XHR"
+  | "Fetch"
+  | "Prefetch"
+  | "EventSource"
+  | "WebSocket"
+  | "Manifest"
+  | "SignedExchange"
+  | "Ping"
+  | "CSPViolationReport"
+  | "Preflight"
+  | "FedCM"
+  | "Other";
 
 export type IntentResolutionPath = "deterministic" | "visionFallback";
 export interface ExecutionRecord {
@@ -76,7 +104,7 @@ export type Evidence =
   | { kind: "download"; filename: string; path: string; bytes: number; sha256: string }
   | { kind: "configuration"; name: string; value: string }
   | { kind: "resolution"; target: TargetSpec; fingerprint: TargetFingerprint; candidates: CandidateEvidence[]; bestMatchAuthorized: boolean }
-  | { kind: "wait"; condition: WaitCondition; elapsedMs: number; observations: number }
+  | { kind: "wait"; condition: WaitCondition; elapsedMs: number; observations: number; excludedClasses?: string[] }
   | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string }
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }

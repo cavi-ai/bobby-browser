@@ -526,7 +526,20 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<div id=status hidden>booting</div><input aria-label=State value=booting><script>setTimeout(()=>{status.hidden=false;status.textContent='ready';document.querySelector('input').value='ready'},100)</script>".into(),
+                url: concat!(
+                    "data:text/html,",
+                    "<div id=ready-flag hidden>booting</div>",
+                    "<input aria-label=State value=booting>",
+                    "<script>",
+                    "setTimeout(function(){",
+                    "var el=document.getElementById('ready-flag');",
+                    "el.removeAttribute('hidden');",
+                    "el.textContent='ready';",
+                    "document.querySelector('input').value='ready';",
+                    "},100);",
+                    "</script>"
+                )
+                .into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -534,7 +547,7 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
         .await
         .unwrap();
     let status = TargetSpec {
-        css: Some("#status".into()),
+        css: Some("#ready-flag".into()),
         ..TargetSpec::default()
     };
     for condition in [
@@ -562,6 +575,9 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
         WaitCondition::NetworkQuiet {
             idle_ms: 50,
             max_in_flight: 0,
+            ignore_url_substrings: Vec::new(),
+            ignore_resource_types: Vec::new(),
+            ignore_long_lived: false,
         },
     ] {
         let evidence = worker
@@ -576,6 +592,112 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
             .unwrap();
         assert!(matches!(&evidence[0], Evidence::Wait { observations, .. } if *observations > 0));
     }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn network_quiet_respects_url_and_long_lived_ignores() {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: format!("{}/network-quiet", fixture.base_url()),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    worker
+        .wait_for(
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(TargetSpec {
+                        css: Some("#status".into()),
+                        ..TargetSpec::default()
+                    }),
+                    matcher: TextMatch::Exact("armed".into()),
+                },
+                timeout_ms: 5_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let without_ignores = worker
+        .wait_for(
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::NetworkQuiet {
+                    idle_ms: 50,
+                    max_in_flight: 0,
+                    ignore_url_substrings: Vec::new(),
+                    ignore_resource_types: Vec::new(),
+                    ignore_long_lived: false,
+                },
+                timeout_ms: 750,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(without_ignores.code, ErrorCode::WaitConditionTimedOut);
+
+    let evidence = worker
+        .wait_for(
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::NetworkQuiet {
+                    idle_ms: 50,
+                    max_in_flight: 0,
+                    ignore_url_substrings: vec!["analytics".into()],
+                    ignore_resource_types: Vec::new(),
+                    ignore_long_lived: true,
+                },
+                timeout_ms: 5_000,
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::Wait {
+        excluded_classes, ..
+    } = &evidence[0]
+    else {
+        panic!("expected wait evidence, got {evidence:?}");
+    };
+    assert!(
+        excluded_classes
+            .iter()
+            .any(|class| class == "urlSubstring:analytics"),
+        "excluded_classes={excluded_classes:?}"
+    );
+    assert!(
+        excluded_classes
+            .iter()
+            .any(|class| class == "eventSource" || class == "websocket" || class == "longLived"),
+        "excluded_classes={excluded_classes:?}"
+    );
     worker.close().await.unwrap();
 }
 

@@ -122,6 +122,8 @@ pub enum Evidence {
         condition: crate::WaitCondition,
         elapsed_ms: u64,
         observations: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        excluded_classes: Vec<String>,
     },
     Screenshot {
         artifact_id: String,

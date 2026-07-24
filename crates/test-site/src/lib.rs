@@ -7,6 +7,7 @@ use axum::http::{header, HeaderValue};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
+use futures_util::StreamExt;
 use tokio::task::JoinHandle;
 
 const INDEX: &str = r#"<!doctype html>
@@ -442,6 +443,74 @@ pub async fn spawn() -> FixtureServer {
                         Html(format!("<title>{title}</title><p id='state'>{title}</p>"))
                     }
                 }
+            }),
+        )
+        .route(
+            "/network-quiet",
+            get(|| async {
+                Html(
+                    r#"<!doctype html>
+<html>
+  <head><title>Network Quiet</title></head>
+  <body>
+    <p id="status">loading</p>
+    <script>
+      (async () => {
+        await fetch('/api/ping').then((response) => response.text());
+        fetch('/analytics/beacon');
+        new EventSource('/events/stream');
+        document.querySelector('#status').textContent = 'armed';
+      })();
+    </script>
+  </body>
+</html>"#,
+                )
+            }),
+        )
+        .route(
+            "/api/ping",
+            get(|| async {
+                let mut response = "{\"ok\":true}".into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                );
+                response.headers_mut().insert(
+                    header::CONNECTION,
+                    HeaderValue::from_static("close"),
+                );
+                response
+            }),
+        )
+        .route(
+            "/analytics/beacon",
+            get(|| async {
+                // Stays open so NetworkQuiet without ignores cannot become quiet.
+                let stream = futures_util::stream::pending::<Result<axum::body::Bytes, std::io::Error>>();
+                axum::response::Response::builder()
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .body(axum::body::Body::from_stream(stream))
+                    .expect("analytics beacon fixture response")
+            }),
+        )
+        .route(
+            "/events/stream",
+            get(|| async {
+                let stream = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"data: hello\n\n"))
+                })
+                .chain(futures_util::stream::pending());
+                axum::response::Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .header(header::CONNECTION, "keep-alive")
+                    .body(axum::body::Body::from_stream(stream))
+                    .expect("event stream fixture response")
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

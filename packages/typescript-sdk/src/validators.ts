@@ -8,6 +8,7 @@ import type {
   ExecutionRecord,
   InterfaceEvent,
   JsonValue,
+  NetworkResourceType,
   PageEvidence,
   PageState,
   RecoveryDecision,
@@ -155,13 +156,33 @@ function isPageEvidence(value: unknown): value is PageEvidence {
   return hasExactKeys(value, ["pageId", "url", "title"]) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
 }
 
+const NETWORK_RESOURCE_TYPES = new Set<NetworkResourceType>([
+  "Document", "Stylesheet", "Image", "Media", "Font", "Script", "TextTrack", "XHR", "Fetch",
+  "Prefetch", "EventSource", "WebSocket", "Manifest", "SignedExchange", "Ping",
+  "CSPViolationReport", "Preflight", "FedCM", "Other",
+]);
+
+function isNetworkResourceType(value: unknown): value is NetworkResourceType {
+  return typeof value === "string" && NETWORK_RESOURCE_TYPES.has(value as NetworkResourceType);
+}
+
+function isNetworkQuietCondition(value: Record<string, unknown>): boolean {
+  return value.kind === "networkQuiet"
+    && hasExactKeys(value, ["kind", "idleMs", "maxInFlight"], ["ignoreUrlSubstrings", "ignoreResourceTypes", "ignoreLongLived"])
+    && isSafeUnsigned(value.idleMs)
+    && isSafeUnsigned(value.maxInFlight)
+    && optional(value, "ignoreUrlSubstrings", isStringArray)
+    && optional(value, "ignoreResourceTypes", (candidate): candidate is NetworkResourceType[] => Array.isArray(candidate) && candidate.every(isNetworkResourceType))
+    && optional(value, "ignoreLongLived", (candidate): candidate is boolean => typeof candidate === "boolean");
+}
+
 function isWaitCondition(value: unknown): value is WaitCondition {
   if (!isRecord(value)) return false;
   if (value.kind === "element") return hasExactKeys(value, ["kind", "target", "state"]) && isTargetSpec(value.target) && (value.state === "attached" || value.state === "detached" || value.state === "visible" || value.state === "hidden" || value.state === "enabled" || value.state === "disabled");
   if (value.kind === "text" || value.kind === "value") return hasExactKeys(value, ["kind", "target", "matcher"]) && isTargetSpec(value.target) && isTextMatch(value.matcher);
   if (value.kind === "url") return hasExactKeys(value, ["kind", "matcher"]) && isTextMatch(value.matcher);
   if (value.kind === "document") return hasExactKeys(value, ["kind", "ready"]) && (value.ready === "commit" || value.ready === "domContentLoaded" || value.ready === "interactive" || value.ready === "networkIdle");
-  return value.kind === "networkQuiet" && hasExactKeys(value, ["kind", "idleMs", "maxInFlight"]) && isSafeUnsigned(value.idleMs) && isSafeUnsigned(value.maxInFlight);
+  return isNetworkQuietCondition(value);
 }
 
 function validExecutionPathOptionalFields(value: Record<string, unknown>): boolean {
@@ -193,7 +214,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "popup": return hasExactKeys(value, ["kind", "openerPageId", "pageId", "url", "title"]) && isUuid(value.openerPageId) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
     case "download": return hasExactKeys(value, ["kind", "filename", "path", "bytes", "sha256"]) && isString(value.filename) && isString(value.path) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     case "resolution": return hasExactKeys(value, ["kind", "target", "fingerprint", "candidates", "bestMatchAuthorized"]) && isTargetSpec(value.target) && isTargetFingerprint(value.fingerprint) && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence) && typeof value.bestMatchAuthorized === "boolean";
-    case "wait": return hasExactKeys(value, ["kind", "condition", "elapsedMs", "observations"]) && isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations);
+    case "wait": return hasExactKeys(value, ["kind", "condition", "elapsedMs", "observations"], ["excludedClasses"]) && isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations) && optional(value, "excludedClasses", isStringArray);
     case "screenshot": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "width", "height", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.width, 4_294_967_295) && isSafeUnsigned(value.height, 4_294_967_295) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     case "configuration": return hasExactKeys(value, ["kind", "name", "value"]) && isString(value.name) && isString(value.value);
     case "browserExecution": return hasExactKeys(value, ["kind", "engine", "browserVersion", "profileId", "interactionPath"]) && isString(value.engine) && isString(value.browserVersion) && isString(value.profileId) && isString(value.interactionPath);
