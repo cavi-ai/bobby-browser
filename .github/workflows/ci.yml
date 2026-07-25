@@ -1,9 +1,9 @@
 name: CI
 
+# Manual dispatch only while the repo is private. Restore the `push` and
+# `pull_request` triggers when the repo goes public.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
