@@ -3,8 +3,7 @@ node_modules/
 /packages/typescript-sdk/dist
 /packages/interface-conformance/dist
 /packages/firefox-companion/dist
-/data/cache
-/data/storage
+/data
 /benchmarks/raw/
 **/*.bench.json
 **/*.benchmark.jsonl
@@ -12,21 +11,3 @@ node_modules/
 **/*.cpuprofile
 .DS_Store
 .env
-# Added by code-review-graph
-.code-review-graph/
-.vscode/
-.cursor/
-.claude/
-.codex/
-.kiro/
-.qoder/
-.gemini/
-.cursorrules
-./gemini
-.superpowers/
-docs/superpowers/plans/
-AGENTS.md
-CLAUDE.md
-GEMINI.md
-QODER.md
-docs/superpowers/specs/

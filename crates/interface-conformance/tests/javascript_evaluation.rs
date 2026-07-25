@@ -4,7 +4,7 @@
 //! that `broker`'s `/v1/mcp` route wires up in production.
 //!
 //! Two independent gates must both pass before `EvaluateJavaScript` ever reaches a
-//! worker (see `docs/superpowers/specs/2026-07-22-javascript-evaluation-design.md`):
+//! worker:
 //!   1. token capability gate (`javascript:evaluate`), enforced in
 //!      `AuthenticatedRuntime::submit` before any session lookup.
 //!   2. per-session `execution_policy.javascript_evaluation` gate, enforced in

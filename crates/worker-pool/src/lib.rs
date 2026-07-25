@@ -1,6 +1,6 @@
 mod chromium;
-pub mod process_registry;
 mod network_quiet;
+pub mod process_registry;
 mod selection;
 mod targeting;
 

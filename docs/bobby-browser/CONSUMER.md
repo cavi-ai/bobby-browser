@@ -46,5 +46,5 @@ node scripts/docs/verify-bobby-browser.mjs
 node --test scripts/docs/bobby-browser-docs.test.mjs
 ```
 
-Host-side route wiring for `/docs/bobby-browser` (for example in cavi-home) is
-outside this repository's prep package; this contract is the ingest API.
+Host-side route wiring for `/docs/bobby-browser` is outside this repository;
+this contract is the ingest API.

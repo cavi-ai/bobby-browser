@@ -27,9 +27,8 @@ Live Chromium vertical slice (when proving browser behavior):
 cargo test -p runtime-tests --test browser_vertical_slice -- --ignored --nocapture
 ```
 
-Additional release and companion proofs are documented in historical release notes
-and scripts under `scripts/`; ask maintainers before treating ignored proofs as
-required for a small docs or SDK change.
+Further release and companion proofs run from `scripts/dev/`. `#[ignore]`d tests
+require a real browser and are not gates for docs or SDK changes.
 
 ## Documentation package
 
