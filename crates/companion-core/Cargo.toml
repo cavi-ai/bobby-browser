@@ -1,0 +1,22 @@
+[package]
+name = "companion-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+observability = { path = "../observability" }
+axum = { workspace = true, features = ["ws"] }
+companion-protocol = { path = "../companion-protocol" }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.29"
+tracing.workspace = true
+types = { path = "../types" }
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

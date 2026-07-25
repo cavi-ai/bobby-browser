@@ -1,0 +1,26 @@
+[package]
+name = "sdk-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+artifact-store = { path = "../artifact-store" }
+async-trait.workspace = true
+chrono.workspace = true
+checkpoint-store = { path = "../checkpoint-store" }
+config = { path = "../config" }
+interface-core = { path = "../interface-core" }
+serde_json.workspace = true
+types = { path = "../types" }
+session-manager = { path = "../session-manager" }
+page-runtime = { path = "../page-runtime" }
+network-engine = { path = "../network-engine" }
+worker-pool = { path = "../worker-pool" }
+workflow-journal = { path = "../workflow-journal" }
+tracing.workspace = true
+
+[dev-dependencies]
+checkpoint-store = { path = "../checkpoint-store" }
+tempfile.workspace = true
+tokio.workspace = true
+uuid.workspace = true

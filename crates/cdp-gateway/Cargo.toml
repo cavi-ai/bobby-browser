@@ -1,0 +1,31 @@
+[package]
+name = "cdp-gateway"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["ws"] }
+artifact-store = { path = "../artifact-store" }
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+types = { path = "../types" }
+interface-core = { path = "../interface-core" }
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+config = { path = "../config" }
+interface-conformance = { path = "../interface-conformance" }
+sdk-core = { path = "../sdk-core" }
+test-site = { path = "../test-site" }
+tokio-tungstenite = "0.29"
+tower.workspace = true

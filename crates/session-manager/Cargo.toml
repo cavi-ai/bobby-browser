@@ -1,0 +1,14 @@
+[package]
+name = "session-manager"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+types = { path = "../types" }
+worker-pool = { path = "../worker-pool" }
+
+[dev-dependencies]
+async-trait.workspace = true

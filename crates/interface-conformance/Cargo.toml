@@ -1,0 +1,31 @@
+[package]
+name = "interface-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+config = { path = "../config" }
+interface-core = { path = "../interface-core" }
+sdk-core = { path = "../sdk-core" }
+test-site = { path = "../test-site" }
+types = { path = "../types" }
+
+[dev-dependencies]
+async-trait.workspace = true
+artifact-store = { path = "../artifact-store" }
+sdk-core = { path = "../sdk-core" }
+interface-core = { path = "../interface-core" }
+types = { path = "../types" }
+mcp-gateway = { path = "../mcp-gateway" }
+broker = { path = "../broker" }
+chrono.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true

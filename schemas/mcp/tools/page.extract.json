@@ -1,0 +1,12 @@
+{
+  "name": "page.extract",
+  "description": "Extract structured data from a page",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "pageId": { "type": "string" },
+      "fields": { "type": "object" }
+    },
+    "required": ["pageId", "fields"]
+  }
+}

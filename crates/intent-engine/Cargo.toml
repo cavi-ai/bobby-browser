@@ -1,0 +1,14 @@
+[package]
+name = "intent-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+dom-engine = { path = "../dom-engine" }
+hex.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+types = { path = "../types" }

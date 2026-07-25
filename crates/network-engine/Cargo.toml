@@ -1,0 +1,23 @@
+[package]
+name = "network-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cookie.workspace = true
+encoding_rs.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+scraper.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+types = { path = "../types" }
+url.workspace = true
+
+[dev-dependencies]
+test-site = { path = "../test-site" }

@@ -1,0 +1,30 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/main.rs"
+
+[[bin]]
+name = "cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+broker = { path = "../broker" }
+config = { path = "../config" }
+companion-protocol = { path = "../companion-protocol" }
+companion-core = { path = "../companion-core" }
+firefox-companion = { path = "../firefox-companion" }
+observability = { path = "../observability" }
+libc = "0.2"
+serde_json.workspace = true
+serde.workspace = true
+types = { path = "../types" }
+uuid.workspace = true
+url.workspace = true
+worker-pool = { path = "../worker-pool" }
