@@ -8,4 +8,4 @@ documentedVersion: 0.2.0
 
 Report privately through GitHub's private vulnerability reporting on this repository (Security → Report a vulnerability). Include reproduction steps, impact, and affected versions when known.
 
-See [SECURITY.md](../../../../SECURITY.md) for the complete reporting guidance.
+See [SECURITY.md](https://github.com/sasan1200/bobby-browser/blob/main/SECURITY.md) for the complete reporting guidance.

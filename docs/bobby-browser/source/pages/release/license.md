@@ -4,4 +4,4 @@ documentedVersion: 0.2.0
 
 # MIT license
 
-bobby-browser is released under the MIT License. See [LICENSE](../../../../LICENSE) in the repository root.
+bobby-browser is released under the MIT License. See [LICENSE](https://github.com/sasan1200/bobby-browser/blob/main/LICENSE) in the repository root.
