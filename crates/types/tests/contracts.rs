@@ -7,10 +7,10 @@ use types::{
     DownloadUrlCommand, ElementState, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
     ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent,
     ExtractValueKind, FillIntent, FillValue, FollowIntent, InspectCommand, IntentCommand,
-    IntentHints, IntentResolutionPath, ListPagesCommand, LocateIntent, OpenPageCommand, PageId,
-    PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec,
-    TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
-    WaitForStateIntent, WaitUntil, WorkflowId,
+    IntentHints, IntentResolutionPath, ListPagesCommand, LocateIntent, NetworkResourceType,
+    OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId,
+    SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -1088,4 +1088,97 @@ fn failed_outcome_preserves_intent_execution_evidence() {
         }
         other => panic!("expected Failed, got {other:?}"),
     }
+}
+
+#[test]
+fn network_quiet_serializes_camel_case_and_accepts_snake_case_aliases() {
+    let condition = WaitCondition::NetworkQuiet {
+        idle_ms: 250,
+        max_in_flight: 1,
+        ignore_url_substrings: vec!["analytics".into()],
+        ignore_resource_types: vec![NetworkResourceType::Image, NetworkResourceType::Xhr],
+        ignore_long_lived: true,
+    };
+
+    let value = serde_json::to_value(&condition).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "kind": "networkQuiet",
+            "idleMs": 250,
+            "maxInFlight": 1,
+            "ignoreUrlSubstrings": ["analytics"],
+            "ignoreResourceTypes": ["Image", "XHR"],
+            "ignoreLongLived": true
+        })
+    );
+
+    let from_camel: WaitCondition = serde_json::from_value(value).unwrap();
+    assert_eq!(from_camel, condition);
+
+    let from_snake: WaitCondition = serde_json::from_value(json!({
+        "kind": "networkQuiet",
+        "idle_ms": 250,
+        "max_in_flight": 1,
+        "ignore_url_substrings": ["analytics"],
+        "ignore_resource_types": ["Image", "XHR"],
+        "ignore_long_lived": true
+    }))
+    .unwrap();
+    assert_eq!(from_snake, condition);
+
+    let minimal: WaitCondition = serde_json::from_value(json!({
+        "kind": "networkQuiet",
+        "idleMs": 50,
+        "maxInFlight": 0
+    }))
+    .unwrap();
+    assert_eq!(
+        minimal,
+        WaitCondition::NetworkQuiet {
+            idle_ms: 50,
+            max_in_flight: 0,
+            ignore_url_substrings: Vec::new(),
+            ignore_resource_types: Vec::new(),
+            ignore_long_lived: false,
+        }
+    );
+}
+
+#[test]
+fn wait_evidence_includes_excluded_classes_when_present() {
+    let evidence = Evidence::Wait {
+        condition: WaitCondition::NetworkQuiet {
+            idle_ms: 50,
+            max_in_flight: 0,
+            ignore_url_substrings: vec!["beacon".into()],
+            ignore_resource_types: Vec::new(),
+            ignore_long_lived: true,
+        },
+        elapsed_ms: 60,
+        observations: 3,
+        excluded_classes: vec![
+            "urlSubstring:beacon".into(),
+            "websocket".into(),
+        ],
+    };
+    let value = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(value["kind"], "wait");
+    assert_eq!(
+        value["excludedClasses"],
+        json!(["urlSubstring:beacon", "websocket"])
+    );
+    let round: Evidence = serde_json::from_value(value).unwrap();
+    assert_eq!(round, evidence);
+
+    let without = Evidence::Wait {
+        condition: WaitCondition::Document {
+            ready: WaitUntil::Interactive,
+        },
+        elapsed_ms: 1,
+        observations: 1,
+        excluded_classes: Vec::new(),
+    };
+    let value = serde_json::to_value(&without).unwrap();
+    assert!(value.get("excludedClasses").is_none());
 }
