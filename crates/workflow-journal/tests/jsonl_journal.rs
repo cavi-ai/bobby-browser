@@ -3,7 +3,16 @@ use std::sync::Arc;
 use chrono::Utc;
 use tokio::io::AsyncWriteExt;
 use types::{CommandId, CommandPhase};
-use workflow_journal::{CommandJournal, JournalRecord, JsonlJournal};
+use workflow_journal::{CommandJournal, JournalError, JournalRecord, JsonlJournal};
+
+/// A journal line as written before `ea42d97` bumped `CommandEnvelope::SCHEMA_VERSION`
+/// to 2: the command is tagged `navigate` instead of `primitive`.
+fn v1_navigate_line(sequence: u64, command_id: &CommandId) -> String {
+    let id = command_id.0;
+    format!(
+        r#"{{"sequence":{sequence},"recordedAt":"2026-07-22T16:31:49.071530Z","commandId":"{id}","phase":"accepted","envelope":{{"schemaVersion":1,"commandId":"{id}","workflowId":"d92e7a46-e0b8-4072-a0a2-bf60afec1729","attemptId":"f03ae64b-e1c0-409d-a41f-64ed1834e218","sessionId":"9a81df15-5046-4bc8-9a53-a3059d7a6126","pageId":"440af7d2-4798-4d56-9edc-cd23f66652b5","deadline":"2026-07-22T16:32:49Z","command":{{"kind":"navigate","input":{{"url":"https://example.com/","waitUntil":"interactive","timeoutMs":30000}}}}}},"outcome":null}}"#
+    )
+}
 
 fn record(command_id: &CommandId, phase: CommandPhase) -> JournalRecord {
     JournalRecord {
@@ -78,6 +87,68 @@ async fn ignores_and_reports_a_torn_final_line() {
     let scan = recovered.history(command_id).await.unwrap();
     assert_eq!(scan.records.len(), 2);
     assert!(!scan.torn_tail);
+}
+
+#[tokio::test]
+async fn skips_records_written_under_an_older_schema_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let command_id = CommandId::new();
+    let id = command_id.0;
+    let contents = format!(
+        "{}\n{}\n",
+        v1_navigate_line(0, &command_id),
+        format_args!(
+            r#"{{"sequence":1,"recordedAt":"2026-07-22T16:31:49.077540Z","commandId":"{id}","phase":"prepared","envelope":null,"outcome":null}}"#
+        )
+    );
+    tokio::fs::write(&path, contents).await.unwrap();
+
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let scan = journal.history(command_id.clone()).await.unwrap();
+    assert_eq!(scan.incompatible_records, 1);
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.records[0].phase, CommandPhase::Prepared);
+    assert!(!scan.torn_tail);
+
+    journal
+        .append(record(&command_id, CommandPhase::Executing))
+        .await
+        .unwrap();
+    let scan = journal.history(command_id).await.unwrap();
+    assert_eq!(scan.records.len(), 2);
+    assert_eq!(scan.records[1].sequence, 2);
+}
+
+#[tokio::test]
+async fn rejects_a_line_it_cannot_decode_at_the_current_schema_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let command_id = CommandId::new();
+    let id = command_id.0;
+
+    let current_version = dir.path().join("current.jsonl");
+    tokio::fs::write(
+        &current_version,
+        format!(
+            r#"{{"sequence":0,"recordedAt":"2026-07-22T16:31:49.071530Z","commandId":"{id}","phase":"accepted","envelope":{{"schemaVersion":2,"commandId":"{id}","workflowId":"d92e7a46-e0b8-4072-a0a2-bf60afec1729","attemptId":"f03ae64b-e1c0-409d-a41f-64ed1834e218","sessionId":"9a81df15-5046-4bc8-9a53-a3059d7a6126","pageId":null,"deadline":"2026-07-22T16:32:49Z","command":{{"kind":"nonsense","input":{{}}}}}},"outcome":null}}
+"#
+        ),
+    )
+    .await
+    .unwrap();
+    let Err(error) = JsonlJournal::open(&current_version).await else {
+        panic!("a line at the current schema version must stay fatal");
+    };
+    assert!(matches!(error, JournalError::Corrupt { line: 1 }));
+
+    let no_version = dir.path().join("no-version.jsonl");
+    tokio::fs::write(&no_version, "{\"sequence\":0,\"phase\":\"accepted\"}\n")
+        .await
+        .unwrap();
+    let Err(error) = JsonlJournal::open(&no_version).await else {
+        panic!("a line without an envelope schema version must stay fatal");
+    };
+    assert!(matches!(error, JournalError::Corrupt { line: 1 }));
 }
 
 #[tokio::test]

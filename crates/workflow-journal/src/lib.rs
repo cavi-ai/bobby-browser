@@ -8,6 +8,7 @@ use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+use tracing::warn;
 use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase, Evidence};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +50,31 @@ pub struct JournalRecord {
 pub struct JournalScan {
     pub records: Vec<JournalRecord>,
     pub torn_tail: bool,
+    /// Lines skipped because they declare a `CommandEnvelope::SCHEMA_VERSION`
+    /// this build does not decode.
+    pub incompatible_records: usize,
+}
+
+/// Enough of a journal line to classify one this build cannot decode.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordProbe {
+    #[serde(default)]
+    sequence: Option<u64>,
+    #[serde(default)]
+    envelope: Option<EnvelopeProbe>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvelopeProbe {
+    schema_version: u16,
+}
+
+struct Scan {
+    scan: JournalScan,
+    /// Highest sequence in the file, including skipped lines, so appends stay monotonic.
+    max_sequence: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -80,16 +106,19 @@ impl JsonlJournal {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let scan = scan_path(&path, None).await?;
+        let Scan { scan, max_sequence } = scan_path(&path, None).await?;
         if scan.torn_tail {
             truncate_torn_tail(&path).await?;
         }
-        let next_sequence = scan
-            .records
-            .iter()
-            .map(|record| record.sequence)
-            .max()
-            .map_or(0, |sequence| sequence + 1);
+        if scan.incompatible_records > 0 {
+            warn!(
+                path = %path.display(),
+                incompatible_records = scan.incompatible_records,
+                schema_version = CommandEnvelope::SCHEMA_VERSION,
+                "skipping journal records written under another command schema version"
+            );
+        }
+        let next_sequence = max_sequence.map_or(0, |sequence| sequence + 1);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -123,7 +152,7 @@ impl CommandJournal for JsonlJournal {
     }
 
     async fn history(&self, id: CommandId) -> Result<JournalScan, JournalError> {
-        let mut scan = scan_path(&self.path, Some(&id)).await?;
+        let mut scan = scan_path(&self.path, Some(&id)).await?.scan;
         scan.torn_tail |= self.recovered_torn_tail;
         Ok(scan)
     }
@@ -141,11 +170,14 @@ async fn truncate_torn_tail(path: &Path) -> Result<(), JournalError> {
     Ok(())
 }
 
-async fn scan_path(path: &Path, filter: Option<&CommandId>) -> Result<JournalScan, JournalError> {
+async fn scan_path(path: &Path, filter: Option<&CommandId>) -> Result<Scan, JournalError> {
     let mut file = match File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(JournalScan::default());
+            return Ok(Scan {
+                scan: JournalScan::default(),
+                max_sequence: None,
+            });
         }
         Err(error) => return Err(error.into()),
     };
@@ -163,6 +195,8 @@ async fn scan_path(path: &Path, filter: Option<&CommandId>) -> Result<JournalSca
     };
 
     let mut records = Vec::new();
+    let mut incompatible_records = 0;
+    let mut max_sequence = None;
     for (index, line) in bytes[..complete_len]
         .split(|byte| *byte == b'\n')
         .enumerate()
@@ -170,12 +204,37 @@ async fn scan_path(path: &Path, filter: Option<&CommandId>) -> Result<JournalSca
         if line.is_empty() {
             continue;
         }
-        let record: JournalRecord =
-            serde_json::from_slice(line).map_err(|_| JournalError::Corrupt { line: index + 1 })?;
-        if filter.is_none_or(|id| &record.command_id == id) {
-            records.push(record);
+        match serde_json::from_slice::<JournalRecord>(line) {
+            Ok(record) => {
+                max_sequence = max_sequence.max(Some(record.sequence));
+                if filter.is_none_or(|id| &record.command_id == id) {
+                    records.push(record);
+                }
+            }
+            Err(_) => {
+                // A line this build cannot decode is only tolerable when it declares
+                // a schema version other than the one this build writes: an older
+                // build's records must not stop the runtime from starting. A line at
+                // the current version, or one carrying no envelope version at all, is
+                // genuine corruption and stays fatal.
+                let probe = serde_json::from_slice::<RecordProbe>(line)
+                    .map_err(|_| JournalError::Corrupt { line: index + 1 })?;
+                let schema_version = probe.envelope.map(|envelope| envelope.schema_version);
+                if schema_version.is_none_or(|version| version == CommandEnvelope::SCHEMA_VERSION) {
+                    return Err(JournalError::Corrupt { line: index + 1 });
+                }
+                max_sequence = max_sequence.max(probe.sequence);
+                incompatible_records += 1;
+            }
         }
     }
 
-    Ok(JournalScan { records, torn_tail })
+    Ok(Scan {
+        scan: JournalScan {
+            records,
+            torn_tail,
+            incompatible_records,
+        },
+        max_sequence,
+    })
 }

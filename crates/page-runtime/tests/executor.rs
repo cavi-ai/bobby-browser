@@ -57,6 +57,7 @@ impl CommandJournal for RecoveryJournal {
         Ok(JournalScan {
             records: self.records.clone(),
             torn_tail: false,
+            incompatible_records: 0,
         })
     }
 }
