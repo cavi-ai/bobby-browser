@@ -8,6 +8,6 @@ Discovery is available at `/json/version` and `/json/list`; WebSockets use `/dev
 
 Connect with Playwright `1.61.1` via `chromium.connectOverCDP(endpoint, { headers })`, or Puppeteer `25.3.0` via `puppeteer.connect({ browserWSEndpoint, headers })`.
 
-The compiled allowlist, client coverage, and explicitly unsupported domains are published in [`docs/cdp-support.json`](../../../cdp-support.json). Raw CDP forwarding is intentionally unsupported.
+The compiled allowlist, client coverage, and explicitly unsupported domains are published in [`docs/cdp-support.json`](https://github.com/sasan1200/bobby-browser/blob/main/docs/cdp-support.json). Raw CDP forwarding is intentionally unsupported.
 
 Playwright, Puppeteer, and raw CDP remain **primitives-only** — there is no parallel intent API on those adapters.
