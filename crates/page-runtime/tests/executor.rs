@@ -197,6 +197,7 @@ impl BrowserWorker for FakeWorker {
             condition: command.condition.clone(),
             elapsed_ms: 1,
             observations: 1,
+            excluded_classes: Vec::new(),
         }])
     }
     async fn close(&self) -> Result<(), CommandError> {

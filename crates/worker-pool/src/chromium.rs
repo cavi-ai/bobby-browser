@@ -146,6 +146,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             max_js_timeout_ms: self.config.max_js_timeout_ms,
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
+            network_trackers: Mutex::new(HashMap::new()),
             http_state: Mutex::new(HttpBridgeState::default()),
             handler_task: Mutex::new(Some(handler_task)),
         }))
@@ -219,6 +220,7 @@ struct ChromiumWorker {
     max_js_timeout_ms: u64,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
+    network_trackers: Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>,
     http_state: Mutex<HttpBridgeState>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -241,6 +243,23 @@ impl ChromiumWorker {
         let browser = browser.as_mut().ok_or_else(closed_error)?;
         resolve_browser_target(page_id, page, selector, target, Some(browser)).await
     }
+
+    async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
+        let tracker = crate::network_quiet::NetworkQuietTracker::start(&page)
+            .await
+            .map_err(command_failed)?;
+        self.network_trackers
+            .lock()
+            .await
+            .insert(page_id.clone(), tracker);
+        self.pages.lock().await.insert(page_id, page);
+        Ok(())
+    }
+
+    async fn unregister_page(&self, page_id: &PageId) -> Option<Page> {
+        self.network_trackers.lock().await.remove(page_id);
+        self.pages.lock().await.remove(page_id)
+    }
 }
 
 #[async_trait]
@@ -261,8 +280,7 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         drop(browser_guard);
-        self.pages.lock().await.insert(page_id, page);
-        Ok(())
+        self.register_page(page_id, page).await
     }
 
     async fn navigate(
@@ -459,7 +477,7 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .map_err(command_failed)?;
         let evidence = page_evidence(page_id.clone(), &page).await?;
-        self.pages.lock().await.insert(page_id, page);
+        self.register_page(page_id, page).await?;
         Ok(vec![Evidence::Page {
             page_id: evidence.page_id,
             url: evidence.url,
@@ -482,10 +500,8 @@ impl BrowserWorker for ChromiumWorker {
         command: &ClosePageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self
-            .pages
-            .lock()
+            .unregister_page(&command.page_id)
             .await
-            .remove(&command.page_id)
             .ok_or_else(page_missing)?;
         let evidence = page_evidence(command.page_id.clone(), &page).await?;
         page.close().await.map_err(command_failed)?;
@@ -557,7 +573,7 @@ impl BrowserWorker for ChromiumWorker {
         drop(browser_guard);
         let popup_id = PageId::new();
         let page = page_evidence(popup_id.clone(), &popup).await?;
-        self.pages.lock().await.insert(popup_id.clone(), popup);
+        self.register_page(popup_id.clone(), popup).await?;
         Ok(vec![
             Evidence::Popup {
                 opener_page_id: page_id.clone(),
@@ -664,12 +680,19 @@ impl BrowserWorker for ChromiumWorker {
         let mut quiet_since = None;
         loop {
             observations += 1;
+            let tracker = self
+                .network_trackers
+                .lock()
+                .await
+                .get(page_id)
+                .cloned();
             let pages = self.pages.lock().await;
             let page = pages.get(page_id).ok_or_else(page_missing)?;
-            let satisfied = wait_condition_satisfied(
+            let (satisfied, excluded_classes) = wait_condition_satisfied(
                 &self.browser,
                 page_id,
                 page,
+                tracker.as_deref(),
                 &command.condition,
                 &mut quiet_since,
             )
@@ -680,6 +703,7 @@ impl BrowserWorker for ChromiumWorker {
                     condition: command.condition.clone(),
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     observations,
+                    excluded_classes,
                 }]);
             }
             if Instant::now() >= deadline {
@@ -973,6 +997,7 @@ impl BrowserWorker for ChromiumWorker {
 
     async fn close(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
+        self.network_trackers.lock().await.clear();
         if let Some(mut browser) = self.browser.lock().await.take() {
             browser.close().await.map_err(command_failed)?;
         }
@@ -987,6 +1012,7 @@ impl BrowserWorker for ChromiumWorker {
 
     async fn terminate(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
+        self.network_trackers.lock().await.clear();
         let close_result = if let Some(mut browser) = self.browser.lock().await.take() {
             browser.close().await.map(|_| ()).map_err(command_failed)
         } else {
@@ -1228,9 +1254,10 @@ async fn wait_condition_satisfied(
     browser: &Mutex<Option<Browser>>,
     page_id: &PageId,
     page: &Page,
+    tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
     condition: &WaitCondition,
     quiet_since: &mut Option<Instant>,
-) -> Result<bool, CommandError> {
+) -> Result<(bool, Vec<String>), CommandError> {
     match condition {
         WaitCondition::Element { target, state } => {
             let mut browser = browser.lock().await;
@@ -1254,18 +1281,24 @@ async fn wait_condition_satisfied(
                 Err(error) => return Err(error),
             };
             let Some(resolved) = resolved else {
-                return Ok(matches!(state, types::ElementState::Detached));
+                return Ok((
+                    matches!(state, types::ElementState::Detached),
+                    Vec::new(),
+                ));
             };
             let visible = resolved.visible(page).await?;
             let enabled = resolved.enabled(page).await?;
-            Ok(match state {
-                types::ElementState::Attached => true,
-                types::ElementState::Detached => false,
-                types::ElementState::Visible => visible,
-                types::ElementState::Hidden => !visible,
-                types::ElementState::Enabled => enabled,
-                types::ElementState::Disabled => !enabled,
-            })
+            Ok((
+                match state {
+                    types::ElementState::Attached => true,
+                    types::ElementState::Detached => false,
+                    types::ElementState::Visible => visible,
+                    types::ElementState::Hidden => !visible,
+                    types::ElementState::Enabled => enabled,
+                    types::ElementState::Disabled => !enabled,
+                },
+                Vec::new(),
+            ))
         }
         WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
             let mut browser = browser.lock().await;
@@ -1277,7 +1310,9 @@ async fn wait_condition_satisfied(
             };
             let resolved = match resolved {
                 Ok(resolved) => resolved,
-                Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => return Ok(false),
+                Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
+                    return Ok((false, Vec::new()))
+                }
                 Err(error) => return Err(error),
             };
             let value = if matches!(condition, WaitCondition::Value { .. }) {
@@ -1285,7 +1320,7 @@ async fn wait_condition_satisfied(
             } else {
                 resolved.inner_text(page).await?.unwrap_or_default()
             };
-            text_matches(matcher, &value)
+            Ok((text_matches(matcher, &value)?, Vec::new()))
         }
         WaitCondition::Url { matcher } => {
             let url = page
@@ -1293,7 +1328,7 @@ async fn wait_condition_satisfied(
                 .await
                 .map_err(command_failed)?
                 .unwrap_or_default();
-            text_matches(matcher, &url)
+            Ok((text_matches(matcher, &url)?, Vec::new()))
         }
         WaitCondition::Document { ready } => {
             let state: String = page
@@ -1302,32 +1337,45 @@ async fn wait_condition_satisfied(
                 .map_err(command_failed)?
                 .into_value()
                 .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            Ok(match ready {
-                WaitUntil::Commit => true,
-                WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
-                    state == "interactive" || state == "complete"
-                }
-                WaitUntil::NetworkIdle => state == "complete",
-            })
+            Ok((
+                match ready {
+                    WaitUntil::Commit => true,
+                    WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
+                        state == "interactive" || state == "complete"
+                    }
+                    WaitUntil::NetworkIdle => state == "complete",
+                },
+                Vec::new(),
+            ))
         }
         WaitCondition::NetworkQuiet {
             idle_ms,
             max_in_flight,
+            ignore_url_substrings,
+            ignore_resource_types,
+            ignore_long_lived,
         } => {
-            let in_flight: usize = page
-                .evaluate(
-                    "performance.getEntriesByType('resource').filter(x => !x.responseEnd).length",
+            let tracker = tracker.ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "network quiet tracker is not attached to this page",
                 )
-                .await
-                .map_err(command_failed)?
-                .into_value()
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            })?;
+            let filters = crate::network_quiet::NetworkQuietFilters {
+                ignore_url_substrings,
+                ignore_resource_types,
+                ignore_long_lived: *ignore_long_lived,
+            };
+            let (in_flight, excluded_classes) = tracker.snapshot(&filters).await;
             if in_flight <= *max_in_flight {
                 let since = quiet_since.get_or_insert_with(Instant::now);
-                Ok(since.elapsed() >= Duration::from_millis(*idle_ms))
+                Ok((
+                    since.elapsed() >= Duration::from_millis(*idle_ms),
+                    excluded_classes,
+                ))
             } else {
                 *quiet_since = None;
-                Ok(false)
+                Ok((false, excluded_classes))
             }
         }
     }

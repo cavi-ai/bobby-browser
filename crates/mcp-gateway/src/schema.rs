@@ -8,6 +8,10 @@ const MAX_STRING_BYTES: usize = 4096;
 const MAX_URL_BYTES: usize = 8192;
 const MAX_HTML_BYTES: usize = 64 * 1024;
 const MAX_TIMEOUT_MS: u64 = 300_000;
+const MAX_NETWORK_IGNORE_SUBSTRINGS: usize = 32;
+const MAX_NETWORK_IGNORE_SUBSTRING_BYTES: usize = 512;
+const MAX_NETWORK_IGNORE_RESOURCE_TYPES: usize = 32;
+const MAX_EXCLUDED_CLASSES: usize = 64;
 
 pub(crate) fn validate_tool_arguments(name: &str, arguments: &Value) -> bool {
     let schema = tool_schema(name);
@@ -478,10 +482,27 @@ fn wait_conditions() -> Vec<Value> {
         ),
         tagged_fields(
             "networkQuiet",
-            json!({"idle_ms":{"type":"integer","minimum":0,"maximum":MAX_TIMEOUT_MS},"max_in_flight":{"type":"integer","minimum":0,"maximum":10000}}),
-            &["idle_ms", "max_in_flight"],
+            json!({
+                "idleMs":{"type":"integer","minimum":0,"maximum":MAX_TIMEOUT_MS},
+                "maxInFlight":{"type":"integer","minimum":0,"maximum":10000},
+                "ignoreUrlSubstrings":array(string(1, MAX_NETWORK_IGNORE_SUBSTRING_BYTES), MAX_NETWORK_IGNORE_SUBSTRINGS),
+                "ignoreResourceTypes":array(network_resource_type(), MAX_NETWORK_IGNORE_RESOURCE_TYPES),
+                "ignoreLongLived":{"type":"boolean"}
+            }),
+            &["idleMs", "maxInFlight"],
         ),
     ]
+}
+
+fn network_resource_type() -> Value {
+    json!({
+        "type":"string",
+        "enum":[
+            "Document","Stylesheet","Image","Media","Font","Script","TextTrack","XHR","Fetch",
+            "Prefetch","EventSource","WebSocket","Manifest","SignedExchange","Ping",
+            "CSPViolationReport","Preflight","FedCM","Other"
+        ]
+    })
 }
 
 fn screenshot_modes() -> Vec<Value> {
@@ -577,7 +598,12 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "wait",
-            json!({"condition":{"$ref":"#/$defs/WaitCondition"},"elapsedMs":{"type":"integer","minimum":0},"observations":{"type":"integer","minimum":0}}),
+            json!({
+                "condition":{"$ref":"#/$defs/WaitCondition"},
+                "elapsedMs":{"type":"integer","minimum":0},
+                "observations":{"type":"integer","minimum":0},
+                "excludedClasses":array(string(1, MAX_STRING_BYTES), MAX_EXCLUDED_CLASSES)
+            }),
             &["condition", "elapsedMs", "observations"],
         ),
         tagged_fields(
