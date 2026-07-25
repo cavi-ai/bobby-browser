@@ -680,12 +680,7 @@ impl BrowserWorker for ChromiumWorker {
         let mut quiet_since = None;
         loop {
             observations += 1;
-            let tracker = self
-                .network_trackers
-                .lock()
-                .await
-                .get(page_id)
-                .cloned();
+            let tracker = self.network_trackers.lock().await.get(page_id).cloned();
             let pages = self.pages.lock().await;
             let page = pages.get(page_id).ok_or_else(page_missing)?;
             let (satisfied, excluded_classes) = wait_condition_satisfied(
@@ -1281,10 +1276,7 @@ async fn wait_condition_satisfied(
                 Err(error) => return Err(error),
             };
             let Some(resolved) = resolved else {
-                return Ok((
-                    matches!(state, types::ElementState::Detached),
-                    Vec::new(),
-                ));
+                return Ok((matches!(state, types::ElementState::Detached), Vec::new()));
             };
             let visible = resolved.visible(page).await?;
             let enabled = resolved.enabled(page).await?;

@@ -1157,10 +1157,7 @@ fn wait_evidence_includes_excluded_classes_when_present() {
         },
         elapsed_ms: 60,
         observations: 3,
-        excluded_classes: vec![
-            "urlSubstring:beacon".into(),
-            "websocket".into(),
-        ],
+        excluded_classes: vec!["urlSubstring:beacon".into(), "websocket".into()],
     };
     let value = serde_json::to_value(&evidence).unwrap();
     assert_eq!(value["kind"], "wait");

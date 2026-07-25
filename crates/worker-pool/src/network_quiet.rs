@@ -134,10 +134,7 @@ fn exclusion_class(
         .iter()
         .any(|wanted| wanted == &request.resource_type)
     {
-        return Some(format!(
-            "resourceType:{}",
-            request.resource_type.as_str()
-        ));
+        return Some(format!("resourceType:{}", request.resource_type.as_str()));
     }
     if filters.ignore_long_lived {
         if request.is_websocket
@@ -250,10 +247,7 @@ impl NetworkQuietTracker {
         Ok(tracker)
     }
 
-    pub async fn snapshot(
-        &self,
-        filters: &NetworkQuietFilters<'_>,
-    ) -> (usize, Vec<String>) {
+    pub async fn snapshot(&self, filters: &NetworkQuietFilters<'_>) -> (usize, Vec<String>) {
         let state = self.state.lock().await;
         counted_in_flight(&state, filters, Instant::now())
     }
@@ -314,7 +308,12 @@ mod tests {
                 now,
                 false,
             ),
-            request("https://api.example/data", NetworkResourceType::Xhr, now, false),
+            request(
+                "https://api.example/data",
+                NetworkResourceType::Xhr,
+                now,
+                false,
+            ),
         ]);
         let ignore = vec!["analytics".to_owned()];
         let filters = NetworkQuietFilters {

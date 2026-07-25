@@ -3,6 +3,23 @@ use std::path::Path;
 use dom_engine::Candidate;
 use types::{CandidateEvidence, Evidence, ExecutionRecord, FillValue, IntentResolutionPath};
 
+/// How an intent reached its target, and the artifacts that prove it.
+pub struct ResolutionDetails {
+    pub path: IntentResolutionPath,
+    pub vision_proposal_sha256: Option<String>,
+    pub artifact_ids: Vec<String>,
+}
+
+impl Default for ResolutionDetails {
+    fn default() -> Self {
+        Self {
+            path: IntentResolutionPath::Deterministic,
+            vision_proposal_sha256: None,
+            artifact_ids: Vec::new(),
+        }
+    }
+}
+
 pub fn execution_record(
     intent_kind: impl Into<String>,
     purpose: Option<String>,
@@ -18,9 +35,7 @@ pub fn execution_record(
         candidates,
         wait_elapsed_ms,
         verification,
-        IntentResolutionPath::Deterministic,
-        None,
-        Vec::new(),
+        ResolutionDetails::default(),
     )
 }
 
@@ -31,20 +46,18 @@ pub fn execution_record_with_path(
     candidates: Vec<CandidateEvidence>,
     wait_elapsed_ms: Option<u64>,
     verification: impl Into<String>,
-    resolution_path: IntentResolutionPath,
-    vision_proposal_sha256: Option<String>,
-    artifact_ids: Vec<String>,
+    resolution: ResolutionDetails,
 ) -> ExecutionRecord {
     ExecutionRecord {
         intent_kind: intent_kind.into(),
         purpose,
-        resolution_path,
+        resolution_path: resolution.path,
         plan_summary: plan_summary.into(),
         candidates,
         wait_elapsed_ms,
         verification: verification.into(),
-        artifact_ids,
-        vision_proposal_sha256,
+        artifact_ids: resolution.artifact_ids,
+        vision_proposal_sha256: resolution.vision_proposal_sha256,
     }
 }
 

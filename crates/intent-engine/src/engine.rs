@@ -13,6 +13,7 @@ use crate::compiler::{compile_intent, ExtractFieldPlan, IntentPlan};
 use crate::stuck::{never_escalates, StuckKind};
 use crate::verify::{
     compatible, execution_record, execution_record_with_path, summarize_target, verify_fill,
+    ResolutionDetails,
 };
 use crate::vision::{
     proposal_sha256, VisionAction, VisionAssist, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
@@ -229,12 +230,14 @@ async fn execute_locate(
         }
         ResolutionDecision::NotFound => {
             stuck_outcome(
-                "locate",
-                StuckKind::TargetMissing,
-                purpose,
-                plan_summary,
-                Vec::new(),
-                "targetNotFound",
+                StuckReport {
+                    intent_kind: "locate",
+                    kind: StuckKind::TargetMissing,
+                    purpose,
+                    plan_summary,
+                    candidates: Vec::new(),
+                    verification: "targetNotFound",
+                },
                 page_id,
                 browser,
                 vision,
@@ -243,12 +246,14 @@ async fn execute_locate(
         }
         ResolutionDecision::Ambiguous { candidates } => {
             stuck_outcome(
-                "locate",
-                StuckKind::TargetAmbiguous,
-                purpose,
-                plan_summary,
-                candidates,
-                "targetAmbiguous",
+                StuckReport {
+                    intent_kind: "locate",
+                    kind: StuckKind::TargetAmbiguous,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    verification: "targetAmbiguous",
+                },
                 page_id,
                 browser,
                 vision,
@@ -318,12 +323,14 @@ async fn execute_fill(
         } => (candidate, evidence, best_match_authorized),
         ResolutionDecision::NotFound => {
             return stuck_outcome(
-                "fill",
-                StuckKind::TargetMissing,
-                purpose,
-                plan_summary,
-                Vec::new(),
-                "targetNotFound",
+                StuckReport {
+                    intent_kind: "fill",
+                    kind: StuckKind::TargetMissing,
+                    purpose,
+                    plan_summary,
+                    candidates: Vec::new(),
+                    verification: "targetNotFound",
+                },
                 page_id,
                 browser,
                 vision,
@@ -332,12 +339,14 @@ async fn execute_fill(
         }
         ResolutionDecision::Ambiguous { candidates } => {
             return stuck_outcome(
-                "fill",
-                StuckKind::TargetAmbiguous,
-                purpose,
-                plan_summary,
-                candidates,
-                "targetAmbiguous",
+                StuckReport {
+                    intent_kind: "fill",
+                    kind: StuckKind::TargetAmbiguous,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    verification: "targetAmbiguous",
+                },
                 page_id,
                 browser,
                 vision,
@@ -581,12 +590,14 @@ async fn execute_submit_and_verify(
         } => (candidate, evidence, best_match_authorized),
         ResolutionDecision::NotFound => {
             return stuck_outcome(
-                "submitAndVerify",
-                StuckKind::TargetMissing,
-                purpose,
-                plan_summary,
-                Vec::new(),
-                "targetNotFound",
+                StuckReport {
+                    intent_kind: "submitAndVerify",
+                    kind: StuckKind::TargetMissing,
+                    purpose,
+                    plan_summary,
+                    candidates: Vec::new(),
+                    verification: "targetNotFound",
+                },
                 page_id,
                 browser,
                 vision,
@@ -595,12 +606,14 @@ async fn execute_submit_and_verify(
         }
         ResolutionDecision::Ambiguous { candidates } => {
             return stuck_outcome(
-                "submitAndVerify",
-                StuckKind::TargetAmbiguous,
-                purpose,
-                plan_summary,
-                candidates,
-                "targetAmbiguous",
+                StuckReport {
+                    intent_kind: "submitAndVerify",
+                    kind: StuckKind::TargetAmbiguous,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    verification: "targetAmbiguous",
+                },
                 page_id,
                 browser,
                 vision,
@@ -750,12 +763,14 @@ async fn execute_follow(
         } => (candidate, evidence, best_match_authorized),
         ResolutionDecision::NotFound => {
             return stuck_outcome(
-                "follow",
-                StuckKind::TargetMissing,
-                purpose,
-                plan_summary,
-                Vec::new(),
-                "targetNotFound",
+                StuckReport {
+                    intent_kind: "follow",
+                    kind: StuckKind::TargetMissing,
+                    purpose,
+                    plan_summary,
+                    candidates: Vec::new(),
+                    verification: "targetNotFound",
+                },
                 page_id,
                 browser,
                 vision,
@@ -764,12 +779,14 @@ async fn execute_follow(
         }
         ResolutionDecision::Ambiguous { candidates } => {
             return stuck_outcome(
-                "follow",
-                StuckKind::TargetAmbiguous,
-                purpose,
-                plan_summary,
-                candidates,
-                "targetAmbiguous",
+                StuckReport {
+                    intent_kind: "follow",
+                    kind: StuckKind::TargetAmbiguous,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    verification: "targetAmbiguous",
+                },
                 page_id,
                 browser,
                 vision,
@@ -919,12 +936,14 @@ async fn execute_dismiss_obstruction(
         } => (candidate, evidence, best_match_authorized),
         ResolutionDecision::NotFound => {
             return stuck_outcome(
-                "dismissObstruction",
-                StuckKind::TargetMissing,
-                purpose,
-                plan_summary,
-                Vec::new(),
-                "targetNotFound",
+                StuckReport {
+                    intent_kind: "dismissObstruction",
+                    kind: StuckKind::TargetMissing,
+                    purpose,
+                    plan_summary,
+                    candidates: Vec::new(),
+                    verification: "targetNotFound",
+                },
                 page_id,
                 browser,
                 vision,
@@ -933,12 +952,14 @@ async fn execute_dismiss_obstruction(
         }
         ResolutionDecision::Ambiguous { candidates } => {
             return stuck_outcome(
-                "dismissObstruction",
-                StuckKind::TargetAmbiguous,
-                purpose,
-                plan_summary,
-                candidates,
-                "targetAmbiguous",
+                StuckReport {
+                    intent_kind: "dismissObstruction",
+                    kind: StuckKind::TargetAmbiguous,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    verification: "targetAmbiguous",
+                },
                 page_id,
                 browser,
                 vision,
@@ -990,12 +1011,14 @@ async fn execute_dismiss_obstruction(
         let mut prior_evidence = vec![resolution];
         prior_evidence.append(&mut click_evidence);
         return stuck_outcome_with_prior_evidence(
-            "dismissObstruction",
-            StuckKind::ObstructionSuspected,
-            purpose,
-            plan_summary,
-            vec![candidate_evidence],
-            "obstructionPersisted",
+            StuckReport {
+                intent_kind: "dismissObstruction",
+                kind: StuckKind::ObstructionSuspected,
+                purpose,
+                plan_summary,
+                candidates: vec![candidate_evidence],
+                verification: "obstructionPersisted",
+            },
             page_id,
             browser,
             vision,
@@ -1350,58 +1373,49 @@ fn non_escalating_failure(error: CommandError, evidence: Evidence) -> IntentOutc
     }
 }
 
-async fn stuck_outcome(
-    intent_kind: &str,
+/// The deterministic-path facts a stuck report carries into failure evidence and
+/// into any vision escalation.
+struct StuckReport<'a> {
+    intent_kind: &'a str,
     kind: StuckKind,
     purpose: Option<String>,
     plan_summary: String,
     candidates: Vec<types::CandidateEvidence>,
-    verification: &str,
+    verification: &'a str,
+}
+
+async fn stuck_outcome(
+    report: StuckReport<'_>,
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
 ) -> IntentOutcome {
-    stuck_outcome_with_prior_evidence(
-        intent_kind,
-        kind,
-        purpose,
-        plan_summary,
-        candidates,
-        verification,
-        page_id,
-        browser,
-        vision,
-        Vec::new(),
-    )
-    .await
+    stuck_outcome_with_prior_evidence(report, page_id, browser, vision, Vec::new()).await
 }
 
 /// Same as `stuck_outcome`, but preserves evidence already gathered before the
 /// intent got stuck (e.g. resolution + a completed act that did not have its
 /// intended effect, as with `DismissObstructionIntent`'s post-click check).
 async fn stuck_outcome_with_prior_evidence(
-    intent_kind: &str,
-    kind: StuckKind,
-    purpose: Option<String>,
-    plan_summary: String,
-    candidates: Vec<types::CandidateEvidence>,
-    verification: &str,
+    report: StuckReport<'_>,
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     prior_evidence: Vec<Evidence>,
 ) -> IntentOutcome {
-    let stuck_code = kind.error_code();
+    let intent_kind = report.intent_kind;
+    let verification = report.verification;
+    let stuck_code = report.kind.error_code();
     let stuck_evidence = intent_evidence(execution_record(
         intent_kind,
-        purpose.clone(),
-        plan_summary.clone(),
-        candidates.clone(),
+        report.purpose.clone(),
+        report.plan_summary.clone(),
+        report.candidates.clone(),
         None,
         verification,
     ));
 
-    if never_escalates(stuck_code) || !kind.may_escalate_to_vision() {
+    if never_escalates(stuck_code) || !report.kind.may_escalate_to_vision() {
         let mut evidence = prior_evidence;
         evidence.push(stuck_evidence);
         return IntentOutcome::Failed {
@@ -1440,12 +1454,7 @@ async fn stuck_outcome_with_prior_evidence(
     }
 
     escalate_with_vision(
-        intent_kind,
-        kind,
-        purpose,
-        plan_summary,
-        candidates,
-        verification,
+        report,
         stuck_evidence,
         prior_evidence,
         page_id,
@@ -1488,18 +1497,21 @@ fn vision_denied_or_unavailable(
 }
 
 async fn escalate_with_vision(
-    intent_kind: &str,
-    kind: StuckKind,
-    purpose: Option<String>,
-    plan_summary: String,
-    candidates: Vec<types::CandidateEvidence>,
-    verification: &str,
+    report: StuckReport<'_>,
     stuck_evidence: Evidence,
     prior_evidence: Vec<Evidence>,
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     assist: &dyn VisionAssist,
 ) -> IntentOutcome {
+    let StuckReport {
+        intent_kind,
+        kind,
+        purpose,
+        plan_summary,
+        candidates,
+        verification,
+    } = report;
     // `stuck_evidence` documents why the deterministic path failed; callers
     // only need that record when the intent still fails after vision, so it
     // is only prefixed onto failure evidence, not the final Completed one.
@@ -1568,9 +1580,11 @@ async fn escalate_with_vision(
                 "visionConfidenceBelowFloor:{:.2}<{VISION_CONFIDENCE_FLOOR}",
                 proposal.confidence
             ),
-            IntentResolutionPath::VisionFallback,
-            Some(proposal_hash),
-            artifact_ids_from(&screenshot_evidence),
+            ResolutionDetails {
+                path: IntentResolutionPath::VisionFallback,
+                vision_proposal_sha256: Some(proposal_hash),
+                artifact_ids: artifact_ids_from(&screenshot_evidence),
+            },
         )));
         return IntentOutcome::Failed {
             error: CommandError {
@@ -1598,9 +1612,11 @@ async fn escalate_with_vision(
                 candidates,
                 None,
                 format!("visionActFailed:{verification}"),
-                IntentResolutionPath::VisionFallback,
-                Some(proposal_hash),
-                artifact_ids_from(&screenshot_evidence),
+                ResolutionDetails {
+                    path: IntentResolutionPath::VisionFallback,
+                    vision_proposal_sha256: Some(proposal_hash),
+                    artifact_ids: artifact_ids_from(&screenshot_evidence),
+                },
             )));
             return IntentOutcome::Failed {
                 error: CommandError {
@@ -1625,9 +1641,11 @@ async fn escalate_with_vision(
         candidates,
         None,
         "visionFallback",
-        IntentResolutionPath::VisionFallback,
-        Some(proposal_hash),
-        artifact_ids,
+        ResolutionDetails {
+            path: IntentResolutionPath::VisionFallback,
+            vision_proposal_sha256: Some(proposal_hash),
+            artifact_ids,
+        },
     )));
     IntentOutcome::Completed { evidence }
 }
