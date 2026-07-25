@@ -3157,6 +3157,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
  "types",
 ]
 
