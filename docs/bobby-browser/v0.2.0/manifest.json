@@ -2,7 +2,7 @@
   "package": "bobby-browser",
   "product": "bobby-browser",
   "version": "0.2.0",
-  "contentSha256": "b309b93816618805d9c65ca18c0a78abdee7cf253159adcb67739ef966008830",
+  "contentSha256": "bdf547710d3ba9b21efb79791422e4083f5ba30a998538a406d54f979936fc26",
   "publicBasePath": "/docs/bobby-browser/v0.2.0",
   "stableAlias": "/docs/bobby-browser"
 }
