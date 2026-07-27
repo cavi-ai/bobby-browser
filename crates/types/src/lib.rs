@@ -4,6 +4,7 @@ mod ids;
 mod interface;
 mod outcomes;
 mod recovery;
+mod skills;
 mod state;
 
 pub use auth::*;
@@ -12,4 +13,5 @@ pub use ids::*;
 pub use interface::*;
 pub use outcomes::*;
 pub use recovery::*;
+pub use skills::*;
 pub use state::*;
