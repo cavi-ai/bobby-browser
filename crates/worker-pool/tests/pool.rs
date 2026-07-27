@@ -434,11 +434,11 @@ async fn invalidate_terminates_and_replaces_worker_without_changing_profile() {
     let first = pool.lease(session.clone()).await.unwrap();
     let first_id = first.worker_id();
     let profile = first.profile_dir().to_path_buf();
+    drop(first);
 
     pool.invalidate_session(&session).await.unwrap();
     assert_eq!(factory.terminations.load(Ordering::SeqCst), 1);
     assert_eq!(pool.active_workers().await, 0);
-    drop(first);
 
     let replacement = pool.lease(session.clone()).await.unwrap();
     assert_ne!(replacement.worker_id(), first_id);
@@ -490,6 +490,39 @@ async fn cancellation_does_not_stop_cleanup(invalidate: bool) {
 #[tokio::test]
 async fn cancelled_release_session_still_finishes_factory_cleanup() {
     cancellation_does_not_stop_cleanup(false).await;
+}
+
+#[tokio::test]
+async fn release_waits_for_the_last_shared_lease_before_cleanup() {
+    let close_started = Arc::new(tokio::sync::Notify::new());
+    let finish_close = Arc::new(tokio::sync::Notify::new());
+    let pool = WorkerPool::new(
+        1,
+        Arc::new(BlockingCleanupFactory {
+            close_started: close_started.clone(),
+            finish_close: finish_close.clone(),
+            releases: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    let session = SessionId::new();
+    let lease = pool.lease(session.clone()).await.unwrap();
+    let release_pool = pool.clone();
+    let release_session = session.clone();
+    let release = tokio::spawn(async move { release_pool.release_session(&release_session).await });
+
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        close_started.notified()
+    )
+    .await
+    .is_err());
+
+    drop(lease);
+    tokio::time::timeout(std::time::Duration::from_secs(1), close_started.notified())
+        .await
+        .expect("release did not begin after the last lease dropped");
+    finish_close.notify_waiters();
+    release.await.unwrap().unwrap();
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use companion_protocol::{BrowserEngine, CompanionCapabilities};
@@ -6,6 +6,10 @@ use tokio::sync::Mutex;
 use types::{CommandError, ProfileId, SessionId};
 
 use crate::{policy_error, BrowserWorker, WorkerFactory};
+
+pub const DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+type SessionSelection = Arc<Mutex<Option<Arc<dyn WorkerFactory>>>>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum EnginePreference {
@@ -87,15 +91,25 @@ impl FactoryRegistration {
 pub struct BrowserWorkerSelector {
     registrations: Vec<FactoryRegistration>,
     required: RequiredCapabilities,
-    selected: Mutex<HashMap<SessionId, Arc<dyn WorkerFactory>>>,
+    selected: Arc<Mutex<HashMap<SessionId, SessionSelection>>>,
+    replacement_cleanup_timeout: Duration,
 }
 
 impl BrowserWorkerSelector {
     pub fn new(registrations: Vec<FactoryRegistration>, required: RequiredCapabilities) -> Self {
+        Self::with_replacement_timeout(registrations, required, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT)
+    }
+
+    pub fn with_replacement_timeout(
+        registrations: Vec<FactoryRegistration>,
+        required: RequiredCapabilities,
+        replacement_cleanup_timeout: Duration,
+    ) -> Self {
         Self {
             registrations,
             required,
-            selected: Mutex::new(HashMap::new()),
+            selected: Arc::new(Mutex::new(HashMap::new())),
+            replacement_cleanup_timeout,
         }
     }
 
@@ -104,33 +118,102 @@ impl BrowserWorkerSelector {
         session_id: &SessionId,
         preference: &EnginePreference,
     ) -> Result<Arc<dyn WorkerFactory>, CommandError> {
-        let mut selected = self.selected.lock().await;
-        if let Some(factory) = selected.get(session_id) {
+        let selection = self.session_selection(session_id).await;
+        let mut selected = selection.lock().await;
+        if let Some(factory) = selected.as_ref() {
             return Ok(Arc::clone(factory));
         }
 
-        let registrations = self.find(preference);
-        if registrations.is_empty() {
-            return Err(policy_error(
-                "no browser worker satisfies the requested engine, profile, and capabilities",
-            ));
-        }
-        let factory: Arc<dyn WorkerFactory> = Arc::new(PreferenceWorkerFactory {
-            factories: registrations
-                .into_iter()
-                .map(|registration| Arc::clone(&registration.factory))
-                .collect(),
-            launched: Mutex::new(HashMap::new()),
-        });
-        selected.insert(session_id.clone(), Arc::clone(&factory));
+        let factory = self.factory_for(preference)?;
+        *selected = Some(Arc::clone(&factory));
         Ok(factory)
     }
 
     pub async fn release_session(&self, session_id: &SessionId) {
-        let factory = { self.selected.lock().await.remove(session_id) };
-        if let Some(factory) = factory {
-            factory.release_session(session_id).await;
+        let selection = self.session_selection(session_id).await;
+        let selections = Arc::clone(&self.selected);
+        let session_id = session_id.clone();
+        let cleanup = tokio::spawn(async move {
+            let mut selected = selection.lock().await;
+            if let Some(factory) = selected.as_ref() {
+                factory.release_session(&session_id).await;
+            }
+            *selected = None;
+            drop(selected);
+
+            let mut registered = selections.lock().await;
+            let is_current = registered
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &selection));
+            let only_registry_and_cleanup = Arc::strong_count(&selection) == 2;
+            let state_is_empty = selection
+                .try_lock()
+                .is_ok_and(|selected| selected.is_none());
+            if is_current && only_registry_and_cleanup && state_is_empty {
+                registered.remove(&session_id);
+            }
+        });
+        let _ = cleanup.await;
+    }
+
+    pub async fn replace_session(
+        &self,
+        session_id: &SessionId,
+        preference: &EnginePreference,
+    ) -> Result<Arc<dyn WorkerFactory>, CommandError> {
+        let mut replacement = self.start_replacement(session_id, preference).await?;
+        match tokio::time::timeout(self.replacement_cleanup_timeout, &mut replacement).await {
+            Ok(result) => Ok(result
+                .map_err(|error| policy_error(format!("replacement task failed: {error}")))?),
+            Err(_) => Err(replacement_timeout_error()),
         }
+    }
+
+    pub fn can_select(&self, preference: &EnginePreference) -> bool {
+        !self.find(preference).is_empty()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn retained_session_count(&self) -> usize {
+        self.selected.lock().await.len()
+    }
+
+    async fn session_selection(&self, session_id: &SessionId) -> SessionSelection {
+        self.selected
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone()
+    }
+
+    async fn replace_session_to_completion(
+        &self,
+        session_id: &SessionId,
+        preference: &EnginePreference,
+    ) -> Result<Arc<dyn WorkerFactory>, CommandError> {
+        self.start_replacement(session_id, preference)
+            .await?
+            .await
+            .map_err(|error| policy_error(format!("replacement task failed: {error}")))
+    }
+
+    async fn start_replacement(
+        &self,
+        session_id: &SessionId,
+        preference: &EnginePreference,
+    ) -> Result<tokio::task::JoinHandle<Arc<dyn WorkerFactory>>, CommandError> {
+        let replacement = self.factory_for(preference)?;
+        let selection = self.session_selection(session_id).await;
+        let session_id = session_id.clone();
+        Ok(tokio::spawn(async move {
+            let mut selected = selection.lock().await;
+            if let Some(previous) = selected.as_ref() {
+                previous.release_session(&session_id).await;
+            }
+            *selected = Some(Arc::clone(&replacement));
+            replacement
+        }))
     }
 
     fn find(&self, preference: &EnginePreference) -> Vec<&FactoryRegistration> {
@@ -155,6 +238,25 @@ impl BrowserWorkerSelector {
                 .flat_map(|engine| self.matching(engine, None))
                 .collect(),
         }
+    }
+
+    fn factory_for(
+        &self,
+        preference: &EnginePreference,
+    ) -> Result<Arc<dyn WorkerFactory>, CommandError> {
+        let registrations = self.find(preference);
+        if registrations.is_empty() {
+            return Err(policy_error(
+                "no browser worker satisfies the requested engine, profile, and capabilities",
+            ));
+        }
+        Ok(Arc::new(PreferenceWorkerFactory {
+            factories: registrations
+                .into_iter()
+                .map(|registration| Arc::clone(&registration.factory))
+                .collect(),
+            launched: Mutex::new(HashMap::new()),
+        }))
     }
 
     fn matching(
@@ -203,10 +305,20 @@ impl WorkerFactory for PreferenceWorkerFactory {
     }
 
     async fn release_session(&self, session_id: &SessionId) {
-        let factory = self.launched.lock().await.remove(session_id);
-        if let Some(factory) = factory {
+        let mut launched = self.launched.lock().await;
+        if let Some(factory) = launched.get(session_id).cloned() {
             factory.release_session(session_id).await;
+            launched.remove(session_id);
         }
+    }
+}
+
+fn replacement_timeout_error() -> CommandError {
+    CommandError {
+        code: types::ErrorCode::DeadlineExceeded,
+        message: "browser worker replacement cleanup exceeded its deadline".into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: true,
     }
 }
 
@@ -236,5 +348,20 @@ impl WorkerFactory for SelectedWorkerFactory {
 
     async fn release_session(&self, session_id: &SessionId) {
         self.selector.release_session(session_id).await;
+    }
+
+    fn can_select(&self, preference: &EnginePreference) -> bool {
+        self.selector.can_select(preference)
+    }
+
+    async fn replace_session(
+        &self,
+        session_id: &SessionId,
+        preference: &EnginePreference,
+    ) -> Result<(), CommandError> {
+        self.selector
+            .replace_session_to_completion(session_id, preference)
+            .await
+            .map(|_| ())
     }
 }

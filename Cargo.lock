@@ -3150,6 +3150,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "skill-runtime",
  "tempfile",
  "test-site",
  "thiserror",
