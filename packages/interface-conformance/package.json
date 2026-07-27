@@ -22,7 +22,7 @@
     "@bobby-browser/sdk": "workspace:*",
     "@types/node": "24.10.1",
     "playwright-core": "1.62.0",
-    "puppeteer-core": "25.3.0",
+    "puppeteer-core": "25.4.0",
     "typescript": "7.0.2"
   }
 }
