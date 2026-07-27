@@ -94,14 +94,21 @@ export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
     && isSafeUnsigned(value.uptime_ms);
 }
 
+function isSessionExecutionPolicy(value: unknown): value is SessionState["execution_policy"] {
+  return hasExactKeys(value, ["javascriptEvaluation", "visionAssist"])
+    && typeof value.javascriptEvaluation === "boolean"
+    && typeof value.visionAssist === "boolean";
+}
+
 export function isSessionState(value: unknown): value is SessionState {
-  return hasExactKeys(value, ["id", "profile", "proxy", "page_ids", "created_at", "last_used_at"])
+  return hasExactKeys(value, ["id", "profile", "proxy", "page_ids", "created_at", "last_used_at", "execution_policy"])
     && isUuid(value.id)
     && isString(value.profile)
     && isNullableString(value.proxy)
     && Array.isArray(value.page_ids) && value.page_ids.every(isUuid)
     && isIsoTimestamp(value.created_at)
-    && isIsoTimestamp(value.last_used_at);
+    && isIsoTimestamp(value.last_used_at)
+    && isSessionExecutionPolicy(value.execution_policy);
 }
 
 export function isPageState(value: unknown): value is PageState {

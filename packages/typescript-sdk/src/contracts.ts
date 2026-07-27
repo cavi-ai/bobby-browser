@@ -5,7 +5,7 @@ export type Id = string;
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface RuntimeInfo { version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; }
-export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; }
+export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean }; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
 /** Matches types::ExecutionPolicy (deny-by-default when omitted). */

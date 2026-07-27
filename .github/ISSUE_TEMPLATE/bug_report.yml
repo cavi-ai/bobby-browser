@@ -1,0 +1,57 @@
+name: Bug report
+description: A defect in the runtime, an SDK, or a control surface
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag or commit SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Rust SDK
+        - TypeScript SDK
+        - MCP over HTTP
+        - MCP over stdio
+        - CDP (Playwright)
+        - CDP (Puppeteer)
+        - CLI / runtime
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Commands, request payloads, or a minimal program
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the error code, correlation id, and redacted logs
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser build, Rust and Node versions
+    validations:
+      required: true

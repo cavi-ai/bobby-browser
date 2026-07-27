@@ -22,6 +22,8 @@ that survives restart.
 > [SECURITY.md](SECURITY.md) for the security model and reporting.
 
 **Documentation:** [Online docs](https://cavi-ai.xyz/docs/bobby-browser) ·
+[Overview](docs/bobby-browser/source/pages/introduction/overview.md) ·
+[Quick start](docs/bobby-browser/source/pages/introduction/quickstart.md) ·
 [Docs consumer contract](docs/bobby-browser/CONSUMER.md) ·
 [Contributing](CONTRIBUTING.md)
 
@@ -77,7 +79,22 @@ let context = handle.context(Utc::now() + Duration::seconds(30), None);
 
 ## Learn more
 
-Deep guides for authentication, JavaScript evaluation, intents, MCP, CDP, events,
-and recovery live in the [online documentation](https://cavi-ai.xyz/docs/bobby-browser).
+These pages are also served at
+[cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser).
+
+- [Authentication](docs/bobby-browser/source/pages/guides/auth.md)
+- [JavaScript evaluation](docs/bobby-browser/source/pages/guides/javascript-eval.md)
+- [Intents](docs/bobby-browser/source/pages/guides/intents.md)
+- [Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md)
+- [Configuration](docs/bobby-browser/source/pages/guides/configuration.md)
+- [MCP over HTTP](docs/bobby-browser/source/pages/surfaces/mcp-http.md) ·
+  [MCP over stdio](docs/bobby-browser/source/pages/surfaces/mcp-stdio.md) ·
+  [CDP](docs/bobby-browser/source/pages/surfaces/cdp.md)
+- [Capabilities](docs/bobby-browser/source/pages/concepts/capabilities.md) ·
+  [Evidence and checkpoints](docs/bobby-browser/source/pages/concepts/evidence-checkpoints.md) ·
+  [Multi-principal](docs/bobby-browser/source/pages/concepts/multi-principal.md)
+
 The CDP allowlist is published in
-[`docs/cdp-support.json`](docs/cdp-support.json).
+[`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into
+an immutable versioned artifact under
+[`docs/bobby-browser/v0.2.0`](docs/bobby-browser/v0.2.0) for documentation hosts.
