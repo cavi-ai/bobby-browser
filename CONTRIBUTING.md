@@ -46,6 +46,8 @@ under `docs/bobby-browser/v*/` by hand — rebuild from source.
 
 ## Pull requests
 
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 - Prefer focused PRs with a clear problem statement
 - Do not commit secrets, private absolute paths, or bearer tokens
 - Link security issues privately per [SECURITY.md](SECURITY.md) — do not open

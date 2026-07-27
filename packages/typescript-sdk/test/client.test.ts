@@ -636,7 +636,7 @@ test("client rejects malformed nested fixtures from every JSON response family",
   const validError = { code: "invalidRequest", layer: "interface", message: "event history has a cursor gap", correlationId: CORRELATION_ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null };
   const cases: Array<[string, number, unknown, (client: BrowserRuntimeClient) => Promise<unknown>]> = [
     ["RuntimeInfo", 200, { version: "1", capabilities: [], active_sessions: 0.5, queued_jobs: 0, uptime_ms: 0 }, (client) => client.runtimeInfo()],
-    ["SessionState", 200, { id: SESSION_ID, profile: "default", proxy: null, page_ids: ["bad"], created_at: time, last_used_at: time }, (client) => client.createSession({ profile: "default", proxy: null })],
+    ["SessionState", 200, { id: SESSION_ID, profile: "default", proxy: null, page_ids: ["bad"], created_at: time, last_used_at: time, execution_policy: { javascriptEvaluation: false, visionAssist: false } }, (client) => client.createSession({ profile: "default", proxy: null })],
     ["PageState", 200, { id: COMMAND_ID, session_id: SESSION_ID, url: null, mode: "document", ready_state: "complete", pending_requests: 0 }, (client) => client.openPage({ session_id: SESSION_ID })],
     ["CommandOutcome", 200, { status: "completed", commandId: COMMAND_ID, evidence: [{ kind: "screenshot", artifactId: "a", mediaType: "image/png", width: 1, height: 1, bytes: 1, sha256: "BAD" }] }, (client) => client.submit(envelope())],
     ["WorkflowCheckpoint", 200, malformedCheckpoint, (client) => client.checkpoint({ checkpoint: malformedCheckpoint as never })],

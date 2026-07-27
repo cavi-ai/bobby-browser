@@ -2,7 +2,10 @@
 name = "interface-conformance"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
 license.workspace = true
+repository.workspace = true
+publish = false
 
 [dependencies]
 serde.workspace = true

@@ -2,6 +2,12 @@
   "name": "@bobby-browser/firefox-companion",
   "version": "0.2.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cavi-ai/bobby-browser.git",
+    "directory": "packages/firefox-companion"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && esbuild src/background.ts src/content.ts --bundle --format=iife --platform=browser --outdir=dist && cp manifest.json dist/manifest.json",

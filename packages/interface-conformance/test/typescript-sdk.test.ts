@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { Agent, request as httpRequest } from "node:http";
 import { writeFile } from "node:fs/promises";
 import { test } from "node:test";
-import { BrowserRuntimeClient, RuntimeClientError, type CommandEnvelope, type Evidence, type WorkflowCheckpoint } from "@bobby-browser/sdk";
+import { BrowserRuntimeClient, RuntimeClientError, type CommandEnvelope, type Evidence, type PrimitiveCommand, type WorkflowCheckpoint } from "@bobby-browser/sdk";
 import { equalityProof, runCanonicalInterfaceScenario, type CanonicalInterfaceProof } from "../src/scenario.js";
 import { typescriptSdkDriver } from "../src/typescript-sdk.js";
 import { type OperationTimer, requestedPerformanceSamples, runPersistentPerformance } from "./performance-support.js";
@@ -43,9 +43,10 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
     let boundaryCheckpoint: WorkflowCheckpoint | undefined;
     const proofEvidence: CanonicalInterfaceProof["evidence"] = [];
     const eventOrdering: string[] = [];
-    const command = (kind: CommandEnvelope["command"]["kind"], input: unknown): CommandEnvelope => ({
-      schemaVersion: 1, commandId: randomUUID(), workflowId: ids.workflow, attemptId: ids.attempt,
-      sessionId, pageId, deadline: new Date(Date.now() + 20_000).toISOString(), command: { kind, input } as CommandEnvelope["command"],
+    const command = (kind: PrimitiveCommand["kind"], input: unknown): CommandEnvelope => ({
+      schemaVersion: 2, commandId: randomUUID(), workflowId: ids.workflow, attemptId: ids.attempt,
+      sessionId, pageId, deadline: new Date(Date.now() + 20_000).toISOString(),
+      command: { kind: "primitive", input: { kind, input } as PrimitiveCommand },
     });
     const handle = async (request: { step: string }): Promise<unknown> => {
       switch (request.step) {
@@ -132,9 +133,9 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
 function evidence(kind: "navigation" | "upload", bytes: Uint8Array) { return { kind, sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.byteLength } as const; }
 async function readLine(stream: NodeJS.ReadableStream): Promise<string> { let buffered = ""; stream.setEncoding("utf8"); for await (const chunk of stream) { buffered += chunk; const newline = buffered.indexOf("\n"); if (newline >= 0) return buffered.slice(0, newline); } throw new Error("broker fixture closed before readiness"); }
 
-function commandEnvelope(sessionId: string, pageId: string, kind: CommandEnvelope["command"]["kind"], input: unknown): CommandEnvelope {
-  return { schemaVersion: 1, commandId: randomUUID(), workflowId: randomUUID(), attemptId: randomUUID(), sessionId, pageId,
-    deadline: new Date(Date.now() + 20_000).toISOString(), command: { kind, input } as CommandEnvelope["command"] };
+function commandEnvelope(sessionId: string, pageId: string, kind: PrimitiveCommand["kind"], input: unknown): CommandEnvelope {
+  return { schemaVersion: 2, commandId: randomUUID(), workflowId: randomUUID(), attemptId: randomUUID(), sessionId, pageId,
+    deadline: new Date(Date.now() + 20_000).toISOString(), command: { kind: "primitive", input: { kind, input } as PrimitiveCommand } };
 }
 
 function activeHttpSockets(agent: Agent): number {

@@ -17,4 +17,4 @@ Key properties:
 - **Deny-by-default JavaScript and vision assists** with double gates.
 - **Per-principal isolation** and bounded request/frame/result sizes.
 
-See [SECURITY.md](https://github.com/sasan1200/bobby-browser/blob/main/SECURITY.md) in the repository root for the full policy.
+See [SECURITY.md](https://github.com/cavi-ai/bobby-browser/blob/main/SECURITY.md) in the repository root for the full policy.

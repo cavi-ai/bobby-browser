@@ -13,7 +13,7 @@ documentedVersion: 0.2.0
 ## Clone and build
 
 ```bash
-git clone https://github.com/sasan1200/bobby-browser.git
+git clone https://github.com/cavi-ai/bobby-browser.git
 cd bobby-browser
 cargo build -p cli
 pnpm install
