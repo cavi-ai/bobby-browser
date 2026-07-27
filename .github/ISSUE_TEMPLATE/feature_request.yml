@@ -1,0 +1,34 @@
+name: Feature request
+description: A capability, contract, or surface the runtime does not cover yet
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: The automation task that is not expressible today
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Proposed command, capability, or contract change
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This changes a wire contract (envelope, evidence, checkpoint, or event)
+        - label: This adds or widens a capability

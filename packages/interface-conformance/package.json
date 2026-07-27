@@ -2,9 +2,16 @@
   "name": "@bobby-browser/interface-conformance",
   "version": "0.2.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sasan1200/bobby-browser.git",
+    "directory": "packages/interface-conformance"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test:unit": "pnpm run build && node --test dist/test/negative.test.js dist/test/performance-methodology.test.js",
     "test:playwright": "pnpm run build && node --test dist/test/playwright.test.js",
     "test:puppeteer": "pnpm run build && node --test dist/test/puppeteer.test.js",
     "test": "pnpm run build && node --test dist/test/negative.test.js dist/test/performance-methodology.test.js && node dist/src/matrix.js",

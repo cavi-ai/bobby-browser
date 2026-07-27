@@ -1,8 +1,9 @@
 name: CI
 
-# Manual dispatch only while the repo is private. Restore the `push` and
-# `pull_request` triggers when the repo goes public.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -15,7 +16,7 @@ env:
 
 jobs:
   rust:
-    name: build · test · lint
+    name: rust · build · test · lint
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
     steps:
@@ -47,3 +48,36 @@ jobs:
         # Chromium-dependent tests are #[ignore]d and skipped here; they run in the
         # certification job locally. This gate covers all logic/contract tests.
         run: cargo test --workspace --locked
+
+  node:
+    name: node · typescript · docs
+    if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript SDK
+        run: pnpm --filter @bobby-browser/sdk test
+
+      - name: Firefox companion
+        run: pnpm --filter @bobby-browser/firefox-companion test
+
+      - name: Interface conformance
+        # Browser-driven conformance (matrix, playwright, puppeteer) needs a real
+        # Chrome and runs locally; this gate covers typecheck and the browser-free tests.
+        run: pnpm --filter @bobby-browser/interface-conformance test:unit
+
+      - name: Docs artifact
+        run: |
+          pnpm docs:verify
+          pnpm docs:test
