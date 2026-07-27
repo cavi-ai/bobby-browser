@@ -21,7 +21,8 @@ that survives restart.
 > build against, but may still change before 1.0. See
 > [SECURITY.md](SECURITY.md) for the security model and reporting.
 
-**Documentation:** [Overview](docs/bobby-browser/source/pages/introduction/overview.md) ·
+**Documentation:** [Online docs](https://cavi-ai.xyz/docs/bobby-browser) ·
+[Overview](docs/bobby-browser/source/pages/introduction/overview.md) ·
 [Quick start](docs/bobby-browser/source/pages/introduction/quickstart.md) ·
 [Docs consumer contract](docs/bobby-browser/CONSUMER.md) ·
 [Contributing](CONTRIBUTING.md)
@@ -77,6 +78,9 @@ let context = handle.context(Utc::now() + Duration::seconds(30), None);
 ```
 
 ## Learn more
+
+These pages are also served at
+[cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser).
 
 - [Authentication](docs/bobby-browser/source/pages/guides/auth.md)
 - [JavaScript evaluation](docs/bobby-browser/source/pages/guides/javascript-eval.md)
