@@ -6,7 +6,7 @@
   "author": "Sasan Sotoodehfar",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sasan1200/bobby-browser.git",
+    "url": "git+https://github.com/cavi-ai/bobby-browser.git",
     "directory": "packages/typescript-sdk"
   },
   "files": [

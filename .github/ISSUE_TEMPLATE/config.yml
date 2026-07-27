@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/sasan1200/bobby-browser/security/advisories/new
+    url: https://github.com/cavi-ai/bobby-browser/security/advisories/new
     about: Report privately through a security advisory, never a public issue.

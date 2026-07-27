@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sasan1200/bobby-browser.git",
+    "url": "git+https://github.com/cavi-ai/bobby-browser.git",
     "directory": "packages/interface-conformance"
   },
   "type": "module",
