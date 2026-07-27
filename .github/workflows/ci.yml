@@ -20,7 +20,7 @@ jobs:
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain (from rust-toolchain.toml)
         run: rustup show
@@ -54,7 +54,7 @@ jobs:
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v4
 
