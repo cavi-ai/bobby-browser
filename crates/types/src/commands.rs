@@ -261,6 +261,11 @@ impl PrimitiveCommand {
         match self {
             Self::Navigate(command) => sanitize(&mut command.url),
             Self::DownloadUrl(command) => sanitize(&mut command.url),
+            Self::UploadFiles(command) => {
+                for (index, path) in command.paths.iter_mut().enumerate() {
+                    *path = format!("upload://input/{index}");
+                }
+            }
             Self::OpenPage(command) => {
                 if let Some(url) = &mut command.url {
                     sanitize(url);
