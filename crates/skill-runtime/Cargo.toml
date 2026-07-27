@@ -1,0 +1,17 @@
+[package]
+name = "skill-runtime"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+types = { path = "../types" }
+
