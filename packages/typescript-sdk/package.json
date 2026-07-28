@@ -22,7 +22,10 @@
     "bobby-browser"
   ],
   "files": [
-    "dist/src"
+    "dist/src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
