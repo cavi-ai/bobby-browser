@@ -628,14 +628,35 @@ pub async fn run() -> Result<()> {
         .unwrap_or_else(|| "serve".to_string());
 
     match cmd.as_str() {
+        "init" => run_init()?,
         "serve" => {
-            let startup = broker::StartupCredential::from_env()?;
             let config_path = std::env::var("BOBBY_BROWSER_CONFIG")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("./config.toml"));
             let config_existed = config_path.exists();
             let config = AppConfig::load(&config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let bootstrap_path = std::env::var("BOBBY_BROWSER_BOOTSTRAP_ENV")
+                .map(PathBuf::from)
+                .unwrap_or(bootstrap_local::default_bootstrap_path()?);
+            let resolved = bootstrap_local::resolve_startup_credential_with(
+                &config.server.host,
+                &bootstrap_path,
+                broker::StartupCredential::from_env,
+            )?;
+            let startup = match resolved {
+                bootstrap_local::ResolveOutcome::FromEnv(c)
+                | bootstrap_local::ResolveOutcome::FromFile(c) => c,
+                bootstrap_local::ResolveOutcome::Generated { credential, material } => {
+                    eprintln!(
+                        "Generated loopback bootstrap at {}",
+                        bootstrap_path.display()
+                    );
+                    eprintln!("Bootstrap bearer (copy now; will not be shown again):");
+                    eprintln!("{}", material.bearer());
+                    credential
+                }
+            };
             let _telemetry = observability::init(&config.observability)?;
             if config_existed {
                 tracing::info!(path = %config_path.display(), "loaded config file");
@@ -662,6 +683,55 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_init() -> Result<()> {
+    let values = std::env::args().skip(2).collect::<Vec<_>>();
+    let mut force = false;
+    let mut ttl_days = bootstrap_local::DEFAULT_TTL_DAYS as u32;
+    let mut path = None;
+    let mut index = 0;
+    while index < values.len() {
+        match values[index].as_str() {
+            "--force" => {
+                force = true;
+                index += 1;
+            }
+            "--ttl-days" => {
+                let value = values
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--ttl-days requires a value"))?;
+                ttl_days = value
+                    .parse()
+                    .with_context(|| format!("invalid --ttl-days value {value}"))?;
+                index += 2;
+            }
+            "--path" => {
+                let value = values
+                    .get(index + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--path requires a value"))?;
+                path = Some(PathBuf::from(value));
+                index += 2;
+            }
+            other => anyhow::bail!("unknown init flag: {other}"),
+        }
+    }
+    let path = match path {
+        Some(path) => path,
+        None => bootstrap_local::default_bootstrap_path()?,
+    };
+    let material =
+        bootstrap_local::generate_bootstrap(chrono::Duration::days(i64::from(ttl_days)))?;
+    bootstrap_local::write_bootstrap_env(&path, &material, force)?;
+    println!("{}", material.bearer());
+    eprintln!("Wrote bootstrap env to {}", path.display());
+    eprintln!(
+        "Map this bearer to AUTOMATION_RUNTIME_TOKEN / Authorization bearer for the SDK."
+    );
+    eprintln!(
+        "Passing --force regenerates and invalidates the previous bearer for new enrollment."
+    );
     Ok(())
 }
 
