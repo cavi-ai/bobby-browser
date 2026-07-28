@@ -4,18 +4,20 @@ This contract describes how a documentation host consumes the immutable
 documentation artifact built for bobby-browser `0.2.0`.
 
 ```text
-source: docs/bobby-browser/v0.2.0
+source: GitHub Release asset bobby-browser-docs-v0.2.0.tar.gz
 publicBasePath: /docs/bobby-browser/v0.2.0
 stableAlias: /docs/bobby-browser
 entrypoints: manifest.json, navigation.json
 identity: manifest.package / manifest.product
 contentIntegrity: manifest.contentSha256
+releaseIntegrity: envelope.artifact.sha256
+releaseProvenance: manifest.release.tag / manifest.release.commit
 ```
 
 ## Copy And Install
 
-Copy the complete `docs/bobby-browser/v0.2.0` directory from this repository
-checkout (or its CI documentation artifact) to the host's
+Extract the complete `docs/` directory from the immutable GitHub Release asset
+after validating the schema-v1 `cavi-oss-release` envelope and archive SHA-256, then copy it to the host's
 `/docs/bobby-browser/v0.2.0` public base path. Serve `/docs/bobby-browser` as an
 alias to that immutable version only after validation succeeds. Do not merge
 files from another package version into this directory.
@@ -34,17 +36,18 @@ Verify `manifest.contentSha256` by hashing every artifact file except
 is the authority for generated-content integrity. There is no npm tarball
 digest in v1.
 
-Consumers must fail ingestion on a version or digest mismatch.
+Consumers must fail ingestion on a version, tag, commit, repository, or digest mismatch.
 Consumers must not edit generated pages; replace the complete versioned
 directory with a newly validated immutable artifact when upgrading.
 
 ## Build And Verify In This Repository
 
 ```bash
-node scripts/docs/build-bobby-browser.mjs
-node scripts/docs/verify-bobby-browser.mjs
-node --test scripts/docs/bobby-browser-docs.test.mjs
+pnpm docs:build
+pnpm docs:verify
+pnpm docs:test
 ```
 
-Host-side route wiring for `/docs/bobby-browser` is outside this repository;
-this contract is the ingest API.
+Published releases require `CONSUMER_DISPATCH_TOKEN` and dispatch the verified
+artifact envelope to cavi-home. Manual dry runs never upload or dispatch.
+Historical backfills require an identical local dry run and explicit approval.
