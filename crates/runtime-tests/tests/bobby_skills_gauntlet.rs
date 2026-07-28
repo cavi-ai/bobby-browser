@@ -90,14 +90,15 @@ struct ScreenshotProof {
     sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppScorecardReceipt {
     manifest_digest: String,
+    passed: bool,
     stations: Vec<AppStationReceipt>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppStationReceipt {
     id: String,
@@ -107,9 +108,50 @@ struct AppStationReceipt {
     evidence: Vec<AppEvidenceReceipt>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct AppEvidenceReceipt {
     id: String,
+}
+
+fn validated_championship_stations(
+    receipt: &AppScorecardReceipt,
+    expected_manifest_digest: &str,
+) -> TestResult<Vec<StationScore>> {
+    if receipt.manifest_digest != expected_manifest_digest
+        || !receipt.passed
+        || receipt.stations.len() != STATIONS.len()
+    {
+        return Err(test_error(
+            "app championship receipt is not one complete passing aggregate",
+        ));
+    }
+    receipt
+        .stations
+        .iter()
+        .zip(STATIONS)
+        .map(|(station, expected_id)| {
+            if station.id != expected_id
+                || station.version != "1"
+                || station.mutation_version != "1"
+                || !station.passed
+            {
+                return Err(test_error(
+                    "app championship receipt does not match the mandatory station ledger",
+                ));
+            }
+            Ok(StationScore {
+                id: station.id.clone(),
+                version: station.version.clone(),
+                mutation_version: station.mutation_version.clone(),
+                passed: station.passed,
+                evidence: station
+                    .evidence
+                    .iter()
+                    .map(|evidence| evidence.id.clone())
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +364,13 @@ impl StaticGauntlet {
             self.addr
         )
     }
+
+    fn championship_url(&self, seed: &str) -> String {
+        format!(
+            "http://{}/championship/?seed={seed}&difficulty=foundation",
+            self.addr
+        )
+    }
 }
 
 impl Drop for StaticGauntlet {
@@ -507,26 +556,17 @@ impl ProductionBobby {
     async fn complete_championship(&self) -> TestResult<ReleaseScorecard> {
         let started = Instant::now();
         let page_id = self.ensure_page().await?;
-        let mut stations = Vec::with_capacity(STATIONS.len());
+        self.navigate_championship(&page_id).await?;
         let mut screenshots = Vec::with_capacity(STATIONS.len());
         for station in STATIONS {
-            self.navigate_station(&page_id, station).await?;
             self.complete_station(&page_id, station).await?;
-            let receipt = self.wait_for_pass(&page_id, station).await?;
+            self.wait_for_pass(&page_id, station).await?;
             let screenshot = self.capture_screenshot(&page_id, station).await?;
-            stations.push(StationScore {
-                id: receipt.id,
-                version: receipt.version,
-                mutation_version: receipt.mutation_version,
-                passed: receipt.passed,
-                evidence: receipt
-                    .evidence
-                    .into_iter()
-                    .map(|evidence| evidence.id)
-                    .collect(),
-            });
             screenshots.push(screenshot);
         }
+        let app_scorecard = self.final_championship_receipt(&page_id).await?;
+        let stations =
+            validated_championship_stations(&app_scorecard, &manifest_digest(&self.seed))?;
         let state = self.state_store.get(&self.session_id)?;
         let recovery_proofs = self.finalize_recovery_proofs().await?;
         let strategy_changes = recovery_proofs
@@ -575,11 +615,11 @@ impl ProductionBobby {
         Ok(opened.id)
     }
 
-    async fn navigate_station(&self, page_id: &PageId, station: &str) -> TestResult<()> {
+    async fn navigate_championship(&self, page_id: &PageId) -> TestResult<()> {
         self.submit(
             page_id,
             PrimitiveCommand::Navigate(NavigateCommand {
-                url: self.gauntlet.station_url(station, &self.seed),
+                url: self.gauntlet.championship_url(&self.seed),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 15_000,
             }),
@@ -658,8 +698,12 @@ impl ProductionBobby {
                     .await?;
                 self.type_text(page_id, target_label("Email address"), "ada@example.test")
                     .await?;
-                self.type_text_selector(page_id, "select[aria-label='Plan']", "pro")
-                    .await?;
+                self.type_text_selector(
+                    page_id,
+                    "[data-station-id='semantic-form'] select[aria-label='Plan']",
+                    "pro",
+                )
+                .await?;
                 self.click(page_id, target_text("Submit form"), true)
                     .await?;
             }
@@ -703,14 +747,19 @@ impl ProductionBobby {
                 self.submit(
                     page_id,
                     PrimitiveCommand::UploadFiles(UploadFilesCommand {
-                        selector: "input[type=file]".into(),
+                        selector: "[data-station-id='file-attachment'] input[type=file]".into(),
                         target: None,
                         paths: vec![self.fixture.to_string_lossy().into_owned()],
                     }),
                 )
                 .await?;
                 tokio::time::sleep(StdDuration::from_millis(50)).await;
-                self.click_raw(page_id, "button[type=submit]", true).await?;
+                self.click_raw(
+                    page_id,
+                    "[data-station-id='file-attachment'] button[type=submit]",
+                    true,
+                )
+                .await?;
             }
             "download" => {
                 self.click(page_id, target_test_id("download-generate"), false)
@@ -719,7 +768,7 @@ impl ProductionBobby {
                     .submit(
                         page_id,
                         PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
-                            selector: "a[download]".into(),
+                            selector: "[data-station-id='download'] a[download]".into(),
                             target: None,
                             timeout_ms: 15_000,
                         }),
@@ -734,7 +783,7 @@ impl ProductionBobby {
                 self.submit(
                     page_id,
                     PrimitiveCommand::UploadFiles(UploadFilesCommand {
-                        selector: "input[type=file]".into(),
+                        selector: "[data-station-id='download'] input[type=file]".into(),
                         target: None,
                         paths: vec![path],
                     }),
@@ -886,17 +935,15 @@ impl ProductionBobby {
         Ok(())
     }
 
-    async fn wait_for_pass(
-        &self,
-        page_id: &PageId,
-        expected_station: &str,
-    ) -> TestResult<AppStationReceipt> {
+    async fn wait_for_pass(&self, page_id: &PageId, expected_station: &str) -> TestResult<()> {
         for _ in 0..80 {
             let evidence = self
                 .submit(
                     page_id,
                     PrimitiveCommand::Inspect(InspectCommand {
-                        selector: Some("[data-testid=result]".into()),
+                        selector: Some(format!(
+                            "[data-station-id='{expected_station}'] [data-testid=result]"
+                        )),
                         target: None,
                         include_html: false,
                     }),
@@ -907,40 +954,7 @@ impl ProductionBobby {
                 _ => None,
             }) {
                 if text.trim() == "Passed" {
-                    let receipt = self
-                        .submit(
-                            page_id,
-                            PrimitiveCommand::Inspect(InspectCommand {
-                                selector: Some("script[data-testid=station-scorecard]".into()),
-                                target: None,
-                                include_html: false,
-                            }),
-                        )
-                        .await?
-                        .into_iter()
-                        .find_map(|item| match item {
-                            Evidence::Inspection { text, .. } => Some(text),
-                            _ => None,
-                        })
-                        .ok_or_else(|| test_error("app scorecard receipt is missing"))?;
-                    let app: AppScorecardReceipt = serde_json::from_str(&receipt)?;
-                    if app.manifest_digest != manifest_digest(&self.seed) || app.stations.len() != 1
-                    {
-                        return Err(test_error(
-                            "app scorecard receipt is not bound to this manifest and station",
-                        ));
-                    }
-                    let station = app
-                        .stations
-                        .into_iter()
-                        .next()
-                        .expect("one app station receipt was verified");
-                    if station.id != expected_station || !station.passed {
-                        return Err(test_error(
-                            "app scorecard receipt does not verify the expected station",
-                        ));
-                    }
-                    return Ok(station);
+                    return Ok(());
                 }
                 if !text.trim().is_empty() {
                     return Err(test_error(format!("station rejected Bobby: {text}")));
@@ -949,6 +963,29 @@ impl ProductionBobby {
             tokio::time::sleep(StdDuration::from_millis(25)).await;
         }
         Err(test_error("station did not produce a verified outcome"))
+    }
+
+    async fn final_championship_receipt(
+        &self,
+        page_id: &PageId,
+    ) -> TestResult<AppScorecardReceipt> {
+        let receipt = self
+            .submit(
+                page_id,
+                PrimitiveCommand::Inspect(InspectCommand {
+                    selector: Some("script[data-testid=championship-scorecard]".into()),
+                    target: None,
+                    include_html: false,
+                }),
+            )
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::Inspection { text, .. } => Some(text),
+                _ => None,
+            })
+            .ok_or_else(|| test_error("app championship scorecard receipt is missing"))?;
+        Ok(serde_json::from_str(&receipt)?)
     }
 
     async fn capture_screenshot(
@@ -1581,6 +1618,44 @@ mod replay_contracts {
         );
         assert!(!output[0].contains(pairing_code));
         assert!(!output[0].contains("19b89d68"));
+    }
+
+    #[test]
+    fn release_gate_rejects_ten_independent_partial_receipts() {
+        let digest = manifest_digest("aggregation-seed");
+        let partials = STATIONS
+            .iter()
+            .map(|station| AppScorecardReceipt {
+                manifest_digest: digest.clone(),
+                passed: false,
+                stations: vec![AppStationReceipt {
+                    id: (*station).into(),
+                    version: "1".into(),
+                    mutation_version: "1".into(),
+                    passed: true,
+                    evidence: Vec::new(),
+                }],
+            })
+            .collect::<Vec<_>>();
+
+        for partial in &partials {
+            assert!(validated_championship_stations(partial, &digest).is_err());
+        }
+
+        let combined = AppScorecardReceipt {
+            manifest_digest: digest.clone(),
+            passed: true,
+            stations: partials
+                .into_iter()
+                .flat_map(|partial| partial.stations)
+                .collect(),
+        };
+        assert_eq!(
+            validated_championship_stations(&combined, &digest)
+                .unwrap()
+                .len(),
+            STATIONS.len()
+        );
     }
 }
 

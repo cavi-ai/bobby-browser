@@ -55,9 +55,9 @@ export function mountGauntlet(root: HTMLElement, pathname: string, search: strin
     heading.textContent = "Bobby Gauntlet";
     main.append(heading);
     if (pathname.replace(/\/+$/, "") === "/championship") {
-      for (const descriptor of controller.manifest.stations) main.append(renderSurface(document, descriptor.id as keyof ChampionshipStates, controller));
+      for (const descriptor of controller.manifest.stations) main.append(renderSurface(document, descriptor.id as keyof ChampionshipStates, controller, true));
     } else {
-      main.append(renderSurface(document, stationIdFor(pathname), controller));
+      main.append(renderSurface(document, stationIdFor(pathname), controller, false));
     }
     root.append(main);
   } catch {
@@ -65,7 +65,7 @@ export function mountGauntlet(root: HTMLElement, pathname: string, search: strin
   }
 }
 
-function renderSurface(document: Document, stationId: keyof ChampionshipStates, controller: GauntletController<ChampionshipStates>): HTMLElement {
+function renderSurface(document: Document, stationId: keyof ChampionshipStates, controller: GauntletController<ChampionshipStates>, sharedChampionship: boolean): HTMLElement {
   const station = document.createElement("section");
   station.dataset.stationId = stationId;
   const result = document.createElement("output");
@@ -80,13 +80,27 @@ function renderSurface(document: Document, stationId: keyof ChampionshipStates, 
     receipt.dataset.testid = "station-scorecard";
     receipt.textContent = JSON.stringify(controller.scorecard());
     station.append(receipt);
+    if (sharedChampionship && controller.scorecard().passed) {
+      document.querySelector("script[data-testid=championship-scorecard]")?.remove();
+      const finalReceipt = document.createElement("script");
+      finalReceipt.type = "application/json";
+      finalReceipt.dataset.testid = "championship-scorecard";
+      finalReceipt.textContent = JSON.stringify(controller.finalizeScorecard({
+        engine: "app",
+        activeSkills: [],
+        recoveryCount: 0,
+        strategyChanges: [],
+        durationMs: 0,
+      }));
+      station.append(finalReceipt);
+    }
   };
   const clearOutcome = () => {
     result.textContent = "";
     station.querySelector("script[data-testid=station-scorecard]")?.remove();
   };
   switch (stationId) {
-    case "route": renderRoute(document, station, controller, report); break;
+    case "route": renderRoute(document, station, controller, report, sharedChampionship); break;
     case "dom-drift": renderDomDrift(document, station, controller, report); break;
     case "semantic-form": renderSemanticForm(document, station, controller, report); break;
     case "validation": renderValidation(document, station, controller, report); break;
@@ -105,7 +119,7 @@ function stationIdFor(pathname: string): keyof ChampionshipStates {
   return candidate !== undefined && STATION_IDS.has(candidate) ? candidate as keyof ChampionshipStates : "route";
 }
 
-function renderRoute(document: Document, station: HTMLElement, controller: GauntletController<ChampionshipStates>, report: (result: StationResult) => void): void {
+function renderRoute(document: Document, station: HTMLElement, controller: GauntletController<ChampionshipStates>, report: (result: StationResult) => void, sharedChampionship: boolean): void {
   station.prepend(title(document, "Canonical navigation", "Follow the visible navigation control and verify that the canonical route was reached."));
   const window = document.defaultView;
   if (window !== null && window.location.pathname === "/station/route/complete/") {
@@ -116,6 +130,14 @@ function renderRoute(document: Document, station: HTMLElement, controller: Gaunt
   redirect.href = "./redirect/";
   redirect.textContent = "Follow canonical redirect";
   redirect.dataset.testid = "route-redirect";
+  if (sharedChampionship) {
+    redirect.href = controller.stateFor("route").canonicalUrl;
+    redirect.addEventListener("click", (event) => {
+      event.preventDefault();
+      window?.history.pushState(null, "", redirect.href);
+      if (window !== null) report(controller.verify("route", { url: observedPath(window) }));
+    });
+  }
   station.append(redirect);
 }
 
