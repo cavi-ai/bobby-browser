@@ -7,6 +7,15 @@ documentedVersion: 0.2.0
 ## Run the server
 
 ```bash
+cargo build -p cli
+./target/debug/bobby init
+./target/debug/bobby serve
+```
+
+Or without a pre-built binary:
+
+```bash
+cargo run -p cli -- init
 cargo run -p cli -- serve
 # or with an explicit config file:
 BOBBY_BROWSER_CONFIG=/path/to/config.toml cargo run -p cli -- serve
@@ -17,7 +26,9 @@ Then open:
 - `http://127.0.0.1:7777/healthz`
 - `http://127.0.0.1:7777/runtime`
 
-Keep the runtime on loopback or an operator-controlled boundary. Do not expose it to untrusted networks.
+On loopback, if no bootstrap env or secret file exists, `bobby serve` auto-generates
+one and prints the bearer once. Keep the runtime on loopback or an operator-controlled
+boundary. Do not expose it to untrusted networks.
 
 ## TypeScript client
 

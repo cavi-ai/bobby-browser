@@ -14,6 +14,9 @@ help:
 	@echo "test    - cargo test --workspace"
 	@echo
 	@echo "Set BOBBY_BROWSER_TOKEN to include the MCP handshake check in reload/verify."
+	@echo
+	@echo "Local CLI after build:"
+	@echo "  cargo build -p cli && ./target/debug/bobby doctor"
 
 build:
 	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p cli

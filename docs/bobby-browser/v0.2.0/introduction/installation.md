@@ -19,8 +19,28 @@ cargo build -p cli
 pnpm install
 ```
 
+The cargo package is `cli`; the binary is `bobby`:
+
+```bash
+./target/debug/bobby doctor
+```
+
 ## Bootstrap credential
 
-Supply a high-entropy bearer through a protected process input or secret manager. The runtime enrolls a SHA-256 digest of that credential at startup. Never commit the plaintext token.
+Run `bobby init` to generate a local bootstrap secret. It writes a dotenv file
+with the four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables under the OS config
+directory (`…/bobby-browser/bootstrap.env`, mode `0600` where supported). Override
+the path with `BOBBY_BROWSER_BOOTSTRAP_ENV` or `bobby init --path <file>`.
 
-Use the non-secret placeholder `$AUTOMATION_RUNTIME_TOKEN` in examples only.
+```bash
+./target/debug/bobby init
+```
+
+`bobby init` prints the plaintext bearer once. Map that value to
+`AUTOMATION_RUNTIME_TOKEN` (or `Authorization: Bearer`) for SDK clients that use
+the bootstrap principal directly. Never commit the plaintext token or put it in
+`config.toml`.
+
+You can also supply the same env contract through a protected process input or
+secret manager. Use the non-secret placeholder `$AUTOMATION_RUNTIME_TOKEN` in
+examples only.
