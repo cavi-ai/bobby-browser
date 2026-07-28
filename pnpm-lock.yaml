@@ -12,6 +12,27 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  packages/bobby-gauntlet:
+    devDependencies:
+      '@types/jsdom':
+        specifier: 28.0.3
+        version: 28.0.3
+      '@types/node':
+        specifier: 24.10.1
+        version: 24.10.1
+      esbuild:
+        specifier: 0.28.1
+        version: 0.28.1
+      jsdom:
+        specifier: 29.1.1
+        version: 29.1.1
+      tsx:
+        specifier: 4.23.1
+        version: 4.23.1
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
   packages/firefox-companion:
     devDependencies:
       '@types/jsdom':
