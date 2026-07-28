@@ -424,6 +424,7 @@ name = "cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "artifact-store",
  "async-trait",
  "broker",
  "companion-core",
@@ -705,12 +706,17 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 name = "firefox-companion"
 version = "0.2.0"
 dependencies = [
+ "artifact-store",
  "async-trait",
+ "base64",
  "companion-core",
  "companion-protocol",
+ "dom-engine",
  "futures-util",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "types",
@@ -1954,6 +1960,7 @@ dependencies = [
  "cli",
  "companion-protocol",
  "config",
+ "firefox-companion",
  "futures-util",
  "intent-engine",
  "interface-conformance",

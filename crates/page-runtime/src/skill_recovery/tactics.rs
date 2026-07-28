@@ -742,7 +742,7 @@ impl SkillRecoveryCoordinator {
         let lease = self.workers.lease(envelope.session_id.clone()).await?;
         let inspect = match &envelope.command {
             RuntimeCommand::Primitive(PrimitiveCommand::TypeText(command)) => InspectCommand {
-                selector: Some(command.selector.clone()),
+                selector: (!command.selector.is_empty()).then(|| command.selector.clone()),
                 target: command.target.clone(),
                 include_html: false,
             },

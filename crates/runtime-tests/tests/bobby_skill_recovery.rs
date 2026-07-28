@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use companion_protocol::BrowserEngine;
 use page_runtime::{RecoveryCoordinator, RecoveryPreflightObserver, SkillRecoveryCoordinator};
 use skill_runtime::{SkillStateStore, SkillZigZagZig};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandEnvelope,
     CommandError, CommandId, CommandOutcome, ErrorCode, ErrorLayer, Evidence, InspectCommand,
@@ -50,6 +50,11 @@ struct CheckpointSwapObserver {
     replacement: Vec<u8>,
 }
 
+struct BlockingCheckpointObserver {
+    reached: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
 struct FailingJournal {
     inner: JsonlJournal,
     failures: Arc<AtomicUsize>,
@@ -83,6 +88,14 @@ impl RecoveryPreflightObserver for CheckpointSwapObserver {
         tokio::fs::write(&self.path, &self.replacement)
             .await
             .unwrap();
+    }
+}
+
+#[async_trait]
+impl RecoveryPreflightObserver for BlockingCheckpointObserver {
+    async fn checkpoint_verified(&self) {
+        self.reached.notify_one();
+        self.resume.notified().await;
     }
 }
 
@@ -683,10 +696,14 @@ async fn invalid_persisted_checkpoint_evidence_blocks_fresh_session_before_relea
     assert!(matches!(
         execution.skill_outcome,
         SkillOutcome::Failed {
-            failure: types::SkillFailure::CheckpointMismatch,
+            failure: types::SkillFailure::TargetDrift,
             ..
         }
     ));
+    assert!(execution
+        .tactic_evidence
+        .iter()
+        .all(|evidence| { evidence.trigger == types::SkillFailure::TargetDrift }));
 }
 
 #[tokio::test]
@@ -728,10 +745,14 @@ async fn invalid_persisted_checkpoint_evidence_blocks_engine_replacement() {
     assert!(matches!(
         execution.skill_outcome,
         SkillOutcome::Failed {
-            failure: types::SkillFailure::CheckpointMismatch,
+            failure: types::SkillFailure::TargetDrift,
             ..
         }
     ));
+    assert!(execution
+        .tactic_evidence
+        .iter()
+        .all(|evidence| { evidence.trigger == types::SkillFailure::TargetDrift }));
 }
 
 #[tokio::test]
@@ -765,10 +786,14 @@ async fn same_checkpoint_id_content_swap_blocks_pool_mutation() {
     assert!(matches!(
         execution.skill_outcome,
         SkillOutcome::Failed {
-            failure: types::SkillFailure::CheckpointMismatch,
+            failure: types::SkillFailure::TargetDrift,
             ..
         }
     ));
+    assert!(execution
+        .tactic_evidence
+        .iter()
+        .all(|evidence| { evidence.trigger == types::SkillFailure::TargetDrift }));
 }
 
 #[tokio::test]
@@ -1587,6 +1612,13 @@ async fn issued_identity_survives_receipt_write_failure_and_reconciles_only_exac
         0,
     )
     .await;
+    let preflight_reached = Arc::new(Notify::new());
+    let preflight_resume = Arc::new(Notify::new());
+    let coordinator =
+        coordinator.with_recovery_preflight_observer(Arc::new(BlockingCheckpointObserver {
+            reached: Arc::clone(&preflight_reached),
+            resume: Arc::clone(&preflight_resume),
+        }));
     let checkpoint_root = journal_path.parent().unwrap().join("checkpoints");
     let checkpoint_store = CheckpointStore::open(&checkpoint_root).await.unwrap();
     let locked = checkpoint_store
@@ -1601,21 +1633,20 @@ async fn issued_identity_survives_receipt_write_failure_and_reconciles_only_exac
         let page = page.clone();
         async move { coordinator.execute_with_adaptation(&envelope, page).await }
     });
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if state_store
-                .get(&envelope.session_id)
-                .unwrap()
-                .pending_issuance
-                .is_some()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        preflight_reached.notified(),
+    )
     .await
-    .expect("issued decision must be durably visible before receipt persistence");
+    .expect("recovery must pause after checkpoint verification");
+    assert!(
+        state_store
+            .get(&envelope.session_id)
+            .unwrap()
+            .pending_issuance
+            .is_some(),
+        "issued decision must be durably visible before receipt persistence"
+    );
     assert!(
         CheckpointStore::open(&checkpoint_root)
             .await
@@ -1628,6 +1659,7 @@ async fn issued_identity_survives_receipt_write_failure_and_reconciles_only_exac
     );
     tokio::fs::write(&checkpoint_path, b"{").await.unwrap();
     drop(locked);
+    preflight_resume.notify_one();
     assert!(first.await.unwrap().is_err());
     tokio::fs::write(&checkpoint_path, valid_checkpoint)
         .await

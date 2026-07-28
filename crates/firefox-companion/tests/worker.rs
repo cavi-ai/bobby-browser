@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use companion_core::AttachmentLease;
 use companion_protocol::{BrowserEngine, BrowserIdentity, CompanionCapabilities, InteractionPath};
@@ -18,9 +19,10 @@ use firefox_companion::{
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Notify};
 use types::{
-    AttachmentId, ClickCommand, ClosePageCommand, CommandError, CompanionId, ErrorCode, ErrorLayer,
-    Evidence, InspectCommand, NavigateCommand, OpenPageCommand, PageId, ProfileId, TypeTextCommand,
-    WaitUntil, WorkerId,
+    AttachmentId, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
+    ClosePageCommand, CommandError, CompanionId, ErrorCode, ErrorLayer, Evidence, InspectCommand,
+    NavigateCommand, OpenPageCommand, PageId, ProfileId, SessionId, TextMatch, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 use worker_pool::BrowserWorker;
 
@@ -33,6 +35,7 @@ struct BidiCall {
 struct FakeBidi {
     calls: Mutex<Vec<BidiCall>>,
     scripted: Mutex<VecDeque<Result<Value, CommandError>>>,
+    preflight: Mutex<VecDeque<Result<Value, CommandError>>>,
     blocked: Mutex<Option<BlockedSend>>,
     subscribe_error: Mutex<Option<CommandError>>,
     subscribe_response: Mutex<Value>,
@@ -62,6 +65,7 @@ impl FakeBidi {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             scripted: Mutex::new(scripted.into()),
+            preflight: Mutex::new(VecDeque::new()),
             blocked: Mutex::new(None),
             subscribe_error: Mutex::new(None),
             subscribe_response: Mutex::new(json!({})),
@@ -114,6 +118,10 @@ impl FakeBidi {
 
     async fn calls(&self) -> Vec<BidiCall> {
         self.calls.lock().await.clone()
+    }
+
+    async fn set_preflight(&self, responses: Vec<Result<Value, CommandError>>) {
+        *self.preflight.lock().await = responses.into();
     }
 
     async fn title(&self, context: &str) -> Option<String> {
@@ -214,6 +222,15 @@ impl BidiTransport for FakeBidi {
         }
         if method == "browsingContext.getTree" {
             return Ok(self.tree.lock().await.clone());
+        }
+        if method == "script.callFunction" {
+            if let Some(response) = self.preflight.lock().await.pop_front() {
+                return response;
+            }
+            let shared_id = params["arguments"][0]["sharedId"]
+                .as_str()
+                .unwrap_or("preflight-element");
+            return Ok(json!({"result": {"type": "node", "sharedId": shared_id}}));
         }
         if let Some(response) = self.scripted.lock().await.pop_front() {
             if method == "browsingContext.create" {
@@ -586,6 +603,7 @@ fn observation() -> ExtensionObservation {
         visible_text: "Observed text".into(),
         controls: vec![ExtensionControl {
             css_path: "#confirm".into(),
+            test_id: Some("confirm".into()),
             role: Some("button".into()),
             name: Some("Confirm".into()),
             label: None,
@@ -659,7 +677,7 @@ async fn worker_subscribes_to_context_destruction_before_exposure_and_propagates
         bidi.calls().await,
         vec![BidiCall {
             method: "session.subscribe".into(),
-            params: json!({"events": ["browsingContext.contextDestroyed"]}),
+            params: json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd"]}),
         }]
     );
 }
@@ -1197,6 +1215,37 @@ async fn inspect_evaluates_in_isolated_realm_and_uses_extension_observation() {
 }
 
 #[tokio::test]
+async fn inspect_reads_only_bounded_inert_json_script_receipts() {
+    let receipt = r#"{"manifestDigest":"abc","stations":[]}"#;
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "boolean", "value": true}})),
+        Ok(json!({"result": {"type": "string", "value": receipt}})),
+    ]);
+    let observer = FakeObserver::new(observation());
+    let worker = worker(bidi, observer.clone()).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .inspect(
+            &page,
+            &InspectCommand {
+                selector: Some("script[data-testid=station-scorecard]".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::Inspection { text, .. } if text == receipt)));
+    assert_eq!(observer.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
@@ -1221,20 +1270,859 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[6].method, "input.performActions");
-    assert_eq!(calls[6].params["context"], "context-1");
-    assert_eq!(calls[6].params["actions"][0]["type"], "pointer");
+    assert_eq!(calls[6].method, "script.callFunction");
+    assert_eq!(calls[7].method, "input.performActions");
+    assert_eq!(calls[7].params["context"], "context-1");
+    assert_eq!(calls[7].params["actions"][0]["type"], "pointer");
     assert_eq!(
-        calls[6].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        calls[7].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
         "element-1"
     );
     assert_engine_native(&evidence);
 }
 
 #[tokio::test]
+async fn native_click_scrolls_and_revalidates_a_below_fold_element_before_pointer_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "below-fold"}})),
+        Ok(json!({})),
+    ]);
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "node",
+        "sharedId": "below-fold-after-scroll"
+    }}))])
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: "#below-fold".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    let preflight = calls
+        .iter()
+        .find(|call| call.method == "script.callFunction")
+        .expect("native click must preflight the live element");
+    assert_eq!(preflight.params["arguments"][0]["sharedId"], "below-fold");
+    assert!(preflight.params["functionDeclaration"]
+        .as_str()
+        .unwrap()
+        .contains("scrollIntoView"));
+    let pointer = calls
+        .iter()
+        .find(|call| call.method == "input.performActions")
+        .unwrap();
+    assert_eq!(
+        pointer.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        "below-fold-after-scroll"
+    );
+}
+
+#[tokio::test]
+async fn native_click_fails_typed_without_pointer_input_when_target_detaches_after_scroll() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "detaching"}})),
+    ]);
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "string",
+        "value": "detached"
+    }}))])
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let error = worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: "#detaching".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::TargetDetached);
+    assert!(!bidi
+        .calls()
+        .await
+        .iter()
+        .any(|call| call.method == "input.performActions"));
+}
+
+#[tokio::test]
+async fn native_click_fails_typed_for_obscured_and_out_of_bounds_targets() {
+    for (status, expected) in [
+        ("obscured", ErrorCode::TargetObscured),
+        ("out-of-bounds", ErrorCode::TargetOutOfBounds),
+    ] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "node", "sharedId": "blocked"}})),
+        ]);
+        bidi.set_preflight(vec![Ok(json!({"result": {
+            "type": "string",
+            "value": status
+        }}))])
+        .await;
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker.open_page(page.clone()).await.unwrap();
+
+        let error = worker
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: "#blocked".into(),
+                    target: None,
+                    boundary: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, expected, "preflight status: {status}");
+        assert!(!bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| call.method == "input.performActions"));
+    }
+}
+
+#[tokio::test]
+async fn semantic_click_resolves_test_id_to_verified_css_before_native_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "element-1"}})),
+        Ok(json!({})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(types::TargetSpec {
+                    test_id: Some("confirm".into()),
+                    ..Default::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    assert!(calls[5].params["expression"]
+        .as_str()
+        .unwrap()
+        .contains("[data-testid=\\\"confirm\\\"]"));
+    assert_eq!(calls[6].method, "script.callFunction");
+    assert_eq!(calls[7].method, "input.performActions");
+}
+
+#[tokio::test]
+async fn semantic_click_missing_live_node_is_typed_as_target_drift_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "null"}})),
+    ]);
+    let worker = worker(bidi, FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let error = worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(types::TargetSpec {
+                    test_id: Some("initial-target".into()),
+                    ..Default::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+}
+
+#[tokio::test]
+async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "frame-button"}})),
+        Ok(json!({})),
+    ]);
+    bidi.set_tree(json!({"contexts": [{
+        "context": "context-1",
+        "children": [{"context": "frame-context", "children": []}]
+    }]}))
+    .await;
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "node",
+        "sharedId": "frame-button-after-scroll"
+    }}))])
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(types::TargetSpec {
+                    test_id: Some("iframe-submit".into()),
+                    frame_path: vec![Box::new(types::TargetSpec {
+                        test_id: Some("iframe-challenge".into()),
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "browsingContext.getTree"));
+    let preflight = calls
+        .iter()
+        .find(|call| call.method == "script.callFunction")
+        .expect("frame click must preflight in the child context");
+    assert_eq!(preflight.params["target"]["context"], "frame-context");
+    let click = calls
+        .iter()
+        .find(|call| call.method == "input.performActions")
+        .unwrap();
+    assert_eq!(click.params["context"], "frame-context");
+    assert_eq!(
+        click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        "frame-button-after-scroll"
+    );
+}
+
+#[tokio::test]
+async fn semantic_frame_path_rejects_missing_ambiguous_and_non_frame_segments() {
+    for (probe, expected) in [
+        ("missing", ErrorCode::FrameNotFound),
+        ("ambiguous", ErrorCode::TargetAmbiguous),
+        ("non-frame", ErrorCode::FrameNotFound),
+    ] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "string", "value": probe}})),
+        ]);
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker.open_page(page.clone()).await.unwrap();
+
+        let error = worker
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: String::new(),
+                    target: Some(types::TargetSpec {
+                        test_id: Some("iframe-submit".into()),
+                        frame_path: vec![Box::new(types::TargetSpec {
+                            test_id: Some("iframe-challenge".into()),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    boundary: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, expected, "frame probe result: {probe}");
+        assert!(!bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| call.method == "input.performActions"));
+    }
+}
+
+#[tokio::test]
+async fn semantic_click_descends_exact_open_shadow_root_before_native_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "shadow-button"}})),
+        Ok(json!({})),
+    ]);
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "node",
+        "sharedId": "shadow-button-after-scroll"
+    }}))])
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(types::TargetSpec {
+                    test_id: Some("shadow-submit".into()),
+                    shadow_path: vec![Box::new(types::TargetSpec {
+                        test_id: Some("shadow-host".into()),
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }),
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    let probe = calls
+        .iter()
+        .find(|call| {
+            call.method == "script.evaluate"
+                && call.params["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains("shadowRoot"))
+        })
+        .unwrap();
+    let expression = probe.params["expression"].as_str().unwrap();
+    assert!(expression.contains("shadow-host"));
+    assert!(expression.contains("shadow-submit"));
+    let click = calls
+        .iter()
+        .find(|call| call.method == "input.performActions")
+        .unwrap();
+    assert_eq!(
+        click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        "shadow-button-after-scroll"
+    );
+}
+
+#[tokio::test]
+async fn semantic_shadow_path_rejects_missing_closed_and_ambiguous_roots() {
+    for (probe, expected) in [
+        ("host-missing", ErrorCode::ShadowRootUnavailable),
+        ("shadow-unavailable", ErrorCode::ShadowRootUnavailable),
+        ("host-ambiguous", ErrorCode::TargetAmbiguous),
+        ("target-missing", ErrorCode::TargetNotFound),
+        ("target-ambiguous", ErrorCode::TargetAmbiguous),
+    ] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "string", "value": probe}})),
+        ]);
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker.open_page(page.clone()).await.unwrap();
+        let error = worker
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: String::new(),
+                    target: Some(types::TargetSpec {
+                        test_id: Some("shadow-submit".into()),
+                        shadow_path: vec![Box::new(types::TargetSpec {
+                            test_id: Some("shadow-host".into()),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    boundary: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, expected, "shadow probe result: {probe}");
+        assert!(!bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| call.method == "input.performActions"));
+    }
+}
+
+#[tokio::test]
+async fn popup_subscription_precedes_one_native_click_and_registers_the_new_page() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "popup-button"}})),
+        Ok(json!({})),
+    ]);
+    let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let operation = {
+        let worker = Arc::clone(&worker);
+        let page = page.clone();
+        tokio::spawn(async move {
+            worker
+                .click_and_wait_for_popup(
+                    &page,
+                    &ClickAndWaitForPopupCommand {
+                        selector: String::new(),
+                        target: Some(types::TargetSpec {
+                            test_id: Some("popup-open".into()),
+                            ..Default::default()
+                        }),
+                        timeout_ms: 1_000,
+                    },
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if bidi
+                .calls()
+                .await
+                .iter()
+                .any(|call| call.method == "input.performActions")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    bidi.emit(
+        "browsingContext.contextCreated",
+        json!({
+            "context": "popup-context",
+            "url": "https://example.test/popup",
+            "originalOpener": "context-1",
+            "parent": null
+        }),
+    );
+    let evidence = operation.await.unwrap().unwrap();
+    let popup_page = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Popup { page_id, .. } => Some(page_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    worker
+        .inspect(&popup_page, &InspectCommand::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "input.performActions")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn popup_timeout_never_replays_the_boundary_click() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "popup-button"}})),
+        Ok(json!({})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let error = worker
+        .click_and_wait_for_popup(
+            &page,
+            &ClickAndWaitForPopupCommand {
+                selector: String::new(),
+                target: Some(types::TargetSpec {
+                    test_id: Some("popup-open".into()),
+                    ..Default::default()
+                }),
+                timeout_ms: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WaitConditionTimedOut);
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "input.performActions")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn popup_capture_ignores_unrelated_contexts_and_handles_event_during_click() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "popup-button"}})),
+        Ok(json!({})),
+    ]);
+    let click = bidi.block_once("input.performActions", None).await;
+    let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let operation = {
+        let worker = Arc::clone(&worker);
+        let page = page.clone();
+        tokio::spawn(async move {
+            worker
+                .click_and_wait_for_popup(
+                    &page,
+                    &ClickAndWaitForPopupCommand {
+                        selector: String::new(),
+                        target: Some(types::TargetSpec {
+                            test_id: Some("popup-open".into()),
+                            ..Default::default()
+                        }),
+                        timeout_ms: 1_000,
+                    },
+                )
+                .await
+        })
+    };
+    click.started.notified().await;
+    bidi.emit(
+        "browsingContext.contextCreated",
+        json!({"context": "unrelated", "originalOpener": "other"}),
+    );
+    bidi.emit(
+        "browsingContext.contextCreated",
+        json!({
+            "context": "popup-context",
+            "url": "https://example.test/popup",
+            "originalOpener": "context-1"
+        }),
+    );
+    click.release.notify_one();
+    assert!(operation.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn upload_uses_bidi_set_files_and_returns_only_opaque_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("fixture.txt");
+    std::fs::write(&file, b"approved fixture").unwrap();
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "valid"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "file-input"}})),
+        Ok(json!({})),
+        Ok(json!({"result": {"type": "number", "value": 1}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation()))
+        .await
+        .with_upload_roots(vec![root.path().to_path_buf()]);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .upload_files(
+            &page,
+            &UploadFilesCommand {
+                selector: "input[type=file]".into(),
+                target: None,
+                paths: vec![file.to_string_lossy().into_owned()],
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    let set_files = calls
+        .iter()
+        .find(|call| call.method == "input.setFiles")
+        .unwrap();
+    assert_eq!(set_files.params["element"]["sharedId"], "file-input");
+    let serialized = serde_json::to_string(&evidence).unwrap();
+    assert!(!serialized.contains(root.path().to_string_lossy().as_ref()));
+    assert!(serialized.contains("upload://sha256/"));
+}
+
+#[tokio::test]
+async fn download_correlates_bidi_events_after_one_click_and_returns_artifact_ref() {
+    let root = tempfile::tempdir().unwrap();
+    let artifacts = ArtifactStore::new(root.path().join("artifacts"), 1024 * 1024, 4096);
+    let downloads = root.path().join("downloads");
+    let session = SessionId::new();
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({})),
+        Ok(json!({"result": {"type": "node", "sharedId": "download-link"}})),
+        Ok(json!({})),
+        Ok(json!({"result": {"type": "string", "value": "valid"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "file-input"}})),
+        Ok(json!({})),
+        Ok(json!({"result": {"type": "number", "value": 1}})),
+    ]);
+    let worker = Arc::new(
+        worker(bidi.clone(), FakeObserver::new(observation()))
+            .await
+            .with_runtime_storage(session.clone(), artifacts, downloads.clone()),
+    );
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let operation = {
+        let worker = Arc::clone(&worker);
+        let page = page.clone();
+        tokio::spawn(async move {
+            worker
+                .click_and_wait_for_download(
+                    &page,
+                    &ClickAndWaitForDownloadCommand {
+                        selector: "a[download]".into(),
+                        target: None,
+                        timeout_ms: 1_000,
+                    },
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if bidi
+                .calls()
+                .await
+                .iter()
+                .any(|call| call.method == "input.performActions")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let destination = downloads.join(session.0.to_string());
+    std::fs::write(destination.join("receipt.txt"), b"download fixture").unwrap();
+    bidi.emit(
+        "browsingContext.downloadWillBegin",
+        json!({
+            "context": "context-1", "navigation": null, "suggestedFilename": "receipt.txt"
+        }),
+    );
+    bidi.emit(
+        "browsingContext.downloadEnd",
+        json!({
+            "context": "context-1", "navigation": null, "status": "complete"
+        }),
+    );
+    let evidence = operation.await.unwrap().unwrap();
+    let serialized = serde_json::to_string(&evidence).unwrap();
+    assert!(serialized.contains("artifact://"));
+    assert!(!serialized.contains(downloads.to_string_lossy().as_ref()));
+    let artifact_ref = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Download { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let upload = worker
+        .upload_files(
+            &page,
+            &UploadFilesCommand {
+                selector: "input[type=file]".into(),
+                target: None,
+                paths: vec![artifact_ref],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!serde_json::to_string(&upload)
+        .unwrap()
+        .contains(downloads.to_string_lossy().as_ref()));
+    assert_eq!(
+        bidi.calls()
+            .await
+            .iter()
+            .filter(|call| call.method == "input.performActions")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn semantic_type_text_resolves_exact_label_before_native_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "not-select"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "element-1"}})),
+        Ok(json!({})),
+        Ok(json!({})),
+    ]);
+    let mut observed = observation();
+    observed.controls[0].label = Some("Full name".into());
+    let worker = worker(bidi.clone(), FakeObserver::new(observed)).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .type_text(
+            &page,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(types::TargetSpec {
+                    label: Some("Full name".into()),
+                    ..Default::default()
+                }),
+                value: "Ada".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    assert!(calls[5].params["expression"]
+        .as_str()
+        .unwrap()
+        .contains("#confirm"));
+    assert_eq!(calls[7].method, "script.callFunction");
+    assert_eq!(calls[8].method, "input.performActions");
+}
+
+#[tokio::test]
+async fn semantic_inspect_resolves_label_and_returns_sanitized_control_value() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+    let mut observed = observation();
+    observed.visible_text.clear();
+    observed.controls[0].label = Some("Full name".into());
+    observed.controls[0].value = Some("Ada Lovelace".into());
+    let observer = FakeObserver::new(observed);
+    let worker = worker(bidi, observer.clone()).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .inspect(
+            &page,
+            &InspectCommand {
+                selector: None,
+                target: Some(types::TargetSpec {
+                    label: Some("Full name".into()),
+                    ..Default::default()
+                }),
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::Inspection { text, .. } if text == "Ada Lovelace")));
+    assert_eq!(observer.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn raw_css_select_inspect_prefers_machine_value_over_visible_option_label() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+    let mut observed = observation();
+    observed.visible_text = "Pro".into();
+    observed.controls[0].role = Some("combobox".into());
+    observed.controls[0].name = Some("Plan".into());
+    observed.controls[0].value = Some("pro".into());
+    let worker = worker(bidi, FakeObserver::new(observed)).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .inspect(
+            &page,
+            &InspectCommand {
+                selector: Some("select[aria-label='Plan']".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::Inspection { text, .. } if text == "pro")));
+}
+
+#[tokio::test]
+async fn wait_for_url_uses_exact_bounded_matcher_semantics() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(
+            json!({"result": {"type": "string", "value": "https://example.test/page?checkpoint=7"}}),
+        ),
+    ]);
+    let worker = worker(bidi, FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .wait_for(
+            &page,
+            &WaitForCommand {
+                condition: WaitCondition::Url {
+                    matcher: TextMatch::Contains("/page".into()),
+                },
+                timeout_ms: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        evidence.as_slice(),
+        [Evidence::Wait {
+            observations: 1,
+            ..
+        }]
+    ));
+}
+
+#[tokio::test]
 async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evidence() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "not-select"}})),
         Ok(json!({"result": {"type": "node", "sharedId": "element-1"}})),
         Ok(json!({})),
         Ok(json!({})),
@@ -1257,11 +2145,12 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[6].method, "input.performActions");
-    assert_eq!(calls[6].params["actions"][0]["type"], "pointer");
-    assert_eq!(calls[7].method, "input.performActions");
-    assert_eq!(calls[7].params["actions"][0]["type"], "key");
-    let keys = calls[7].params["actions"][0]["actions"].as_array().unwrap();
+    assert_eq!(calls[7].method, "script.callFunction");
+    assert_eq!(calls[8].method, "input.performActions");
+    assert_eq!(calls[8].params["actions"][0]["type"], "pointer");
+    assert_eq!(calls[9].method, "input.performActions");
+    assert_eq!(calls[9].params["actions"][0]["type"], "key");
+    let keys = calls[9].params["actions"][0]["actions"].as_array().unwrap();
     assert!(keys.iter().any(|action| action["value"] == "a"));
     assert!(keys.iter().any(|action| action["value"] == "\u{e003}"));
     assert!(keys.iter().any(|action| action["value"] == "H"));
@@ -1271,6 +2160,87 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
         Evidence::Element { text: Some(text), .. } if text == "Hi"
     )));
     assert_engine_native(&evidence);
+}
+
+#[tokio::test]
+async fn type_text_selects_an_exact_option_value_without_keyboard_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "selected"}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .type_text(
+            &page,
+            &TypeTextCommand {
+                selector: "select[aria-label='Plan']".into(),
+                target: None,
+                value: "pro".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    assert!(calls.iter().any(|call| {
+        call.method == "script.evaluate"
+            && call.params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("HTMLSelectElement"))
+    }));
+    assert!(!calls
+        .iter()
+        .any(|call| call.method == "input.performActions"));
+    let expected = serde_json::to_value(InteractionPath::ExtensionApi)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::BrowserExecution { interaction_path, .. } if interaction_path == &expected
+    )));
+}
+
+#[tokio::test]
+async fn type_text_select_reports_missing_disabled_and_ambiguous_options() {
+    for (result, expected_code) in [
+        ("missing", ErrorCode::TargetNotFound),
+        ("disabled", ErrorCode::TargetNotFound),
+        ("ambiguous", ErrorCode::TargetAmbiguous),
+    ] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "string", "value": result}})),
+        ]);
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker.open_page(page.clone()).await.unwrap();
+
+        let error = worker
+            .type_text(
+                &page,
+                &TypeTextCommand {
+                    selector: "select[aria-label='Plan']".into(),
+                    target: None,
+                    value: "pro".into(),
+                    clear_first: true,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, expected_code, "select probe result: {result}");
+        assert!(!bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| call.method == "input.performActions"));
+    }
 }
 
 #[tokio::test]
@@ -1346,6 +2316,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
             "script.evaluate",
             "script.evaluate",
             "script.evaluate",
+            "script.callFunction",
             "input.performActions"
         ]
     );

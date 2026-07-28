@@ -18,6 +18,11 @@ async fn server_socket(listener: TcpListener) -> ServerSocket {
     accept_async(stream).await.expect("accept websocket")
 }
 
+async fn next_server_socket(listener: &TcpListener) -> ServerSocket {
+    let (stream, _) = listener.accept().await.expect("accept connection");
+    accept_async(stream).await.expect("accept websocket")
+}
+
 async fn recv_json(socket: &mut ServerSocket) -> Value {
     let message = socket
         .next()
@@ -59,6 +64,50 @@ async fn session_connection_negotiates_a_bidi_session_before_use() {
         )
         .await;
     });
+
+    BidiClient::connect_session(url, Duration::from_secs(1))
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ending_session_releases_the_single_session_slot_before_handoff() {
+    let (listener, url) = listener_url().await;
+    let server = tokio::spawn(async move {
+        let mut first = next_server_socket(&listener).await;
+        let session_new = recv_json(&mut first).await;
+        assert_eq!(session_new["method"], "session.new");
+        send_json(
+            &mut first,
+            json!({"id": session_new["id"], "type": "success", "result": {"sessionId": "installer", "capabilities": {}}}),
+        )
+        .await;
+
+        let session_end = recv_json(&mut first).await;
+        assert_eq!(session_end["method"], "session.end");
+        assert_eq!(session_end["params"], json!({}));
+        send_json(
+            &mut first,
+            json!({"id": session_end["id"], "type": "success", "result": {}}),
+        )
+        .await;
+        drop(first);
+
+        let mut second = next_server_socket(&listener).await;
+        let handoff = recv_json(&mut second).await;
+        assert_eq!(handoff["method"], "session.new");
+        send_json(
+            &mut second,
+            json!({"id": handoff["id"], "type": "success", "result": {"sessionId": "runtime", "capabilities": {}}}),
+        )
+        .await;
+    });
+
+    let installer = BidiClient::connect_session(url.clone(), Duration::from_secs(1))
+        .await
+        .unwrap();
+    installer.end_session().await.unwrap();
 
     BidiClient::connect_session(url, Duration::from_secs(1))
         .await
@@ -141,18 +190,16 @@ async fn events_are_delivered_independently_of_command_responses() {
 }
 
 #[tokio::test]
-async fn deadline_removes_pending_correlation_without_poisoning_the_client() {
+async fn response_deadline_terminates_the_uncertain_session_before_replacement() {
     let (listener, url) = listener_url().await;
     let server = tokio::spawn(async move {
         let mut socket = server_socket(listener).await;
         let first = recv_json(&mut socket).await;
         assert_eq!(first["method"], "never.respond");
-        let second = recv_json(&mut socket).await;
-        send_json(
-            &mut socket,
-            json!({"id": second["id"], "type": "success", "result": {"alive": true}}),
-        )
-        .await;
+        let closed = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .expect("transport closes promptly after a response deadline");
+        assert!(matches!(closed, None | Some(Ok(Message::Close(_)))));
     });
 
     let client = BidiClient::connect(url, Duration::from_millis(100))
@@ -162,11 +209,16 @@ async fn deadline_removes_pending_correlation_without_poisoning_the_client() {
     assert_eq!(error.code, ErrorCode::DeadlineExceeded);
     assert_eq!(error.layer, ErrorLayer::Driver);
     assert!(error.retryable);
-
     assert_eq!(
-        client.send("still.alive", json!({})).await.unwrap(),
-        json!({"alive": true})
+        error.message,
+        "Firefox BiDi never.respond response deadline exceeded"
     );
+
+    let follow_up = client.send("must.replace", json!({})).await.unwrap_err();
+    assert_eq!(follow_up.code, ErrorCode::DeadlineExceeded);
+    assert_eq!(follow_up.layer, ErrorLayer::Driver);
+    assert!(follow_up.retryable);
+    assert_eq!(follow_up.message, error.message);
     server.await.unwrap();
 }
 
