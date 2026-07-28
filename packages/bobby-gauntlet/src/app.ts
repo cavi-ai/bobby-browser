@@ -55,9 +55,9 @@ export function mountGauntlet(root: HTMLElement, pathname: string, search: strin
     heading.textContent = "Bobby Gauntlet";
     main.append(heading);
     if (pathname.replace(/\/+$/, "") === "/championship") {
-      for (const descriptor of controller.manifest.stations) main.append(renderSurface(document, descriptor.id as keyof ChampionshipStates, controller));
+      for (const descriptor of controller.manifest.stations) main.append(renderSurface(document, descriptor.id as keyof ChampionshipStates, controller, true));
     } else {
-      main.append(renderSurface(document, stationIdFor(pathname), controller));
+      main.append(renderSurface(document, stationIdFor(pathname), controller, false));
     }
     root.append(main);
   } catch {
@@ -65,7 +65,7 @@ export function mountGauntlet(root: HTMLElement, pathname: string, search: strin
   }
 }
 
-function renderSurface(document: Document, stationId: keyof ChampionshipStates, controller: GauntletController<ChampionshipStates>): HTMLElement {
+function renderSurface(document: Document, stationId: keyof ChampionshipStates, controller: GauntletController<ChampionshipStates>, sharedChampionship: boolean): HTMLElement {
   const station = document.createElement("section");
   station.dataset.stationId = stationId;
   const result = document.createElement("output");
@@ -80,13 +80,27 @@ function renderSurface(document: Document, stationId: keyof ChampionshipStates, 
     receipt.dataset.testid = "station-scorecard";
     receipt.textContent = JSON.stringify(controller.scorecard());
     station.append(receipt);
+    if (sharedChampionship && controller.scorecard().passed) {
+      document.querySelector("script[data-testid=championship-scorecard]")?.remove();
+      const finalReceipt = document.createElement("script");
+      finalReceipt.type = "application/json";
+      finalReceipt.dataset.testid = "championship-scorecard";
+      finalReceipt.textContent = JSON.stringify(controller.finalizeScorecard({
+        engine: "app",
+        activeSkills: [],
+        recoveryCount: 0,
+        strategyChanges: [],
+        durationMs: 0,
+      }));
+      station.append(finalReceipt);
+    }
   };
   const clearOutcome = () => {
     result.textContent = "";
     station.querySelector("script[data-testid=station-scorecard]")?.remove();
   };
   switch (stationId) {
-    case "route": renderRoute(document, station, controller, report); break;
+    case "route": renderRoute(document, station, controller, report, sharedChampionship); break;
     case "dom-drift": renderDomDrift(document, station, controller, report); break;
     case "semantic-form": renderSemanticForm(document, station, controller, report); break;
     case "validation": renderValidation(document, station, controller, report); break;
@@ -105,8 +119,30 @@ function stationIdFor(pathname: string): keyof ChampionshipStates {
   return candidate !== undefined && STATION_IDS.has(candidate) ? candidate as keyof ChampionshipStates : "route";
 }
 
-function renderRoute(document: Document, station: HTMLElement, controller: GauntletController<ChampionshipStates>, report: (result: StationResult) => void): void {
+function renderRoute(document: Document, station: HTMLElement, controller: GauntletController<ChampionshipStates>, report: (result: StationResult) => void, sharedChampionship: boolean): void {
   station.prepend(title(document, "Canonical navigation", "Follow the visible navigation control and verify that the canonical route was reached."));
+  if (sharedChampionship) {
+    const frame = document.createElement("iframe");
+    frame.dataset.testid = "route-challenge";
+    frame.title = "Canonical navigation challenge";
+    frame.src = `/station/route/?seed=${encodeURIComponent(controller.manifest.seed)}&difficulty=${encodeURIComponent(controller.manifest.difficulty)}`;
+    frame.addEventListener("load", () => {
+      try {
+        const child = frame.contentWindow;
+        if (child === null) return;
+        const path = observedPath(child);
+        if (child.location.pathname === "/station/route/complete/") {
+          report(controller.verify("route", { url: path }));
+        } else if (child.location.pathname !== "/station/route/" && child.location.pathname !== "/station/route/redirect/") {
+          report(controller.verify("route", { url: path }));
+        }
+      } catch {
+        report(controller.verify("route", {}));
+      }
+    });
+    station.append(frame);
+    return;
+  }
   const window = document.defaultView;
   if (window !== null && window.location.pathname === "/station/route/complete/") {
     report(controller.verify("route", { url: observedPath(window) }));
@@ -139,11 +175,14 @@ function renderSemanticForm(document: Document, station: HTMLElement, controller
   form.append(title(document, "Semantic form", "Complete the form by the meaning of each labelled control."));
   const name = labelledInput(document, "Full name", state.fields.name, "text");
   const email = labelledInput(document, "Email address", state.fields.email, "email");
+  name.input.dataset.testid = "semantic-full-name";
+  email.input.dataset.testid = "semantic-email";
   const planLabel = document.createElement("label"); planLabel.textContent = "Plan";
   const plan = document.createElement("select"); plan.name = state.fields.plan; plan.setAttribute("aria-label", "Plan");
   for (const value of ["starter", "pro"]) { const option = document.createElement("option"); option.value = value; option.textContent = value === "pro" ? "Professional" : "Starter"; plan.append(option); }
   planLabel.append(plan);
-  form.append(name.label, email.label, planLabel, buttonFor(document, "Submit form", "submit"));
+  const submit = buttonFor(document, "Submit form", "submit"); submit.dataset.testid = "semantic-submit";
+  form.append(name.label, email.label, planLabel, submit);
   form.addEventListener("submit", (event) => { event.preventDefault(); report(controller.verify("semantic-form", { values: { [state.fields.name]: name.input.value, [state.fields.email]: email.input.value, [state.fields.plan]: plan.value } })); });
   station.prepend(form);
 }
@@ -154,9 +193,11 @@ function renderValidation(document: Document, station: HTMLElement, controller: 
   form.append(title(document, "Validation correction", "Preserve the accepted value and correct the rejected value using a five-digit replacement."));
   const accepted = labelledInput(document, "Accepted reference", state.validField, "text", state.validValue);
   const rejected = labelledInput(document, "Rejected value", state.invalidField, "text", state.invalidValue);
+  rejected.input.dataset.testid = "validation-rejected";
   rejected.input.pattern = "[0-9]{5}"; rejected.input.minLength = 5; rejected.input.required = true;
   const feedback = document.createElement("p"); feedback.setAttribute("role", "alert"); feedback.id = "validation-feedback"; rejected.input.setAttribute("aria-describedby", feedback.id);
-  form.append(accepted.label, rejected.label, buttonFor(document, "Correct and submit", "submit"), feedback); form.noValidate = true;
+  const submit = buttonFor(document, "Correct and submit", "submit"); submit.dataset.testid = "validation-submit";
+  form.append(accepted.label, rejected.label, submit, feedback); form.noValidate = true;
   form.addEventListener("submit", (event) => { event.preventDefault(); rejected.input.setCustomValidity(""); feedback.textContent = ""; if (!rejected.input.checkValidity()) { rejected.input.setCustomValidity("Enter a five-digit correction."); feedback.textContent = "Enter a five-digit correction."; } const browserValid = rejected.input.checkValidity(); const stationResult = controller.verify("validation", { values: { [state.validField]: accepted.input.value, [state.invalidField]: rejected.input.value } }); if (browserValid && stationResult.passed) feedback.textContent = ""; report(stationResult); });
   station.prepend(form);
 }
@@ -164,6 +205,7 @@ function renderValidation(document: Document, station: HTMLElement, controller: 
 function renderIframe(document: Document, station: HTMLElement, controller: GauntletController<ChampionshipStates>, report: (result: StationResult) => void): void {
   station.prepend(title(document, "Nested iframe", "Complete the action inside the embedded document."));
   const frame = document.createElement("iframe"); frame.dataset.testid = "iframe-challenge"; frame.title = "Embedded Bobby challenge";
+  frame.name = "bobby-iframe-challenge";
   station.append(frame);
   let initialized = false;
   const populate = () => {

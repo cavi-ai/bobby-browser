@@ -201,6 +201,14 @@ fn new_target_failures_have_stable_error_codes() {
         json!("targetAmbiguous")
     );
     assert_eq!(
+        serde_json::to_value(types::ErrorCode::TargetObscured).unwrap(),
+        json!("targetObscured")
+    );
+    assert_eq!(
+        serde_json::to_value(types::ErrorCode::TargetOutOfBounds).unwrap(),
+        json!("targetOutOfBounds")
+    );
+    assert_eq!(
         serde_json::to_value(types::ErrorCode::WaitConditionTimedOut).unwrap(),
         json!("waitConditionTimedOut")
     );

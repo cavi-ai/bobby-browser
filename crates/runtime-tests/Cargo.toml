@@ -21,6 +21,7 @@ futures-util.workspace = true
 intent-engine = { path = "../intent-engine" }
 interface-conformance = { path = "../interface-conformance" }
 interface-core = { path = "../interface-core" }
+firefox-companion = { path = "../firefox-companion" }
 libc = "0.2"
 cli = { path = "../cli" }
 mcp-gateway = { path = "../mcp-gateway" }

@@ -53,8 +53,13 @@ test("DOM drift station rejects an actionable stale target before accepting its 
 
 test("semantic form station is completed through labelled browser controls", () => {
   const { root } = mount("/station/semantic-form/");
-  requireElement(root.querySelector<HTMLInputElement>("[aria-label='Full name']"), "full name input").value = "Bobby";
-  requireElement(root.querySelector<HTMLInputElement>("[aria-label='Email address']"), "email input").value = "bobby@example.test";
+  const fullName = requireElement(root.querySelector<HTMLInputElement>("[aria-label='Full name']"), "full name input");
+  const email = requireElement(root.querySelector<HTMLInputElement>("[aria-label='Email address']"), "email input");
+  assert.equal(fullName.dataset.testid, "semantic-full-name");
+  assert.equal(email.dataset.testid, "semantic-email");
+  assert.equal(root.querySelector<HTMLButtonElement>("button[type=submit]")?.dataset.testid, "semantic-submit");
+  fullName.value = "Bobby";
+  email.value = "bobby@example.test";
   const plan = requireElement(root.querySelector<HTMLSelectElement>("[aria-label='Plan']"), "plan selector");
   plan.value = "pro";
 
@@ -66,6 +71,8 @@ test("validation station publishes corrective feedback and derives a correction 
   const { root } = mount("/station/validation/");
   const accepted = requireElement(root.querySelector<HTMLInputElement>("[aria-label='Accepted reference']"), "accepted input");
   const rejected = requireElement(root.querySelector<HTMLInputElement>("[aria-label='Rejected value']"), "rejected input");
+  assert.equal(rejected.dataset.testid, "validation-rejected");
+  assert.equal(root.querySelector<HTMLButtonElement>("button[type=submit]")?.dataset.testid, "validation-submit");
   const acceptedBefore = accepted.value;
 
   root.querySelector<HTMLButtonElement>("button[type=submit]")?.click();

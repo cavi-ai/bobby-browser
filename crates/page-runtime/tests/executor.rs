@@ -122,11 +122,23 @@ impl BrowserWorker for FakeWorker {
         if matches!(self.mode, DriverMode::FailInspect) {
             return Err(driver_failure());
         }
+        let text = if command.selector.as_deref() == Some("select[aria-label='Plan']")
+            && self
+                .events
+                .lock()
+                .await
+                .iter()
+                .any(|event| event == "browser:type_text")
+        {
+            "pro"
+        } else {
+            command.selector.as_deref().map_or("page", |_| "Ada")
+        };
         Ok(vec![Evidence::Inspection {
             selector: command.selector.clone(),
             url: "https://example.test/".into(),
             title: "Fixture".into(),
-            text: command.selector.as_deref().map_or("page", |_| "Ada").into(),
+            text: text.into(),
             html: None,
         }])
     }
@@ -490,6 +502,28 @@ fn driver_failure() -> CommandError {
         layer: ErrorLayer::Driver,
         retryable: true,
     }
+}
+
+#[tokio::test]
+async fn raw_css_select_type_text_verifies_the_exact_option_value() {
+    let (runtime, session, page, events) = runtime(DriverMode::Succeed, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::TypeText(TypeTextCommand {
+                selector: "select[aria-label='Plan']".into(),
+                target: None,
+                value: "pro".into(),
+                clear_first: true,
+            }),
+        ))
+        .await;
+
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
+    let events = events.lock().await;
+    assert!(events.contains(&"browser:type_text".to_string()));
+    assert!(events.contains(&"browser:inspect".to_string()));
 }
 
 #[tokio::test]

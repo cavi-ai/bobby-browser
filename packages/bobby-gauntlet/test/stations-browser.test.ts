@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { JSDOM, type DOMWindow } from "jsdom";
 
 import { mountGauntlet } from "../src/app.js";
@@ -23,6 +24,7 @@ test("iframe station requires a real nested-frame click and does not expose a ch
   await new Promise((resolve) => setTimeout(resolve, 20));
   const frame = root.querySelector<HTMLIFrameElement>("iframe[data-testid=iframe-challenge]");
   assert.notEqual(frame, null);
+  assert.equal(frame?.name, "bobby-iframe-challenge");
   const nestedButton = frame?.contentDocument?.querySelector<HTMLButtonElement>("button[data-testid=iframe-submit]");
   assert.notEqual(nestedButton, null);
   nestedButton?.click();
@@ -206,6 +208,102 @@ test("championship direct route surfaces every mandatory station without leaking
   const { root } = mount("/championship");
   assert.equal(root.querySelectorAll("[data-station-id]").length, 10);
   assert.doesNotMatch(root.textContent ?? "", /station-seed|canonicalUrl|correctedValue/i);
+});
+
+test("championship route delegates genuine navigation to an owned child and verifies its observed final URL", async () => {
+  const mounted = mount("/championship");
+  const route = mounted.root.querySelector<HTMLElement>("[data-station-id=route]")!;
+  const frame = route.querySelector<HTMLIFrameElement>("iframe[data-testid=route-challenge]");
+  assert.notEqual(frame, null);
+  assert.match(frame?.src ?? "", /\/station\/route\/\?seed=station-seed&difficulty=foundation$/);
+  assert.equal(route.querySelector("a[data-testid=route-redirect]"), null, "parent must not impersonate navigation");
+  assert.equal(mounted.window.location.pathname, "/championship");
+
+  const childDom = new JSDOM("<main id=child></main>", { url: "https://gauntlet.test/station/route/?seed=station-seed&difficulty=foundation" });
+  const child = childDom.window;
+  Object.defineProperty(frame, "contentWindow", { configurable: true, value: child });
+  const childRoot = child.document.querySelector<HTMLElement>("#child")!;
+  mountGauntlet(childRoot, "/station/route/", "?seed=station-seed&difficulty=foundation");
+  const redirect = childRoot.querySelector<HTMLAnchorElement>("a[data-testid=route-redirect]")!;
+  const event = new mounted.window.Event("click", { bubbles: true, cancelable: true });
+  redirect.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, false, "normal child anchor navigation must not be intercepted");
+  const artifact = await readFile(new URL("../route-redirect.html", import.meta.url), "utf8");
+  assert.match(artifact, /window\.location\.replace\(`\.\.\/complete\/\?checkpoint=/);
+  assert.doesNotMatch(artifact, /pushState|preventDefault/);
+
+  const initialDocument = child.document;
+  child.history.replaceState(null, "", "/station/route/complete/?checkpoint=15a98k0");
+  frame?.dispatchEvent(new mounted.window.Event("load"));
+  assert.strictEqual(child.document, initialDocument, "test simulation retains the owned child document only because jsdom cannot navigate");
+  assert.equal(route.querySelector<HTMLElement>("[data-testid=result]")?.textContent, "Passed");
+  assert.equal(mounted.window.location.pathname, "/championship", "parent controller document must survive child navigation");
+
+  const tampered = mount("/championship");
+  const tamperedFrame = tampered.root.querySelector<HTMLIFrameElement>("[data-station-id=route] iframe")!;
+  const tamperedChild = new JSDOM("<main></main>", { url: "https://gauntlet.test/station/route/complete/?checkpoint=tampered" }).window;
+  Object.defineProperty(tamperedFrame, "contentWindow", { configurable: true, value: tamperedChild });
+  tamperedFrame.dispatchEvent(new tampered.window.Event("load"));
+  assert.notEqual(tampered.root.querySelector<HTMLElement>("[data-station-id=route] [data-testid=result]")?.textContent, "Passed");
+});
+
+test("championship route publishes one final app-produced aggregate only after its shared ledger passes", async () => {
+  const { window, root } = mount("/championship");
+  const section = (id: string) => root.querySelector<HTMLElement>(`[data-station-id='${id}']`)!;
+  const click = (id: string, selector: string) => section(id).querySelector<HTMLElement>(selector)?.click();
+
+  const routeFrame = section("route").querySelector<HTMLIFrameElement>("iframe[data-testid=route-challenge]")!;
+  const routeChild = new JSDOM("<main></main>", { url: "https://gauntlet.test/station/route/complete/?checkpoint=15a98k0" }).window;
+  Object.defineProperty(routeFrame, "contentWindow", { configurable: true, value: routeChild });
+  routeFrame.dispatchEvent(new window.Event("load"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  click("dom-drift", "[data-testid=replacement-target]");
+
+  const semantic = section("semantic-form");
+  semantic.querySelector<HTMLInputElement>("[aria-label='Full name']")!.value = "Bobby";
+  semantic.querySelector<HTMLInputElement>("[aria-label='Email address']")!.value = "bobby@example.test";
+  semantic.querySelector<HTMLSelectElement>("[aria-label='Plan']")!.value = "pro";
+  click("semantic-form", "button[type=submit]");
+
+  section("validation").querySelector<HTMLInputElement>("[aria-label='Rejected value']")!.value = "00000";
+  click("validation", "button[type=submit]");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  section("iframe").querySelector<HTMLIFrameElement>("iframe")?.contentDocument?.querySelector<HTMLButtonElement>("button")?.click();
+  section("shadow-root").querySelector<HTMLElement>("[data-testid=shadow-host]")?.shadowRoot?.querySelector<HTMLButtonElement>("button")?.click();
+
+  const popup = new JSDOM("<main></main>", { url: "https://gauntlet.test/companion" }).window;
+  Object.defineProperty(window, "open", { value: () => popup });
+  click("popup", "[data-testid=popup-open]");
+  popup.document.querySelector<HTMLButtonElement>("button")?.click();
+
+  const upload = section("file-attachment").querySelector<HTMLInputElement>("input[type=file]")!;
+  Object.defineProperty(upload, "files", { value: [new window.File(["approved upload for Bobby\n"], "approved-upload.txt")] });
+  upload.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await waitFor(() => section("file-attachment").querySelector("[data-testid=station-scorecard]") === null);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  click("file-attachment", "button[type=submit]");
+
+  click("download", "[data-testid=download-generate]");
+  const link = section("download").querySelector<HTMLAnchorElement>("a[download]")!;
+  link.addEventListener("click", (event) => event.preventDefault());
+  link.click();
+  const downloadInput = section("download").querySelector<HTMLInputElement>("input[type=file]")!;
+  Object.defineProperty(downloadInput, "files", { configurable: true, value: [new window.File([decodeDownloadedBytes(link.href)], "bobby-artifact.txt")] });
+  downloadInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+  const confirm = section("download").querySelector<HTMLButtonElement>("[data-testid=download-confirm]")!;
+  await waitFor(() => !confirm.disabled);
+  confirm.click();
+
+  for (let step = 1; step <= 3; step += 1) click("championship", `[data-testid=championship-step-${step}]`);
+
+  const receipt = root.querySelector<HTMLScriptElement>("script[data-testid=championship-scorecard]");
+  assert.notEqual(receipt, null);
+  const scorecard = JSON.parse(receipt?.textContent ?? "") as { passed: boolean; manifestDigest: string; stations: { id: string; passed: boolean }[] };
+  assert.equal(scorecard.passed, true);
+  assert.match(scorecard.manifestDigest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(scorecard.stations.map(({ id, passed }) => ({ id, passed })), [
+    "route", "dom-drift", "semantic-form", "validation", "iframe", "shadow-root", "popup", "file-attachment", "download", "championship",
+  ].map((id) => ({ id, passed: true })));
 });
 
 function decodeDownloadedBytes(href: string): string {

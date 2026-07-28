@@ -12,6 +12,7 @@ use config::{
     AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
     FirefoxCompanionConfig,
 };
+use firefox_companion::BidiClient;
 use release_gates::{NativeBrowserOperationProof, NativeBrowserProof};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -59,8 +60,6 @@ pub async fn run_installed_firefox_workflow(
     let state_dir = proof_state_dir();
     std::fs::create_dir_all(&state_dir).map_err(io_error)?;
     let descriptor_path = state_dir.join("native-host-descriptor.json");
-    let _extension = ExtensionInstallation::install(&config.profile, &config.companion_extension)?;
-
     let process_observations = ProcessObservationCollector::new(Vec::new());
     let enrollment = cli::start_firefox_profile_enrollment(
         cli::FirefoxProfileEnrollmentConfig {
@@ -75,7 +74,29 @@ pub async fn run_installed_firefox_workflow(
     .await?;
     let (mut firefox, bidi_url) =
         launch_firefox(&config, &fixture.url, &process_observations).await?;
-    let enrollment = enrollment.wait().await?;
+    let extension_session = BidiClient::connect_session(bidi_url.clone(), PROOF_TIMEOUT).await?;
+    let (method, params) = temporary_extension_install_command(&config.companion_extension)?;
+    let installed = extension_session.send(method, params).await;
+    if let Err(error) = installed {
+        let _ = extension_session.end_session().await;
+        return Err(error);
+    }
+    if installed
+        .as_ref()
+        .ok()
+        .and_then(|value| value["extension"].as_str())
+        != Some(EXTENSION_ID)
+    {
+        let _ = extension_session.end_session().await;
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            "Firefox installed an unexpected companion extension",
+        ));
+    }
+    let enrollment = enrollment.wait().await;
+    let extension_session_ended = extension_session.end_session().await;
+    let enrollment = enrollment?;
+    extension_session_ended?;
     let profile_id = enrollment.profile_id().clone();
     let factory = cli::compose_worker_factory_with_enrolled_firefox(
         &AppConfig::default(),
@@ -244,44 +265,23 @@ impl Drop for ProofSite {
     }
 }
 
-struct ExtensionInstallation {
-    path: PathBuf,
-    owned: bool,
-}
-
-impl ExtensionInstallation {
-    fn install(profile: &Path, source: &Path) -> Result<Self, CommandError> {
-        let extensions = profile.join("extensions");
-        std::fs::create_dir_all(&extensions).map_err(io_error)?;
-        let path = extensions.join(EXTENSION_ID);
-        if path.exists() || path.symlink_metadata().is_ok() {
-            let current = std::fs::canonicalize(&path).map_err(io_error)?;
-            let expected = std::fs::canonicalize(source).map_err(io_error)?;
-            if current != expected {
-                return Err(workflow_error(
-                    ErrorCode::PolicyDenied,
-                    "dedicated profile already contains a different companion extension",
-                ));
-            }
-            return Ok(Self { path, owned: false });
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(source, &path).map_err(io_error)?;
-        #[cfg(not(unix))]
-        return Err(workflow_error(
+fn temporary_extension_install_command(
+    source: &Path,
+) -> Result<(&'static str, serde_json::Value), CommandError> {
+    let source = std::fs::canonicalize(source).map_err(io_error)?;
+    let source = source.to_str().ok_or_else(|| {
+        workflow_error(
             ErrorCode::BrowserLaunchFailed,
-            "unpacked companion setup is not supported on this platform",
-        ));
-        Ok(Self { path, owned: true })
-    }
-}
-
-impl Drop for ExtensionInstallation {
-    fn drop(&mut self) {
-        if self.owned {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+            "companion extension path must be valid UTF-8",
+        )
+    })?;
+    Ok((
+        "webExtension.install",
+        serde_json::json!({
+            "extensionData": {"type": "path", "path": source},
+            "moz:permanent": false,
+        }),
+    ))
 }
 
 fn proof_state_dir() -> PathBuf {
@@ -784,6 +784,27 @@ fn workflow_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_install_uses_the_standard_temporary_bidi_path_command() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("extension");
+        std::fs::create_dir_all(&source).unwrap();
+
+        let (method, params) = temporary_extension_install_command(&source).unwrap();
+
+        assert_eq!(method, "webExtension.install");
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "extensionData": {
+                    "type": "path",
+                    "path": std::fs::canonicalize(source).unwrap().to_str().unwrap(),
+                },
+                "moz:permanent": false,
+            })
+        );
+    }
 
     #[test]
     fn proof_site_confirmation_depends_on_the_native_typed_value() {

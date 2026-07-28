@@ -337,6 +337,8 @@ pub enum ErrorCode {
     FrameNotFound,
     ShadowRootUnavailable,
     TargetDetached,
+    TargetObscured,
+    TargetOutOfBounds,
     WaitConditionTimedOut,
     ScreenshotCaptureFailed,
     NetworkPolicyDenied,

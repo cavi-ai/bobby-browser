@@ -74,10 +74,21 @@ impl BidiTransport for BindingBidi {
             "script.evaluate"
                 if params["expression"]
                     .as_str()
+                    .is_some_and(|value| value.contains("HTMLSelectElement")) =>
+            {
+                Ok(json!({"result": {"type": "string", "value": "not-select"}}))
+            }
+            "script.evaluate"
+                if params["expression"]
+                    .as_str()
                     .is_some_and(|value| value.starts_with("document.querySelector(")) =>
             {
                 Ok(json!({"result": {"type": "node", "sharedId": "native-target"}}))
             }
+            "script.callFunction" => Ok(json!({"result": {
+                "type": "node",
+                "sharedId": params["arguments"][0]["sharedId"]
+            }})),
             "script.evaluate" => Ok(json!({"result": {"type": "boolean", "value": true}})),
             _ => Ok(json!({})),
         }

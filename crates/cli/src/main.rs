@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use companion_core::{
     run_native_host, CompanionServer, CompanionServerConfig, CompanionServerHandle,
@@ -37,6 +38,9 @@ struct ConfiguredFirefoxFactory {
     required: RequiredCapabilities,
     pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
     server: Mutex<Option<Arc<CompanionServerHandle>>>,
+    artifacts: ArtifactStore,
+    upload_roots: Vec<PathBuf>,
+    downloads_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -255,6 +259,9 @@ impl ConfiguredFirefoxFactory {
             lease,
             observer,
         )
+        .with_artifacts(self.artifacts.clone())
+        .with_upload_roots(self.upload_roots.clone())
+        .with_downloads_dir(self.downloads_dir.clone())
         .launch(session_id)
         .await
     }
@@ -508,6 +515,13 @@ fn compose_worker_factory_with_enrollment(
     pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
     enrollment: Option<EnrolledFirefoxProfile>,
 ) -> Result<Arc<dyn WorkerFactory>> {
+    let firefox_artifacts = ArtifactStore::new(
+        config.browser.artifacts_dir.clone(),
+        config.browser.max_artifact_bytes,
+        config.browser.max_screenshot_dimension,
+    );
+    let firefox_upload_roots = config.browser.upload_roots.clone();
+    let firefox_downloads_dir = config.browser.downloads_dir.clone();
     let chromium_capabilities = CompanionCapabilities {
         observe: true,
         navigate: true,
@@ -545,6 +559,9 @@ fn compose_worker_factory_with_enrollment(
                         required: firefox_required,
                         pairing_code_observer: Arc::clone(&pairing_code_observer),
                         server: Mutex::new(server),
+                        artifacts: firefox_artifacts.clone(),
+                        upload_roots: firefox_upload_roots.clone(),
+                        downloads_dir: firefox_downloads_dir.clone(),
                     },
                 }
             })
