@@ -14,7 +14,7 @@ const ENV_PRINCIPAL: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL";
 const ENV_CAPABILITIES: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES";
 const ENV_EXPIRES_AT: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT";
 
-const DEFAULT_CAPABILITIES: &[Capability] = &[
+pub(crate) const DEFAULT_CAPABILITIES: &[Capability] = &[
     Capability::SessionRead,
     Capability::SessionWrite,
     Capability::PageRead,
@@ -204,6 +204,60 @@ pub fn is_loopback_host(host: &str) -> bool {
     host == "127.0.0.1" || host == "::1"
 }
 
+#[derive(Debug)]
+pub enum ResolveOutcome {
+    FromEnv(StartupCredential),
+    FromFile(StartupCredential),
+    Generated {
+        credential: StartupCredential,
+        material: BootstrapMaterial,
+    },
+}
+
+pub fn resolve_startup_credential_with<F>(
+    host: &str,
+    bootstrap_path: &Path,
+    from_env: F,
+) -> Result<ResolveOutcome>
+where
+    F: FnOnce() -> Result<StartupCredential, broker::StartupCredentialError>,
+{
+    if let Ok(credential) = from_env() {
+        return Ok(ResolveOutcome::FromEnv(credential));
+    }
+    if bootstrap_path.exists() {
+        let credential = load_startup_from_env_file(bootstrap_path)?;
+        return Ok(ResolveOutcome::FromFile(credential));
+    }
+    if is_loopback_host(host) {
+        let material = generate_bootstrap(Duration::days(DEFAULT_TTL_DAYS))?;
+        write_bootstrap_env(bootstrap_path, &material, false)?;
+        let credential = startup_from_material(&material)?;
+        return Ok(ResolveOutcome::Generated {
+            credential,
+            material,
+        });
+    }
+    bail!(
+        "startup credentials missing for non-loopback host {host}; run `bobby init` or set AUTOMATION_RUNTIME_BOOTSTRAP_* env vars"
+    );
+}
+
+fn startup_from_material(material: &BootstrapMaterial) -> Result<StartupCredential> {
+    let capabilities = material
+        .capabilities_csv()
+        .split(',')
+        .map(|value| parse_capability(value.trim()))
+        .collect::<Result<Vec<_>>>()?;
+    StartupCredential::new(
+        material.bearer().to_string(),
+        material.principal_id().clone(),
+        capabilities,
+        material.expires_at(),
+    )
+    .context("generated bootstrap material is not a valid startup credential")
+}
+
 fn parse_capability(value: &str) -> Result<Capability> {
     match value {
         "session:read" => Ok(Capability::SessionRead),
@@ -298,5 +352,61 @@ mod tests {
         std::fs::write(&path, "NOT_A_VALID=file\n").unwrap();
         let err = load_startup_from_env_file(&path).unwrap_err();
         assert!(err.to_string().contains(path.display().to_string().as_str()));
+    }
+
+    #[test]
+    fn resolve_prefers_process_env() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let file_material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        write_bootstrap_env(&path, &file_material, false).unwrap();
+        let env_material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let env_cred = broker::StartupCredential::new(
+            env_material.bearer().to_string(),
+            env_material.principal_id().clone(),
+            DEFAULT_CAPABILITIES.to_vec(),
+            env_material.expires_at(),
+        )
+        .unwrap();
+        let outcome =
+            resolve_startup_credential_with("127.0.0.1", &path, || Ok(env_cred)).unwrap();
+        assert!(matches!(outcome, ResolveOutcome::FromEnv(_)));
+    }
+
+    #[test]
+    fn resolve_loads_file_when_env_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        write_bootstrap_env(&path, &material, false).unwrap();
+        let outcome = resolve_startup_credential_with("127.0.0.1", &path, || {
+            Err(broker::StartupCredentialError::MissingInput)
+        })
+        .unwrap();
+        assert!(matches!(outcome, ResolveOutcome::FromFile(_)));
+    }
+
+    #[test]
+    fn resolve_autogens_on_loopback_when_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        assert!(!path.exists());
+        let outcome = resolve_startup_credential_with("127.0.0.1", &path, || {
+            Err(broker::StartupCredentialError::MissingInput)
+        })
+        .unwrap();
+        assert!(matches!(outcome, ResolveOutcome::Generated { .. }));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn resolve_errors_on_non_loopback_when_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let err = resolve_startup_credential_with("0.0.0.0", &path, || {
+            Err(broker::StartupCredentialError::MissingInput)
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("bobby init"));
     }
 }
