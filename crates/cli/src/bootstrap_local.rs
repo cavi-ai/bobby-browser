@@ -118,12 +118,8 @@ pub fn write_bootstrap_env(path: &Path, material: &BootstrapMaterial, force: boo
 }
 
 pub fn load_startup_from_env_file(path: &Path) -> Result<StartupCredential> {
-    let contents = std::fs::read_to_string(path).with_context(|| {
-        format!(
-            "failed to read bootstrap env from {}",
-            path.display()
-        )
-    })?;
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read bootstrap env from {}", path.display()))?;
     let mut token = None;
     let mut principal = None;
     let mut capabilities = None;
@@ -171,14 +167,12 @@ pub fn load_startup_from_env_file(path: &Path) -> Result<StartupCredential> {
             path.display()
         )
     })?;
-    let principal_id = PrincipalId::from_uuid(
-        Uuid::parse_str(&principal).with_context(|| {
-            format!(
-                "bootstrap env {} has invalid principal {principal}",
-                path.display()
-            )
-        })?,
-    );
+    let principal_id = PrincipalId::from_uuid(Uuid::parse_str(&principal).with_context(|| {
+        format!(
+            "bootstrap env {} has invalid principal {principal}",
+            path.display()
+        )
+    })?);
     let capabilities = capabilities
         .split(',')
         .map(|value| parse_capability(value.trim()))
@@ -380,7 +374,9 @@ mod tests {
         let path = dir.path().join("bootstrap.env");
         std::fs::write(&path, "NOT_A_VALID=file\n").unwrap();
         let err = load_startup_from_env_file(&path).unwrap_err();
-        assert!(err.to_string().contains(path.display().to_string().as_str()));
+        assert!(err
+            .to_string()
+            .contains(path.display().to_string().as_str()));
     }
 
     #[test]
@@ -397,8 +393,7 @@ mod tests {
             env_material.expires_at(),
         )
         .unwrap();
-        let outcome =
-            resolve_startup_credential_with("127.0.0.1", &path, || Ok(env_cred)).unwrap();
+        let outcome = resolve_startup_credential_with("127.0.0.1", &path, || Ok(env_cred)).unwrap();
         assert!(matches!(outcome, ResolveOutcome::FromEnv(_)));
     }
 

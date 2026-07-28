@@ -647,7 +647,10 @@ pub async fn run() -> Result<()> {
             let startup = match resolved {
                 bootstrap_local::ResolveOutcome::FromEnv(c)
                 | bootstrap_local::ResolveOutcome::FromFile(c) => c,
-                bootstrap_local::ResolveOutcome::Generated { credential, material } => {
+                bootstrap_local::ResolveOutcome::Generated {
+                    credential,
+                    material,
+                } => {
                     eprintln!(
                         "Generated loopback bootstrap at {}",
                         bootstrap_path.display()
@@ -726,9 +729,7 @@ fn run_init() -> Result<()> {
     bootstrap_local::write_bootstrap_env(&path, &material, force)?;
     println!("{}", material.bearer());
     eprintln!("Wrote bootstrap env to {}", path.display());
-    eprintln!(
-        "Map this bearer to AUTOMATION_RUNTIME_TOKEN / Authorization bearer for the SDK."
-    );
+    eprintln!("Map this bearer to AUTOMATION_RUNTIME_TOKEN / Authorization bearer for the SDK.");
     eprintln!(
         "Passing --force regenerates and invalidates the previous bearer for new enrollment."
     );
