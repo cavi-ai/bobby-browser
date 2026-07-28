@@ -11,3 +11,4 @@ node_modules/
 **/*.cpuprofile
 .DS_Store
 .env
+.worktrees/
