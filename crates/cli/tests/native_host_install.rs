@@ -23,7 +23,7 @@ fn installer_recovers_after_a_waiting_process_is_killed_and_reuses_the_advisory_
     lock_file.lock().unwrap();
 
     let command = || {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cli"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bobby"));
         command.args([
             "install-firefox-native-host",
             "--wrapper",
@@ -77,7 +77,7 @@ fn installer_never_follows_an_operator_owned_lock_symlink() {
     std::fs::write(&foreign, b"must-not-open-or-change").unwrap();
     std::os::unix::fs::symlink(&foreign, &lock).unwrap();
 
-    let status = std::process::Command::new(env!("CARGO_BIN_EXE_cli"))
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_bobby"))
         .args([
             "install-firefox-native-host",
             "--wrapper",

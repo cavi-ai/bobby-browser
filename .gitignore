@@ -11,3 +11,6 @@ node_modules/
 **/*.cpuprofile
 .DS_Store
 .env
+bootstrap.env
+**/.bobby-browser/
+.worktrees/

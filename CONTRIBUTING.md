@@ -10,8 +10,12 @@ still change before 1.0.
 
 ```bash
 cargo build -p cli
+./target/debug/bobby doctor
 pnpm install
 ```
+
+The CLI binary is `bobby` (cargo package `cli`). Common commands: `bobby init`,
+`bobby serve`, `bobby doctor`.
 
 ## Tests
 

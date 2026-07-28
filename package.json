@@ -1,6 +1,16 @@
 {
-  "name": "bobby-browser-interface",
+  "name": "bobby-browser",
   "private": true,
+  "description": "Browser automation runtime with authenticated, capability-scoped control surfaces",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cavi-ai/bobby-browser.git"
+  },
+  "homepage": "https://cavi-ai.xyz/docs/bobby-browser",
+  "bugs": {
+    "url": "https://github.com/cavi-ai/bobby-browser/issues"
+  },
   "packageManager": "pnpm@10.15.1",
   "engines": {
     "node": ">=22"
