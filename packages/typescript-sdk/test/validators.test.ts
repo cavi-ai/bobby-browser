@@ -77,7 +77,7 @@ function evidenceFixtures(): unknown[] {
 }
 
 function recoveryDecision(): unknown {
-  return { status: "restarted", checkpointId: ID, lineage: { workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "retry" } };
+  return { status: "restarted", checkpointId: ID, lineage: { workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "retry" }, evidence: [] };
 }
 
 function checkpoint(): Record<string, unknown> {
@@ -101,6 +101,7 @@ function checkpoint(): Record<string, unknown> {
     replayableInputs: ["input"],
     evidence: evidenceFixtures(),
     recoveryHistory: [{ recordedAt: TIME, decision: recoveryDecision() }],
+    recoveryReceipts: [],
     createdAt: TIME,
   };
 }
@@ -119,7 +120,7 @@ test("deep validators accept every exact public response variant", () => {
     { status: "needsReconciliation", commandId: ID, error: commandError, evidence: [] },
     { status: "policyDenied", commandId: ID, error: { ...commandError, code: "policyDenied" } },
     { status: "resourceExhausted", commandId: ID, error: { ...commandError, code: "resourceExhausted" }, retryAfterMs: 0 },
-    { status: "restarted", commandId: ID, priorAttemptId: ID, attemptId: ID_2, reason: "retry" },
+    { status: "restarted", commandId: ID, priorAttemptId: ID, attemptId: ID_2, reason: "retry", evidence: [] },
     { status: "failed", commandId: ID, error: commandError },
     {
       status: "failed",
@@ -234,8 +235,8 @@ test("validators reject unknown and variant-incompatible keys at every object la
   assert.equal(isWorkflowCheckpoint(extraHistory), false);
 
   assert.equal(isRecoveryDecision({ status: "resumed", checkpointId: ID, attemptId: ID_2, evidence: [], lineage: {} }), false);
-  assert.equal(isRecoveryDecision({ status: "restarted", checkpointId: ID, lineage: withExtra({ workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "x" }) }), false);
-  assert.equal(isRecoveryDecision({ status: "restarted", checkpointId: ID, lineage: { workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "x" }, evidence: [] }), false);
+  assert.equal(isRecoveryDecision({ status: "restarted", checkpointId: ID, lineage: withExtra({ workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "x" }), evidence: [] }), false);
+  assert.equal(isRecoveryDecision({ status: "restarted", checkpointId: ID, lineage: { workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "x" } }), false);
 
   assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "x", payload: null, unexpected: true }], latestAvailable: 1 }, 0, 1), false);
   assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "x", payload: null }], latestAvailable: 1, unexpected: true }, 0, 1), false);
