@@ -41,7 +41,7 @@ repository = "https://github.com/cavi-ai/bobby-browser"
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 chromiumoxide = "0.9.1"
 futures = "0.3"
