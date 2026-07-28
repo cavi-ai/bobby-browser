@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -23,9 +22,7 @@ fn config(root: &tempfile::TempDir) -> AppConfig {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )),
+            executable: None,
             profiles_dir: root.path().join("profiles"),
             headless: true,
             max_active: 8,
