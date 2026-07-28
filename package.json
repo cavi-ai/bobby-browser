@@ -16,7 +16,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "docs:build": "node scripts/docs/build-bobby-browser.mjs",
+    "docs:build": "node scripts/docs/build-bobby-browser.mjs --version 0.2.0 --tag v0.2.0 --commit aa5184347037c04c42064a702ce1dc7d5b16c75b --source-date-epoch 1784953886",
     "docs:verify": "node scripts/docs/verify-bobby-browser.mjs",
     "docs:test": "node --test scripts/docs/bobby-browser-docs.test.mjs"
   },

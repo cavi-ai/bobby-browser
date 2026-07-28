@@ -9,11 +9,14 @@ import {
   assertNavigationResolves,
   computeContentSha256,
   listFilesRecursive,
+  resolveReleaseIdentity,
 } from "./lib.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const COMMIT_SHA = /^[a-f0-9]{40}$/u;
 
-export async function verifyBobbyBrowserDocs(root = REPO_ROOT) {
+export async function verifyBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
+  const release = releaseInput ? resolveReleaseIdentity(releaseInput) : null;
   const artifactRoot = path.join(root, OUTPUT_REL);
   const manifestPath = path.join(artifactRoot, "manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -28,6 +31,19 @@ export async function verifyBobbyBrowserDocs(root = REPO_ROOT) {
   }
   if (typeof manifest.contentSha256 !== "string" || !manifest.contentSha256) {
     throw new Error("manifest.contentSha256 is required");
+  }
+  if (manifest.schemaVersion !== 1) throw new Error("manifest.schemaVersion must be 1");
+  if (!manifest.release || typeof manifest.release !== "object") {
+    throw new Error("manifest.release provenance is required");
+  }
+  if (!COMMIT_SHA.test(manifest.release.commit ?? "")) {
+    throw new Error("manifest.release.commit must be a full lowercase SHA");
+  }
+  if (manifest.release.tag !== `v${manifest.version}`) {
+    throw new Error("manifest.release.tag must match version");
+  }
+  if (release && (manifest.release.tag !== release.tag || manifest.release.commit !== release.commit || manifest.generatedAt !== release.generatedAt)) {
+    throw new Error("manifest release provenance does not match expected release identity");
   }
 
   await assertNavigationResolves(artifactRoot);
