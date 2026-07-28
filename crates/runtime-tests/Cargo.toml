@@ -38,7 +38,7 @@ sha2.workspace = true
 tempfile.workspace = true
 test-site = { path = "../test-site" }
 tokio.workspace = true
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tower.workspace = true
 types = { path = "../types" }
 url.workspace = true

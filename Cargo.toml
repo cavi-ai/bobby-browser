@@ -41,7 +41,7 @@ repository = "https://github.com/cavi-ai/bobby-browser"
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 chromiumoxide = "0.9.1"
 futures = "0.3"
@@ -61,9 +61,9 @@ getrandom = "0.3"
 hex = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tempfile = "3"
-toml = "0.8"
+toml = "1.1"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
