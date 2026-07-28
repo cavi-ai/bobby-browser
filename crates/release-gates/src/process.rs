@@ -404,7 +404,14 @@ fn live_process_group_members(
         }
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            // ENOENT and ESRCH both mean the process vanished between /proc
+            // listing and the per-pid read; treat as not live.
+            Err(source)
+                if source.kind() == std::io::ErrorKind::NotFound
+                    || source.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue;
+            }
             Err(source) => return Err(source),
         };
         let fields = stat
@@ -566,6 +573,9 @@ async fn finalize_completed_process(
             cleanup_completed_process_group(child, process_group, cleanup_timeout).await?;
             return Err(ProcessFailure::ResidualProcessGroup { process_group_id });
         }
+        // ESRCH during grace means the group evaporated under us; treat as empty
+        // and continue to the final residual check rather than failing closed as Cleanup.
+        Err(source) if source.raw_os_error() == Some(libc::ESRCH) => {}
         Err(source) => {
             let kind = source.kind();
             cleanup_completed_process_group(child, process_group, cleanup_timeout).await?;
