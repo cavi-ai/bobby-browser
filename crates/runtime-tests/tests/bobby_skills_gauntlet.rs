@@ -635,15 +635,9 @@ impl ProductionBobby {
     ) -> TestResult<Option<String>> {
         match station {
             "route" => {
-                self.click(page_id, target_test_id("route-redirect"), true)
-                    .await?;
-                self.wait(
-                    page_id,
-                    WaitCondition::Url {
-                        matcher: TextMatch::Contains("/station/route/complete/?checkpoint=".into()),
-                    },
-                )
-                .await?;
+                let mut target = target_test_id("route-redirect");
+                target.frame_path = vec![Box::new(target_test_id("route-challenge"))];
+                self.click(page_id, target, true).await?;
             }
             "dom-drift" => {
                 self.wait(

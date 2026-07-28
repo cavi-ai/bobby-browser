@@ -121,6 +121,28 @@ function stationIdFor(pathname: string): keyof ChampionshipStates {
 
 function renderRoute(document: Document, station: HTMLElement, controller: GauntletController<ChampionshipStates>, report: (result: StationResult) => void, sharedChampionship: boolean): void {
   station.prepend(title(document, "Canonical navigation", "Follow the visible navigation control and verify that the canonical route was reached."));
+  if (sharedChampionship) {
+    const frame = document.createElement("iframe");
+    frame.dataset.testid = "route-challenge";
+    frame.title = "Canonical navigation challenge";
+    frame.src = `/station/route/?seed=${encodeURIComponent(controller.manifest.seed)}&difficulty=${encodeURIComponent(controller.manifest.difficulty)}`;
+    frame.addEventListener("load", () => {
+      try {
+        const child = frame.contentWindow;
+        if (child === null) return;
+        const path = observedPath(child);
+        if (child.location.pathname === "/station/route/complete/") {
+          report(controller.verify("route", { url: path }));
+        } else if (child.location.pathname !== "/station/route/" && child.location.pathname !== "/station/route/redirect/") {
+          report(controller.verify("route", { url: path }));
+        }
+      } catch {
+        report(controller.verify("route", {}));
+      }
+    });
+    station.append(frame);
+    return;
+  }
   const window = document.defaultView;
   if (window !== null && window.location.pathname === "/station/route/complete/") {
     report(controller.verify("route", { url: observedPath(window) }));
@@ -130,14 +152,6 @@ function renderRoute(document: Document, station: HTMLElement, controller: Gaunt
   redirect.href = "./redirect/";
   redirect.textContent = "Follow canonical redirect";
   redirect.dataset.testid = "route-redirect";
-  if (sharedChampionship) {
-    redirect.href = controller.stateFor("route").canonicalUrl;
-    redirect.addEventListener("click", (event) => {
-      event.preventDefault();
-      window?.history.pushState(null, "", redirect.href);
-      if (window !== null) report(controller.verify("route", { url: observedPath(window) }));
-    });
-  }
   station.append(redirect);
 }
 
@@ -186,6 +200,7 @@ function renderValidation(document: Document, station: HTMLElement, controller: 
 function renderIframe(document: Document, station: HTMLElement, controller: GauntletController<ChampionshipStates>, report: (result: StationResult) => void): void {
   station.prepend(title(document, "Nested iframe", "Complete the action inside the embedded document."));
   const frame = document.createElement("iframe"); frame.dataset.testid = "iframe-challenge"; frame.title = "Embedded Bobby challenge";
+  frame.name = "bobby-iframe-challenge";
   station.append(frame);
   let initialized = false;
   const populate = () => {
