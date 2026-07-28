@@ -63,11 +63,14 @@ const outcome = await client.submit(
     pageId: page.id,
     deadline,
     command: {
-      kind: "navigate",
+      kind: "primitive",
       input: {
-        url: "https://example.com",
-        waitUntil: "domContentLoaded",
-        timeoutMs: 30_000,
+        kind: "navigate",
+        input: {
+          url: "https://example.com",
+          waitUntil: "domContentLoaded",
+          timeoutMs: 30_000,
+        },
       },
     },
   },

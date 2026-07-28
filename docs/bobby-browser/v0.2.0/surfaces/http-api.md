@@ -40,7 +40,8 @@ validators / Rust types.
 - **POST `/v1/sessions`** — `{ profile, proxy, executionPolicy? }` where
   `executionPolicy` defaults to `{ javascriptEvaluation: false, visionAssist: false }`
 - **POST `/v1/pages`** — `{ session_id }` (snake_case on this request; session/page state also uses `id` / `session_id` / `page_ids`)
-- **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`, `command`)
+- **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,
+  `command` where `command` is `{ kind: "primitive"|"intent", input: … }`)
 - **POST `/v1/checkpoints`** — checkpoint request with verified evidence (see SDK `CheckpointRequest`)
 - **POST `/v1/principals`** — `{ principalId, capabilities, expiresAt }` → `201` with one-time `bearer`
 - **GET `/v1/events`** — query `after` (cursor) and `limit` (bounded; SDK max 256)
