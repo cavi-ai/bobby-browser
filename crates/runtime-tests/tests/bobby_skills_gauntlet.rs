@@ -1332,8 +1332,15 @@ fn configured_factory(
     Ok(cli::compose_worker_factory_with_pairing_observer(
         config,
         selection,
-        Arc::new(|code| eprintln!("Firefox companion pairing code: {code}")),
+        firefox_pairing_observer(|event| eprintln!("{event}")),
     )?)
+}
+
+fn firefox_pairing_observer<F>(emit: F) -> Arc<dyn Fn(&str) + Send + Sync>
+where
+    F: Fn(&str) + Send + Sync + 'static,
+{
+    Arc::new(move |_code| emit("Firefox companion pairing established (code redacted)"))
 }
 
 fn required_env(name: &str) -> TestResult<String> {
@@ -1509,6 +1516,7 @@ fn command_result<T>(result: Result<T, types::CommandError>) -> TestResult<T> {
 #[cfg(test)]
 mod replay_contracts {
     use super::*;
+    use std::sync::Mutex as StdMutex;
 
     fn fixture(root: &Path) -> Vec<ScreenshotProof> {
         STATIONS
@@ -1553,6 +1561,26 @@ mod replay_contracts {
 
         std::fs::write(root.path().join(&missing[0].logical_ref), b"substitution").unwrap();
         assert!(verify_screenshot_proofs(root.path(), &missing).is_err());
+    }
+
+    #[test]
+    fn firefox_pairing_observer_emits_only_a_fixed_redacted_event() {
+        let output = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let captured = Arc::clone(&output);
+        let observer = firefox_pairing_observer(move |event| {
+            captured.lock().unwrap().push(event.to_owned());
+        });
+        let pairing_code = "19b89d68-7127-4d5d-9268-d675dbd599d2";
+
+        observer(pairing_code);
+
+        let output = output.lock().unwrap();
+        assert_eq!(
+            output.as_slice(),
+            ["Firefox companion pairing established (code redacted)"]
+        );
+        assert!(!output[0].contains(pairing_code));
+        assert!(!output[0].contains("19b89d68"));
     }
 }
 
