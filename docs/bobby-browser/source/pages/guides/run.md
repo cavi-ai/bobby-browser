@@ -5,10 +5,16 @@ documentedVersion: 0.2.0
 # Run the server
 
 ```bash
+bobby serve
+# or:
 cargo run -p cli -- serve
-# or with an explicit config file:
-BOBBY_BROWSER_CONFIG=/path/to/config.toml cargo run -p cli -- serve
+# with an explicit config file:
+BOBBY_BROWSER_CONFIG=/path/to/config.toml bobby serve
 ```
+
+Override the bootstrap secret path with `BOBBY_BROWSER_BOOTSTRAP_ENV` when it is
+not at the default OS config location (`…/bobby-browser/bootstrap.env`). Prefer
+`bobby init` before first serve on non-loopback binds.
 
 Then open:
 
