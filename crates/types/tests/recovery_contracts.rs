@@ -165,8 +165,59 @@ fn recovery_receipt_round_trips_full_command_identity_and_outbox_state() {
     .unwrap();
 
     let value = serde_json::to_value(&receipt).unwrap();
+    let mut oversized = value.clone();
+    oversized["tacticEvidence"] = serde_json::Value::Array(vec![
+        serde_json::json!({"kind":"configuration","name":"bounded","value":"ok"});
+        types::MAX_RECOVERY_RECEIPT_EVIDENCE
+            + 1
+    ]);
+    assert!(serde_json::from_value::<RecoveryReceipt>(oversized)
+        .unwrap_err()
+        .to_string()
+        .contains("exceeds its bound"));
     let decoded: RecoveryReceipt = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(decoded.identity, identity);
     assert_eq!(decoded.state, RecoveryReceiptState::PendingJournal);
     assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+}
+
+#[test]
+fn recovery_receipt_rejects_oversized_evidence_before_persistence() {
+    let identity = RecoveryCommandIdentity::new(
+        CommandId::new(),
+        WorkflowId::new(),
+        AttemptId::new(),
+        SessionId::new(),
+        None,
+        CommandClass::Replayable,
+        "b".repeat(64),
+    )
+    .unwrap();
+    let result = RecoveryReceipt::new(
+        identity.command_id.clone(),
+        identity.clone(),
+        RecoveryReceiptState::Unresolved,
+        CommandId::new(),
+        SkillDecision::new(
+            SkillTactic::ObserveAgain,
+            SkillFailure::TargetDrift,
+            "observed",
+            100,
+            100,
+            None,
+            None,
+        )
+        .unwrap(),
+        CommandOutcome::Completed {
+            command_id: identity.command_id,
+            evidence: Vec::new(),
+        },
+        SkillOutcome::applied(Vec::new()).unwrap(),
+        vec![Evidence::Configuration {
+            name: "bounded".into(),
+            value: "x".repeat(types::MAX_RECOVERY_RECEIPT_BYTES),
+        }],
+        Utc::now(),
+    );
+    assert!(result.unwrap_err().contains("byte bound"));
 }

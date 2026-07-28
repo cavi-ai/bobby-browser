@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, OwnedMutexGuard};
-use types::{WorkflowCheckpoint, WorkflowId};
+use types::{SkillIssuedDecision, WorkflowCheckpoint, WorkflowId, MAX_RECOVERY_RECEIPTS};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -178,8 +178,76 @@ impl CheckpointStore {
         }
     }
 
+    pub async fn save_skill_issuance(
+        &self,
+        workflow_id: &WorkflowId,
+        issuance: &SkillIssuedDecision,
+    ) -> Result<(), CheckpointStoreError> {
+        let lock = self.workflow_lock(workflow_id).await;
+        let _guard = lock.lock().await;
+        let destination = self.issuance_path(workflow_id);
+        let temporary = self.root.join(format!(
+            ".{}.{}.issuance.tmp",
+            workflow_id.0,
+            Uuid::new_v4()
+        ));
+        let result = async {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)
+                .await?;
+            file.write_all(&serde_json::to_vec(issuance)?).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&temporary, destination).await?;
+            File::open(self.root.as_ref()).await?.sync_all().await?;
+            Ok::<_, CheckpointStoreError>(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+        }
+        result
+    }
+
+    pub async fn load_skill_issuance(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<Option<SkillIssuedDecision>, CheckpointStoreError> {
+        let lock = self.workflow_lock(workflow_id).await;
+        let _guard = lock.lock().await;
+        match tokio::fs::read(self.issuance_path(workflow_id)).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub async fn remove_skill_issuance(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<(), CheckpointStoreError> {
+        let lock = self.workflow_lock(workflow_id).await;
+        let _guard = lock.lock().await;
+        match tokio::fs::remove_file(self.issuance_path(workflow_id)).await {
+            Ok(()) => File::open(self.root.as_ref())
+                .await?
+                .sync_all()
+                .await
+                .map_err(Into::into),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn path(&self, workflow_id: &WorkflowId) -> PathBuf {
         self.root.join(format!("{}.json", workflow_id.0))
+    }
+
+    fn issuance_path(&self, workflow_id: &WorkflowId) -> PathBuf {
+        self.root
+            .join(format!("{}.skill-issuance.json", workflow_id.0))
     }
 
     fn validate_schema(&self, checkpoint: &WorkflowCheckpoint) -> Result<(), CheckpointStoreError> {
@@ -188,6 +256,22 @@ impl CheckpointStore {
                 actual: checkpoint.schema_version,
                 expected: WorkflowCheckpoint::SCHEMA_VERSION,
             });
+        }
+        if checkpoint.recovery_receipts.len() > MAX_RECOVERY_RECEIPTS {
+            return Err(CheckpointStoreError::Serialization(serde_json::Error::io(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "checkpoint recovery receipts exceed their bound",
+                ),
+            )));
+        }
+        for receipt in &checkpoint.recovery_receipts {
+            receipt.validate().map_err(|message| {
+                CheckpointStoreError::Serialization(serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    message,
+                )))
+            })?;
         }
         Ok(())
     }

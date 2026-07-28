@@ -7,6 +7,10 @@ use crate::{
     SkillDecision, SkillOutcome, WorkflowId,
 };
 
+pub const MAX_RECOVERY_RECEIPTS: usize = 64;
+pub const MAX_RECOVERY_RECEIPT_EVIDENCE: usize = 32;
+pub const MAX_RECOVERY_RECEIPT_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CheckpointInvariant {
@@ -89,7 +93,7 @@ pub enum RecoveryReceiptState {
     Unresolved,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryReceipt {
     pub idempotency_key: CommandId,
@@ -102,6 +106,44 @@ pub struct RecoveryReceipt {
     pub tactic_evidence: Vec<Evidence>,
     pub outcome_sha256: String,
     pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryReceiptWire {
+    idempotency_key: CommandId,
+    identity: RecoveryCommandIdentity,
+    state: RecoveryReceiptState,
+    reservation_id: CommandId,
+    decision: SkillDecision,
+    command_outcome: CommandOutcome,
+    skill_outcome: SkillOutcome,
+    tactic_evidence: Vec<Evidence>,
+    outcome_sha256: String,
+    recorded_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for RecoveryReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = RecoveryReceiptWire::deserialize(deserializer)?;
+        let receipt = Self {
+            idempotency_key: wire.idempotency_key,
+            identity: wire.identity,
+            state: wire.state,
+            reservation_id: wire.reservation_id,
+            decision: wire.decision,
+            command_outcome: wire.command_outcome,
+            skill_outcome: wire.skill_outcome,
+            tactic_evidence: wire.tactic_evidence,
+            outcome_sha256: wire.outcome_sha256,
+            recorded_at: wire.recorded_at,
+        };
+        receipt.validate().map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
 }
 
 impl RecoveryReceipt {
@@ -137,6 +179,9 @@ impl RecoveryReceipt {
 
     pub fn validate(&self) -> Result<(), String> {
         self.identity.validate()?;
+        if self.tactic_evidence.len() > MAX_RECOVERY_RECEIPT_EVIDENCE {
+            return Err("recovery receipt tactic evidence exceeds its bound".into());
+        }
         if self.idempotency_key != self.identity.command_id
             || command_outcome_id(&self.command_outcome) != &self.identity.command_id
         {
@@ -152,6 +197,10 @@ impl RecoveryReceipt {
             return Err("recovery receipt outcome digest changed".into());
         }
         serde_json::to_vec(&self.decision).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(self).map_err(|error| error.to_string())?;
+        if bytes.len() > MAX_RECOVERY_RECEIPT_BYTES {
+            return Err("recovery receipt exceeds its byte bound".into());
+        }
         Ok(())
     }
 

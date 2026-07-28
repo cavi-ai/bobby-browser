@@ -1,7 +1,8 @@
 use checkpoint_store::{CheckpointStore, CheckpointStoreError};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use types::{
-    AttemptId, CheckpointId, CommandClass, PageId, RecoveryDecision, RecoveryRecord, SessionId,
+    AttemptId, CheckpointId, CommandClass, CommandId, PageId, RecoveryDecision, RecoveryRecord,
+    SessionId, SkillCommandIdentity, SkillDecision, SkillFailure, SkillIssuedDecision, SkillTactic,
     WorkflowCheckpoint, WorkflowId,
 };
 
@@ -45,6 +46,60 @@ async fn saves_loads_and_atomically_replaces_a_workflow_checkpoint() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(entries.len(), 1, "temporary files must not survive save");
+}
+
+#[tokio::test]
+async fn issued_skill_decision_survives_store_reopen_until_explicitly_cleared() {
+    let root = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::new();
+    let session_id = SessionId::new();
+    let now = Utc::now();
+    let identity = SkillCommandIdentity::new(
+        CommandId::new(),
+        workflow_id.clone(),
+        AttemptId::new(),
+        session_id.clone(),
+        Some(PageId::new()),
+        CommandClass::Boundary,
+        "a".repeat(64),
+    )
+    .unwrap();
+    let issuance = SkillIssuedDecision::new_for_command(
+        CommandId::new(),
+        session_id,
+        identity,
+        SkillDecision::new(
+            SkillTactic::ObserveAgain,
+            SkillFailure::TargetDrift,
+            "submitted",
+            1_000,
+            500,
+            None,
+            None,
+        )
+        .unwrap(),
+        None,
+        now,
+        now + Duration::seconds(1),
+    )
+    .unwrap();
+
+    CheckpointStore::open(root.path())
+        .await
+        .unwrap()
+        .save_skill_issuance(&workflow_id, &issuance)
+        .await
+        .unwrap();
+    let reopened = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(
+        reopened.load_skill_issuance(&workflow_id).await.unwrap(),
+        Some(issuance)
+    );
+    reopened.remove_skill_issuance(&workflow_id).await.unwrap();
+    assert_eq!(
+        reopened.load_skill_issuance(&workflow_id).await.unwrap(),
+        None
+    );
 }
 
 #[tokio::test]

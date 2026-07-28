@@ -1414,12 +1414,8 @@ async fn mismatched_committed_receipt_cannot_clear_the_issued_decision() {
     let durable = receipt.command_outcome.journal_safe();
     receipt.skill_outcome =
         SkillOutcome::failed(types::SkillFailure::StrategyExhausted, Vec::new()).unwrap();
-    checkpoint_store.save(&checkpoint).await.unwrap();
-
-    assert!(coordinator
-        .execute_with_adaptation(&envelope, page)
-        .await
-        .is_err());
+    assert!(checkpoint_store.save(&checkpoint).await.is_err());
+    drop(page);
     assert!(state_store
         .get(&envelope.session_id)
         .unwrap()
@@ -1620,6 +1616,16 @@ async fn issued_identity_survives_receipt_write_failure_and_reconciles_only_exac
     })
     .await
     .expect("issued decision must be durably visible before receipt persistence");
+    assert!(
+        CheckpointStore::open(&checkpoint_root)
+            .await
+            .unwrap()
+            .load_skill_issuance(&envelope.workflow_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "a reconstructed process must recover the issued decision"
+    );
     tokio::fs::write(&checkpoint_path, b"{").await.unwrap();
     drop(locked);
     assert!(first.await.unwrap().is_err());

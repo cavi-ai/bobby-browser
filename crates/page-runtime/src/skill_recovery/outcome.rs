@@ -308,6 +308,24 @@ impl SkillRecoveryCoordinator {
             *skills = before;
             return Err(skill_state_error(error));
         }
+        self.recovery
+            .clear_skill_issuance(
+                &before
+                    .session_state()
+                    .pending_issuance
+                    .as_ref()
+                    .and_then(|issued| issued.command_identity.as_ref())
+                    .ok_or_else(|| {
+                        recovery_error(
+                            ErrorCode::Internal,
+                            "issued decision lost command identity",
+                            false,
+                        )
+                    })?
+                    .workflow_id,
+            )
+            .await
+            .map_err(recovery_coordinator_error)?;
         Ok(())
     }
 
@@ -354,6 +372,10 @@ impl SkillRecoveryCoordinator {
             .settle_committed_receipt(receipt)
             .map_err(skill_state_error)?;
         *skills = settled;
+        self.recovery
+            .clear_skill_issuance(&receipt.identity.workflow_id)
+            .await
+            .map_err(recovery_coordinator_error)?;
         Ok(())
     }
 
@@ -477,13 +499,21 @@ impl SkillRecoveryCoordinator {
             }
             Err(error) => return Err(recovery_coordinator_error(error)),
         };
-        let pending = self
+        let in_memory = self
             .skills
             .lock()
             .await
             .session_state()
             .pending_issuance
             .clone();
+        let pending = match in_memory {
+            Some(pending) => Some(pending),
+            None => self
+                .recovery
+                .load_skill_issuance(&envelope.workflow_id)
+                .await
+                .map_err(recovery_coordinator_error)?,
+        };
         if let Some(pending) = &pending {
             let identity = issued_command_identity(envelope).map_err(skill_failure_error)?;
             if pending.command_identity.as_ref() != Some(&identity) {
@@ -550,6 +580,10 @@ impl SkillRecoveryCoordinator {
             receipt.state = RecoveryReceiptState::Committed;
         }
         self.settle_committed_receipt(&receipt).await?;
+        self.recovery
+            .clear_skill_issuance(&envelope.workflow_id)
+            .await
+            .map_err(recovery_coordinator_error)?;
         Ok(Some(execution_from_receipt(&receipt)?))
     }
 

@@ -488,6 +488,20 @@ impl SkillRecoveryCoordinator {
         let identity = issued_command_identity(envelope)?;
         let decision = skills.next_decision_for_command(trigger, identity, Utc::now())?;
         let issued = skills.session_state().clone();
+        let pending = issued
+            .pending_issuance
+            .as_ref()
+            .ok_or(SkillFailure::ConfigurationConflict)?;
+        if self
+            .recovery
+            .persist_skill_issuance(&envelope.workflow_id, pending)
+            .await
+            .is_err()
+        {
+            let _ = replace_skill_state(&self.skill_state, before.session_state());
+            *skills = before;
+            return Err(SkillFailure::ConfigurationConflict);
+        }
         if let Err(error) = replace_skill_state(&self.skill_state, &issued) {
             *skills = before;
             return Err(store_failure(error));

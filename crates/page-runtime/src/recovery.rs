@@ -5,8 +5,8 @@ use thiserror::Error;
 use types::{
     AttemptId, CheckpointInvariant, CommandClass, CommandError, Evidence, InspectCommand,
     NavigateCommand, RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt,
-    RecoveryReceiptState, RecoveryRecord, RestartLineage, SessionId, WaitUntil, WorkflowCheckpoint,
-    WorkflowId,
+    RecoveryReceiptState, RecoveryRecord, RestartLineage, SessionId, SkillIssuedDecision,
+    WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{WorkerLease, WorkerPool};
 
@@ -109,6 +109,40 @@ impl VerifiedRecoveryCheckpoint {
 }
 
 impl RecoveryCoordinator {
+    pub async fn persist_skill_issuance(
+        &self,
+        workflow_id: &WorkflowId,
+        issuance: &SkillIssuedDecision,
+    ) -> Result<(), RecoveryError> {
+        let identity = issuance.command_identity.as_ref().ok_or_else(|| {
+            RecoveryError::InvariantMismatch("skill issuance lacks command identity".into())
+        })?;
+        if &identity.workflow_id != workflow_id || identity.session_id != issuance.session_id {
+            return Err(RecoveryError::InvariantMismatch(
+                "skill issuance authority does not match checkpoint workflow".into(),
+            ));
+        }
+        self.store
+            .save_skill_issuance(workflow_id, issuance)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn load_skill_issuance(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<Option<SkillIssuedDecision>, RecoveryError> {
+        Ok(self.store.load_skill_issuance(workflow_id).await?)
+    }
+
+    pub async fn clear_skill_issuance(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<(), RecoveryError> {
+        self.store.remove_skill_issuance(workflow_id).await?;
+        Ok(())
+    }
+
     pub fn new(store: CheckpointStore) -> Self {
         Self {
             store,
