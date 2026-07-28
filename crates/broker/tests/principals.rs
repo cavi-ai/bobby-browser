@@ -38,7 +38,12 @@ async fn admin_issues_and_revokes_a_principal() {
         json["capabilities"],
         serde_json::json!(["session:read", "session:write"])
     );
-    assert_eq!(json["expiresAt"], serde_json::json!(expires_at));
+    let response_expiry =
+        chrono::DateTime::parse_from_rfc3339(json["expiresAt"].as_str().expect("expiresAt string"))
+            .expect("valid response expiry");
+    let requested_expiry =
+        chrono::DateTime::parse_from_rfc3339(&expires_at).expect("valid requested expiry");
+    assert_eq!(response_expiry, requested_expiry);
     let issued_bearer = json["bearer"].as_str().unwrap().to_owned();
 
     let list_request = context_headers(Request::get("/v1/sessions"), &issued_bearer)
@@ -76,7 +81,9 @@ async fn admin_issues_and_revokes_a_principal() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
+// CaptureSink installs a thread-local tracing subscriber, so keep this async
+// test on one runtime thread across the authority persistence awaits.
+#[tokio::test(flavor = "current_thread")]
 async fn principal_issuance_and_revocation_emit_audit_events() {
     let sink = observability::test_support::CaptureSink::install();
     let (app, _authority, admin_bearer) = app_with_admin(8).await;
@@ -119,7 +126,9 @@ async fn principal_issuance_and_revocation_emit_audit_events() {
     );
 }
 
-#[tokio::test]
+// CaptureSink is thread-local; a current-thread runtime makes the leak check
+// observe every event emitted while the request future is polled.
+#[tokio::test(flavor = "current_thread")]
 async fn bearer_token_never_appears_in_any_emitted_record() {
     let sink = observability::test_support::CaptureSink::install();
     let (app, _authority, admin_bearer) = app_with_admin(4).await;
