@@ -1,11 +1,15 @@
 # bobby-browser configuration
 #
 # This file mirrors the `AppConfig` schema defined in `crates/config/src/lib.rs`.
-# It is loaded by `cli serve` via `AppConfig::load`:
+# It is loaded by `bobby serve` via `AppConfig::load`:
 #   - the path is read from the `BOBBY_BROWSER_CONFIG` env var, defaulting to
 #     `./config.toml` (this file) if unset;
 #   - if the file does not exist, built-in defaults (`AppConfig::default()`)
 #     are used instead — a missing config file is not an error.
+#
+# Bootstrap credentials are never stored here. Use `bobby init`, process env
+# (`AUTOMATION_RUNTIME_BOOTSTRAP_*`), or `BOBBY_BROWSER_BOOTSTRAP_ENV` for the
+# secret file path.
 #
 # The values below are exactly `AppConfig::default()`. Uncomment/edit fields
 # to override; any field you omit falls back to its own default.

@@ -6,16 +6,21 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+autobins = false
 
 [lib]
 path = "src/main.rs"
 
 [[bin]]
-name = "cli"
+name = "bobby"
 path = "src/bin/cli.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+getrandom.workspace = true
+hex.workspace = true
 artifact-store = { path = "../artifact-store" }
 async-trait.workspace = true
 tokio.workspace = true
@@ -33,3 +38,6 @@ types = { path = "../types" }
 uuid.workspace = true
 url.workspace = true
 worker-pool = { path = "../worker-pool" }
+
+[dev-dependencies]
+tempfile.workspace = true
