@@ -35,6 +35,7 @@ struct BidiCall {
 struct FakeBidi {
     calls: Mutex<Vec<BidiCall>>,
     scripted: Mutex<VecDeque<Result<Value, CommandError>>>,
+    preflight: Mutex<VecDeque<Result<Value, CommandError>>>,
     blocked: Mutex<Option<BlockedSend>>,
     subscribe_error: Mutex<Option<CommandError>>,
     subscribe_response: Mutex<Value>,
@@ -64,6 +65,7 @@ impl FakeBidi {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
             scripted: Mutex::new(scripted.into()),
+            preflight: Mutex::new(VecDeque::new()),
             blocked: Mutex::new(None),
             subscribe_error: Mutex::new(None),
             subscribe_response: Mutex::new(json!({})),
@@ -116,6 +118,10 @@ impl FakeBidi {
 
     async fn calls(&self) -> Vec<BidiCall> {
         self.calls.lock().await.clone()
+    }
+
+    async fn set_preflight(&self, responses: Vec<Result<Value, CommandError>>) {
+        *self.preflight.lock().await = responses.into();
     }
 
     async fn title(&self, context: &str) -> Option<String> {
@@ -216,6 +222,15 @@ impl BidiTransport for FakeBidi {
         }
         if method == "browsingContext.getTree" {
             return Ok(self.tree.lock().await.clone());
+        }
+        if method == "script.callFunction" {
+            if let Some(response) = self.preflight.lock().await.pop_front() {
+                return response;
+            }
+            let shared_id = params["arguments"][0]["sharedId"]
+                .as_str()
+                .unwrap_or("preflight-element");
+            return Ok(json!({"result": {"type": "node", "sharedId": shared_id}}));
         }
         if let Some(response) = self.scripted.lock().await.pop_front() {
             if method == "browsingContext.create" {
@@ -1255,14 +1270,141 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[6].method, "input.performActions");
-    assert_eq!(calls[6].params["context"], "context-1");
-    assert_eq!(calls[6].params["actions"][0]["type"], "pointer");
+    assert_eq!(calls[6].method, "script.callFunction");
+    assert_eq!(calls[7].method, "input.performActions");
+    assert_eq!(calls[7].params["context"], "context-1");
+    assert_eq!(calls[7].params["actions"][0]["type"], "pointer");
     assert_eq!(
-        calls[6].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        calls[7].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
         "element-1"
     );
     assert_engine_native(&evidence);
+}
+
+#[tokio::test]
+async fn native_click_scrolls_and_revalidates_a_below_fold_element_before_pointer_input() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "below-fold"}})),
+        Ok(json!({})),
+    ]);
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "node",
+        "sharedId": "below-fold-after-scroll"
+    }}))])
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: "#below-fold".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    let preflight = calls
+        .iter()
+        .find(|call| call.method == "script.callFunction")
+        .expect("native click must preflight the live element");
+    assert_eq!(preflight.params["arguments"][0]["sharedId"], "below-fold");
+    assert!(preflight.params["functionDeclaration"]
+        .as_str()
+        .unwrap()
+        .contains("scrollIntoView"));
+    let pointer = calls
+        .iter()
+        .find(|call| call.method == "input.performActions")
+        .unwrap();
+    assert_eq!(
+        pointer.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        "below-fold-after-scroll"
+    );
+}
+
+#[tokio::test]
+async fn native_click_fails_typed_without_pointer_input_when_target_detaches_after_scroll() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "detaching"}})),
+    ]);
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "string",
+        "value": "detached"
+    }}))])
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let error = worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: "#detaching".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::TargetDetached);
+    assert!(!bidi
+        .calls()
+        .await
+        .iter()
+        .any(|call| call.method == "input.performActions"));
+}
+
+#[tokio::test]
+async fn native_click_fails_typed_for_obscured_and_out_of_bounds_targets() {
+    for (status, expected) in [
+        ("obscured", ErrorCode::TargetObscured),
+        ("out-of-bounds", ErrorCode::TargetOutOfBounds),
+    ] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "node", "sharedId": "blocked"}})),
+        ]);
+        bidi.set_preflight(vec![Ok(json!({"result": {
+            "type": "string",
+            "value": status
+        }}))])
+        .await;
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker.open_page(page.clone()).await.unwrap();
+
+        let error = worker
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: "#blocked".into(),
+                    target: None,
+                    boundary: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, expected, "preflight status: {status}");
+        assert!(!bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| call.method == "input.performActions"));
+    }
 }
 
 #[tokio::test]
@@ -1297,7 +1439,8 @@ async fn semantic_click_resolves_test_id_to_verified_css_before_native_input() {
         .as_str()
         .unwrap()
         .contains("[data-testid=\\\"confirm\\\"]"));
-    assert_eq!(calls[6].method, "input.performActions");
+    assert_eq!(calls[6].method, "script.callFunction");
+    assert_eq!(calls[7].method, "input.performActions");
 }
 
 #[tokio::test]
@@ -1342,6 +1485,11 @@ async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
         "children": [{"context": "frame-context", "children": []}]
     }]}))
     .await;
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "node",
+        "sharedId": "frame-button-after-scroll"
+    }}))])
+    .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
@@ -1370,6 +1518,11 @@ async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
     assert!(calls
         .iter()
         .any(|call| call.method == "browsingContext.getTree"));
+    let preflight = calls
+        .iter()
+        .find(|call| call.method == "script.callFunction")
+        .expect("frame click must preflight in the child context");
+    assert_eq!(preflight.params["target"]["context"], "frame-context");
     let click = calls
         .iter()
         .find(|call| call.method == "input.performActions")
@@ -1377,7 +1530,7 @@ async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
     assert_eq!(click.params["context"], "frame-context");
     assert_eq!(
         click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
-        "frame-button"
+        "frame-button-after-scroll"
     );
 }
 
@@ -1432,6 +1585,11 @@ async fn semantic_click_descends_exact_open_shadow_root_before_native_input() {
         Ok(json!({"result": {"type": "node", "sharedId": "shadow-button"}})),
         Ok(json!({})),
     ]);
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "node",
+        "sharedId": "shadow-button-after-scroll"
+    }}))])
+    .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
@@ -1475,7 +1633,7 @@ async fn semantic_click_descends_exact_open_shadow_root_before_native_input() {
         .unwrap();
     assert_eq!(
         click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
-        "shadow-button"
+        "shadow-button-after-scroll"
     );
 }
 
@@ -1860,7 +2018,8 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
         .as_str()
         .unwrap()
         .contains("#confirm"));
-    assert_eq!(calls[7].method, "input.performActions");
+    assert_eq!(calls[7].method, "script.callFunction");
+    assert_eq!(calls[8].method, "input.performActions");
 }
 
 #[tokio::test]
@@ -1986,11 +2145,12 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[7].method, "input.performActions");
-    assert_eq!(calls[7].params["actions"][0]["type"], "pointer");
+    assert_eq!(calls[7].method, "script.callFunction");
     assert_eq!(calls[8].method, "input.performActions");
-    assert_eq!(calls[8].params["actions"][0]["type"], "key");
-    let keys = calls[8].params["actions"][0]["actions"].as_array().unwrap();
+    assert_eq!(calls[8].params["actions"][0]["type"], "pointer");
+    assert_eq!(calls[9].method, "input.performActions");
+    assert_eq!(calls[9].params["actions"][0]["type"], "key");
+    let keys = calls[9].params["actions"][0]["actions"].as_array().unwrap();
     assert!(keys.iter().any(|action| action["value"] == "a"));
     assert!(keys.iter().any(|action| action["value"] == "\u{e003}"));
     assert!(keys.iter().any(|action| action["value"] == "H"));
@@ -2156,6 +2316,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
             "script.evaluate",
             "script.evaluate",
             "script.evaluate",
+            "script.callFunction",
             "input.performActions"
         ]
     );

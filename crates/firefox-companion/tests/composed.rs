@@ -85,6 +85,10 @@ impl BidiTransport for BindingBidi {
             {
                 Ok(json!({"result": {"type": "node", "sharedId": "native-target"}}))
             }
+            "script.callFunction" => Ok(json!({"result": {
+                "type": "node",
+                "sharedId": params["arguments"][0]["sharedId"]
+            }})),
             "script.evaluate" => Ok(json!({"result": {"type": "boolean", "value": true}})),
             _ => Ok(json!({})),
         }

@@ -22,7 +22,9 @@ pub(super) fn failure_from_error(error: &CommandError) -> SkillFailure {
         | ErrorCode::TargetAmbiguous
         | ErrorCode::FrameNotFound
         | ErrorCode::ShadowRootUnavailable
-        | ErrorCode::TargetDetached => SkillFailure::TargetDrift,
+        | ErrorCode::TargetDetached
+        | ErrorCode::TargetObscured
+        | ErrorCode::TargetOutOfBounds => SkillFailure::TargetDrift,
         ErrorCode::BrowserLaunchFailed | ErrorCode::ResourceExhausted => {
             SkillFailure::EngineUnavailable
         }
@@ -778,6 +780,25 @@ mod classification_tests {
         ] {
             assert_eq!(
                 failure_from_outcome(&outcome, CommandClass::Reconciliable),
+                SkillFailure::TargetDrift
+            );
+        }
+    }
+
+    #[test]
+    fn native_pointer_preflight_failures_are_target_drift_before_mutation() {
+        for code in [
+            ErrorCode::TargetDetached,
+            ErrorCode::TargetObscured,
+            ErrorCode::TargetOutOfBounds,
+        ] {
+            assert_eq!(
+                failure_from_error(&CommandError {
+                    code,
+                    message: "native pointer preflight rejected the target".into(),
+                    layer: ErrorLayer::Driver,
+                    retryable: false,
+                }),
                 SkillFailure::TargetDrift
             );
         }

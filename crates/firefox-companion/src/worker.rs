@@ -1342,10 +1342,60 @@ impl FirefoxCompanionWorker {
         context: &str,
         shared_id: &str,
     ) -> Result<(), CommandError> {
+        let shared_id = self.preflight_pointer_target(context, shared_id).await?;
         self.transport
-            .send("input.performActions", pointer_actions(context, shared_id))
+            .send("input.performActions", pointer_actions(context, &shared_id))
             .await?;
         Ok(())
+    }
+
+    async fn preflight_pointer_target(
+        &self,
+        context: &str,
+        shared_id: &str,
+    ) -> Result<String, CommandError> {
+        let response = self
+            .transport
+            .send(
+                "script.callFunction",
+                json!({
+                    "functionDeclaration": "async(element)=>{if(!(element instanceof Element)||!element.isConnected)return 'detached';element.scrollIntoView({block:'center',inline:'center'});await new Promise(resolve=>requestAnimationFrame(()=>resolve()));if(!element.isConnected)return 'detached';const rect=element.getBoundingClientRect();const width=document.documentElement.clientWidth;const height=document.documentElement.clientHeight;if(rect.width<=0||rect.height<=0||rect.right<=0||rect.bottom<=0||rect.left>=width||rect.top>=height)return 'out-of-bounds';const x=Math.min(Math.max(rect.left+rect.width/2,0),width-1);const y=Math.min(Math.max(rect.top+rect.height/2,0),height-1);const root=element.getRootNode();const hit=typeof root.elementFromPoint==='function'?root.elementFromPoint(x,y):document.elementFromPoint(x,y);if(hit===null||(hit!==element&&!element.contains(hit)))return 'obscured';return element;}",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "arguments": [{"sharedId": shared_id}],
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        if let Some(shared_id) = response
+            .pointer("/result/sharedId")
+            .and_then(Value::as_str)
+            .filter(|shared_id| !shared_id.is_empty())
+        {
+            return Ok(shared_id.to_owned());
+        }
+        match response.pointer("/result/value").and_then(Value::as_str) {
+            Some("detached") => Err(driver_error(
+                ErrorCode::TargetDetached,
+                "Firefox native click target detached during viewport preflight",
+                false,
+            )),
+            Some("obscured") => Err(driver_error(
+                ErrorCode::TargetObscured,
+                "Firefox native click target is obscured after viewport preflight",
+                false,
+            )),
+            Some("out-of-bounds") => Err(driver_error(
+                ErrorCode::TargetOutOfBounds,
+                "Firefox native click target has no clickable point in the viewport",
+                false,
+            )),
+            _ => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox native click viewport preflight returned an invalid result",
+                false,
+            )),
+        }
     }
 
     async fn bind_existing_popup(&self, context: &str) -> Result<(PageId, String), CommandError> {
