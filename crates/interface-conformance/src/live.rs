@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 
 use chrono::{Duration, Utc};
 use interface_core::{AuthorityStore, CapabilityHandle};
@@ -28,9 +25,6 @@ impl ChromeRuntimeHarness {
         let root = tempfile::tempdir().expect("create conformance root");
         let site = test_site::spawn().await;
         let mut config = config::AppConfig::default();
-        config.browser.executable = Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        ));
         config.browser.profiles_dir = root.path().join("profiles");
         config.browser.upload_roots = vec![root.path().join("uploads")];
         config.browser.downloads_dir = root.path().join("downloads");
