@@ -265,6 +265,7 @@ async fn run_mcp_sample(
         replayable_inputs: vec![],
         evidence: inspect_evidence.clone(),
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: chrono::Utc::now(),
     };
     tool(
@@ -335,6 +336,7 @@ async fn run_mcp_sample(
         replayable_inputs: vec![],
         evidence: inspect_evidence.clone(),
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: chrono::Utc::now(),
     };
     let saved_checkpoint = tool(

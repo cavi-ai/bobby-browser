@@ -2,16 +2,17 @@ mod chromium;
 mod network_quiet;
 pub mod process_registry;
 mod selection;
+mod skill_adapter;
 mod targeting;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use network_engine::state::{HttpStateSnapshot, ResponseStateDelta};
-use tokio::sync::{Mutex, OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OnceCell, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, EvaluateJavaScriptCommand, Evidence,
@@ -23,7 +24,12 @@ use types::{
 pub use chromium::ChromiumWorkerFactory;
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
-    SelectedWorkerFactory,
+    SelectedWorkerFactory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
+};
+pub use skill_adapter::{
+    skill_engine, ChromiumSkillAdapter, FirefoxSkillAdapter,
+    CHROMIUM_PRODUCTION_SKILL_PROFILE_VERSION, FIREFOX_PRODUCTION_SKILL_PROFILE_VERSION,
+    PRODUCTION_SKILL_CAPABILITIES,
 };
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
@@ -220,6 +226,20 @@ pub trait WorkerFactory: Send + Sync {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError>;
 
     async fn release_session(&self, _session_id: &SessionId) {}
+
+    fn can_select(&self, _preference: &EnginePreference) -> bool {
+        false
+    }
+
+    async fn replace_session(
+        &self,
+        _session_id: &SessionId,
+        _preference: &EnginePreference,
+    ) -> Result<(), CommandError> {
+        Err(policy_error(
+            "worker factory does not support session replacement",
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -231,6 +251,10 @@ struct PoolInner {
     factory: Arc<dyn WorkerFactory>,
     permits: Arc<Semaphore>,
     entries: Mutex<HashMap<SessionId, Arc<WorkerEntry>>>,
+    // Lifecycle lock order is session gate -> lease permit -> entries/factory.
+    // The registry mutex is released before waiting on a session gate.
+    session_gates: Mutex<HashMap<SessionId, Weak<RwLock<()>>>>,
+    replacement_cleanup_timeout: std::time::Duration,
 }
 
 struct WorkerEntry {
@@ -262,6 +286,7 @@ impl WorkerEntry {
 pub struct WorkerLease {
     worker: Arc<dyn BrowserWorker>,
     _active_permit: Arc<OwnedSemaphorePermit>,
+    _session_use: Arc<OwnedRwLockReadGuard<()>>,
 }
 
 impl WorkerLease {
@@ -280,12 +305,22 @@ impl WorkerLease {
 
 impl WorkerPool {
     pub fn new(max_active: usize, factory: Arc<dyn WorkerFactory>) -> Self {
+        Self::with_replacement_timeout(max_active, factory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT)
+    }
+
+    pub fn with_replacement_timeout(
+        max_active: usize,
+        factory: Arc<dyn WorkerFactory>,
+        replacement_cleanup_timeout: std::time::Duration,
+    ) -> Self {
         assert!(max_active > 0, "worker pool capacity must be positive");
         Self {
             inner: Arc::new(PoolInner {
                 factory,
                 permits: Arc::new(Semaphore::new(max_active)),
                 entries: Mutex::new(HashMap::new()),
+                session_gates: Mutex::new(HashMap::new()),
+                replacement_cleanup_timeout,
             }),
         }
     }
@@ -295,6 +330,8 @@ impl WorkerPool {
         // semaphore bounds only operations that are actively using a worker.
         // Owned permits are cancellation-safe and return automatically when a
         // command finishes, errors, or its task is aborted.
+        let session_gate = self.session_gate(&session_id).await;
+        let session_use = session_gate.read_owned().await;
         let active_permit = self
             .inner
             .permits
@@ -347,18 +384,19 @@ impl WorkerPool {
                 }
                 inner.factory.release_session(&task_session).await;
             }
-            result.map(|worker| (worker, active_permit))
+            result.map(|worker| (worker, active_permit, session_use))
         })
         .await
         .map_err(|error| resource_error(format!("worker launch task failed: {error}")))?;
         cancellation.armed = false;
 
         match result {
-            Ok((worker, active_permit)) => {
+            Ok((worker, active_permit, session_use)) => {
                 tracing::info!(session_id = %session_id.0, "worker.leased");
                 Ok(WorkerLease {
                     worker,
                     _active_permit: Arc::new(active_permit),
+                    _session_use: Arc::new(session_use),
                 })
             }
             Err(error) => Err(error),
@@ -366,13 +404,74 @@ impl WorkerPool {
     }
 
     pub async fn release_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
-        let entry = self.inner.entries.lock().await.remove(session_id);
+        self.cleanup_session(session_id, false).await
+    }
+
+    pub async fn invalidate_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
+        self.cleanup_session(session_id, true).await
+    }
+
+    pub fn can_select(&self, preference: &EnginePreference) -> bool {
+        self.inner.factory.can_select(preference)
+    }
+
+    pub async fn replace_session(
+        &self,
+        session_id: &SessionId,
+        preference: &EnginePreference,
+    ) -> Result<(), CommandError> {
+        if !self.can_select(preference) {
+            return Err(policy_error(
+                "no browser worker satisfies the requested replacement preference",
+            ));
+        }
+        let session_gate = self.session_gate(session_id).await;
+        let inner = Arc::clone(&self.inner);
+        let session_id = session_id.clone();
+        let preference = preference.clone();
+        let mut cleanup = tokio::spawn(async move {
+            let _session_exclusive = session_gate.write_owned().await;
+            let entry = inner.entries.lock().await.remove(&session_id);
+            if let Some(worker) = entry.and_then(|entry| entry.worker.get().cloned()) {
+                worker.terminate().await?;
+            }
+            inner
+                .factory
+                .replace_session(&session_id, &preference)
+                .await
+        });
+        match tokio::time::timeout(self.inner.replacement_cleanup_timeout, &mut cleanup).await {
+            Ok(result) => result.map_err(|error| {
+                resource_error(format!("worker replacement task failed: {error}"))
+            })?,
+            Err(_) => Err(replacement_timeout_error()),
+        }
+    }
+
+    pub async fn wait_for_session_stable(&self, session_id: &SessionId) {
+        let session_gate = self.session_gate(session_id).await;
+        drop(session_gate.write_owned().await);
+    }
+
+    async fn cleanup_session(
+        &self,
+        session_id: &SessionId,
+        terminate: bool,
+    ) -> Result<(), CommandError> {
+        let session_gate = self.session_gate(session_id).await;
         let factory = Arc::clone(&self.inner.factory);
+        let inner = Arc::clone(&self.inner);
         let session_id = session_id.clone();
         tokio::spawn(async move {
+            let _session_exclusive = session_gate.write_owned().await;
+            let entry = inner.entries.lock().await.remove(&session_id);
             let result = if let Some(entry) = entry {
                 if let Some(worker) = entry.worker.get() {
-                    worker.close().await
+                    if terminate {
+                        worker.terminate().await
+                    } else {
+                        worker.close().await
+                    }
                 } else {
                     Ok(())
                 }
@@ -381,7 +480,12 @@ impl WorkerPool {
             };
             factory.release_session(&session_id).await;
             if result.is_ok() {
-                tracing::info!(session_id = %session_id.0, "worker.released");
+                let action = if terminate {
+                    "worker.invalidated"
+                } else {
+                    "worker.released"
+                };
+                tracing::info!(session_id = %session_id.0, action);
             }
             result
         })
@@ -389,25 +493,15 @@ impl WorkerPool {
         .map_err(|error| resource_error(format!("worker cleanup task failed: {error}")))?
     }
 
-    pub async fn invalidate_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
-        let entry = self.inner.entries.lock().await.remove(session_id);
-        let factory = Arc::clone(&self.inner.factory);
-        let session_id = session_id.clone();
-        tokio::spawn(async move {
-            let result = if let Some(entry) = entry {
-                if let Some(worker) = entry.worker.get() {
-                    worker.terminate().await
-                } else {
-                    Ok(())
-                }
-            } else {
-                Ok(())
-            };
-            factory.release_session(&session_id).await;
-            result
-        })
-        .await
-        .map_err(|error| resource_error(format!("worker cleanup task failed: {error}")))?
+    async fn session_gate(&self, session_id: &SessionId) -> Arc<RwLock<()>> {
+        let mut gates = self.inner.session_gates.lock().await;
+        if let Some(gate) = gates.get(session_id).and_then(Weak::upgrade) {
+            return gate;
+        }
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        let gate = Arc::new(RwLock::new(()));
+        gates.insert(session_id.clone(), Arc::downgrade(&gate));
+        gate
     }
 
     pub async fn active_workers(&self) -> usize {
@@ -425,6 +519,15 @@ fn resource_error(message: impl Into<String>) -> CommandError {
     CommandError {
         code: types::ErrorCode::ResourceExhausted,
         message: message.into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: true,
+    }
+}
+
+fn replacement_timeout_error() -> CommandError {
+    CommandError {
+        code: types::ErrorCode::DeadlineExceeded,
+        message: "browser worker replacement cleanup exceeded its deadline".into(),
         layer: types::ErrorLayer::Driver,
         retryable: true,
     }

@@ -40,6 +40,7 @@ fn checkpoint(
         replayable_inputs: Vec::new(),
         evidence: Vec::new(),
         recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
         created_at: Utc::now(),
     }
 }

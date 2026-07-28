@@ -333,6 +333,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1512,10 +1513,14 @@ dependencies = [
  "async-trait",
  "checkpoint-store",
  "chrono",
+ "companion-protocol",
  "dom-engine",
  "intent-engine",
  "network-engine",
+ "serde",
  "serde_json",
+ "sha2",
+ "skill-runtime",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1960,9 +1965,11 @@ dependencies = [
  "release-gates",
  "reqwest 0.12.28",
  "sdk-core",
+ "serde",
  "serde_json",
  "session-manager",
  "sha2",
+ "skill-runtime",
  "tempfile",
  "test-site",
  "tokio",
@@ -2258,6 +2265,18 @@ name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
+name = "skill-runtime"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "types",
+]
 
 [[package]]
 name = "slab"
@@ -2750,6 +2769,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "url",
  "uuid",
@@ -3137,6 +3157,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "skill-runtime",
  "tempfile",
  "test-site",
  "thiserror",

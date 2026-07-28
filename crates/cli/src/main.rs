@@ -1116,9 +1116,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn installed_native_host_wrapper_passes_descriptor_without_environment_injection() {
-        let root = std::fs::canonicalize("target")
-            .unwrap()
-            .join(format!("native-host-install-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "bobby-native-host-install-{}",
+            uuid::Uuid::new_v4()
+        ));
         let wrapper = root.join("firefox-native-host");
         let manifest = root.join("com.bobby_browser.companion.json");
         let descriptor = root.join("dynamic-descriptor.json");
@@ -1159,9 +1160,10 @@ mod tests {
 
     #[test]
     fn native_host_installation_never_clobbers_operator_owned_files() {
-        let root = std::fs::canonicalize("target")
-            .unwrap()
-            .join(format!("native-host-no-clobber-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "bobby-native-host-no-clobber-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let wrapper = root.join("firefox-native-host");
         let manifest = root.join("com.bobby_browser.companion.json");
@@ -1183,8 +1185,8 @@ mod tests {
 
     #[test]
     fn native_host_manifest_conflict_rolls_back_wrapper_created_by_attempt() {
-        let root = std::fs::canonicalize("target").unwrap().join(format!(
-            "native-host-manifest-conflict-{}",
+        let root = std::env::temp_dir().join(format!(
+            "bobby-native-host-manifest-conflict-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).unwrap();
@@ -1211,9 +1213,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn concurrent_identical_native_host_installers_are_both_successful() {
-        let root = std::fs::canonicalize("target")
-            .unwrap()
-            .join(format!("native-host-concurrent-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "bobby-native-host-concurrent-{}",
+            uuid::Uuid::new_v4()
+        ));
         let config = NativeHostInstallConfig {
             wrapper_path: root.join("firefox-native-host"),
             manifest_path: root.join("com.bobby_browser.companion.json"),

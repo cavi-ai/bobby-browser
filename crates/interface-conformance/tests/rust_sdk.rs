@@ -197,6 +197,7 @@ async fn run_rust_sample(
         replayable_inputs: vec![],
         evidence: inspect_evidence.clone(),
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: chrono::Utc::now(),
     };
     runtime
@@ -263,6 +264,7 @@ async fn run_rust_sample(
         replayable_inputs: vec![],
         evidence: inspect_evidence.clone(),
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: chrono::Utc::now(),
     };
     let saved_checkpoint = runtime

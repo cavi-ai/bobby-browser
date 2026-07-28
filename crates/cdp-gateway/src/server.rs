@@ -916,7 +916,7 @@ impl CdpConnection {
                 let checkpoint=WorkflowCheckpoint { schema_version:1, checkpoint_id:checkpoint_id.clone(), workflow_id:workflow_id.clone(), attempt_id:attempt_id.clone(),
                     session_id:session_id.clone(), page_id:page_id.clone(), restart_url:url.clone(), current_url:url.clone(), cursor:Some(inspect_id), boundary_command_id:Some(command_id.clone()),
                     recovery_class:CommandClass::Boundary, invariants:vec![CheckpointInvariant::Url{value:url},CheckpointInvariant::Title{value:title}],
-                    replayable_inputs:vec![], evidence:evidence.clone(), recovery_history:vec![], created_at:Utc::now() };
+                    replayable_inputs:vec![], evidence:evidence.clone(), recovery_history:vec![], recovery_receipts:vec![], created_at:Utc::now() };
                 match self.runtime.checkpoint(ctx, checkpoint, evidence).await {
                     Ok(saved) => {
                         *self.automation_boundary.lock().await=Some(AutomationBoundary { workflow_id:workflow_id.clone(), attempt_id, command_id:command_id.clone(), checkpoint_id:checkpoint_id.clone(), session_id, page_id, expires_at:Utc::now()+Duration::seconds(30), phase:AutomationBoundaryPhase::Pending });
