@@ -8,8 +8,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandError,
-    Evidence, InspectCommand, NavigateCommand, PageId, RecoveryDecision, SessionId,
-    TypeTextCommand, WorkerId, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PageId,
+    RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt, RecoveryReceiptState, SessionId,
+    SkillDecision, SkillFailure, SkillOutcome, SkillTactic, TypeTextCommand, WorkerId,
+    WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 
@@ -41,6 +43,7 @@ fn checkpoint() -> WorkflowCheckpoint {
         replayable_inputs: vec!["Ada".into()],
         evidence: Vec::new(),
         recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
         created_at: Utc::now(),
     }
 }
@@ -59,6 +62,46 @@ fn matching_evidence() -> Vec<Evidence> {
             text: Some("Ada".into()),
         },
     ]
+}
+
+fn recovery_receipt(
+    checkpoint: &WorkflowCheckpoint,
+    state: RecoveryReceiptState,
+) -> RecoveryReceipt {
+    let command_id = CommandId::new();
+    RecoveryReceipt::new(
+        command_id.clone(),
+        RecoveryCommandIdentity::new(
+            command_id.clone(),
+            checkpoint.workflow_id.clone(),
+            checkpoint.attempt_id.clone(),
+            checkpoint.session_id.clone(),
+            Some(checkpoint.page_id.clone()),
+            checkpoint.recovery_class,
+            "a".repeat(64),
+        )
+        .unwrap(),
+        state,
+        CommandId::new(),
+        SkillDecision::new(
+            SkillTactic::ObserveAgain,
+            SkillFailure::DeadlineExceeded,
+            "observed postcondition",
+            100,
+            100,
+            None,
+            None,
+        )
+        .unwrap(),
+        CommandOutcome::Completed {
+            command_id,
+            evidence: Vec::new(),
+        },
+        SkillOutcome::failed(SkillFailure::DeadlineExceeded, Vec::new()).unwrap(),
+        Vec::new(),
+        Utc::now(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -107,8 +150,135 @@ async fn persists_only_a_checkpoint_proven_by_observed_evidence() {
     assert!(store.load(&checkpoint.workflow_id).await.is_err());
 }
 
+#[tokio::test]
+async fn recovery_receipt_creation_starts_unresolved_and_rejects_payload_overwrite() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let coordinator = RecoveryCoordinator::new(store.clone());
+    let checkpoint = checkpoint();
+    store.save(&checkpoint).await.unwrap();
+
+    let pending = recovery_receipt(&checkpoint, RecoveryReceiptState::PendingJournal);
+    assert!(coordinator.persist_recovery_receipt(pending).await.is_err());
+
+    let unresolved = recovery_receipt(&checkpoint, RecoveryReceiptState::Unresolved);
+    coordinator
+        .persist_recovery_receipt(unresolved.clone())
+        .await
+        .unwrap();
+    coordinator
+        .persist_recovery_receipt(unresolved.clone())
+        .await
+        .unwrap();
+    let mut overwritten = unresolved;
+    overwritten.command_outcome = CommandOutcome::Completed {
+        command_id: overwritten.identity.command_id.clone(),
+        evidence: vec![Evidence::Configuration {
+            name: "changed".into(),
+            value: "true".into(),
+        }],
+    };
+    assert!(coordinator
+        .persist_recovery_receipt(overwritten)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn recovery_receipt_fsm_is_forward_only_and_committed_payload_survives_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let coordinator = RecoveryCoordinator::new(store.clone());
+    let checkpoint = checkpoint();
+    store.save(&checkpoint).await.unwrap();
+    let unresolved = recovery_receipt(&checkpoint, RecoveryReceiptState::Unresolved);
+    coordinator
+        .persist_recovery_receipt(unresolved.clone())
+        .await
+        .unwrap();
+
+    assert!(coordinator
+        .transition_recovery_receipt(&unresolved.identity, RecoveryReceiptState::Committed,)
+        .await
+        .is_err());
+    coordinator
+        .transition_recovery_receipt(&unresolved.identity, RecoveryReceiptState::PendingJournal)
+        .await
+        .unwrap();
+    coordinator
+        .transition_recovery_receipt(&unresolved.identity, RecoveryReceiptState::PendingJournal)
+        .await
+        .unwrap();
+    assert!(coordinator
+        .transition_recovery_receipt(&unresolved.identity, RecoveryReceiptState::Unresolved)
+        .await
+        .is_err());
+    coordinator
+        .transition_recovery_receipt(&unresolved.identity, RecoveryReceiptState::Committed)
+        .await
+        .unwrap();
+    coordinator
+        .transition_recovery_receipt(&unresolved.identity, RecoveryReceiptState::Committed)
+        .await
+        .unwrap();
+    assert!(coordinator
+        .transition_recovery_receipt(&unresolved.identity, RecoveryReceiptState::PendingJournal,)
+        .await
+        .is_err());
+
+    let reopened_store = CheckpointStore::open(root.path()).await.unwrap();
+    let reopened = RecoveryCoordinator::new(reopened_store.clone());
+    let committed = reopened_store
+        .load(&checkpoint.workflow_id)
+        .await
+        .unwrap()
+        .recovery_receipts
+        .into_iter()
+        .find(|receipt| receipt.identity == unresolved.identity)
+        .unwrap();
+    assert_eq!(committed.state, RecoveryReceiptState::Committed);
+    let mut changed = committed.clone();
+    changed.recorded_at = Utc::now() + chrono::Duration::seconds(1);
+    assert!(reopened.persist_recovery_receipt(changed).await.is_err());
+    assert_eq!(
+        reopened_store
+            .load(&checkpoint.workflow_id)
+            .await
+            .unwrap()
+            .recovery_receipts,
+        vec![committed]
+    );
+}
+
+#[tokio::test]
+async fn durable_restart_rejects_a_checkpoint_without_persisted_invariant_proof() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let launches = Arc::new(AtomicUsize::new(0));
+    let navigations = Arc::new(Mutex::new(Vec::new()));
+    let pool = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(RecoveryFactory {
+            launches: Arc::clone(&launches),
+            replacement_matches: true,
+            navigations,
+        }),
+    ));
+    let unverified = checkpoint();
+    store.save(&unverified).await.unwrap();
+    let coordinator = RecoveryCoordinator::with_workers(store, pool);
+
+    let error = coordinator
+        .restart_from_verified_boundary(&unverified.workflow_id)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("checkpoint invariants failed"));
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+}
+
 struct RecoveryFactory {
-    launches: AtomicUsize,
+    launches: Arc<AtomicUsize>,
     replacement_matches: bool,
     navigations: Arc<Mutex<Vec<String>>>,
 }
@@ -201,7 +371,7 @@ async fn recover(
     let pool = Arc::new(WorkerPool::new(
         1,
         Arc::new(RecoveryFactory {
-            launches: AtomicUsize::new(0),
+            launches: Arc::new(AtomicUsize::new(0)),
             replacement_matches: matches,
             navigations: navigations.clone(),
         }),

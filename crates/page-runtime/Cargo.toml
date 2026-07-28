@@ -7,15 +7,23 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+test-support = ["skill-runtime/test-support"]
+
 [dependencies]
 artifact-store = { path = "../artifact-store" }
 async-trait.workspace = true
 checkpoint-store = { path = "../checkpoint-store" }
 chrono.workspace = true
+companion-protocol = { path = "../companion-protocol" }
 dom-engine = { path = "../dom-engine" }
 intent-engine = { path = "../intent-engine" }
 network-engine = { path = "../network-engine" }
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+skill-runtime = { path = "../skill-runtime" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

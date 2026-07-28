@@ -1,6 +1,7 @@
 mod adaptive;
 mod executor;
 mod recovery;
+mod skill_recovery;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +16,15 @@ use workflow_journal::CommandJournal;
 pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, VisionGate};
 pub use executor::ExecutorError;
 pub use intent_engine::VisionAssist;
-pub use recovery::{evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError};
+pub use recovery::{
+    evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError,
+    VerifiedRecoveryCheckpoint,
+};
+#[cfg(feature = "test-support")]
+pub use skill_recovery::RecoveryPreflightObserver;
+pub use skill_recovery::{
+    SkillRecoveryCoordinator, SkillRecoveryExecution, SkillTacticEffect, SkillTacticEvidence,
+};
 
 #[doc(hidden)]
 #[async_trait]

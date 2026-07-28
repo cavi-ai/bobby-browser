@@ -1,13 +1,14 @@
-use checkpoint_store::{CheckpointStore, CheckpointStoreError};
+use checkpoint_store::{CheckpointStore, CheckpointStoreError, LockedCheckpointSnapshot};
 use chrono::Utc;
 use std::sync::Arc;
 use thiserror::Error;
 use types::{
     AttemptId, CheckpointInvariant, CommandClass, CommandError, Evidence, InspectCommand,
-    NavigateCommand, RecoveryDecision, RecoveryRecord, RestartLineage, WaitUntil,
-    WorkflowCheckpoint, WorkflowId,
+    NavigateCommand, RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt,
+    RecoveryReceiptState, RecoveryRecord, RestartLineage, SessionId, WaitUntil, WorkflowCheckpoint,
+    WorkflowId,
 };
-use worker_pool::WorkerPool;
+use worker_pool::{WorkerLease, WorkerPool};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvariantEvaluation {
@@ -84,6 +85,29 @@ pub struct RecoveryCoordinator {
     workers: Option<Arc<WorkerPool>>,
 }
 
+pub struct VerifiedRecoveryCheckpoint {
+    snapshot: LockedCheckpointSnapshot,
+}
+
+pub(crate) struct PreparedRecovery {
+    checkpoint: WorkflowCheckpoint,
+    lease: WorkerLease,
+}
+
+impl VerifiedRecoveryCheckpoint {
+    pub fn checkpoint(&self) -> &WorkflowCheckpoint {
+        self.snapshot.checkpoint()
+    }
+
+    pub fn digest(&self) -> &str {
+        self.snapshot.digest()
+    }
+
+    pub async fn verify_unchanged(&self) -> Result<(), RecoveryError> {
+        self.snapshot.verify_unchanged().await.map_err(Into::into)
+    }
+}
+
 impl RecoveryCoordinator {
     pub fn new(store: CheckpointStore) -> Self {
         Self {
@@ -115,19 +139,78 @@ impl RecoveryCoordinator {
         Ok(checkpoint)
     }
 
+    pub async fn load_checkpoint(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowCheckpoint, RecoveryError> {
+        self.store.load(workflow_id).await.map_err(Into::into)
+    }
+
+    pub async fn lock_verified_checkpoint(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<VerifiedRecoveryCheckpoint, RecoveryError> {
+        let snapshot = self.store.lock_snapshot(workflow_id).await?;
+        ensure_persisted_checkpoint_verified(snapshot.checkpoint())?;
+        Ok(VerifiedRecoveryCheckpoint { snapshot })
+    }
+
     pub async fn recover(
         &self,
         workflow_id: &WorkflowId,
     ) -> Result<RecoveryDecision, RecoveryError> {
-        let mut checkpoint = self.store.load(workflow_id).await?;
+        let mut checkpoint = self.lock_verified_checkpoint(workflow_id).await?;
+        self.recover_locked(&mut checkpoint, true).await
+    }
+
+    pub async fn recover_after_replacement(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        let mut checkpoint = self.lock_verified_checkpoint(workflow_id).await?;
+        self.recover_locked(&mut checkpoint, false).await
+    }
+
+    pub async fn recover_locked(
+        &self,
+        verified: &mut VerifiedRecoveryCheckpoint,
+        replace_session: bool,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        verified.verify_unchanged().await?;
+        self.stabilize_recovery_pool(&verified.checkpoint().session_id, replace_session)
+            .await?;
+        let prepared = self
+            .reattach_recovery_pool(verified.checkpoint().clone())
+            .await?;
+        self.complete_prepared_recovery(verified, prepared).await
+    }
+
+    pub(crate) async fn stabilize_recovery_pool(
+        &self,
+        session_id: &SessionId,
+        replace_session: bool,
+    ) -> Result<(), RecoveryError> {
         let workers = self
             .workers
             .as_ref()
             .ok_or(RecoveryError::WorkersUnavailable)?;
-        workers
-            .invalidate_session(&checkpoint.session_id)
-            .await
-            .map_err(browser_error)?;
+        if replace_session {
+            workers
+                .invalidate_session(session_id)
+                .await
+                .map_err(browser_error)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn reattach_recovery_pool(
+        &self,
+        checkpoint: WorkflowCheckpoint,
+    ) -> Result<PreparedRecovery, RecoveryError> {
+        let workers = self
+            .workers
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
         let lease = workers
             .lease(checkpoint.session_id.clone())
             .await
@@ -137,7 +220,19 @@ impl RecoveryCoordinator {
             .open_page(checkpoint.page_id.clone())
             .await
             .map_err(browser_error)?;
+        Ok(PreparedRecovery { checkpoint, lease })
+    }
 
+    pub(crate) async fn complete_prepared_recovery(
+        &self,
+        verified: &mut VerifiedRecoveryCheckpoint,
+        prepared: PreparedRecovery,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        verified.verify_unchanged().await?;
+        let PreparedRecovery {
+            mut checkpoint,
+            lease,
+        } = prepared;
         let mut evidence = lease
             .worker()
             .navigate(
@@ -193,7 +288,7 @@ impl RecoveryCoordinator {
             }
         } else {
             let reason = evaluation.failures.join("; ");
-            lease
+            let restart_evidence = lease
                 .worker()
                 .navigate(
                     &checkpoint.page_id,
@@ -213,13 +308,14 @@ impl RecoveryCoordinator {
                     attempt_id: AttemptId::new(),
                     reason,
                 },
+                evidence: restart_evidence,
             }
         };
         checkpoint.recovery_history.push(RecoveryRecord {
             recorded_at: Utc::now(),
             decision: decision.clone(),
         });
-        self.store.save(&checkpoint).await?;
+        verified.snapshot.save_if_unchanged(&checkpoint).await?;
         tracing::info!(
             outcome = match &decision {
                 RecoveryDecision::Resumed { .. } => "resumed",
@@ -229,6 +325,216 @@ impl RecoveryCoordinator {
             "checkpoint.reconciled"
         );
         Ok(decision)
+    }
+
+    pub async fn restart_from_verified_boundary(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        let mut checkpoint = self.lock_verified_checkpoint(workflow_id).await?;
+        self.restart_from_locked_boundary(&mut checkpoint).await
+    }
+
+    pub async fn restart_from_locked_boundary(
+        &self,
+        verified: &mut VerifiedRecoveryCheckpoint,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        verified.verify_unchanged().await?;
+        let mut checkpoint = verified.checkpoint().clone();
+        let workers = self
+            .workers
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        workers
+            .invalidate_session(&checkpoint.session_id)
+            .await
+            .map_err(browser_error)?;
+        let lease = workers
+            .lease(checkpoint.session_id.clone())
+            .await
+            .map_err(browser_error)?;
+        lease
+            .worker()
+            .open_page(checkpoint.page_id.clone())
+            .await
+            .map_err(browser_error)?;
+        let evidence = lease
+            .worker()
+            .navigate(
+                &checkpoint.page_id,
+                &NavigateCommand {
+                    url: checkpoint.restart_url.clone(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 30_000,
+                },
+            )
+            .await
+            .map_err(browser_error)?;
+        let decision = RecoveryDecision::Restarted {
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+            lineage: RestartLineage {
+                workflow_id: checkpoint.workflow_id.clone(),
+                abandoned_attempt_id: checkpoint.attempt_id.clone(),
+                attempt_id: AttemptId::new(),
+                reason: "restarted from reviewed durable boundary".into(),
+            },
+            evidence,
+        };
+        checkpoint.recovery_history.push(RecoveryRecord {
+            recorded_at: Utc::now(),
+            decision: decision.clone(),
+        });
+        verified.snapshot.save_if_unchanged(&checkpoint).await?;
+
+        Ok(decision)
+    }
+
+    pub async fn prepare_restart_from_locked_boundary(
+        &self,
+        verified: &VerifiedRecoveryCheckpoint,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        verified.verify_unchanged().await?;
+        self.prepare_restart_pool(verified.checkpoint().clone())
+            .await
+    }
+
+    pub(crate) async fn prepare_restart_pool(
+        &self,
+        checkpoint: WorkflowCheckpoint,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        self.stabilize_recovery_pool(&checkpoint.session_id, true)
+            .await?;
+        self.prepare_restart_after_stabilization(checkpoint).await
+    }
+
+    pub(crate) async fn prepare_restart_after_stabilization(
+        &self,
+        checkpoint: WorkflowCheckpoint,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        let prepared = self.reattach_recovery_pool(checkpoint.clone()).await?;
+        drop(prepared);
+        Ok(RecoveryDecision::Restarted {
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+            lineage: RestartLineage {
+                workflow_id: checkpoint.workflow_id.clone(),
+                abandoned_attempt_id: checkpoint.attempt_id.clone(),
+                attempt_id: AttemptId::new(),
+                reason: "restarted from reviewed durable boundary".into(),
+            },
+            evidence: Vec::new(),
+        })
+    }
+
+    pub async fn record_locked_decision(
+        &self,
+        verified: &mut VerifiedRecoveryCheckpoint,
+        decision: &RecoveryDecision,
+    ) -> Result<(), RecoveryError> {
+        let mut checkpoint = verified.checkpoint().clone();
+        let decision_checkpoint_id = match decision {
+            RecoveryDecision::Resumed { checkpoint_id, .. }
+            | RecoveryDecision::NeedsReconciliation { checkpoint_id, .. }
+            | RecoveryDecision::Restarted { checkpoint_id, .. } => checkpoint_id,
+        };
+        if decision_checkpoint_id != &checkpoint.checkpoint_id {
+            return Err(RecoveryError::InvariantMismatch(
+                "recovery decision checkpoint changed before persistence".into(),
+            ));
+        }
+        checkpoint.recovery_history.push(RecoveryRecord {
+            recorded_at: Utc::now(),
+            decision: decision.clone(),
+        });
+        verified.snapshot.save_if_unchanged(&checkpoint).await?;
+        Ok(())
+    }
+
+    pub async fn persist_recovery_receipt(
+        &self,
+        receipt: RecoveryReceipt,
+    ) -> Result<(), RecoveryError> {
+        receipt
+            .validate()
+            .map_err(RecoveryError::InvariantMismatch)?;
+        let mut snapshot = self
+            .store
+            .lock_snapshot(&receipt.identity.workflow_id)
+            .await?;
+        let mut checkpoint = snapshot.checkpoint().clone();
+        if let Some(existing) = checkpoint
+            .recovery_receipts
+            .iter()
+            .find(|existing| existing.identity == receipt.identity)
+        {
+            if existing == &receipt {
+                return Ok(());
+            }
+            return Err(RecoveryError::InvariantMismatch(
+                "recovery receipt payload is immutable".into(),
+            ));
+        } else {
+            if receipt.state != RecoveryReceiptState::Unresolved {
+                return Err(RecoveryError::InvariantMismatch(
+                    "recovery receipt must start unresolved".into(),
+                ));
+            }
+            checkpoint.recovery_receipts.push(receipt);
+        }
+        snapshot.save_if_unchanged(&checkpoint).await?;
+        Ok(())
+    }
+
+    pub async fn transition_recovery_receipt(
+        &self,
+        identity: &RecoveryCommandIdentity,
+        state: RecoveryReceiptState,
+    ) -> Result<(), RecoveryError> {
+        let mut snapshot = self.store.lock_snapshot(&identity.workflow_id).await?;
+        let mut checkpoint = snapshot.checkpoint().clone();
+        let receipt = checkpoint
+            .recovery_receipts
+            .iter_mut()
+            .find(|receipt| &receipt.identity == identity)
+            .ok_or_else(|| {
+                RecoveryError::InvariantMismatch("recovery receipt disappeared".into())
+            })?;
+        receipt
+            .validate()
+            .map_err(RecoveryError::InvariantMismatch)?;
+        let allowed = matches!(
+            (receipt.state, state),
+            (
+                RecoveryReceiptState::Unresolved,
+                RecoveryReceiptState::PendingJournal
+            ) | (
+                RecoveryReceiptState::PendingJournal,
+                RecoveryReceiptState::Committed
+            )
+        );
+        if receipt.state == state {
+            return Ok(());
+        }
+        if !allowed {
+            return Err(RecoveryError::InvariantMismatch(
+                "invalid recovery receipt state transition".into(),
+            ));
+        }
+        receipt.state = state;
+        snapshot.save_if_unchanged(&checkpoint).await?;
+        Ok(())
+    }
+}
+
+fn ensure_persisted_checkpoint_verified(
+    checkpoint: &WorkflowCheckpoint,
+) -> Result<(), RecoveryError> {
+    let evaluation = evaluate_invariants(&checkpoint.invariants, &checkpoint.evidence);
+    if evaluation.is_match() {
+        Ok(())
+    } else {
+        Err(RecoveryError::InvariantMismatch(
+            evaluation.failures.join("; "),
+        ))
     }
 }
 

@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use types::{WorkflowCheckpoint, WorkflowId};
 use uuid::Uuid;
 
@@ -19,6 +20,56 @@ pub enum CheckpointStoreError {
     NotFound(WorkflowId),
     #[error("unsupported checkpoint schema {actual}; expected {expected}")]
     UnsupportedSchema { actual: u16, expected: u16 },
+    #[error("checkpoint changed after the recovery snapshot was verified")]
+    SnapshotChanged,
+}
+
+pub struct LockedCheckpointSnapshot {
+    store: CheckpointStore,
+    checkpoint: WorkflowCheckpoint,
+    authority_digest: String,
+    content_digest: String,
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl LockedCheckpointSnapshot {
+    pub fn checkpoint(&self) -> &WorkflowCheckpoint {
+        &self.checkpoint
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.authority_digest
+    }
+
+    pub fn content_digest(&self) -> &str {
+        &self.content_digest
+    }
+
+    pub async fn verify_unchanged(&self) -> Result<(), CheckpointStoreError> {
+        let bytes = self.store.read_bytes(&self.checkpoint.workflow_id).await?;
+        if checkpoint_digest(&bytes) == self.content_digest {
+            Ok(())
+        } else {
+            Err(CheckpointStoreError::SnapshotChanged)
+        }
+    }
+
+    pub async fn save_if_unchanged(
+        &mut self,
+        checkpoint: &WorkflowCheckpoint,
+    ) -> Result<(), CheckpointStoreError> {
+        self.verify_unchanged().await?;
+        if checkpoint.workflow_id != self.checkpoint.workflow_id {
+            return Err(CheckpointStoreError::SnapshotChanged);
+        }
+        self.store.validate_schema(checkpoint)?;
+        self.store.write_unlocked(checkpoint).await?;
+        let bytes = serde_json::to_vec(checkpoint)?;
+        self.checkpoint = checkpoint.clone();
+        self.authority_digest = checkpoint_authority_digest(checkpoint)?;
+        self.content_digest = checkpoint_digest(&bytes);
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -41,6 +92,31 @@ impl CheckpointStore {
         self.validate_schema(checkpoint)?;
         let lock = self.workflow_lock(&checkpoint.workflow_id).await;
         let _guard = lock.lock().await;
+        self.write_unlocked(checkpoint).await
+    }
+
+    pub async fn lock_snapshot(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<LockedCheckpointSnapshot, CheckpointStoreError> {
+        let lock = self.workflow_lock(workflow_id).await;
+        let guard = lock.lock_owned().await;
+        let bytes = self.read_bytes(workflow_id).await?;
+        let checkpoint: WorkflowCheckpoint = serde_json::from_slice(&bytes)?;
+        self.validate_schema(&checkpoint)?;
+        Ok(LockedCheckpointSnapshot {
+            store: self.clone(),
+            authority_digest: checkpoint_authority_digest(&checkpoint)?,
+            checkpoint,
+            content_digest: checkpoint_digest(&bytes),
+            _guard: guard,
+        })
+    }
+
+    async fn write_unlocked(
+        &self,
+        checkpoint: &WorkflowCheckpoint,
+    ) -> Result<(), CheckpointStoreError> {
         let destination = self.path(&checkpoint.workflow_id);
         let temporary = self.root.join(format!(
             ".{}.{}.tmp",
@@ -74,15 +150,19 @@ impl CheckpointStore {
         &self,
         workflow_id: &WorkflowId,
     ) -> Result<WorkflowCheckpoint, CheckpointStoreError> {
-        let bytes = tokio::fs::read(self.path(workflow_id))
+        let bytes = self.read_bytes(workflow_id).await?;
+        let checkpoint: WorkflowCheckpoint = serde_json::from_slice(&bytes)?;
+        self.validate_schema(&checkpoint)?;
+        Ok(checkpoint)
+    }
+
+    async fn read_bytes(&self, workflow_id: &WorkflowId) -> Result<Vec<u8>, CheckpointStoreError> {
+        tokio::fs::read(self.path(workflow_id))
             .await
             .map_err(|error| match error.kind() {
                 std::io::ErrorKind::NotFound => CheckpointStoreError::NotFound(workflow_id.clone()),
                 _ => error.into(),
-            })?;
-        let checkpoint: WorkflowCheckpoint = serde_json::from_slice(&bytes)?;
-        self.validate_schema(&checkpoint)?;
-        Ok(checkpoint)
+            })
     }
 
     pub async fn remove(&self, workflow_id: &WorkflowId) -> Result<(), CheckpointStoreError> {
@@ -120,4 +200,17 @@ impl CheckpointStore {
             .or_default()
             .clone()
     }
+}
+
+fn checkpoint_digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn checkpoint_authority_digest(
+    checkpoint: &WorkflowCheckpoint,
+) -> Result<String, CheckpointStoreError> {
+    let mut authority = checkpoint.clone();
+    authority.recovery_history.clear();
+    authority.recovery_receipts.clear();
+    Ok(checkpoint_digest(&serde_json::to_vec(&authority)?))
 }

@@ -436,6 +436,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         replayable_inputs: vec![],
         evidence: vec![],
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: Utc::now(),
     };
     let oversized = vec![
@@ -546,6 +547,7 @@ async fn checkpoint_save_schema_accepts_evidence_containing_a_javascript_result_
         replayable_inputs: vec![],
         evidence: vec![],
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: Utc::now(),
     };
     let evidence = vec![Evidence::JavaScriptResult {

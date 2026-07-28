@@ -337,6 +337,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 replayable_inputs: vec!["Ada".into(), "Analytical Engines".into()],
                 evidence: Vec::new(),
                 recovery_history: Vec::new(),
+                recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
             observed,

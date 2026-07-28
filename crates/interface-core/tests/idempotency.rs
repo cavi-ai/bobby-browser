@@ -547,6 +547,7 @@ fn retryable_failed_helper_remains_explicit_for_future_outcomes() {
         prior_attempt_id: AttemptId::new(),
         attempt_id: AttemptId::new(),
         reason: "restart".into(),
+        evidence: vec![],
     };
     assert!(matches!(restarted, CommandOutcome::Restarted { .. }));
 }
