@@ -27,9 +27,11 @@ mcp-gateway = { path = "../mcp-gateway" }
 network-engine = { path = "../network-engine" }
 sdk-core = { path = "../sdk-core" }
 session-manager = { path = "../session-manager" }
-page-runtime = { path = "../page-runtime" }
+skill-runtime = { path = "../skill-runtime", features = ["test-support"] }
+page-runtime = { path = "../page-runtime", features = ["test-support"] }
 release-gates = { path = "../release-gates" }
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
