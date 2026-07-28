@@ -34,6 +34,8 @@
         { "title": "Authentication", "path": "guides/auth.md" },
         { "title": "JavaScript evaluation", "path": "guides/javascript-eval.md" },
         { "title": "Intent commands", "path": "guides/intents.md" },
+        { "title": "Bobby skills", "path": "guides/skills.md" },
+        { "title": "Browser gauntlet", "path": "guides/gauntlet.md" },
         { "title": "Events and recovery", "path": "guides/events-recovery.md" },
         { "title": "Configuration", "path": "guides/configuration.md" },
         { "title": "Run the server", "path": "guides/run.md" }
