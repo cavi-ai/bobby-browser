@@ -294,6 +294,11 @@ fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     file.write_all(contents)?;
     file.flush()?;
     file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -329,6 +334,28 @@ mod tests {
         let second = generate_bootstrap(chrono::Duration::days(1)).unwrap();
         write_bootstrap_env(&path, &second, true).unwrap();
         load_startup_from_env_file(&path).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn force_overwrite_restores_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        std::fs::write(&path, b"old content\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        write_bootstrap_env(&path, &material, true).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
