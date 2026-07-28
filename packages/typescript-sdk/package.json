@@ -9,6 +9,18 @@
     "url": "git+https://github.com/cavi-ai/bobby-browser.git",
     "directory": "packages/typescript-sdk"
   },
+  "homepage": "https://cavi-ai.xyz/docs/bobby-browser",
+  "bugs": {
+    "url": "https://github.com/cavi-ai/bobby-browser/issues"
+  },
+  "keywords": [
+    "browser-automation",
+    "cdp",
+    "mcp",
+    "playwright",
+    "puppeteer",
+    "bobby-browser"
+  ],
   "files": [
     "dist/src"
   ],
