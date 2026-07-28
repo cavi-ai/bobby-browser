@@ -369,6 +369,16 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     );
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
 
+    let checkpoint_schema = tools
+        .iter()
+        .find(|tool| tool["name"] == "checkpoint_save")
+        .unwrap();
+    assert_eq!(
+        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
+            ["recoveryReceipts"]["maxItems"],
+        0
+    );
+
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),

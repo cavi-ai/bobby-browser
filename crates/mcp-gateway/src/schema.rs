@@ -115,6 +115,7 @@ fn definitions() -> Value {
             "replayableInputs":array(string(0, MAX_STRING_BYTES), MAX_COLLECTION_ITEMS),
             "evidence":array(json!({"$ref":"#/$defs/Evidence"}), MAX_EVIDENCE_ITEMS),
             "recoveryHistory":array(json!({"$ref":"#/$defs/RecoveryRecord"}), MAX_COLLECTION_ITEMS),
+            "recoveryReceipts":{"type":"array","maxItems":0},
             "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
         }), &["schemaVersion","checkpointId","workflowId","attemptId","sessionId","pageId","restartUrl","currentUrl","recoveryClass","invariants","replayableInputs","evidence","createdAt"])
     })
