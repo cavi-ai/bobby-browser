@@ -16,6 +16,7 @@ path = "src/bin/cli.rs"
 
 [dependencies]
 anyhow.workspace = true
+artifact-store = { path = "../artifact-store" }
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true

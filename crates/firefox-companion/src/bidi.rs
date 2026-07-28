@@ -293,6 +293,13 @@ impl BidiClient {
             retryable: true,
         })
     }
+
+    pub async fn end_session(&self) -> Result<(), CommandError> {
+        let ended = self.send("session.end", json!({})).await.map(|_| ());
+        let closed = self.close().await;
+        ended?;
+        closed
+    }
 }
 
 #[async_trait]

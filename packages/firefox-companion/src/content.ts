@@ -120,6 +120,7 @@ export type PageObservation = {
   visibleText: string;
   controls: Array<{
     cssPath: string;
+    testId?: string;
     role?: string;
     name?: string;
     label?: string;
@@ -630,8 +631,12 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
     const observedLabel = labelText(element, labelsByControlId, helperBudget);
     const observedName = accessibleName(element, observedLabel, helperBudget, sensitive);
     const label = sensitive && observedLabel ? REDACTED : observedLabel;
+    const testId = sensitive
+      ? undefined
+      : observationString(element.getAttribute("data-testid"));
     const control = {
       cssPath: observedPath,
+      ...(testId ? { testId } : {}),
       role: implicitRole(element, !sensitive),
       name: sensitive && observedName ? REDACTED : observedName,
       label,

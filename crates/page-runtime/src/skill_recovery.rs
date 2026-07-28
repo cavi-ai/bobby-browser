@@ -238,23 +238,11 @@ impl SkillRecoveryCoordinator {
                             return Ok(receipt);
                         }
                     }
-                    let tactic_failure = if is_owned_terminal_error(&error) {
-                        if envelope.command.class() == CommandClass::Boundary {
-                            SkillFailure::EffectUncertain
-                        } else {
-                            SkillFailure::DeadlineExceeded
-                        }
-                    } else if is_checkpoint_mismatch_error(&error) {
-                        SkillFailure::CheckpointMismatch
-                    } else if error.code == ErrorCode::DeadlineExceeded {
-                        SkillFailure::DeadlineExceeded
-                    } else if decision.tactic == SkillTactic::ChangeInteractionMethod
-                        && envelope.command.class() == CommandClass::Boundary
-                    {
-                        SkillFailure::EffectUncertain
-                    } else {
-                        failure_from_error(&error)
-                    };
+                    // A recovery attempt has one typed trigger. The strategy decision,
+                    // tactic evidence, terminal outcome, and durable receipt must all
+                    // describe that same failure instead of reclassifying a later
+                    // tactic error into a contradictory terminal reason.
+                    let tactic_failure = decision.trigger;
                     let evidence =
                         tactic_record(&decision, SkillTacticEffect::ReconciliationRequired);
                     tactic_evidence.push(evidence);

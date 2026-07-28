@@ -731,10 +731,14 @@ async fn checkpoint_authority_mismatch_fails_before_pool_replacement() {
     assert!(matches!(
         execution.skill_outcome,
         SkillOutcome::Failed {
-            failure: SkillFailure::CheckpointMismatch,
+            failure: SkillFailure::EffectUncertain,
             ..
         }
     ));
+    assert!(execution
+        .tactic_evidence
+        .iter()
+        .all(|evidence| evidence.trigger == SkillFailure::EffectUncertain));
     assert_eq!(mutations.load(Ordering::SeqCst), 1);
     assert_eq!(launches.load(Ordering::SeqCst), 1);
 }

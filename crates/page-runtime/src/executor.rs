@@ -441,7 +441,8 @@ impl PageRuntime {
                     .inspect(
                         page_id,
                         &InspectCommand {
-                            selector: Some(command.selector.clone()),
+                            selector: (!command.selector.is_empty())
+                                .then(|| command.selector.clone()),
                             target: command.target.clone(),
                             include_html: false,
                         },

@@ -683,10 +683,14 @@ async fn invalid_persisted_checkpoint_evidence_blocks_fresh_session_before_relea
     assert!(matches!(
         execution.skill_outcome,
         SkillOutcome::Failed {
-            failure: types::SkillFailure::CheckpointMismatch,
+            failure: types::SkillFailure::TargetDrift,
             ..
         }
     ));
+    assert!(execution
+        .tactic_evidence
+        .iter()
+        .all(|evidence| { evidence.trigger == types::SkillFailure::TargetDrift }));
 }
 
 #[tokio::test]
@@ -728,10 +732,14 @@ async fn invalid_persisted_checkpoint_evidence_blocks_engine_replacement() {
     assert!(matches!(
         execution.skill_outcome,
         SkillOutcome::Failed {
-            failure: types::SkillFailure::CheckpointMismatch,
+            failure: types::SkillFailure::TargetDrift,
             ..
         }
     ));
+    assert!(execution
+        .tactic_evidence
+        .iter()
+        .all(|evidence| { evidence.trigger == types::SkillFailure::TargetDrift }));
 }
 
 #[tokio::test]
@@ -765,10 +773,14 @@ async fn same_checkpoint_id_content_swap_blocks_pool_mutation() {
     assert!(matches!(
         execution.skill_outcome,
         SkillOutcome::Failed {
-            failure: types::SkillFailure::CheckpointMismatch,
+            failure: types::SkillFailure::TargetDrift,
             ..
         }
     ));
+    assert!(execution
+        .tactic_evidence
+        .iter()
+        .all(|evidence| { evidence.trigger == types::SkillFailure::TargetDrift }));
 }
 
 #[tokio::test]

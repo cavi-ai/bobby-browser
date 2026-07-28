@@ -42,9 +42,6 @@ pub(super) fn checkpoint_mismatch_error(message: impl Into<String>) -> CommandEr
     )
 }
 
-pub(super) fn is_checkpoint_mismatch_error(error: &CommandError) -> bool {
-    error.message.starts_with("checkpoint mismatch:")
-}
 impl SkillRecoveryCoordinator {
     pub(super) async fn ensure_recovery_authority(
         &self,

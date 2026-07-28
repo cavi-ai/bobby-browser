@@ -5,7 +5,7 @@ pub(super) fn failure_from_outcome(outcome: &CommandOutcome, class: CommandClass
         CommandOutcome::NeedsReconciliation { .. } if class == CommandClass::Boundary => {
             SkillFailure::EffectUncertain
         }
-        CommandOutcome::NeedsReconciliation { .. } => SkillFailure::PostconditionFailed,
+        CommandOutcome::NeedsReconciliation { error, .. } => failure_from_error(error),
         CommandOutcome::RetryableFailure { error, .. }
         | CommandOutcome::PolicyDenied { error, .. }
         | CommandOutcome::ResourceExhausted { error, .. }
@@ -743,5 +743,43 @@ impl SkillRecoveryCoordinator {
             })
             .await
             .map_err(journal_error)
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    #[test]
+    fn failed_and_retryable_target_errors_are_target_drift_before_decision() {
+        let error = CommandError {
+            code: ErrorCode::TargetNotFound,
+            message: "semantic target disappeared".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+        for outcome in [
+            CommandOutcome::Failed {
+                command_id: CommandId::new(),
+                error: error.clone(),
+            },
+            CommandOutcome::RetryableFailure {
+                command_id: CommandId::new(),
+                error: CommandError {
+                    retryable: true,
+                    ..error.clone()
+                },
+            },
+            CommandOutcome::NeedsReconciliation {
+                command_id: CommandId::new(),
+                error: error.clone(),
+                evidence: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                failure_from_outcome(&outcome, CommandClass::Reconciliable),
+                SkillFailure::TargetDrift
+            );
+        }
     }
 }

@@ -18,6 +18,11 @@ async fn server_socket(listener: TcpListener) -> ServerSocket {
     accept_async(stream).await.expect("accept websocket")
 }
 
+async fn next_server_socket(listener: &TcpListener) -> ServerSocket {
+    let (stream, _) = listener.accept().await.expect("accept connection");
+    accept_async(stream).await.expect("accept websocket")
+}
+
 async fn recv_json(socket: &mut ServerSocket) -> Value {
     let message = socket
         .next()
@@ -59,6 +64,50 @@ async fn session_connection_negotiates_a_bidi_session_before_use() {
         )
         .await;
     });
+
+    BidiClient::connect_session(url, Duration::from_secs(1))
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ending_session_releases_the_single_session_slot_before_handoff() {
+    let (listener, url) = listener_url().await;
+    let server = tokio::spawn(async move {
+        let mut first = next_server_socket(&listener).await;
+        let session_new = recv_json(&mut first).await;
+        assert_eq!(session_new["method"], "session.new");
+        send_json(
+            &mut first,
+            json!({"id": session_new["id"], "type": "success", "result": {"sessionId": "installer", "capabilities": {}}}),
+        )
+        .await;
+
+        let session_end = recv_json(&mut first).await;
+        assert_eq!(session_end["method"], "session.end");
+        assert_eq!(session_end["params"], json!({}));
+        send_json(
+            &mut first,
+            json!({"id": session_end["id"], "type": "success", "result": {}}),
+        )
+        .await;
+        drop(first);
+
+        let mut second = next_server_socket(&listener).await;
+        let handoff = recv_json(&mut second).await;
+        assert_eq!(handoff["method"], "session.new");
+        send_json(
+            &mut second,
+            json!({"id": handoff["id"], "type": "success", "result": {"sessionId": "runtime", "capabilities": {}}}),
+        )
+        .await;
+    });
+
+    let installer = BidiClient::connect_session(url.clone(), Duration::from_secs(1))
+        .await
+        .unwrap();
+    installer.end_session().await.unwrap();
 
     BidiClient::connect_session(url, Duration::from_secs(1))
         .await
