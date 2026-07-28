@@ -222,8 +222,10 @@ pub fn resolve_startup_credential_with<F>(
 where
     F: FnOnce() -> Result<StartupCredential, broker::StartupCredentialError>,
 {
-    if let Ok(credential) = from_env() {
-        return Ok(ResolveOutcome::FromEnv(credential));
+    match from_env() {
+        Ok(credential) => return Ok(ResolveOutcome::FromEnv(credential)),
+        Err(broker::StartupCredentialError::MissingInput) => {}
+        Err(error) => return Err(error.into()),
     }
     if bootstrap_path.exists() {
         let credential = load_startup_from_env_file(bootstrap_path)?;
@@ -408,5 +410,22 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("bobby init"));
+    }
+
+    #[test]
+    fn resolve_errors_on_invalid_env() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        write_bootstrap_env(&path, &material, false).unwrap();
+        let err = resolve_startup_credential_with("127.0.0.1", &path, || {
+            Err(broker::StartupCredentialError::InvalidPrincipal)
+        })
+        .unwrap_err();
+        assert!(err
+            .downcast_ref::<broker::StartupCredentialError>()
+            .is_some_and(|error| {
+                matches!(error, broker::StartupCredentialError::InvalidPrincipal)
+            }));
     }
 }
