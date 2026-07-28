@@ -270,6 +270,7 @@ async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_state
                 replayable_inputs: Vec::new(),
                 evidence: Vec::new(),
                 recovery_history: Vec::new(),
+                recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
             observed,

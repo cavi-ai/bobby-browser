@@ -85,6 +85,8 @@ These pages are also served at
 - [Authentication](docs/bobby-browser/source/pages/guides/auth.md)
 - [JavaScript evaluation](docs/bobby-browser/source/pages/guides/javascript-eval.md)
 - [Intents](docs/bobby-browser/source/pages/guides/intents.md)
+- [Bobby skills](docs/bobby-browser/source/pages/guides/skills.md)
+- [Browser gauntlet](docs/bobby-browser/source/pages/guides/gauntlet.md)
 - [Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md)
 - [Configuration](docs/bobby-browser/source/pages/guides/configuration.md)
 - [MCP over HTTP](docs/bobby-browser/source/pages/surfaces/mcp-http.md) ·
@@ -98,3 +100,23 @@ The CDP allowlist is published in
 [`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into
 an immutable versioned artifact under
 [`docs/bobby-browser/v0.2.0`](docs/bobby-browser/v0.2.0) for documentation hosts.
+
+## Bobby skill and championship gates
+
+Run the deterministic skill, recovery, and gauntlet contracts without an installed browser:
+
+```bash
+pnpm --filter @bobby-browser/gauntlet test
+cargo test -p skill-runtime
+cargo test -p page-runtime --test skill_recovery
+cargo test -p runtime-tests --test bobby_skill_recovery
+```
+
+Build the course and run the opt-in production Chromium championship with:
+
+```bash
+pnpm --filter @bobby-browser/gauntlet build
+cargo test -p runtime-tests --test bobby_skills_gauntlet -- --ignored --nocapture
+```
+
+The gate retains its redacted scorecard and screenshots under `target/bobby-championship/<engine>/<seed>/`. See the [browser gauntlet guide](docs/bobby-browser/source/pages/guides/gauntlet.md) for fixed seeds, headed mode, executable overrides, and the dedicated Firefox profile configuration.

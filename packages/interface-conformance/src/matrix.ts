@@ -9,7 +9,10 @@ const interfaces=["rust-sdk","typescript-sdk","mcp","playwright","puppeteer"] as
 const proofDir=await mkdtemp(join(tmpdir(),"interface-proof-matrix-"));
 try {
   const tests=interfaces.map(name=>`dist/test/${name}.test.js`);
-  const child=spawn(process.execPath,["--test",...tests],{stdio:["ignore","pipe","pipe"],env:{...process.env,CONFORMANCE_PROOF_DIR:proofDir}});
+  // Each adapter owns a real browser fixture. Serialize the matrix so five
+  // independent Chrome process trees cannot exhaust the host and turn a
+  // contract proof into a resource-contention failure.
+  const child=spawn(process.execPath,["--test","--test-concurrency=1",...tests],{stdio:["ignore","pipe","pipe"],env:{...process.env,CONFORMANCE_PROOF_DIR:proofDir}});
   let output="";child.stdout.setEncoding("utf8");child.stderr.setEncoding("utf8");child.stdout.on("data",c=>{output=(output+String(c)).slice(-32768)});child.stderr.on("data",c=>{output=(output+String(c)).slice(-32768)});
   const[code]=await once(child,"exit") as [number|null,NodeJS.Signals|null];assert.equal(code,0,output);
   const records=await Promise.all(interfaces.map(async name=>JSON.parse(await readFile(join(proofDir,`${name}.json`),"utf8")) as {proof:{checkpointLineage:{checkpointId:string;workflowId:string;boundaryCommandId:string};[key:string]:unknown};rawEvidence:Array<{kind:string;sha256:string;size:number}>;normalization:string}));

@@ -602,6 +602,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
             replayable_inputs: Vec::new(),
             evidence: Vec::new(),
             recovery_history: Vec::new(),
+            recovery_receipts: Vec::new(),
             created_at: Utc::now(),
         })
         .await
@@ -677,6 +678,7 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
             replayable_inputs: Vec::new(),
             evidence: Vec::new(),
             recovery_history: Vec::new(),
+            recovery_receipts: Vec::new(),
             created_at: Utc::now(),
         })
         .await
@@ -761,6 +763,7 @@ async fn follow_with_boundary_true_requires_matching_checkpoint_before_boundary_
             replayable_inputs: Vec::new(),
             evidence: Vec::new(),
             recovery_history: Vec::new(),
+            recovery_receipts: Vec::new(),
             created_at: Utc::now(),
         })
         .await

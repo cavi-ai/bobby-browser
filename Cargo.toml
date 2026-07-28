@@ -4,6 +4,7 @@ members = [
   "crates/cli",
   "crates/config",
   "crates/types",
+  "crates/skill-runtime",
   "crates/companion-protocol",
   "crates/companion-core",
   "crates/firefox-companion",

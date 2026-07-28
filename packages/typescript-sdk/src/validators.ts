@@ -270,7 +270,7 @@ export function isCommandOutcome(value: unknown): value is CommandOutcome {
       );
     case "needsReconciliation": return hasExactKeys(value, ["status", "commandId", "error", "evidence"]) && isCommandError(value.error) && isEvidenceArray(value.evidence);
     case "resourceExhausted": return hasExactKeys(value, ["status", "commandId", "error", "retryAfterMs"]) && isCommandError(value.error) && isSafeUnsigned(value.retryAfterMs);
-    case "restarted": return hasExactKeys(value, ["status", "commandId", "priorAttemptId", "attemptId", "reason"]) && isUuid(value.priorAttemptId) && isUuid(value.attemptId) && isString(value.reason);
+    case "restarted": return hasExactKeys(value, ["status", "commandId", "priorAttemptId", "attemptId", "reason", "evidence"]) && isUuid(value.priorAttemptId) && isUuid(value.attemptId) && isString(value.reason) && isEvidenceArray(value.evidence);
     default: return false;
   }
 }
@@ -286,16 +286,17 @@ export function isRecoveryDecision(value: unknown): value is RecoveryDecision {
   if (value.status === "resumed") return hasExactKeys(value, ["status", "checkpointId", "attemptId", "evidence"]) && isUuid(value.attemptId) && isEvidenceArray(value.evidence);
   if (value.status === "needsReconciliation") return hasExactKeys(value, ["status", "checkpointId", "attemptId", "reason", "evidence"]) && isUuid(value.attemptId) && isString(value.reason) && isEvidenceArray(value.evidence);
   return value.status === "restarted"
-    && hasExactKeys(value, ["status", "checkpointId", "lineage"])
+    && hasExactKeys(value, ["status", "checkpointId", "lineage", "evidence"])
     && hasExactKeys(value.lineage, ["workflowId", "abandonedAttemptId", "attemptId", "reason"])
     && isUuid(value.lineage.workflowId)
     && isUuid(value.lineage.abandonedAttemptId)
     && isUuid(value.lineage.attemptId)
-    && isString(value.lineage.reason);
+    && isString(value.lineage.reason)
+    && isEvidenceArray(value.evidence);
 }
 
 export function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoint {
-  return hasExactKeys(value, ["schemaVersion", "checkpointId", "workflowId", "attemptId", "sessionId", "pageId", "restartUrl", "currentUrl", "cursor", "boundaryCommandId", "recoveryClass", "invariants", "replayableInputs", "evidence", "recoveryHistory", "createdAt"])
+  return hasExactKeys(value, ["schemaVersion", "checkpointId", "workflowId", "attemptId", "sessionId", "pageId", "restartUrl", "currentUrl", "cursor", "boundaryCommandId", "recoveryClass", "invariants", "replayableInputs", "evidence", "recoveryHistory", "recoveryReceipts", "createdAt"])
     && value.schemaVersion === 1
     && isUuid(value.checkpointId)
     && isUuid(value.workflowId)
@@ -311,6 +312,7 @@ export function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoin
     && isStringArray(value.replayableInputs)
     && isEvidenceArray(value.evidence)
     && Array.isArray(value.recoveryHistory) && value.recoveryHistory.every((record) => hasExactKeys(record, ["recordedAt", "decision"]) && isIsoTimestamp(record.recordedAt) && isRecoveryDecision(record.decision))
+    && Array.isArray(value.recoveryReceipts) && value.recoveryReceipts.length === 0
     && isIsoTimestamp(value.createdAt);
 }
 

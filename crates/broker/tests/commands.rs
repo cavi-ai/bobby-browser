@@ -189,6 +189,7 @@ async fn command_outcomes_map_to_stable_http_statuses() {
                 prior_attempt_id: AttemptId::new(),
                 attempt_id: AttemptId::new(),
                 reason: "checkpoint could not be reconciled".into(),
+                evidence: vec![],
             },
             StatusCode::OK,
             "restarted",

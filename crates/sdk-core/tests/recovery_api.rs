@@ -32,6 +32,7 @@ async fn runtime_service_exposes_durable_checkpoint_and_recovery_boundary() {
         replayable_inputs: Vec::new(),
         evidence: Vec::new(),
         recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
         created_at: Utc::now(),
     };
 

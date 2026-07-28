@@ -118,7 +118,7 @@ export type CommandOutcome =
   | { status: "needsReconciliation"; commandId: Id; error: CommandError; evidence: Evidence[] }
   | { status: "policyDenied"; commandId: Id; error: CommandError }
   | { status: "resourceExhausted"; commandId: Id; error: CommandError; retryAfterMs: number }
-  | { status: "restarted"; commandId: Id; priorAttemptId: Id; attemptId: Id; reason: string }
+  | { status: "restarted"; commandId: Id; priorAttemptId: Id; attemptId: Id; reason: string; evidence: Evidence[] }
   | { status: "failed"; commandId: Id; error: CommandError; evidence?: Evidence[] };
 
 export type WaitUntil = "commit" | "domContentLoaded" | "interactive" | "networkIdle";
@@ -200,12 +200,12 @@ export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflo
 
 export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };
-export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory: RecoveryRecord[]; createdAt: string; }
+export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory: RecoveryRecord[]; recoveryReceipts: never[]; createdAt: string; }
 export interface RecoveryRecord { recordedAt: string; decision: RecoveryDecision; }
 export type RecoveryDecision =
   | { status: "resumed"; checkpointId: Id; attemptId: Id; evidence: Evidence[] }
   | { status: "needsReconciliation"; checkpointId: Id; attemptId: Id; reason: string; evidence: Evidence[] }
-  | { status: "restarted"; checkpointId: Id; lineage: { workflowId: Id; abandonedAttemptId: Id; attemptId: Id; reason: string } };
+  | { status: "restarted"; checkpointId: Id; lineage: { workflowId: Id; abandonedAttemptId: Id; attemptId: Id; reason: string }; evidence: Evidence[] };
 export interface CheckpointRequest { checkpoint: WorkflowCheckpoint; evidence?: Evidence[]; }
 
 /** The /v1/events batch envelope, matching interface_core::Event rather than an invented schema. */

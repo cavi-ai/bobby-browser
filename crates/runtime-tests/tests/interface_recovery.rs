@@ -781,10 +781,10 @@ async fn worker_generation_replacement_mid_command_rebuilds_without_guessing() {
     tokio::time::timeout(StdDuration::from_secs(2), observer.reached.notified())
         .await
         .expect("command did not reach durable verifying");
-    workers.invalidate_session(&session.id).await.unwrap();
     command.abort();
     let _ = command.await;
     observer.release.notify_waiters();
+    workers.invalidate_session(&session.id).await.unwrap();
     let replacement = workers.lease(session.id).await.unwrap().worker_id();
     assert_ne!(first_worker, replacement);
 

@@ -369,6 +369,16 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     );
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
 
+    let checkpoint_schema = tools
+        .iter()
+        .find(|tool| tool["name"] == "checkpoint_save")
+        .unwrap();
+    assert_eq!(
+        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
+            ["recoveryReceipts"]["maxItems"],
+        0
+    );
+
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
@@ -436,6 +446,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         replayable_inputs: vec![],
         evidence: vec![],
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: Utc::now(),
     };
     let oversized = vec![
@@ -546,6 +557,7 @@ async fn checkpoint_save_schema_accepts_evidence_containing_a_javascript_result_
         replayable_inputs: vec![],
         evidence: vec![],
         recovery_history: vec![],
+        recovery_receipts: vec![],
         created_at: Utc::now(),
     };
     let evidence = vec![Evidence::JavaScriptResult {

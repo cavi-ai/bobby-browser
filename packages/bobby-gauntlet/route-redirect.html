@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="refresh" content="0;url=../complete/" />
+    <title>Bobby Gauntlet redirect</title>
+  </head>
+  <body>
+    <p>Continuing to the canonical route…</p>
+    <script>
+      (() => {
+        const seed = sessionStorage.getItem("bobby.gauntlet.seed") ?? "demo-seed";
+        let value = 0x811c9dc5;
+        for (const character of `${seed}:route`) {
+          value ^= character.charCodeAt(0);
+          value = Math.imul(value, 0x01000193);
+        }
+        value ^= value << 13;
+        value ^= value >>> 17;
+        value ^= value << 5;
+        window.location.replace(`../complete/?checkpoint=${(value >>> 0).toString(36)}`);
+      })();
+    </script>
+  </body>
+</html>
+

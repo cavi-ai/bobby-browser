@@ -3,7 +3,7 @@ use thiserror::Error;
 
 use crate::{AttemptId, CommandId, PageId};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
@@ -37,6 +37,8 @@ pub enum CommandOutcome {
         prior_attempt_id: AttemptId,
         attempt_id: AttemptId,
         reason: String,
+        #[serde(default)]
+        evidence: Vec<Evidence>,
     },
     Failed {
         command_id: CommandId,
@@ -219,6 +221,14 @@ impl Evidence {
                     page.url = safe_url(&page.url);
                 }
             }
+            Self::Upload { paths, .. } => {
+                for (index, path) in paths.iter_mut().enumerate() {
+                    *path = format!("upload://evidence/{index}");
+                }
+            }
+            Self::Download { path, sha256, .. } => {
+                *path = format!("artifact://sha256/{sha256}");
+            }
             Self::BrowserExecution { .. } => {}
             Self::IntentExecution { .. } => {}
             Self::Extraction { .. } => {}
@@ -234,6 +244,7 @@ impl CommandOutcome {
         match &mut safe {
             Self::Completed { evidence, .. }
             | Self::NeedsReconciliation { evidence, .. }
+            | Self::Restarted { evidence, .. }
             | Self::Failed { evidence, .. } => {
                 *evidence = evidence.iter().map(Evidence::journal_safe).collect();
             }
@@ -299,7 +310,7 @@ pub struct PageEvidence {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandError {
     pub code: ErrorCode,

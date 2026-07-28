@@ -16,3 +16,5 @@ Then open:
 - `http://127.0.0.1:7777/runtime`
 
 Do not expose the runtime to untrusted networks; reach it over loopback or an operator-controlled boundary.
+
+To exercise the deterministic skill course locally, build `@bobby-browser/gauntlet` and run the opt-in production championship described in the [browser gauntlet guide](gauntlet.md).

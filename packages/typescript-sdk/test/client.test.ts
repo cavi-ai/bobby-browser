@@ -187,7 +187,7 @@ test("enforces the broker status table for every command outcome variant", async
     [429, { status: "resourceExhausted", commandId: COMMAND_ID, error: { code: "resourceExhausted", message: "x", layer: "workflow", retryable: true }, retryAfterMs: 1 }],
     [422, { status: "failed", commandId: COMMAND_ID, error: { code: "invalidRequest", message: "x", layer: "workflow", retryable: false } }],
     [500, { status: "failed", commandId: COMMAND_ID, error: { code: "internal", message: "x", layer: "workflow", retryable: false } }],
-    [200, { status: "restarted", commandId: COMMAND_ID, priorAttemptId: ATTEMPT_ID, attemptId: NEXT_ATTEMPT_ID, reason: "x" }],
+    [200, { status: "restarted", commandId: COMMAND_ID, priorAttemptId: ATTEMPT_ID, attemptId: NEXT_ATTEMPT_ID, reason: "x", evidence: [] }],
   ] as const;
   for (const [status, outcome] of cases) {
     await withServer((_request, response) => writeJson(response, status, outcome), async (baseUrl) => {
@@ -205,7 +205,7 @@ test("enforces the broker status table for every recovery decision variant", asy
   const cases = [
     [200, { status: "resumed", checkpointId: CHECKPOINT_ID, attemptId: ATTEMPT_ID, evidence: [] }],
     [409, { status: "needsReconciliation", checkpointId: CHECKPOINT_ID, attemptId: ATTEMPT_ID, reason: "x", evidence: [] }],
-    [200, { status: "restarted", checkpointId: CHECKPOINT_ID, lineage: { workflowId: WORKFLOW_ID, abandonedAttemptId: ATTEMPT_ID, attemptId: NEXT_ATTEMPT_ID, reason: "x" } }],
+    [200, { status: "restarted", checkpointId: CHECKPOINT_ID, lineage: { workflowId: WORKFLOW_ID, abandonedAttemptId: ATTEMPT_ID, attemptId: NEXT_ATTEMPT_ID, reason: "x" }, evidence: [] }],
   ] as const;
   for (const [status, decision] of cases) {
     await withServer((_request, response) => writeJson(response, status, decision), async (baseUrl) => {
@@ -631,6 +631,7 @@ test("client rejects malformed nested fixtures from every JSON response family",
     replayableInputs: [],
     evidence: [],
     recoveryHistory: [{ recordedAt: "not-a-time", decision: { status: "resumed", checkpointId: CHECKPOINT_ID, attemptId: ATTEMPT_ID, evidence: [] } }],
+    recoveryReceipts: [],
     createdAt: time,
   };
   const validError = { code: "invalidRequest", layer: "interface", message: "event history has a cursor gap", correlationId: CORRELATION_ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null };

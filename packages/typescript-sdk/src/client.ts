@@ -263,7 +263,8 @@ function delay(ms: number, scope: RequestScope): Promise<void> {
 }
 
 function scopeError(scope: RequestScope): RuntimeClientError {
-  return new RuntimeClientError({ kind: scope.deadline.getTime() <= Date.now() ? "deadline" : "aborted", message: scope.deadline.getTime() <= Date.now() ? "Request deadline exceeded" : "Request was aborted", redactor: scope.redact });
+  const deadlineAbort = scope.signal.reason instanceof Error && scope.signal.reason.message === "deadline";
+  return new RuntimeClientError({ kind: deadlineAbort ? "deadline" : "aborted", message: deadlineAbort ? "Request deadline exceeded" : "Request was aborted", redactor: scope.redact });
 }
 
 function artifactProtocolError(scope: RequestScope): RuntimeClientError {
