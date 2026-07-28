@@ -2613,6 +2613,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     condition: command.condition.clone(),
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     observations,
+                    excluded_classes: Vec::new(),
                 }]);
             }
             let now = Instant::now();

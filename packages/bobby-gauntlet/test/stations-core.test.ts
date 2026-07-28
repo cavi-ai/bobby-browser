@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { createFoundationController } from "../src/app.js";
+
+test("approved upload fixture matches the browser-side byte contract", async () => {
+  const fixture = await readFile(new URL("../fixtures/approved-upload.txt", import.meta.url), "utf8");
+
+  assert.equal(fixture, "approved upload for Bobby\n");
+});
 
 test("route station accepts only the seeded canonical route", () => {
   const controller = createFoundationController("course-v1", "seed-42", "foundation");
@@ -45,4 +52,3 @@ test("station state is isolated by direct route and reset is deterministic", () 
   assert.deepEqual(controller.stateFor("route"), routeBefore);
   assert.deepEqual(controller.stateFor("semantic-form"), formBefore);
 });
-
