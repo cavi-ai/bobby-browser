@@ -1,3 +1,5 @@
+mod bootstrap_local;
+
 use anyhow::{Context, Result};
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
