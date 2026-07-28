@@ -203,11 +203,11 @@ impl BidiClient {
         }
         let permit = tokio::time::timeout_at(deadline, self.permits.clone().acquire_owned())
             .await
-            .map_err(|_| deadline_error("Firefox BiDi command deadline exceeded"))?
+            .map_err(|_| command_deadline(method, "capacity"))?
             .map_err(|_| transport_failure("Firefox BiDi command capacity closed").error())?;
         let enqueue = tokio::time::timeout_at(deadline, self.shared.enqueue.lock())
             .await
-            .map_err(|_| deadline_error("Firefox BiDi command deadline exceeded"))?;
+            .map_err(|_| command_deadline(method, "enqueue"))?;
         let (response_tx, response_rx) = oneshot::channel();
         let id = {
             let mut correlations = self.shared.correlations.lock().await;
@@ -251,7 +251,7 @@ impl BidiClient {
             }
             Err(_) => {
                 guard.retire().await;
-                return Err(deadline_error("Firefox BiDi command deadline exceeded"));
+                return Err(command_deadline(method, "write"));
             }
         }
 
@@ -268,7 +268,17 @@ impl BidiClient {
             }
             Err(_) => {
                 guard.retire().await;
-                Err(deadline_error("Firefox BiDi command deadline exceeded"))
+                let error = command_deadline(method, "response");
+                terminate(
+                    &self.shared,
+                    TerminalFailure {
+                        code: error.code,
+                        message: error.message.clone(),
+                        retryable: error.retryable,
+                    },
+                )
+                .await;
+                Err(error)
             }
         }
     }
@@ -610,6 +620,10 @@ fn deadline_error(message: impl Into<String>) -> CommandError {
         layer: ErrorLayer::Driver,
         retryable: true,
     }
+}
+
+fn command_deadline(method: &str, phase: &str) -> CommandError {
+    deadline_error(format!("Firefox BiDi {method} {phase} deadline exceeded"))
 }
 
 fn transport_failure(message: impl Into<String>) -> TerminalFailure {

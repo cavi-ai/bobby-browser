@@ -190,18 +190,16 @@ async fn events_are_delivered_independently_of_command_responses() {
 }
 
 #[tokio::test]
-async fn deadline_removes_pending_correlation_without_poisoning_the_client() {
+async fn response_deadline_terminates_the_uncertain_session_before_replacement() {
     let (listener, url) = listener_url().await;
     let server = tokio::spawn(async move {
         let mut socket = server_socket(listener).await;
         let first = recv_json(&mut socket).await;
         assert_eq!(first["method"], "never.respond");
-        let second = recv_json(&mut socket).await;
-        send_json(
-            &mut socket,
-            json!({"id": second["id"], "type": "success", "result": {"alive": true}}),
-        )
-        .await;
+        let closed = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .expect("transport closes promptly after a response deadline");
+        assert!(matches!(closed, None | Some(Ok(Message::Close(_)))));
     });
 
     let client = BidiClient::connect(url, Duration::from_millis(100))
@@ -211,11 +209,16 @@ async fn deadline_removes_pending_correlation_without_poisoning_the_client() {
     assert_eq!(error.code, ErrorCode::DeadlineExceeded);
     assert_eq!(error.layer, ErrorLayer::Driver);
     assert!(error.retryable);
-
     assert_eq!(
-        client.send("still.alive", json!({})).await.unwrap(),
-        json!({"alive": true})
+        error.message,
+        "Firefox BiDi never.respond response deadline exceeded"
     );
+
+    let follow_up = client.send("must.replace", json!({})).await.unwrap_err();
+    assert_eq!(follow_up.code, ErrorCode::DeadlineExceeded);
+    assert_eq!(follow_up.layer, ErrorLayer::Driver);
+    assert!(follow_up.retryable);
+    assert_eq!(follow_up.message, error.message);
     server.await.unwrap();
 }
 
