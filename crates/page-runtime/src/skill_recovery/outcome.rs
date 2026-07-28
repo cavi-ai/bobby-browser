@@ -764,6 +764,7 @@ mod classification_tests {
             CommandOutcome::Failed {
                 command_id: CommandId::new(),
                 error: error.clone(),
+                evidence: Vec::new(),
             },
             CommandOutcome::RetryableFailure {
                 command_id: CommandId::new(),

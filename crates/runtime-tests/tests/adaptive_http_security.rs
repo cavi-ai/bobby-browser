@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, HttpConfig, ServerConfig, StorageConfig};
@@ -31,9 +30,7 @@ fn config(root: &tempfile::TempDir, max_download_bytes: usize) -> AppConfig {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )),
+            executable: None,
             profiles_dir: root.path().join("profiles"),
             headless: true,
             max_active: 2,

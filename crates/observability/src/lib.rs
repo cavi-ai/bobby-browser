@@ -64,31 +64,62 @@ pub fn init(
 }
 
 pub mod test_support {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use tracing_subscriber::prelude::*;
 
-    /// In-memory sink for tests. `install` uses `set_default`, so it never
-    /// conflicts with global init and is scoped to the calling thread.
-    /// Tests are short-lived; the subscriber default is intentionally kept
-    /// for the remainder of the test.
-    #[derive(Clone, Default)]
-    pub struct CaptureSink {
-        records: Arc<Mutex<Vec<serde_json::Value>>>,
+    type Records = Arc<Mutex<Vec<serde_json::Value>>>;
+
+    fn capture_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    impl CaptureSink {
-        pub fn install() -> Self {
-            let sink = Self::default();
-            let records = sink.records.clone();
+    fn active_records() -> &'static Mutex<Option<Records>> {
+        static ACTIVE: OnceLock<Mutex<Option<Records>>> = OnceLock::new();
+        ACTIVE.get_or_init(|| Mutex::new(None))
+    }
+
+    fn install_global_subscriber() {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
             let layer = tracing_subscriber::fmt::layer()
                 .json()
                 .with_current_span(true)
                 .with_span_list(true)
-                .with_writer(move || CaptureWriter(records.clone()));
-            let subscriber = tracing_subscriber::registry().with(layer);
-            let guard = tracing::subscriber::set_default(subscriber);
-            std::mem::forget(guard);
-            sink
+                .with_writer(|| CaptureWriter {
+                    records: active_records()
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone(),
+                    buffer: Vec::new(),
+                });
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("capture subscriber must be the test process global default");
+        });
+    }
+
+    /// In-memory sink for tests. A process-global subscriber observes events
+    /// regardless of which executor thread polls the request, while this guard
+    /// allows only one test at a time to retain those events.
+    pub struct CaptureSink {
+        records: Records,
+        _capture_guard: MutexGuard<'static, ()>,
+    }
+
+    impl CaptureSink {
+        pub fn install() -> Self {
+            let capture_guard = capture_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            install_global_subscriber();
+            let records = Arc::new(Mutex::new(Vec::new()));
+            *active_records()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(records.clone());
+            Self {
+                records,
+                _capture_guard: capture_guard,
+            }
         }
 
         pub fn events(&self) -> Vec<serde_json::Value> {
@@ -96,17 +127,64 @@ pub mod test_support {
         }
     }
 
-    struct CaptureWriter(Arc<Mutex<Vec<serde_json::Value>>>);
+    impl Drop for CaptureSink {
+        fn drop(&mut self) {
+            *active_records()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    struct CaptureWriter {
+        records: Option<Records>,
+        buffer: Vec<u8>,
+    }
 
     impl std::io::Write for CaptureWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(buf) {
-                self.0.lock().expect("capture sink mutex").push(value);
-            }
+            self.buffer.extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    impl Drop for CaptureWriter {
+        fn drop(&mut self) {
+            let values = self
+                .buffer
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok());
+            if let Some(records) = &self.records {
+                records.lock().expect("capture sink mutex").extend(values);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::io::Write;
+
+        #[test]
+        fn capture_writer_retains_json_split_across_write_calls() {
+            let records = Arc::new(Mutex::new(Vec::new()));
+            let mut writer = CaptureWriter {
+                records: Some(records.clone()),
+                buffer: Vec::new(),
+            };
+
+            writer
+                .write_all(br#"{"fields":{"message":"principal."#)
+                .unwrap();
+            writer.write_all(b"issued\"}}\n").unwrap();
+            drop(writer);
+
+            let events = records.lock().expect("capture sink mutex");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["fields"]["message"], "principal.issued");
         }
     }
 }
