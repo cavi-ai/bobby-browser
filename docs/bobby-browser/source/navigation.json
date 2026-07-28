@@ -41,6 +41,7 @@
         { "title": "Browser gauntlet", "path": "guides/gauntlet.md" },
         { "title": "Events and recovery", "path": "guides/events-recovery.md" },
         { "title": "Configuration", "path": "guides/configuration.md" },
+        { "title": "Troubleshooting", "path": "guides/troubleshooting.md" },
         { "title": "Run the server", "path": "guides/run.md" }
       ]
     },

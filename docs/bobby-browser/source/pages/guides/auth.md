@@ -107,3 +107,5 @@ After bootstrap, multi-principal issuance uses authenticated HTTP:
 
 All issuance requests carry `Authorization`, `x-interface-version`, a bounded
 correlation id, a deadline, and an idempotency key for the mutating `POST`.
+
+Common auth failures and capability errors: [Troubleshooting](troubleshooting.md).
