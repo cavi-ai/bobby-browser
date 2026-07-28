@@ -175,11 +175,14 @@ function renderSemanticForm(document: Document, station: HTMLElement, controller
   form.append(title(document, "Semantic form", "Complete the form by the meaning of each labelled control."));
   const name = labelledInput(document, "Full name", state.fields.name, "text");
   const email = labelledInput(document, "Email address", state.fields.email, "email");
+  name.input.dataset.testid = "semantic-full-name";
+  email.input.dataset.testid = "semantic-email";
   const planLabel = document.createElement("label"); planLabel.textContent = "Plan";
   const plan = document.createElement("select"); plan.name = state.fields.plan; plan.setAttribute("aria-label", "Plan");
   for (const value of ["starter", "pro"]) { const option = document.createElement("option"); option.value = value; option.textContent = value === "pro" ? "Professional" : "Starter"; plan.append(option); }
   planLabel.append(plan);
-  form.append(name.label, email.label, planLabel, buttonFor(document, "Submit form", "submit"));
+  const submit = buttonFor(document, "Submit form", "submit"); submit.dataset.testid = "semantic-submit";
+  form.append(name.label, email.label, planLabel, submit);
   form.addEventListener("submit", (event) => { event.preventDefault(); report(controller.verify("semantic-form", { values: { [state.fields.name]: name.input.value, [state.fields.email]: email.input.value, [state.fields.plan]: plan.value } })); });
   station.prepend(form);
 }
@@ -190,9 +193,11 @@ function renderValidation(document: Document, station: HTMLElement, controller: 
   form.append(title(document, "Validation correction", "Preserve the accepted value and correct the rejected value using a five-digit replacement."));
   const accepted = labelledInput(document, "Accepted reference", state.validField, "text", state.validValue);
   const rejected = labelledInput(document, "Rejected value", state.invalidField, "text", state.invalidValue);
+  rejected.input.dataset.testid = "validation-rejected";
   rejected.input.pattern = "[0-9]{5}"; rejected.input.minLength = 5; rejected.input.required = true;
   const feedback = document.createElement("p"); feedback.setAttribute("role", "alert"); feedback.id = "validation-feedback"; rejected.input.setAttribute("aria-describedby", feedback.id);
-  form.append(accepted.label, rejected.label, buttonFor(document, "Correct and submit", "submit"), feedback); form.noValidate = true;
+  const submit = buttonFor(document, "Correct and submit", "submit"); submit.dataset.testid = "validation-submit";
+  form.append(accepted.label, rejected.label, submit, feedback); form.noValidate = true;
   form.addEventListener("submit", (event) => { event.preventDefault(); rejected.input.setCustomValidity(""); feedback.textContent = ""; if (!rejected.input.checkValidity()) { rejected.input.setCustomValidity("Enter a five-digit correction."); feedback.textContent = "Enter a five-digit correction."; } const browserValid = rejected.input.checkValidity(); const stationResult = controller.verify("validation", { values: { [state.validField]: accepted.input.value, [state.invalidField]: rejected.input.value } }); if (browserValid && stationResult.passed) feedback.textContent = ""; report(stationResult); });
   station.prepend(form);
 }

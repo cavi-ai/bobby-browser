@@ -31,8 +31,8 @@ use types::{
     ClickAndWaitForPopupCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
     ElementState, Evidence, InspectCommand, NavigateCommand, PageId, PrimitiveCommand,
     ScreenshotMode, SessionId, SkillBrowserEngine, SkillCapability, SkillFailure, SkillOutcome,
-    SkillProfileRequest, SkillSessionState, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    SkillProfileRequest, SkillSessionState, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 use worker_pool::{
@@ -688,23 +688,31 @@ impl ProductionBobby {
                     .await?;
             }
             "semantic-form" => {
-                self.type_text(page_id, target_label("Full name"), "Ada Lovelace")
-                    .await?;
-                self.type_text(page_id, target_label("Email address"), "ada@example.test")
-                    .await?;
+                self.type_text(
+                    page_id,
+                    target_test_id("semantic-full-name"),
+                    "Ada Lovelace",
+                )
+                .await?;
+                self.type_text(
+                    page_id,
+                    target_test_id("semantic-email"),
+                    "ada@example.test",
+                )
+                .await?;
                 self.type_text_selector(
                     page_id,
                     "[data-station-id='semantic-form'] select[aria-label='Plan']",
                     "pro",
                 )
                 .await?;
-                self.click(page_id, target_text("Submit form"), true)
+                self.click(page_id, target_test_id("semantic-submit"), true)
                     .await?;
             }
             "validation" => {
-                self.type_text(page_id, target_label("Rejected value"), "02139")
+                self.type_text(page_id, target_test_id("validation-rejected"), "02139")
                     .await?;
-                self.click(page_id, target_text("Correct and submit"), true)
+                self.click(page_id, target_test_id("validation-submit"), true)
                     .await?;
             }
             "iframe" => {
@@ -1279,20 +1287,6 @@ fn verify_journal_proofs(
 fn target_test_id(test_id: &str) -> TargetSpec {
     TargetSpec {
         test_id: Some(test_id.into()),
-        ..TargetSpec::default()
-    }
-}
-
-fn target_label(label: &str) -> TargetSpec {
-    TargetSpec {
-        label: Some(label.into()),
-        ..TargetSpec::default()
-    }
-}
-
-fn target_text(value: &str) -> TargetSpec {
-    TargetSpec {
-        text: Some(TextMatch::Exact(value.into())),
         ..TargetSpec::default()
     }
 }
