@@ -4,7 +4,24 @@ documentedVersion: 0.2.0
 
 # TypeScript SDK
 
-Install workspace packages with pnpm, then use `@bobby-browser/sdk`:
+Package: `@bobby-browser/sdk` (Node ≥ 22).
+
+## Install
+
+Published registry (when available):
+
+```bash
+npm install @bobby-browser/sdk
+```
+
+From this monorepo after `pnpm install`:
+
+```bash
+pnpm --filter @bobby-browser/sdk build
+# import from the workspace package name in local packages/apps
+```
+
+## Construct the client
 
 ```ts
 import { BrowserRuntimeClient } from "@bobby-browser/sdk";
@@ -13,7 +30,54 @@ const client = new BrowserRuntimeClient({
   baseUrl: "http://127.0.0.1:7777",
   bearerToken: process.env.AUTOMATION_RUNTIME_TOKEN!,
 });
-const info = await client.runtimeInfo();
 ```
 
-The HTTP API requires `Authorization`, the current `X-Interface-Version`, and a bounded correlation identifier. Mutating requests additionally require an idempotency key. Duplicate or conflicting security-sensitive headers are rejected; bodies are limited to 1 MiB by default.
+`baseUrl` should be the broker origin without a trailing `/v1` (the client
+strips a trailing `/v1` if present). Bearer is the plaintext from `bobby init`
+/ bootstrap (conventional env name `AUTOMATION_RUNTIME_TOKEN`).
+
+## Headers
+
+Every request sends:
+
+- `Authorization: Bearer …`
+- `x-interface-version: 2026-07-23` (`INTERFACE_VERSION`)
+- `x-correlation-id` (UUID; override via `options.correlationId`)
+- `x-deadline` (from `options.deadline` / `timeoutMs`, default 30s)
+
+Pass `options.idempotencyKey` on mutating POSTs for replay-safe retries.
+
+## Method catalog
+
+| Method | HTTP | Notes |
+|---|---|---|
+| `runtimeInfo()` | `GET /v1/runtime` | |
+| `createSession(input, options?)` | `POST /v1/sessions` | |
+| `openPage(input, options?)` | `POST /v1/pages` | |
+| `submit(envelope, options?)` | `POST /v1/commands` | Validates outcome vs status |
+| `checkpoint(input, options?)` | `POST /v1/checkpoints` | |
+| `recover(workflowId, options?)` | `POST /v1/recovery/{id}` | |
+| `events(cursor, options?)` | `GET /v1/events` | Async iterable; handles `EventGap` |
+| `artifact(reference, options?)` | `GET /v1/artifacts/{id}` | Verified byte stream |
+
+There is no principals helper on the client today — mint/revoke with raw HTTP
+(see [Authentication](../guides/auth.md)).
+
+## Intents
+
+Build envelopes with helpers from the package (`locateEnvelope`,
+`fillEnvelope`, `submitAndVerifyEnvelope`, `waitForStateEnvelope`,
+`followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
+them to `submit`. See [Intent commands](../guides/intents.md).
+
+## Errors
+
+Failures throw `RuntimeClientError` with `kind` of `http` | `transport` |
+`deadline` | `aborted` | `protocol`. HTTP interface errors expose
+`interfaceError` (`InterfaceErrorCode` camelCase wire codes).
+
+## Next
+
+- [First browser session](../introduction/first-session.md)
+- [HTTP API reference](http-api.md)
+- [Authentication](../guides/auth.md)

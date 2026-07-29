@@ -23,12 +23,15 @@ BOBBY_BROWSER_CONFIG=/path/to/config.toml cargo run -p cli -- serve
 
 Then open:
 
-- `http://127.0.0.1:7777/healthz`
-- `http://127.0.0.1:7777/runtime`
+- `http://127.0.0.1:7777/healthz` — unauthenticated liveness
+- Authenticated HTTP under `/v1/*` (for example `GET /v1/runtime`) — requires a bearer and interface headers (see [Authentication](../guides/auth.md))
+
+There is no `/runtime` route. Use `/v1/runtime`.
 
 On loopback, if no bootstrap env or secret file exists, `bobby serve` auto-generates
-one and prints the bearer once. Keep the runtime on loopback or an operator-controlled
-boundary. Do not expose it to untrusted networks.
+one and prints the bearer once. Export that value as `AUTOMATION_RUNTIME_TOKEN` for
+SDK clients (same plaintext bearer). Keep the runtime on loopback or an
+operator-controlled boundary. Do not expose it to untrusted networks.
 
 ## TypeScript client
 
@@ -42,7 +45,11 @@ const client = new BrowserRuntimeClient({
 const info = await client.runtimeInfo();
 ```
 
-HTTP calls require `Authorization`, the current `X-Interface-Version`, and a bounded correlation identifier. Mutating requests also require an idempotency key.
+The SDK sets `Authorization`, `x-interface-version` (`2026-07-23`),
+`x-correlation-id`, `x-deadline`, and `idempotency-key` on mutating POSTs. Raw
+HTTP callers must send those headers themselves — see [Authentication](../guides/auth.md).
+
+For a full session → page → navigate loop, see [First browser session](first-session.md).
 
 ## Rust authority sketch
 
