@@ -9,11 +9,13 @@ import {
   SOURCE_REL,
   computeContentSha256,
   listFilesRecursive,
+  resolveReleaseIdentity,
 } from "./lib.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-export async function buildBobbyBrowserDocs(root = REPO_ROOT) {
+export async function buildBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
+  const release = resolveReleaseIdentity(releaseInput);
   const sourceRoot = path.join(root, SOURCE_REL);
   const pagesRoot = path.join(sourceRoot, "pages");
   const outputRoot = path.join(root, OUTPUT_REL);
@@ -41,12 +43,15 @@ export async function buildBobbyBrowserDocs(root = REPO_ROOT) {
 
   /** @type {Record<string, unknown>} */
   const manifest = {
+    schemaVersion: 1,
     package: PRODUCT_ID,
     product: PRODUCT_ID,
     version: DOCUMENTED_VERSION,
     contentSha256,
     publicBasePath: `/docs/${PRODUCT_ID}/v${DOCUMENTED_VERSION}`,
     stableAlias: `/docs/${PRODUCT_ID}`,
+    release: { tag: release.tag, commit: release.commit },
+    generatedAt: release.generatedAt,
   };
 
   await writeFile(
@@ -63,7 +68,18 @@ const isMain =
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isMain) {
-  buildBobbyBrowserDocs()
+  const values = Object.fromEntries(process.argv.slice(2).reduce((entries, option, index, args) => {
+    if (option.startsWith("--") && args[index + 1] && !args[index + 1].startsWith("--")) {
+      entries.push([option.slice(2), args[index + 1]]);
+    }
+    return entries;
+  }, []));
+  buildBobbyBrowserDocs(REPO_ROOT, {
+    version: values.version,
+    tag: values.tag,
+    commit: values.commit,
+    sourceDateEpoch: Number(values["source-date-epoch"]),
+  })
     .then(({ outputRoot, manifest }) => {
       console.log(`built ${outputRoot}`);
       console.log(`contentSha256=${manifest.contentSha256}`);

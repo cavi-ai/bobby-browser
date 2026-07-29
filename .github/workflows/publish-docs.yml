@@ -1,0 +1,134 @@
+name: Publish product documentation
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact stable version to verify or backfill
+        required: true
+        default: "0.2.0"
+        type: string
+      dry_run:
+        description: Build and verify without upload or dispatch
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+permissions: {}
+
+concurrency:
+  group: publish-docs-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  docs:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Resolve release identity
+        id: release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            TAG="$EVENT_TAG"
+            VERSION="${TAG#v}"
+          else
+            VERSION="$INPUT_VERSION"
+            TAG="v${VERSION}"
+          fi
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error::documentation releases require an exact v-prefixed stable version"
+            exit 1
+          fi
+          COMMIT="$(git rev-list -n 1 "$TAG")"
+          EPOCH="$(git show -s --format=%ct "$COMMIT")"
+          if [[ ! "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || [[ ! "$EPOCH" =~ ^[0-9]+$ ]]; then
+            echo "::error::release tag does not resolve to immutable provenance"
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "commit=$COMMIT"
+            echo "epoch=$EPOCH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build, verify, and package deterministic documentation
+        id: artifact
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+          COMMIT: ${{ steps.release.outputs.commit }}
+          EPOCH: ${{ steps.release.outputs.epoch }}
+        run: |
+          node scripts/docs/build-bobby-browser.mjs --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --source-date-epoch "$EPOCH"
+          node scripts/docs/verify-bobby-browser.mjs
+          OUTPUT="$RUNNER_TEMP/bobby-docs-release"
+          ENVELOPE="$RUNNER_TEMP/cavi-oss-release.json"
+          node scripts/docs/release-artifact.mjs --docs-root "docs/bobby-browser/v${VERSION}" --output "$OUTPUT" --version "$VERSION" --tag "$TAG" --repository "$GITHUB_REPOSITORY" --commit "$COMMIT" --source-date-epoch "$EPOCH" > "$ENVELOPE"
+          ARTIFACT="bobby-browser-docs-${TAG}.tar.gz"
+          SHA256="$(jq -r '.artifact.sha256' "$ENVELOPE")"
+          {
+            echo "directory=$OUTPUT"
+            echo "name=$ARTIFACT"
+            echo "sha256=$SHA256"
+            echo "envelope=$ENVELOPE"
+          } >> "$GITHUB_OUTPUT"
+          jq . "$ENVELOPE"
+
+      - name: Upload immutable release assets
+        if: ${{ env.DRY_RUN != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          DIRECTORY: ${{ steps.artifact.outputs.directory }}
+          ARTIFACT: ${{ steps.artifact.outputs.name }}
+          SHA256: ${{ steps.artifact.outputs.sha256 }}
+        run: |
+          RELEASE_STATE="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
+          if ! printf '%s\n' "$RELEASE_STATE" | jq -e '.isDraft == false and .isPrerelease == false' >/dev/null; then
+            echo "::error::documentation asset requires a published non-prerelease GitHub Release"
+            exit 1
+          fi
+          EXISTING="$RUNNER_TEMP/existing-$ARTIFACT"
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ARTIFACT" --output "$EXISTING" 2>/dev/null; then
+            EXISTING_SHA="$(sha256sum "$EXISTING" | cut -d' ' -f1)"
+            if [ "$EXISTING_SHA" != "$SHA256" ]; then
+              echo "::error::existing release asset differs; refusing overwrite"
+              exit 1
+            fi
+            echo "identical release asset already exists"
+          else
+            gh release upload "$TAG" "$DIRECTORY/$ARTIFACT" "$DIRECTORY/$ARTIFACT.sha256" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Dispatch required cavi-home ingestion
+        if: ${{ env.DRY_RUN != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.CONSUMER_DISPATCH_TOKEN }}
+          ENVELOPE: ${{ steps.artifact.outputs.envelope }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CONSUMER_DISPATCH_TOKEN is required"
+            exit 1
+          fi
+          jq -n --argjson payload "$(cat "$ENVELOPE")" '{event_type:"cavi-oss-release",client_payload:$payload}' | gh api --method POST /repos/cavi-ai/cavi-home/dispatches --input -
