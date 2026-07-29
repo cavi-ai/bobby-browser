@@ -77,6 +77,8 @@ pub enum RecoveryError {
     WorkersUnavailable,
     #[error("browser recovery failed: {0}")]
     Browser(String),
+    #[error("checkpoint session does not match the authorized recovery session")]
+    SessionMismatch,
 }
 
 #[derive(Clone)]
@@ -194,6 +196,25 @@ impl RecoveryCoordinator {
         workflow_id: &WorkflowId,
     ) -> Result<RecoveryDecision, RecoveryError> {
         let mut checkpoint = self.lock_verified_checkpoint(workflow_id).await?;
+        self.recover_locked(&mut checkpoint, true).await
+    }
+
+    pub async fn checkpoint_session(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<SessionId, RecoveryError> {
+        Ok(self.load_checkpoint(workflow_id).await?.session_id)
+    }
+
+    pub async fn recover_for_session(
+        &self,
+        workflow_id: &WorkflowId,
+        session_id: &SessionId,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        let mut checkpoint = self.lock_verified_checkpoint(workflow_id).await?;
+        if &checkpoint.checkpoint().session_id != session_id {
+            return Err(RecoveryError::SessionMismatch);
+        }
         self.recover_locked(&mut checkpoint, true).await
     }
 

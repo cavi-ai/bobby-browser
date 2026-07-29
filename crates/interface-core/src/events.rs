@@ -3,7 +3,7 @@ use std::{collections::VecDeque, sync::Arc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify};
-use types::EventCursor;
+use types::{EventCursor, PrincipalId};
 
 const MAX_EVENT_KIND_BYTES: usize = 128;
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 16 * 1024;
@@ -66,7 +66,12 @@ struct EventStoreInner {
 
 struct EventState {
     next_cursor: u64,
-    retained: VecDeque<Event>,
+    retained: VecDeque<StoredEvent>,
+}
+
+struct StoredEvent {
+    audience: Option<PrincipalId>,
+    event: Event,
 }
 
 impl EventStore {
@@ -84,7 +89,15 @@ impl EventStore {
         }
     }
 
-    pub async fn append(&self, mut event: Event) -> EventCursor {
+    pub async fn append(&self, event: Event) -> EventCursor {
+        self.append_inner(None, event).await
+    }
+
+    pub async fn append_for(&self, principal: PrincipalId, event: Event) -> EventCursor {
+        self.append_inner(Some(principal), event).await
+    }
+
+    async fn append_inner(&self, audience: Option<PrincipalId>, mut event: Event) -> EventCursor {
         event.kind = truncate_utf8(event.kind, MAX_EVENT_KIND_BYTES);
         sanitize_payload(&mut event.payload);
 
@@ -99,7 +112,7 @@ impl EventStore {
             if state.retained.len() == self.inner.capacity {
                 state.retained.pop_front();
             }
-            state.retained.push_back(event);
+            state.retained.push_back(StoredEvent { audience, event });
             cursor
         };
 
@@ -127,7 +140,34 @@ impl EventStore {
             let notified = self.inner.appended.notified();
             let decision = {
                 let state = self.inner.state.lock().await;
-                read_decision(&state, cursor, limit)
+                read_decision(&state, None, cursor, limit)
+            };
+            match decision {
+                ReadDecision::Return(result) => return result,
+                ReadDecision::Wait => notified.await,
+            }
+        }
+    }
+
+    pub async fn read_after_for(
+        &self,
+        principal: &PrincipalId,
+        cursor: EventCursor,
+        limit: usize,
+    ) -> Result<EventBatch, EventGap> {
+        if limit == 0 {
+            return Err(EventGap {
+                reason: EventGapReason::InvalidLimit,
+                earliest_available: EventCursor::ZERO,
+            });
+        }
+        let limit = limit.min(self.inner.capacity);
+
+        loop {
+            let notified = self.inner.appended.notified();
+            let decision = {
+                let state = self.inner.state.lock().await;
+                read_decision(&state, Some(principal), cursor, limit)
             };
             match decision {
                 ReadDecision::Return(result) => return result,
@@ -142,15 +182,20 @@ enum ReadDecision {
     Wait,
 }
 
-fn read_decision(state: &EventState, cursor: EventCursor, limit: usize) -> ReadDecision {
+fn read_decision(
+    state: &EventState,
+    principal: Option<&PrincipalId>,
+    cursor: EventCursor,
+    limit: usize,
+) -> ReadDecision {
     let latest = state
         .retained
         .back()
-        .map_or(EventCursor::ZERO, |event| event.cursor);
+        .map_or(EventCursor::ZERO, |stored| stored.event.cursor);
     let earliest = state
         .retained
         .front()
-        .map_or(EventCursor::ZERO, |event| event.cursor);
+        .map_or(EventCursor::ZERO, |stored| stored.event.cursor);
 
     if cursor > latest {
         return ReadDecision::Return(Err(EventGap {
@@ -168,9 +213,12 @@ fn read_decision(state: &EventState, cursor: EventCursor, limit: usize) -> ReadD
     let events = state
         .retained
         .iter()
-        .filter(|event| event.cursor > cursor)
+        .filter(|stored| stored.event.cursor > cursor)
+        .filter(|stored| {
+            principal.is_none_or(|principal| stored.audience.as_ref() == Some(principal))
+        })
         .take(limit)
-        .cloned()
+        .map(|stored| stored.event.clone())
         .collect::<Vec<_>>();
     if events.is_empty() {
         ReadDecision::Wait

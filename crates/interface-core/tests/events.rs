@@ -5,7 +5,8 @@ use interface_core::{
 };
 use serde_json::json;
 use tokio::time::timeout;
-use types::EventCursor;
+use types::{EventCursor, PrincipalId};
+use uuid::uuid;
 
 fn event(sequence: u64) -> Event {
     Event::new(
@@ -49,6 +50,60 @@ async fn bounded_history_reports_a_gap_instead_of_skipping_events() {
             .collect::<Vec<_>>(),
         vec![EventCursor(2), EventCursor(3)]
     );
+}
+
+#[tokio::test]
+async fn principal_scoped_reads_never_return_another_principals_events() {
+    let events = EventStore::new(4);
+    let owner = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000001"));
+    let other = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000002"));
+
+    events.append_for(owner.clone(), event(1)).await;
+    events.append_for(other.clone(), event(2)).await;
+
+    let owner_batch = events
+        .read_after_for(&owner, EventCursor::ZERO, 4)
+        .await
+        .unwrap();
+    assert_eq!(owner_batch.events.len(), 1);
+    assert_eq!(owner_batch.events[0].payload["sequence"], 1);
+    assert_eq!(owner_batch.latest_available, EventCursor(2));
+
+    let other_batch = events
+        .read_after_for(&other, EventCursor::ZERO, 4)
+        .await
+        .unwrap();
+    assert_eq!(other_batch.events.len(), 1);
+    assert_eq!(other_batch.events[0].payload["sequence"], 2);
+    assert_eq!(other_batch.latest_available, EventCursor(2));
+}
+
+#[tokio::test]
+async fn principal_scoped_read_waits_past_hidden_events_for_its_own_event() {
+    let events = EventStore::new(4);
+    let owner = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000001"));
+    let other = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000002"));
+    events.append_for(other, event(1)).await;
+
+    let waiter = tokio::spawn({
+        let events = events.clone();
+        let owner = owner.clone();
+        async move { events.read_after_for(&owner, EventCursor::ZERO, 4).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "a hidden event produced an empty batch"
+    );
+
+    events.append_for(owner, event(2)).await;
+    let batch = timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("the principal's event must wake its reader")
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.events.len(), 1);
+    assert_eq!(batch.events[0].payload["sequence"], 2);
 }
 
 #[tokio::test]

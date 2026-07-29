@@ -7,21 +7,22 @@ use std::{
 };
 
 use async_trait::async_trait;
+use checkpoint_store::CheckpointStore;
 use chrono::{Duration, Utc};
 use interface_core::{
     canonical_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyPermit,
     IdempotencyReservation, IdempotencyStore, RuntimeInterface, SessionOwnershipAuthority,
     SessionOwnershipRecorder, SessionOwnershipRegistry,
 };
-use page_runtime::PageRuntime;
+use page_runtime::{PageRuntime, RecoveryCoordinator};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use types::{
-    AttemptId, Capability, ClickCommand, CommandEnvelope, CommandError, CommandId, CommandOutcome,
-    CreateSessionRequest, Evidence, FillIntent, FillValue, IdempotencyKey, InspectCommand,
-    IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest,
-    PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId,
-    WorkflowId,
+    AttemptId, Capability, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError,
+    CommandId, CommandOutcome, CreateSessionRequest, Evidence, FillIntent, FillValue,
+    IdempotencyKey, InspectCommand, IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent,
+    NavigateCommand, OpenPageRequest, PageId, PrincipalId, RequestContext, RuntimeCommand,
+    SessionId, TypeTextCommand, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -457,6 +458,133 @@ async fn session_owned_runtime_hides_and_rejects_another_principals_session() {
         )
         .await
         .unwrap_err();
+    assert_eq!(denial.code, InterfaceErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn checkpoint_rejects_another_principals_session_before_persistence() {
+    let authority = AuthorityStore::in_memory();
+    let owner_principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010"));
+    let other_principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000011"));
+    let owner_token = authority
+        .issue(
+            owner_principal.clone(),
+            [Capability::RecoveryWrite],
+            expiry(),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let other_token = authority
+        .issue(other_principal, [Capability::RecoveryWrite], expiry())
+        .await
+        .unwrap()
+        .expose_once();
+    authority.verify(&owner_token).await.unwrap();
+    let other_handle = authority.verify(&other_token).await.unwrap();
+    let (ownership, recorder) = SessionOwnershipRegistry::bounded(4);
+    let session_id = SessionId::new();
+    recorder
+        .record_authenticated_session(owner_principal, session_id.clone())
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = RuntimeService::with_recovery(
+        Default::default(),
+        Default::default(),
+        RecoveryCoordinator::new(store.clone()),
+    );
+    let other =
+        AuthenticatedRuntime::with_session_ownership(runtime, other_handle.clone(), recorder);
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id,
+        page_id: PageId::new(),
+        restart_url: "https://example.test".into(),
+        current_url: "https://example.test".into(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Replayable,
+        invariants: Vec::new(),
+        replayable_inputs: Vec::new(),
+        evidence: Vec::new(),
+        recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
+        created_at: Utc::now(),
+    };
+
+    let denial = other
+        .checkpoint(
+            other_handle.context(expiry(), None),
+            checkpoint.clone(),
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(denial.code, InterfaceErrorCode::NotFound);
+    assert_eq!(other.checkpoint_dispatch_count(), 0);
+    assert!(store.load(&checkpoint.workflow_id).await.is_err());
+    assert!(ownership.owns_session(
+        &PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010")),
+        &checkpoint.session_id
+    ));
+}
+
+#[tokio::test]
+async fn recovery_rejects_another_principals_checkpoint_before_browser_dispatch() {
+    let authority = AuthorityStore::in_memory();
+    let owner_principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000010"));
+    let other_principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000011"));
+    let other_token = authority
+        .issue(other_principal, [Capability::RecoveryWrite], expiry())
+        .await
+        .unwrap()
+        .expose_once();
+    let other_handle = authority.verify(&other_token).await.unwrap();
+    let (_ownership, recorder) = SessionOwnershipRegistry::bounded(4);
+    let session_id = SessionId::new();
+    recorder
+        .record_authenticated_session(owner_principal, session_id.clone())
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id,
+        page_id: PageId::new(),
+        restart_url: "https://example.test".into(),
+        current_url: "https://example.test".into(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Replayable,
+        invariants: Vec::new(),
+        replayable_inputs: Vec::new(),
+        evidence: Vec::new(),
+        recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.save(&checkpoint).await.unwrap();
+    let runtime = RuntimeService::with_recovery(
+        Default::default(),
+        Default::default(),
+        RecoveryCoordinator::new(store),
+    );
+    let other =
+        AuthenticatedRuntime::with_session_ownership(runtime, other_handle.clone(), recorder);
+
+    let denial = other
+        .recover(other_handle.context(expiry(), None), checkpoint.workflow_id)
+        .await
+        .unwrap_err();
+
     assert_eq!(denial.code, InterfaceErrorCode::NotFound);
 }
 
