@@ -22,6 +22,8 @@ pub enum CheckpointStoreError {
     UnsupportedSchema { actual: u16, expected: u16 },
     #[error("checkpoint changed after the recovery snapshot was verified")]
     SnapshotChanged,
+    #[error("checkpoint workflow cannot be rebound to another session")]
+    IdentityChanged,
 }
 
 pub struct LockedCheckpointSnapshot {
@@ -92,6 +94,17 @@ impl CheckpointStore {
         self.validate_schema(checkpoint)?;
         let lock = self.workflow_lock(&checkpoint.workflow_id).await;
         let _guard = lock.lock().await;
+        match self.read_bytes(&checkpoint.workflow_id).await {
+            Ok(bytes) => {
+                let existing: WorkflowCheckpoint = serde_json::from_slice(&bytes)?;
+                self.validate_schema(&existing)?;
+                if existing.session_id != checkpoint.session_id {
+                    return Err(CheckpointStoreError::IdentityChanged);
+                }
+            }
+            Err(CheckpointStoreError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
         self.write_unlocked(checkpoint).await
     }
 

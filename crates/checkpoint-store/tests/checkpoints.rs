@@ -34,7 +34,8 @@ async fn saves_loads_and_atomically_replaces_a_workflow_checkpoint() {
     let store = CheckpointStore::open(root.path()).await.unwrap();
     let workflow_id = WorkflowId::new();
     let first = checkpoint(workflow_id.clone(), "https://example.test/one");
-    let second = checkpoint(workflow_id.clone(), "https://example.test/two");
+    let mut second = checkpoint(workflow_id.clone(), "https://example.test/two");
+    second.session_id = first.session_id.clone();
 
     store.save(&first).await.unwrap();
     assert_eq!(store.load(&workflow_id).await.unwrap(), first);
@@ -46,6 +47,22 @@ async fn saves_loads_and_atomically_replaces_a_workflow_checkpoint() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(entries.len(), 1, "temporary files must not survive save");
+}
+
+#[tokio::test]
+async fn established_workflow_rejects_rebinding_to_another_session() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let workflow_id = WorkflowId::new();
+    let first = checkpoint(workflow_id.clone(), "https://example.test/one");
+    let replacement = checkpoint(workflow_id.clone(), "https://example.test/two");
+    assert_ne!(first.session_id, replacement.session_id);
+
+    store.save(&first).await.unwrap();
+    let error = store.save(&replacement).await.unwrap_err();
+
+    assert!(matches!(error, CheckpointStoreError::IdentityChanged));
+    assert_eq!(store.load(&workflow_id).await.unwrap(), first);
 }
 
 #[tokio::test]
@@ -170,7 +187,8 @@ async fn locked_snapshot_blocks_same_workflow_writes_and_detects_external_swaps(
     let store = CheckpointStore::open(root.path()).await.unwrap();
     let workflow_id = WorkflowId::new();
     let first = checkpoint(workflow_id.clone(), "https://example.test/one");
-    let second = checkpoint(workflow_id.clone(), "https://example.test/two");
+    let mut second = checkpoint(workflow_id.clone(), "https://example.test/two");
+    second.session_id = first.session_id.clone();
     store.save(&first).await.unwrap();
 
     let locked = store.lock_snapshot(&workflow_id).await.unwrap();
@@ -188,7 +206,8 @@ async fn locked_snapshot_blocks_same_workflow_writes_and_detects_external_swaps(
         "workflow writer bypassed snapshot lock"
     );
 
-    let swapped = checkpoint(workflow_id.clone(), "https://example.test/external");
+    let mut swapped = checkpoint(workflow_id.clone(), "https://example.test/external");
+    swapped.session_id = first.session_id.clone();
     std::fs::write(
         root.path().join(format!("{}.json", workflow_id.0)),
         serde_json::to_vec(&swapped).unwrap(),
