@@ -7,7 +7,8 @@
       "pages": [
         { "title": "Overview", "path": "introduction/overview.md" },
         { "title": "Installation", "path": "introduction/installation.md" },
-        { "title": "Quickstart", "path": "introduction/quickstart.md" }
+        { "title": "Quickstart", "path": "introduction/quickstart.md" },
+        { "title": "First browser session", "path": "introduction/first-session.md" }
       ]
     },
     {
@@ -21,8 +22,10 @@
     {
       "title": "Control surfaces",
       "pages": [
-        { "title": "Rust SDK", "path": "surfaces/rust-sdk.md" },
+        { "title": "HTTP API", "path": "surfaces/http-api.md" },
         { "title": "TypeScript SDK", "path": "surfaces/typescript-sdk.md" },
+        { "title": "Rust SDK", "path": "surfaces/rust-sdk.md" },
+        { "title": "MCP tools", "path": "surfaces/mcp-tools.md" },
         { "title": "MCP stdio", "path": "surfaces/mcp-stdio.md" },
         { "title": "MCP over HTTP", "path": "surfaces/mcp-http.md" },
         { "title": "Authenticated CDP", "path": "surfaces/cdp.md" }

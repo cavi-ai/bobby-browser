@@ -18,8 +18,10 @@ not at the default OS config location (`…/bobby-browser/bootstrap.env`). Prefe
 
 Then open:
 
-- `http://127.0.0.1:7777/healthz`
-- `http://127.0.0.1:7777/runtime`
+- `http://127.0.0.1:7777/healthz` — unauthenticated liveness
+- Authenticated routes under `/v1/*` (for example `GET /v1/runtime`) — bearer + interface headers required
+
+There is no `/runtime` route. Use `/v1/runtime`. See [Authentication](auth.md) and the [HTTP API reference](../surfaces/http-api.md).
 
 Do not expose the runtime to untrusted networks; reach it over loopback or an operator-controlled boundary.
 
