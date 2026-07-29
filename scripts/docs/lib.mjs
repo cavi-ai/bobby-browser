@@ -6,6 +6,29 @@ export const PRODUCT_ID = "bobby-browser";
 export const DOCUMENTED_VERSION = "0.2.0";
 export const SOURCE_REL = "docs/bobby-browser/source";
 export const OUTPUT_REL = `docs/bobby-browser/v${DOCUMENTED_VERSION}`;
+const STABLE_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+const COMMIT_SHA = /^[a-f0-9]{40}$/u;
+
+export function resolveReleaseIdentity(input) {
+  if (!input || typeof input !== "object") throw new Error("release identity is required");
+  if (input.version !== DOCUMENTED_VERSION || !STABLE_VERSION.test(input.version)) {
+    throw new Error(`release version must be ${DOCUMENTED_VERSION}`);
+  }
+  if (input.tag !== `v${input.version}`) throw new Error("release tag must match version");
+  if (typeof input.commit !== "string" || !COMMIT_SHA.test(input.commit)) {
+    throw new Error("release commit must be a full lowercase SHA");
+  }
+  if (!Number.isSafeInteger(input.sourceDateEpoch) || input.sourceDateEpoch < 0) {
+    throw new Error("source date epoch must be a non-negative integer");
+  }
+  return Object.freeze({
+    version: input.version,
+    tag: input.tag,
+    commit: input.commit,
+    sourceDateEpoch: input.sourceDateEpoch,
+    generatedAt: new Date(input.sourceDateEpoch * 1000).toISOString(),
+  });
+}
 
 /** @param {string} root @param {string} directory */
 export async function listFilesRecursive(root, directory) {
