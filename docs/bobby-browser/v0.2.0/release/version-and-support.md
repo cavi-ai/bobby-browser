@@ -4,6 +4,15 @@ documentedVersion: 0.2.0
 
 # Version and support
 
-This documentation artifact documents bobby-browser **0.2.0** (Cargo workspace version). The project is alpha: contracts may still change before 1.0.
+This documentation artifact documents bobby-browser **0.2.0** (Cargo / npm
+workspace version).
 
-Contributor quality gates (workspace tests, live browser proofs, release certification) live in [CONTRIBUTING.md](https://github.com/cavi-ai/bobby-browser/blob/main/CONTRIBUTING.md) and the repository README pointers — they are not required to read or ingest this docs package.
+- **Interface version** (HTTP header `x-interface-version` / TypeScript
+  `INTERFACE_VERSION`): **`2026-07-23`**
+- **Support posture:** alpha — contracts are buildable but may change before 1.0;
+  do not expose the runtime to untrusted networks
+- Hosted docs: [cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser)
+
+Contributor quality gates live in
+[CONTRIBUTING.md](https://github.com/cavi-ai/bobby-browser/blob/main/CONTRIBUTING.md)
+and the repository README — they are not required to read this docs package.

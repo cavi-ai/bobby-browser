@@ -37,8 +37,15 @@ broker path uses `Authorization`, `x-interface-version`, `x-correlation-id`,
 and `x-deadline` (see [Authentication](../guides/auth.md)). Prefer an MCP
 client that can attach those headers, or use the TypeScript SDK / stdio gateway.
 
+## Lifecycle
+
+Rotating or replacing the bearer resets that principal's MCP session state.
+Clients must `initialize` again before tools. Tool catalog and capability
+gates: [MCP tools](mcp-tools.md).
+
 ## Next
 
 - Tool list and capabilities: [MCP tools](mcp-tools.md)
 - Single-process local agent: [MCP stdio](mcp-stdio.md)
 - End-to-end loop: [First browser session](../introduction/first-session.md)
+- Troubleshooting: [Troubleshooting](../guides/troubleshooting.md)
