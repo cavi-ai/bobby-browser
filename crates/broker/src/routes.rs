@@ -131,7 +131,10 @@ async fn submit_command(
     });
     state
         .events
-        .append(Event::new("command.outcome", payload))
+        .append_for(
+            request.context.principal_id.clone(),
+            Event::new("command.outcome", payload),
+        )
         .await;
     Ok(outcome_response(outcome))
 }
@@ -197,7 +200,11 @@ async fn events(
         .map_err(|_| deadline_error(&request.context.correlation_id))?;
     match tokio::time::timeout(
         wait,
-        state.events.read_after(query.after.into(), query.limit),
+        state.events.read_after_for(
+            &request.context.principal_id,
+            query.after.into(),
+            query.limit,
+        ),
     )
     .await
     {

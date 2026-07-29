@@ -259,6 +259,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<WorkflowCheckpoint> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        self.require_owned_session(&ctx, &checkpoint.session_id)?;
         self.checkpoint_dispatches.fetch_add(1, Ordering::AcqRel);
         self.inner
             .checkpoint(checkpoint, evidence)
@@ -273,10 +274,23 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<RecoveryDecision> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::RecoverWorkflow)?;
-        self.inner
-            .recover(&workflow)
+        let session_id = self
+            .inner
+            .recovery_session(&workflow)
             .await
-            .map_err(|_| internal_error(&ctx))
+            .map_err(|_| internal_error(&ctx))?;
+        self.require_owned_session(&ctx, &session_id)?;
+        self.inner
+            .recover_for_session(&workflow, &session_id)
+            .await
+            .map_err(|error| match error {
+                page_runtime::RecoveryError::SessionMismatch => error_with(
+                    &ctx,
+                    InterfaceErrorCode::NotFound,
+                    "runtime resource was not found",
+                ),
+                _ => internal_error(&ctx),
+            })
     }
 }
 

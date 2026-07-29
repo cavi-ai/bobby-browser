@@ -127,6 +127,61 @@ async fn event_gap_and_query_bounds_survive_the_authenticated_route() {
     }
 }
 
+#[tokio::test]
+async fn event_route_returns_only_the_authenticated_principals_events() {
+    let authority = AuthorityStore::in_memory();
+    let owner_id = PrincipalId::from_uuid(Uuid::from_u128(1));
+    let other_id = PrincipalId::from_uuid(Uuid::from_u128(2));
+    let owner_token = issue(&authority, 1, [Capability::SessionRead]).await;
+    let other_token = issue(&authority, 2, [Capability::SessionRead]).await;
+    let events = EventStore::new(4);
+    events
+        .append_for(owner_id, Event::new("owner", json!({ "owner": true })))
+        .await;
+    events
+        .append_for(other_id, Event::new("other", json!({ "other": true })))
+        .await;
+    let app = app(
+        authority,
+        InterfaceConfig::default(),
+        events,
+        ArtifactCatalog::default(),
+    );
+
+    let owner_response = app
+        .clone()
+        .oneshot(authorized(
+            "GET",
+            "/v1/events?after=0&limit=4",
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(owner_response.status(), StatusCode::OK);
+    let owner_body = to_bytes(owner_response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let owner_json: serde_json::Value = serde_json::from_slice(&owner_body).unwrap();
+    assert_eq!(owner_json["events"].as_array().unwrap().len(), 1);
+    assert_eq!(owner_json["events"][0]["kind"], "owner");
+
+    let other_response = app
+        .oneshot(authorized(
+            "GET",
+            "/v1/events?after=0&limit=4",
+            &other_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(other_response.status(), StatusCode::OK);
+    let other_body = to_bytes(other_response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let other_json: serde_json::Value = serde_json::from_slice(&other_body).unwrap();
+    assert_eq!(other_json["events"].as_array().unwrap().len(), 1);
+    assert_eq!(other_json["events"][0]["kind"], "other");
+}
+
 struct ArtifactFixture {
     _root: TempDir,
     app: axum::Router,
