@@ -264,6 +264,29 @@ impl RuntimeService {
             .await
     }
 
+    pub async fn recovery_session(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<types::SessionId, RecoveryError> {
+        self.recovery
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?
+            .checkpoint_session(workflow_id)
+            .await
+    }
+
+    pub async fn recover_for_session(
+        &self,
+        workflow_id: &WorkflowId,
+        session_id: &types::SessionId,
+    ) -> Result<RecoveryDecision, RecoveryError> {
+        self.recovery
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?
+            .recover_for_session(workflow_id, session_id)
+            .await
+    }
+
     pub async fn navigate(&self, req: NavigationRequest) -> Result<NavigationResult, RuntimeError> {
         let page = self.pages.get(&req.page_id).await?;
         let wait_until = match req.wait_until.as_deref() {

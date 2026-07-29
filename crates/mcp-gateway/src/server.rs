@@ -595,10 +595,13 @@ impl Server {
                             Ok(mut value) => {
                                 admission.apply_to_mcp_value(&mut value, &envelope.command_id);
                                 self.events
-                                    .append(interface_core::Event::new(
-                                        "command.outcome",
-                                        value.clone(),
-                                    ))
+                                    .append_for(
+                                        registration_context.principal_id.clone(),
+                                        interface_core::Event::new(
+                                            "command.outcome",
+                                            value.clone(),
+                                        ),
+                                    )
                                     .await;
                                 Ok(value)
                             }
@@ -648,7 +651,11 @@ impl Server {
                 };
                 match tokio::time::timeout(
                     remaining,
-                    self.events.read_after(input.cursor.into(), input.limit),
+                    self.events.read_after_for(
+                        &context.principal_id,
+                        input.cursor.into(),
+                        input.limit,
+                    ),
                 )
                 .await
                 {
