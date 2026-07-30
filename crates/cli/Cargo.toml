@@ -1,14 +1,19 @@
 [package]
-name = "cli"
+name = "bobby-browser"
+description = "Bobby Browser automation runtime CLI (bobby)"
+readme = "README.md"
+keywords = ["browser", "automation", "cdp", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 autobins = false
 
 [lib]
+name = "cli"
 path = "src/main.rs"
 
 [[bin]]
@@ -21,23 +26,23 @@ chrono.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-artifact-store = { path = "../artifact-store" }
+artifact-store = { path = "../artifact-store", version = "0.2.1" }
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-broker = { path = "../broker" }
-config = { path = "../config" }
-companion-protocol = { path = "../companion-protocol" }
-companion-core = { path = "../companion-core" }
-firefox-companion = { path = "../firefox-companion" }
-observability = { path = "../observability" }
+broker = { path = "../broker", version = "0.2.1" }
+config = { path = "../config", version = "0.2.1" }
+companion-protocol = { path = "../companion-protocol", version = "0.2.1" }
+companion-core = { path = "../companion-core", version = "0.2.1" }
+firefox-companion = { path = "../firefox-companion", version = "0.2.1" }
+observability = { path = "../observability", version = "0.2.1" }
 libc = "0.2"
 serde_json.workspace = true
 serde.workspace = true
-types = { path = "../types" }
+types = { path = "../types", version = "0.2.1" }
 uuid.workspace = true
 url.workspace = true
-worker-pool = { path = "../worker-pool" }
+worker-pool = { path = "../worker-pool", version = "0.2.1" }
 
 [dev-dependencies]
 tempfile.workspace = true

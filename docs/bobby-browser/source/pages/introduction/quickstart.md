@@ -7,7 +7,7 @@ documentedVersion: 0.2.1
 ## Run the server
 
 ```bash
-cargo build -p cli
+cargo build -p bobby-browser
 ./target/debug/bobby init
 ./target/debug/bobby serve
 ```
@@ -15,10 +15,10 @@ cargo build -p cli
 Or without a pre-built binary:
 
 ```bash
-cargo run -p cli -- init
-cargo run -p cli -- serve
+cargo run -p bobby-browser -- init
+cargo run -p bobby-browser -- serve
 # or with an explicit config file:
-BOBBY_BROWSER_CONFIG=/path/to/config.toml cargo run -p cli -- serve
+BOBBY_BROWSER_CONFIG=/path/to/config.toml cargo run -p bobby-browser -- serve
 ```
 
 Then open:

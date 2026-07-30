@@ -1,0 +1,98 @@
+name: Release binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-binaries-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: x64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: arm64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            asset_os: macos
+            asset_arch: arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_os: macos
+            asset_arch: x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_os: windows
+            asset_arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build release bobby
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p bobby-browser --target "${{ matrix.target }}"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == "$GITHUB_REF_NAME" ]]; then
+            VERSION="$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -1)"
+            VERSION="${VERSION:-0.0.0-dev}"
+          fi
+          STAGE="bobby-browser-${VERSION}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
+          mkdir -p "$STAGE"
+          if [[ "${{ matrix.asset_os }}" == "windows" ]]; then
+            cp "target/${{ matrix.target }}/release/bobby.exe" "$STAGE/bobby.exe"
+            tar -a -cf "${STAGE}.zip" "$STAGE"
+            echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
+          else
+            cp "target/${{ matrix.target }}/release/bobby" "$STAGE/bobby"
+            tar -czf "${STAGE}.tar.gz" "$STAGE"
+            echo "ASSET=${STAGE}.tar.gz" >> "$GITHUB_ENV"
+          fi
+          echo "STAGE_DIR=${STAGE}" >> "$GITHUB_ENV"
+      - name: Smoke bobby --help
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.asset_os }}" == "windows" ]]; then
+            "./${STAGE_DIR}/bobby.exe" --help
+          else
+            "./${STAGE_DIR}/bobby" --help
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bobby-browser-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+          path: ${{ env.ASSET }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

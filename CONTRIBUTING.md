@@ -9,7 +9,7 @@ still change before 1.0.
 - Node.js 22+ and pnpm for TypeScript packages
 
 ```bash
-cargo build -p cli
+cargo build -p bobby-browser
 ./target/debug/bobby doctor
 pnpm install
 ```

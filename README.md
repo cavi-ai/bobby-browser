@@ -10,7 +10,7 @@ strings.
 ## Run the runtime
 
 ```bash
-cargo build -p cli --release
+cargo build -p bobby-browser --release
 ./target/release/bobby init
 ./target/release/bobby serve
 ```
@@ -18,6 +18,8 @@ cargo build -p cli --release
 Then open `http://127.0.0.1:7777/healthz`.
 
 ## Use from TypeScript
+
+Package: `@bobby-browser/sdk` (publish via `sdk-v*` tag / Publish npm workflow).
 
 ```bash
 npm install @bobby-browser/sdk
@@ -30,6 +32,13 @@ const client = new BrowserRuntimeClient({
   baseUrl: "http://127.0.0.1:7777",
   bearerToken: process.env.AUTOMATION_RUNTIME_TOKEN!,
 });
+```
+
+Until the package is on the public registry, build from this repo:
+
+```bash
+pnpm install
+pnpm --filter @bobby-browser/sdk test
 ```
 
 > **Alpha.** The interfaces and contracts described here are stable enough to
@@ -65,4 +74,4 @@ These pages are also served at
 The CDP allowlist is published in
 [`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into
 an immutable versioned artifact under
-[`docs/bobby-browser/v0.2.0`](docs/bobby-browser/v0.2.0) for documentation hosts.
+[`docs/bobby-browser/v0.2.1`](docs/bobby-browser/v0.2.1) for documentation hosts.
