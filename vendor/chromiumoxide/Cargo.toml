@@ -129,10 +129,12 @@ path = "examples/storage-cookie.rs"
 name = "wiki"
 path = "examples/wiki.rs"
 
-[[test]]
-name = "chromiumoxide_tests"
-path = "tests/lib.rs"
-harness = true
+# Upstream browser integration tests are not run in this workspace (CI has no
+# exclusive Chromium profile). Re-enable locally against a real Chrome if needed.
+# [[test]]
+# name = "chromiumoxide_tests"
+# path = "tests/lib.rs"
+# harness = true
 
 [dependencies.async-tungstenite]
 version = "0.32"
