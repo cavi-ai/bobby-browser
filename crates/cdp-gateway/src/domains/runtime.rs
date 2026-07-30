@@ -30,6 +30,29 @@ fn is_pinned_bootstrap_identity(len: usize, digest: &str) -> bool {
     .contains(&(len, digest))
 }
 
+fn normalize_playwright_frame_seq(expression: &str) -> Option<String> {
+    const MARKER: &str = r#""frameSeq":"#;
+    let marker_start = expression.find(MARKER)?;
+    if expression[marker_start + MARKER.len()..].contains(MARKER) {
+        return None;
+    }
+    let value_start = marker_start + MARKER.len();
+    let value_len = expression[value_start..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    if value_len == 0 {
+        return None;
+    }
+    let value_end = value_start + value_len;
+    let _: u32 = expression[value_start..value_end].parse().ok()?;
+    let mut normalized = String::with_capacity(expression.len() - value_len + 1);
+    normalized.push_str(&expression[..value_start]);
+    normalized.push('0');
+    normalized.push_str(&expression[value_end..]);
+    Some(normalized)
+}
+
 /// Recognizes Playwright's pinned injected-script bootstrap without executing caller JavaScript.
 pub(crate) fn bootstrap_injected_script(params: &Value) -> Result<Value, CdpError> {
     let expression = params
@@ -38,13 +61,24 @@ pub(crate) fn bootstrap_injected_script(params: &Value) -> Result<Value, CdpErro
         .ok_or_else(|| CdpError::new(CdpErrorCode::InvalidParams, "missing runtime expression"))?;
     let digest = format!("{:x}", Sha256::digest(expression.as_bytes()));
     let identity = (expression.len(), digest.as_str());
-    let injected = identity == PLAYWRIGHT_1_61_INJECTED || identity == PLAYWRIGHT_1_62_INJECTED;
+    let normalized = normalize_playwright_frame_seq(expression);
+    let normalized_digest = normalized
+        .as_ref()
+        .map(|value| format!("{:x}", Sha256::digest(value.as_bytes())));
+    let normalized_identity = normalized
+        .as_ref()
+        .zip(normalized_digest.as_deref())
+        .map(|(value, digest)| (value.len(), digest));
+    let injected = normalized_identity.is_some_and(|identity| {
+        identity == PLAYWRIGHT_1_61_INJECTED || identity == PLAYWRIGHT_1_62_INJECTED
+    });
+    let pinned = is_pinned_bootstrap_identity(identity.0, identity.1) || injected;
     if params
         .get("contextId")
         .and_then(Value::as_u64)
         .is_none_or(|id| id == 0 || id > 1_000_000)
         || expression.len() > crate::MAX_FRAME_BYTES
-        || !is_pinned_bootstrap_identity(expression.len(), &digest)
+        || !pinned
     {
         return Err(CdpError::new(
             CdpErrorCode::InvalidParams,
@@ -65,7 +99,30 @@ pub(crate) fn bootstrap_injected_script(params: &Value) -> Result<Value, CdpErro
 mod tests {
     use serde_json::json;
 
-    use super::{bootstrap_injected_script, is_pinned_bootstrap_identity};
+    use super::{
+        bootstrap_injected_script, is_pinned_bootstrap_identity, normalize_playwright_frame_seq,
+    };
+
+    #[test]
+    fn normalizes_one_bounded_playwright_frame_sequence() {
+        assert_eq!(
+            normalize_playwright_frame_seq(r#"prefix{"frameSeq":27,"option":true}suffix"#),
+            Some(r#"prefix{"frameSeq":0,"option":true}suffix"#.to_owned())
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_unbounded_playwright_frame_sequences() {
+        assert_eq!(
+            normalize_playwright_frame_seq(r#"{"frameSeq":1,"frameSeq":2}"#),
+            None
+        );
+        assert_eq!(
+            normalize_playwright_frame_seq(r#"{"frameSeq":4294967296}"#),
+            None
+        );
+        assert_eq!(normalize_playwright_frame_seq(r#"{"frameSeq":-1}"#), None);
+    }
 
     #[test]
     fn accepts_playwright_1_62_injected_bootstrap_identity() {

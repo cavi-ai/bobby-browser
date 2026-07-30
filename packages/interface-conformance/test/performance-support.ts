@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { type ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type PerformanceSample = {
@@ -22,6 +24,33 @@ export class OperationTimer {
       return await operation();
     } finally {
       this.elapsedMs += performance.now() - started;
+    }
+  }
+}
+
+export async function withPerformanceChildCleanup<T>(resources: {
+  child: ChildProcess;
+  controlDirectory: string;
+  sampler: () => NodeJS.Timeout | undefined;
+  sampleChain: () => Promise<void>;
+}, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } finally {
+    const sampler = resources.sampler();
+    if (sampler) clearInterval(sampler);
+    try {
+      await resources.sampleChain();
+    } finally {
+      try {
+        if (resources.child.exitCode === null && resources.child.signalCode === null) {
+          const childExit = once(resources.child, "exit");
+          resources.child.kill("SIGTERM");
+          await childExit;
+        }
+      } finally {
+        await rm(resources.controlDirectory, { recursive: true, force: true });
+      }
     }
   }
 }
