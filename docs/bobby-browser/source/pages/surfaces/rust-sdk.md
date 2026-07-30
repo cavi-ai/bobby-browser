@@ -4,14 +4,15 @@ documentedVersion: 0.2.1
 
 # Rust SDK
 
-In-process and embedded control uses workspace crates rather than a single
-published `bobby-browser` crates.io package (alpha; publishing is phased).
+In-process and embedded control uses workspace crates. The installable CLI
+package on crates.io is `bobby-browser` (`cargo install bobby-browser` → `bobby`)
+once the maintainer publish pass completes; until then build from source.
 
 ## Crate map
 
 | Crate | Role |
 |---|---|
-| `cli` | `bobby` binary (`init`, `serve`, …) |
+| `bobby-browser` | `bobby` binary (`init`, `serve`, …); lib crate name remains `cli` |
 | `broker` | Authenticated HTTP `/v1/*` + MCP HTTP mount |
 | `sdk-core` | Runtime interface implementation behind the broker |
 | `interface-core` | Authority store, events, idempotency, authorization |
@@ -21,7 +22,7 @@ published `bobby-browser` crates.io package (alpha; publishing is phased).
 | `cdp-gateway` | Authenticated CDP discovery + DevTools WebSockets |
 | `intent-engine` / `page-runtime` / `session-manager` / … | Execution engines |
 
-Build the CLI: `cargo build -p cli`. Workspace tests: `cargo test --workspace`
+Build the CLI: `cargo build -p bobby-browser`. Workspace tests: `cargo test --workspace`
 (some live browser tests are ignored until Chromium is installed).
 
 ## Embed vs HTTP

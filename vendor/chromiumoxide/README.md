@@ -1,4 +1,11 @@
-# chromiumoxide
+# bobby-chromiumoxide
+
+CAVI fork of [chromiumoxide](https://github.com/mattsse/chromiumoxide) 0.9.1 for
+[bobby-browser](https://github.com/cavi-ai/bobby-browser). Adds iframe target
+polling and pierce-DOM helpers used by the worker pool. Published on crates.io
+as `bobby-chromiumoxide`; the Rust library name remains `chromiumoxide`.
+
+Upstream:
 
 ![Build](https://github.com/mattsse/chromiumoxide/workflows/Continuous%20integration/badge.svg)
 [![Crates.io](https://img.shields.io/crates/v/chromiumoxide.svg)](https://crates.io/crates/chromiumoxide)

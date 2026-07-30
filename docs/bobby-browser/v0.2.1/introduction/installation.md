@@ -15,11 +15,11 @@ documentedVersion: 0.2.1
 ```bash
 git clone https://github.com/cavi-ai/bobby-browser.git
 cd bobby-browser
-cargo build -p cli
+cargo build -p bobby-browser
 pnpm install
 ```
 
-The cargo package is `cli`; the binary is `bobby`:
+The cargo package is `bobby-browser`; the binary is `bobby`:
 
 ```bash
 ./target/debug/bobby doctor

@@ -46,7 +46,7 @@ mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
 
 build() {
   log "building release cli"
-  cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p cli
+  cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p bobby-browser
 }
 
 restart() {
