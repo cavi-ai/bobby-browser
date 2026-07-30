@@ -11,9 +11,8 @@ pub const DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5)
 
 type SessionSelection = Arc<Mutex<Option<Arc<dyn WorkerFactory>>>>;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnginePreference {
-    #[default]
     ManagedChromium,
     Exact {
         engine: BrowserEngine,
@@ -22,6 +21,15 @@ pub enum EnginePreference {
     Prefer {
         engines: Vec<BrowserEngine>,
     },
+}
+
+impl Default for EnginePreference {
+    fn default() -> Self {
+        Self::Exact {
+            engine: BrowserEngine::Firefox,
+            profile_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

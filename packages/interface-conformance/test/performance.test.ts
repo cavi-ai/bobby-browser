@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { type PerformanceEvent, type PerformanceSample } from "./performance-support.js";
+import {
+  type PerformanceEvent,
+  type PerformanceSample,
+  withPerformanceChildCleanup,
+} from "./performance-support.js";
 
 const adapters = ["rust-sdk", "typescript-sdk", "mcp", "playwright", "puppeteer"] as const;
 const selectedAdapters = process.env.CONFORMANCE_PERFORMANCE_ADAPTERS
@@ -62,36 +66,40 @@ async function runPersistentAdapter(adapter: typeof adapters[number]): Promise<A
     output = (output + String(chunk)).slice(-65_536);
   });
   child.stderr.on("data", chunk => { output = (output + String(chunk)).slice(-65_536); });
-  const ready = await waitForEvent(join(controlDirectory, "ready.json"), child, output) as Extract<PerformanceEvent, { event: "measurement-start" }>;
-  assert.equal(ready.adapter, adapter); assert.equal(ready.samples, samples); assert(ready.rootPid > 0);
-  rssBeforeKiB = await processTreeRssKiB(child.pid!);
-  assert(rssBeforeKiB > 0, `${adapter} process tree was not alive before measurement`);
-  rssPeakKiB = rssBeforeKiB; sampler = setInterval(samplePeak, 50);
-  const disconnected = await waitForEvent(join(controlDirectory, "disconnected.json"), child, output) as Extract<PerformanceEvent, { event: "client-disconnected" }>;
-  assert.equal(disconnected.adapter, adapter); assert.equal(disconnected.samples.length, samples);
-  if (sampler) clearInterval(sampler);
-  await sampleChain;
-  rssPeakKiB = Math.max(rssPeakKiB, await processTreeRssKiB(child.pid!));
-  measured = disconnected.samples;
-  rssAfterDisconnectKiB = await processTreeRssKiB(child.pid!);
-  assert(rssAfterDisconnectKiB > 0, `${adapter} daemon/browser tree exited before post-disconnect RSS`);
-  const ack = join(controlDirectory, "ack.json"); const ackTmp = `${ack}.${process.pid}.tmp`;
-  await writeFile(ackTmp, JSON.stringify({ event: "rss-sampled", rootPid: child.pid })); await rename(ackTmp, ack);
-  const [code] = await childExit;
-  await rm(controlDirectory, { recursive: true, force: true });
-  assert.equal(code, 0, output);
-  return { samples: measured, rssBeforeKiB, rssPeakKiB, rssAfterDisconnectKiB };
+  return withPerformanceChildCleanup(
+    { child, controlDirectory, sampler: () => sampler, sampleChain: () => sampleChain },
+    async () => {
+      const ready = await waitForEvent(join(controlDirectory, "ready.json"), child, () => output) as Extract<PerformanceEvent, { event: "measurement-start" }>;
+      assert.equal(ready.adapter, adapter); assert.equal(ready.samples, samples); assert(ready.rootPid > 0);
+      rssBeforeKiB = await processTreeRssKiB(child.pid!);
+      assert(rssBeforeKiB > 0, `${adapter} process tree was not alive before measurement`);
+      rssPeakKiB = rssBeforeKiB; sampler = setInterval(samplePeak, 50);
+      const disconnected = await waitForEvent(join(controlDirectory, "disconnected.json"), child, () => output) as Extract<PerformanceEvent, { event: "client-disconnected" }>;
+      assert.equal(disconnected.adapter, adapter); assert.equal(disconnected.samples.length, samples);
+      if (sampler) clearInterval(sampler);
+      await sampleChain;
+      rssPeakKiB = Math.max(rssPeakKiB, await processTreeRssKiB(child.pid!));
+      measured = disconnected.samples;
+      rssAfterDisconnectKiB = await processTreeRssKiB(child.pid!);
+      assert(rssAfterDisconnectKiB > 0, `${adapter} daemon/browser tree exited before post-disconnect RSS`);
+      const ack = join(controlDirectory, "ack.json"); const ackTmp = `${ack}.${process.pid}.tmp`;
+      await writeFile(ackTmp, JSON.stringify({ event: "rss-sampled", rootPid: child.pid })); await rename(ackTmp, ack);
+      const [code] = await childExit;
+      assert.equal(code, 0, output);
+      return { samples: measured, rssBeforeKiB, rssPeakKiB, rssAfterDisconnectKiB };
+    },
+  );
 }
 
-async function waitForEvent(path: string, child: ReturnType<typeof spawn>, output: string): Promise<PerformanceEvent> {
+async function waitForEvent(path: string, child: ReturnType<typeof spawn>, output: () => string): Promise<PerformanceEvent> {
   const deadline = Date.now() + 180_000;
   while (Date.now() < deadline) {
     try { return JSON.parse(await readFile(path, "utf8")) as PerformanceEvent; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    assert.equal(child.exitCode, null, `benchmark child exited before ${path}: ${output}`);
+    assert.equal(child.exitCode, null, `benchmark child exited before ${path}: ${output()}`);
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  child.kill("SIGTERM"); assert.fail(`timed out waiting for ${path}: ${output}`);
+  child.kill("SIGTERM"); assert.fail(`timed out waiting for ${path}: ${output()}`);
 }
 
 test("five actual adapters use one warmed persistent fixture for seven paired samples", { timeout: 1_800_000 }, async () => {

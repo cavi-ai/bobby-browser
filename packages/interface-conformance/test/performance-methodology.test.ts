@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { withPerformanceChildCleanup } from "./performance-support.js";
 
 const performanceSource = new URL("../../test/performance.test.ts", import.meta.url);
 const performanceSupportSource = new URL("../../test/performance-support.ts", import.meta.url);
@@ -75,4 +79,32 @@ test("performance labels describe measured operation time and process-tree reten
   assert.match(source, /adapter_operation_median_ms=/);
   assert.match(source, /process_tree_rss_after_transport_close_kib=/);
   assert.doesNotMatch(source, /browser time/i);
+});
+
+test("performance child cleanup runs when measurement fails", async () => {
+  const controlDirectory = await mkdtemp(join(tmpdir(), "performance-cleanup-test-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  let ticks = 0;
+  const sampler = setInterval(() => { ticks += 1; }, 5);
+
+  await assert.rejects(
+    withPerformanceChildCleanup(
+      {
+        child,
+        controlDirectory,
+        sampler: () => sampler,
+        sampleChain: () => Promise.resolve(),
+      },
+      async () => { throw new Error("measurement failed"); },
+    ),
+    /measurement failed/,
+  );
+
+  const ticksAfterCleanup = ticks;
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(ticks, ticksAfterCleanup, "RSS sampler remained live after failure");
+  assert.notEqual(child.signalCode, null, "benchmark child remained live after failure");
+  await assert.rejects(stat(controlDirectory), { code: "ENOENT" });
 });

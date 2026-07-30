@@ -49,7 +49,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "artifact-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "broker"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "cdp-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "checkpoint-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde_json",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "companion-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "companion-protocol",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "companion-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -496,7 +496,7 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "dom-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "regex",
@@ -730,7 +730,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "firefox-companion"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "intent-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "dom-engine",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "interface-conformance"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "interface-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -1290,7 +1290,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "js-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -1414,7 +1414,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -1475,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "network-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "cookie",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "observability"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "config",
@@ -1554,7 +1554,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "page-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -1901,7 +1901,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "release-gates"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "companion-protocol",
  "libc",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-tests"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "sdk-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -2256,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "session-manager"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2327,7 +2327,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "test-site"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "brotli",
@@ -2823,7 +2823,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "types"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3199,7 +3199,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worker-pool"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "workflow-journal"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "chrono",

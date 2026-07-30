@@ -177,6 +177,27 @@ async fn exact_firefox_never_silently_falls_back_to_chromium() {
 }
 
 #[tokio::test]
+async fn default_selection_requires_firefox_without_chromium_fallback() {
+    let selector = BrowserWorkerSelector::new(
+        vec![registration(
+            "chromium",
+            BrowserEngine::Chromium,
+            None,
+            true,
+        )],
+        RequiredCapabilities::default(),
+    );
+    let result = selector
+        .select(&session(), &EnginePreference::default())
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("default selection unexpectedly launched Chromium"),
+    };
+    assert_eq!(error.code, types::ErrorCode::PolicyDenied);
+}
+
+#[tokio::test]
 async fn exact_firefox_selects_only_the_requested_profile() {
     let wanted = ProfileId::new();
     let selector = BrowserWorkerSelector::new(

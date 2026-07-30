@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "package": "bobby-browser",
   "product": "bobby-browser",
-  "version": "0.2.0",
-  "contentSha256": "bb8d5ded2f505e85828b3fb0aaf0bd4ae7dcc2c269c6b81dfe353cebe7783a64",
-  "publicBasePath": "/docs/bobby-browser/v0.2.0",
+  "version": "0.2.1",
+  "contentSha256": "e02682c3a000df62a74dee8cd259786315f473084400262130d421707ea651ce",
+  "publicBasePath": "/docs/bobby-browser/v0.2.1",
   "stableAlias": "/docs/bobby-browser",
   "release": {
-    "tag": "v0.2.0",
+    "tag": "v0.2.1",
     "commit": "aa5184347037c04c42064a702ce1dc7d5b16c75b"
   },
   "generatedAt": "2026-07-25T04:31:26.000Z"

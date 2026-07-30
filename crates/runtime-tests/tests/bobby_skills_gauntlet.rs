@@ -12,12 +12,12 @@ use axum::routing::get;
 use axum::Router;
 use checkpoint_store::CheckpointStore;
 use chrono::{Duration, Utc};
-use config::{
-    AppConfig, BrowserConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
-    FirefoxCompanionConfig,
-};
+use config::{AppConfig, BrowserConfig, BrowserSelectionConfig, EnginePreferenceConfig};
 use page_runtime::{
     PageRuntime, RecoveryCoordinator, SkillRecoveryCoordinator, SkillRecoveryExecution,
+};
+use runtime_tests::{
+    launch_installed_firefox_runtime, InstalledFirefoxConfig, InstalledFirefoxRuntime,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -441,6 +441,7 @@ struct ProductionBobby {
     seed: String,
     fixture: PathBuf,
     run_dir: PathBuf,
+    _installed_firefox: Option<InstalledFirefoxRuntime>,
 }
 
 impl ProductionBobby {
@@ -459,7 +460,13 @@ impl ProductionBobby {
         std::fs::create_dir_all(&run_dir)?;
         let fixture = repository.join("packages/bobby-gauntlet/fixtures/approved-upload.txt");
         let config = runtime_config(&run_dir, fixture.parent().expect("fixture has a parent"))?;
-        let factory = configured_factory(&config, engine)?;
+        let (factory, installed_firefox) = configured_factory(
+            &config,
+            engine,
+            &gauntlet.championship_url(&target.seed),
+            repository.join("target/firefox-companion-proof/native-host-descriptor.json"),
+        )
+        .await?;
         let workers = Arc::new(WorkerPool::new(config.browser.max_active, factory));
         let journal = Arc::new(JsonlJournal::open(&config.storage.journal_path).await?);
         let checkpoints = CheckpointStore::open(&config.storage.checkpoints_dir).await?;
@@ -528,6 +535,7 @@ impl ProductionBobby {
             seed: target.seed,
             fixture,
             run_dir,
+            _installed_firefox: installed_firefox,
         })
     }
 
@@ -1293,7 +1301,7 @@ fn target_test_id(test_id: &str) -> TargetSpec {
 
 fn configured_engine() -> TestResult<SkillBrowserEngine> {
     match std::env::var("BOBBY_CHAMPIONSHIP_ENGINE")
-        .unwrap_or_else(|_| "chromium".into())
+        .unwrap_or_else(|_| "firefox".into())
         .as_str()
     {
         "chromium" => Ok(SkillBrowserEngine::Chromium),
@@ -1327,38 +1335,42 @@ fn runtime_config(run_dir: &Path, upload_root: &Path) -> TestResult<AppConfig> {
     Ok(config)
 }
 
-fn configured_factory(
+async fn configured_factory(
     config: &AppConfig,
     engine: SkillBrowserEngine,
-) -> TestResult<Arc<dyn WorkerFactory>> {
+    startup_url: &str,
+    descriptor_path: PathBuf,
+) -> TestResult<(Arc<dyn WorkerFactory>, Option<InstalledFirefoxRuntime>)> {
+    if engine == SkillBrowserEngine::Firefox {
+        let installed = InstalledFirefoxConfig::from_env()
+            .map_err(|name| test_error(format!("{name} is required for Firefox proof")))?;
+        let runtime =
+            launch_installed_firefox_runtime(installed, config, startup_url, descriptor_path)
+                .await
+                .map_err(|error| test_error(format!("Firefox bootstrap failed: {error:?}")))?;
+        return Ok((runtime.factory(), Some(runtime)));
+    }
     let selection = match engine {
-        SkillBrowserEngine::Chromium => BrowserSelectionConfig::default(),
+        SkillBrowserEngine::Chromium => BrowserSelectionConfig {
+            preference: EnginePreferenceConfig::ManagedChromium,
+            firefox: Vec::new(),
+        },
         SkillBrowserEngine::Firefox => BrowserSelectionConfig {
-            preference: EnginePreferenceConfig::Exact {
-                engine: BrowserEngineConfig::Firefox,
-                profile_id: Some(required_env("BOBBY_FIREFOX_PROFILE_ID")?),
-            },
-            firefox: vec![FirefoxCompanionConfig {
-                profile_id: required_env("BOBBY_FIREFOX_PROFILE_ID")?,
-                bidi_url: required_env("BOBBY_FIREFOX_BIDI_URL")?,
-                profile_dir: PathBuf::from(required_env("BOBBY_FIREFOX_PROFILE_DIR")?),
-                companion_bind: std::env::var("BOBBY_FIREFOX_COMPANION_BIND")
-                    .unwrap_or_else(|_| "127.0.0.1:0".into()),
-                descriptor_path: PathBuf::from(required_env("BOBBY_FIREFOX_DESCRIPTOR_PATH")?),
-                timeout_ms: 30_000,
-                pairing_code_ttl_ms: 300_000,
-                attachment_ttl_ms: 300_000,
-            }],
+            preference: EnginePreferenceConfig::default(),
+            firefox: Vec::new(),
         },
         SkillBrowserEngine::WebKit => {
             return Err(test_error("WebKit is not configured for this release gate"));
         }
     };
-    Ok(cli::compose_worker_factory_with_pairing_observer(
-        config,
-        selection,
-        firefox_pairing_observer(|event| eprintln!("{event}")),
-    )?)
+    Ok((
+        cli::compose_worker_factory_with_pairing_observer(
+            config,
+            selection,
+            firefox_pairing_observer(|event| eprintln!("{event}")),
+        )?,
+        None,
+    ))
 }
 
 fn firefox_pairing_observer<F>(emit: F) -> Arc<dyn Fn(&str) + Send + Sync>
@@ -1366,10 +1378,6 @@ where
     F: Fn(&str) + Send + Sync + 'static,
 {
     Arc::new(move |_code| emit("Firefox companion pairing established (code redacted)"))
-}
-
-fn required_env(name: &str) -> TestResult<String> {
-    std::env::var(name).map_err(|_| test_error(format!("{name} is required for Firefox proof")))
 }
 
 fn chromium_executable() -> Option<PathBuf> {
@@ -1541,6 +1549,18 @@ fn command_result<T>(result: Result<T, types::CommandError>) -> TestResult<T> {
 #[cfg(test)]
 mod replay_contracts {
     use super::*;
+
+    #[test]
+    fn championship_defaults_to_firefox() {
+        let saved = std::env::var_os("BOBBY_CHAMPIONSHIP_ENGINE");
+        std::env::remove_var("BOBBY_CHAMPIONSHIP_ENGINE");
+        let engine = configured_engine().unwrap();
+        match saved {
+            Some(value) => std::env::set_var("BOBBY_CHAMPIONSHIP_ENGINE", value),
+            None => std::env::remove_var("BOBBY_CHAMPIONSHIP_ENGINE"),
+        }
+        assert_eq!(engine, SkillBrowserEngine::Firefox);
+    }
     use std::sync::Mutex as StdMutex;
 
     fn fixture(root: &Path) -> Vec<ScreenshotProof> {

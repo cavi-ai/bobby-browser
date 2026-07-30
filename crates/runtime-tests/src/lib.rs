@@ -35,6 +35,17 @@ pub struct InstalledFirefoxConfig {
     pub companion_extension: PathBuf,
 }
 
+pub struct InstalledFirefoxRuntime {
+    factory: Arc<dyn worker_pool::WorkerFactory>,
+    _firefox: Child,
+}
+
+impl InstalledFirefoxRuntime {
+    pub fn factory(&self) -> Arc<dyn worker_pool::WorkerFactory> {
+        Arc::clone(&self.factory)
+    }
+}
+
 impl InstalledFirefoxConfig {
     pub fn from_env() -> Result<Self, String> {
         fn required(name: &str) -> Result<PathBuf, String> {
@@ -49,6 +60,90 @@ impl InstalledFirefoxConfig {
             companion_extension: required("BOBBY_COMPANION_EXTENSION")?,
         })
     }
+}
+
+pub async fn launch_installed_firefox_runtime(
+    installed: InstalledFirefoxConfig,
+    runtime_config: &AppConfig,
+    startup_url: &str,
+    descriptor_path: PathBuf,
+) -> Result<InstalledFirefoxRuntime, CommandError> {
+    validate_installed_config(&installed)?;
+    let process_observations = ProcessObservationCollector::new(Vec::new());
+    let enrollment = cli::start_firefox_profile_enrollment(
+        cli::FirefoxProfileEnrollmentConfig {
+            companion_bind: "127.0.0.1:0".parse().expect("loopback enrollment address"),
+            descriptor_path: descriptor_path.clone(),
+            timeout: PROOF_TIMEOUT,
+            pairing_code_ttl: PROOF_TIMEOUT,
+            attachment_ttl: Duration::from_secs(300),
+        },
+        process_observations.pairing_code_observer(),
+    )
+    .await?;
+    let (mut firefox, bidi_url) =
+        launch_firefox(&installed, startup_url, &process_observations).await?;
+    let factory = async {
+        let extension_session =
+            BidiClient::connect_session(bidi_url.clone(), PROOF_TIMEOUT).await?;
+        let (method, params) = temporary_extension_install_command(&installed.companion_extension)?;
+        let installed_extension = extension_session.send(method, params).await;
+        if let Err(error) = installed_extension {
+            let _ = extension_session.end_session().await;
+            return Err(error);
+        }
+        if installed_extension
+            .as_ref()
+            .ok()
+            .and_then(|value| value["extension"].as_str())
+            != Some(EXTENSION_ID)
+        {
+            let _ = extension_session.end_session().await;
+            return Err(workflow_error(
+                ErrorCode::VerificationFailed,
+                "Firefox installed an unexpected companion extension",
+            ));
+        }
+        let enrollment = enrollment.wait().await;
+        let extension_session_ended = extension_session.end_session().await;
+        let enrollment = enrollment?;
+        extension_session_ended?;
+        let profile_id = enrollment.profile_id().clone();
+        cli::compose_worker_factory_with_enrolled_firefox(
+            runtime_config,
+            BrowserSelectionConfig {
+                preference: EnginePreferenceConfig::Exact {
+                    engine: BrowserEngineConfig::Firefox,
+                    profile_id: Some(profile_id.0.to_string()),
+                },
+                firefox: vec![FirefoxCompanionConfig {
+                    profile_id: profile_id.0.to_string(),
+                    bidi_url: bidi_url.to_string(),
+                    profile_dir: installed.profile,
+                    companion_bind: "127.0.0.1:0".into(),
+                    descriptor_path,
+                    timeout_ms: PROOF_TIMEOUT.as_millis() as u64,
+                    pairing_code_ttl_ms: PROOF_TIMEOUT.as_millis() as u64,
+                    attachment_ttl_ms: 300_000,
+                }],
+            },
+            process_observations.pairing_code_observer(),
+            enrollment,
+        )
+        .map_err(|error| workflow_error(ErrorCode::BrowserLaunchFailed, error))
+    }
+    .await;
+    let factory = match factory {
+        Ok(factory) => factory,
+        Err(error) => {
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+    Ok(InstalledFirefoxRuntime {
+        factory,
+        _firefox: firefox,
+    })
 }
 
 pub async fn run_installed_firefox_workflow(
