@@ -24,7 +24,7 @@ Pinned clients in this repo (see `packages/interface-conformance/package.json`
 and `pnpm-lock.yaml`):
 
 - `playwright-core` **1.62.0**
-- `puppeteer-core` **25.3.0**
+- `puppeteer-core` **25.4.0**
 
 (`docs/cdp-support.json` still labels some parameter schema revisions with
 historical `playwright-1.61.1-*` strings; use the lockfile versions for client
