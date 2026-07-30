@@ -48,6 +48,6 @@
     "test": "pnpm run build && node --test dist/test/*.test.js"
   },
   "devDependencies": {
-    "@types/node": "22.15.3"
+    "@types/node": "26.1.2"
   }
 }
