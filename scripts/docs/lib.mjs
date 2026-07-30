@@ -3,7 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 export const PRODUCT_ID = "bobby-browser";
-export const DOCUMENTED_VERSION = "0.2.0";
+export const DOCUMENTED_VERSION = "0.2.1";
 export const SOURCE_REL = "docs/bobby-browser/source";
 export const OUTPUT_REL = `docs/bobby-browser/v${DOCUMENTED_VERSION}`;
 const STABLE_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;

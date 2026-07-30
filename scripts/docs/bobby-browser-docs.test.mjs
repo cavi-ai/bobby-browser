@@ -10,8 +10,8 @@ import { OUTPUT_REL } from "./lib.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const RELEASE = Object.freeze({
-  version: "0.2.0",
-  tag: "v0.2.0",
+  version: "0.2.1",
+  tag: "v0.2.1",
   commit: "aa5184347037c04c42064a702ce1dc7d5b16c75b",
   sourceDateEpoch: 1784953886,
 });
@@ -71,7 +71,7 @@ test("verify fails when navigation points at a missing page", async () => {
       path.join(fixtureRoot, "docs/bobby-browser/source/navigation.json"),
       JSON.stringify({
         title: "bobby-browser",
-        version: "0.2.0",
+        version: "0.2.1",
         sections: [
           {
             title: "Introduction",
