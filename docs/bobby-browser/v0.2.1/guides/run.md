@@ -7,7 +7,7 @@ documentedVersion: 0.2.1
 ```bash
 bobby serve
 # or:
-cargo run -p cli -- serve
+cargo run -p bobby-browser -- serve
 # with an explicit config file:
 BOBBY_BROWSER_CONFIG=/path/to/config.toml bobby serve
 ```

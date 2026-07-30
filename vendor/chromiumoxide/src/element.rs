@@ -71,15 +71,11 @@ impl Element {
             )
             .await?;
 
-        let remote_object_id = resp
-            .result
-            .object
-            .object_id
-            .ok_or_else(|| {
-                CdpError::msg(format!(
-                    "No object Id found for backend node {backend_node_id:?}"
-                ))
-            })?;
+        let remote_object_id = resp.result.object.object_id.ok_or_else(|| {
+            CdpError::msg(format!(
+                "No object Id found for backend node {backend_node_id:?}"
+            ))
+        })?;
 
         // Push the node into the frontend map so QuerySelector-based helpers
         // (find_element) have a usable node_id.

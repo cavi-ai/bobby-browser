@@ -23,7 +23,7 @@ interface-conformance = { path = "../interface-conformance" }
 interface-core = { path = "../interface-core" }
 firefox-companion = { path = "../firefox-companion" }
 libc = "0.2"
-cli = { path = "../cli" }
+bobby-browser = { path = "../cli" }
 mcp-gateway = { path = "../mcp-gateway" }
 network-engine = { path = "../network-engine" }
 sdk-core = { path = "../sdk-core" }

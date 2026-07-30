@@ -5,14 +5,14 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [dependencies]
 chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types" }
-worker-pool = { path = "../worker-pool" }
+types = { path = "../types", version = "0.2.1" }
+worker-pool = { path = "../worker-pool", version = "0.2.1" }
 
 [dev-dependencies]
 async-trait.workspace = true

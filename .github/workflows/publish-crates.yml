@@ -1,0 +1,37 @@
+name: Publish crates (dry-run)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "crate-v*"
+
+concurrency:
+  group: publish-crates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build installable binary
+        run: cargo build --release -p bobby-browser
+      - name: Dry-run publish leaves
+        run: |
+          set -euo pipefail
+          # Full ordered live publish needs crates.io credentials and must run
+          # leaf→root after each crate exists on the registry. CI dry-runs only
+          # crates whose path deps are registry crates (no unpublished workspace
+          # path deps).
+          for crate in bobby-chromiumoxide types config test-site; do
+            echo "::group::dry-run $crate"
+            cargo publish -p "$crate" --dry-run
+            echo "::endgroup::"
+          done
+      - name: Verify path deps carry versions
+        run: |
+          set -euo pipefail
+          python3 scripts/check-publish-path-versions.py

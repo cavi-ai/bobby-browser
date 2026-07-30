@@ -5,12 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [dependencies]
-observability = { path = "../observability" }
+observability = { path = "../observability", version = "0.2.1" }
 axum = { workspace = true, features = ["ws"] }
-companion-protocol = { path = "../companion-protocol" }
+companion-protocol = { path = "../companion-protocol", version = "0.2.1" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -18,7 +18,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.30"
 tracing.workspace = true
-types = { path = "../types" }
+types = { path = "../types", version = "0.2.1" }
 url.workspace = true
 uuid.workspace = true
 
