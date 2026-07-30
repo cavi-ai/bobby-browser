@@ -9,10 +9,9 @@ pub enum BrowserEngineConfig {
     WebKit,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum EnginePreferenceConfig {
-    #[default]
     ManagedChromium,
     Exact {
         engine: BrowserEngineConfig,
@@ -22,6 +21,15 @@ pub enum EnginePreferenceConfig {
     Prefer {
         engines: Vec<BrowserEngineConfig>,
     },
+}
+
+impl Default for EnginePreferenceConfig {
+    fn default() -> Self {
+        Self::Exact {
+            engine: BrowserEngineConfig::Firefox,
+            profile_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,9 +349,15 @@ mod tests {
     };
 
     #[test]
-    fn missing_browser_selection_defaults_to_managed_chromium() {
+    fn missing_browser_selection_defaults_to_exact_firefox_without_fallback() {
         let parsed: BrowserSelectionConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(parsed.preference, EnginePreferenceConfig::ManagedChromium);
+        assert_eq!(
+            parsed.preference,
+            EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: None,
+            }
+        );
         assert!(parsed.firefox.is_empty());
     }
 

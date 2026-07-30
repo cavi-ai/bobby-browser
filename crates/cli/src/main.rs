@@ -999,10 +999,13 @@ mod tests {
     use types::SessionId;
 
     #[test]
-    fn absent_selection_configuration_keeps_managed_chromium() {
+    fn absent_selection_configuration_requires_firefox_without_fallback() {
         assert_eq!(
             parse_selection(None).unwrap().preference,
-            EnginePreferenceConfig::ManagedChromium
+            EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: None,
+            }
         );
     }
 
