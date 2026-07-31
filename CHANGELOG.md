@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Share one BiDi connection across runtime sessions on a Firefox profile (Firefox RemoteAgent accepts a single WebDriver session per browser).
+- Keep prior attachment grants when issuing new ones, and renew attachment leases before expiry so sessions outlive the attachment TTL.
+- Companion extension: merge attachment grants instead of replacing them, and retry terminal native-auth states after a bounded cooldown instead of stopping until a browser restart.
+- Recover native-host descriptor publication from descriptor files leaked by killed processes.
+- Log Firefox companion launch, pairing, and discovery failures as warnings.
+
+
 ## 0.3.0 - 2026-07-30
 
 - Honor idempotency keys on session creation and checkpoint save, replaying retained results.

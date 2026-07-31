@@ -204,7 +204,15 @@ impl AdaptivePageEngine {
         let RuntimeCommand::Primitive(command) = &envelope.command else {
             unreachable!("Intent handled above");
         };
-        let Some(direct) = &self.direct else {
+        // The direct-HTTP path reads and commits the worker's own HTTP state mirror.
+        // A worker without that mirror (the Firefox companion) can still serve every
+        // eligible command through the browser, so treat it exactly like an unconfigured
+        // direct path rather than letting `http_state` fail the command outright.
+        let Some(direct) = self
+            .direct
+            .as_ref()
+            .filter(|_| lease.worker().supports_http_state())
+        else {
             return browser_execute(
                 envelope,
                 lease,

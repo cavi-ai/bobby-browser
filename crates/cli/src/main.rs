@@ -43,6 +43,7 @@ struct ConfiguredFirefoxFactory {
     artifacts: ArtifactStore,
     upload_roots: Vec<PathBuf>,
     downloads_dir: PathBuf,
+    bidi: Mutex<Option<firefox_companion::BidiClient>>,
 }
 
 #[derive(Clone)]
@@ -210,17 +211,36 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
             server
                 .wait_for_discovery(&self.config.profile_id, self.config.timeout)
                 .await
-                .map_err(companion_error)?;
+                .map_err(companion_error)
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        error = %error.message,
+                        "firefox companion discovery wait failed"
+                    );
+                })?;
             return self.launch_with_server(server, session_id).await;
         }
 
-        let attempt = self.start_server().await?;
+        let attempt = self.start_server().await.inspect_err(|error| {
+            tracing::warn!(error = %error.message, "firefox companion bootstrap failed");
+        })?;
         let server = attempt.server();
         server
             .wait_for_discovery(&self.config.profile_id, self.config.timeout)
             .await
-            .map_err(companion_error)?;
-        let worker = self.launch_with_server(server, session_id).await?;
+            .map_err(companion_error)
+            .inspect_err(|error| {
+                tracing::warn!(
+                    error = %error.message,
+                    "firefox companion pairing timed out waiting for extension discovery"
+                );
+            })?;
+        let worker = self
+            .launch_with_server(server, session_id)
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(error = %error.message, "firefox companion worker launch failed");
+            })?;
         let server = attempt.complete().map_err(companion_error)?;
         *live_server = Some(server);
         Ok(worker)
@@ -254,6 +274,11 @@ impl ConfiguredFirefoxFactory {
             Arc::clone(server),
             self.config.timeout,
         ));
+        // Firefox's RemoteAgent accepts exactly one active WebDriver session
+        // per browser instance, so every worker on this profile multiplexes
+        // over a single shared BiDi connection. A dead connection (browser
+        // restart, transport failure) is re-established on the next launch.
+        let bidi = self.shared_bidi().await?;
         FirefoxCompanionFactory::new(
             self.config.bidi_url.clone(),
             self.config.timeout,
@@ -264,8 +289,25 @@ impl ConfiguredFirefoxFactory {
         .with_artifacts(self.artifacts.clone())
         .with_upload_roots(self.upload_roots.clone())
         .with_downloads_dir(self.downloads_dir.clone())
+        .with_shared_transport(bidi)
         .launch(session_id)
         .await
+    }
+
+    async fn shared_bidi(&self) -> Result<firefox_companion::BidiClient, CommandError> {
+        let mut slot = self.bidi.lock().await;
+        if let Some(client) = slot.as_ref() {
+            if client.is_alive() {
+                return Ok(client.clone());
+            }
+        }
+        let client = firefox_companion::BidiClient::connect_session(
+            self.config.bidi_url.clone(),
+            self.config.timeout,
+        )
+        .await?;
+        *slot = Some(client.clone());
+        Ok(client)
     }
 
     async fn start_server(&self) -> Result<FirefoxBootstrapAttempt, CommandError> {
@@ -303,6 +345,8 @@ async fn start_bootstrap_attempt(
         pairing_code,
         ownership_id: uuid::Uuid::new_v4().to_string(),
     };
+    remove_stale_descriptor(&descriptor_path)
+        .map_err(|error| companion_error(error.to_string()))?;
     let publication = write_descriptor(&descriptor_path, &descriptor)
         .map_err(|error| companion_error(error.to_string()))?;
     Ok(FirefoxBootstrapAttempt {
@@ -438,6 +482,26 @@ fn write_descriptor(
     write_descriptor_with_pending_remove(path, descriptor, |pending| std::fs::remove_file(pending))
 }
 
+/// Recover from a descriptor leaked by a process that died mid-publication
+/// (a SIGKILL cannot run `Drop`): remove a pre-existing descriptor only when
+/// it parses as our own descriptor format, never a foreign file.
+fn remove_stale_descriptor(path: &Path) -> std::io::Result<()> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            if serde_json::from_slice::<NativeHostDescriptor>(&bytes).is_ok() {
+                std::fs::remove_file(path)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "native-host descriptor path holds a foreign file",
+                ))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn write_descriptor_with_pending_remove(
     path: &Path,
     descriptor: &NativeHostDescriptor,
@@ -564,6 +628,7 @@ fn compose_worker_factory_with_enrollment(
                         artifacts: firefox_artifacts.clone(),
                         upload_roots: firefox_upload_roots.clone(),
                         downloads_dir: firefox_downloads_dir.clone(),
+                        bidi: Mutex::new(None),
                     },
                 }
             })
@@ -1428,6 +1493,50 @@ mod tests {
         assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
         assert!(!descriptor.exists());
         let _ = std::fs::remove_file(descriptor);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_recovers_a_descriptor_leaked_by_a_killed_process() {
+        let descriptor =
+            PathBuf::from("target").join(format!("stale-descriptor-{}.json", uuid::Uuid::new_v4()));
+        let attempt = start_bootstrap_attempt(
+            "127.0.0.1:0".parse().unwrap(),
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(descriptor.exists());
+        std::mem::forget(attempt);
+
+        let recovered = start_bootstrap_attempt(
+            "127.0.0.1:0".parse().unwrap(),
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await;
+        let attempt = recovered.unwrap_or_else(|error| {
+            panic!("stale descriptor was not recovered: {}", error.message)
+        });
+        drop(attempt);
+        assert!(!descriptor.exists());
+
+        std::fs::write(&descriptor, b"not-a-descriptor").unwrap();
+        let foreign = start_bootstrap_attempt(
+            "127.0.0.1:0".parse().unwrap(),
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await;
+        assert!(foreign.is_err());
+        assert_eq!(std::fs::read(&descriptor).unwrap(), b"not-a-descriptor");
+        let _ = std::fs::remove_file(&descriptor);
     }
 
     #[tokio::test]

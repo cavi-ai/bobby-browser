@@ -195,6 +195,13 @@ pub trait BrowserWorker: Send + Sync {
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
+    /// Whether this worker mirrors page HTTP state, and can therefore serve the
+    /// direct-HTTP execution path. Workers that keep the `http_state` default below
+    /// must report `false`, so the adaptive executor routes the command through the
+    /// browser instead of failing it on an unsupported primitive.
+    fn supports_http_state(&self) -> bool {
+        false
+    }
     async fn http_state(&self, _page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
         Err(unsupported_error())
     }

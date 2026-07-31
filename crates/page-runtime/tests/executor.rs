@@ -216,6 +216,9 @@ impl BrowserWorker for FakeWorker {
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
+    fn supports_http_state(&self) -> bool {
+        true
+    }
     async fn http_state(
         &self,
         _: &PageId,

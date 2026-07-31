@@ -908,6 +908,10 @@ impl BrowserWorker for ChromiumWorker {
         Ok(vec![Evidence::JavaScriptResult { value, truncated }])
     }
 
+    fn supports_http_state(&self) -> bool {
+        true
+    }
+
     async fn http_state(&self, page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;

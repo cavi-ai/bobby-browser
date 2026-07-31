@@ -134,3 +134,13 @@ backoff, so restarts of either side self-heal).
 - Headless is not a companion mode; the paired Firefox is a real window.
 - Chromium remains available as a managed engine in the same selection (e.g.
   `{"preference":{"mode":"prefer","engines":["firefox","chromium"]}}`).
+
+## Notes
+
+- Firefox's RemoteAgent accepts a single WebDriver BiDi session per browser,
+  so all runtime sessions on a profile share one BiDi connection; page
+  attachments stay per-session and renew automatically before their TTL.
+- If pairing is interrupted (serve restart, rotated descriptor), the
+  extension retries with a bounded cooldown instead of giving up until a
+  browser restart. A killed serve cannot brick later pairing: descriptor
+  publication recovers its own leftover files.

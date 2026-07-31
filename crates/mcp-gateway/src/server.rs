@@ -1170,6 +1170,8 @@ struct Implementation {
     #[serde(default)]
     #[serde(rename = "title")]
     _title: Option<String>,
+    #[serde(default, rename = "description")]
+    _description: Option<String>,
     #[serde(default, rename = "websiteUrl")]
     _website_url: Option<String>,
     #[serde(default, rename = "icons")]
