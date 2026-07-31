@@ -4,6 +4,7 @@
 
 - Add verified `completeForm` intent (ordered uniquely named fill fields; no implicit submit).
 - Add `FillValue` kind `checked` for reliable checkbox/radio semantic fills on Chromium and Firefox.
+- Add the `accessibilitySnapshot` primitive (MCP `a11y_snapshot`): a compact `{role, name, children}` tree capped at 2048 nodes, from Chrome's full AX tree on Chromium and the companion extension's DOM walker on Firefox.
 - Add `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` for session teardown.
 - Add the `activatePage` primitive (MCP `page_activate`) to bring a page to the front on Chromium and Firefox.
 - Add `GET /v1/events?stream=1` server-sent-event streaming with cursor frame ids and terminal gap frames.

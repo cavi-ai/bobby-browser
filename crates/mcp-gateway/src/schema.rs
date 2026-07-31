@@ -44,6 +44,14 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({"sessionId": id(), "pageId": id()}),
             vec!["sessionId", "pageId"],
         ),
+        "a11y_snapshot" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "maxNodes": {"type":"integer","minimum":1,"maximum":2048}
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "session_close" => (json!({"sessionId": id()}), vec!["sessionId"]),
         "navigate" => (
             json!({
@@ -183,6 +191,7 @@ fn definitions() -> Value {
         "CompleteFormField": complete_form_field(),
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
+        "AccessibilityNode": accessibility_node(0),
         "WaitForCommand": wait_for_command(),
         "TargetSpec": target_spec(),
         "TextMatch": {"oneOf":[
@@ -532,6 +541,13 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input("listPages", json!({"type":"null"})),
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
+        tagged_input(
+            "accessibilitySnapshot",
+            object(
+                json!({"maxNodes":{"type":"integer","minimum":1,"maximum":2048}}),
+                &[],
+            ),
+        ),
         tagged_input("clickAndWaitForPopup", click_wait_input()),
         tagged_input("clickAndWaitForDownload", click_wait_input()),
         tagged_input(
@@ -786,6 +802,15 @@ fn evidence_variants() -> Vec<Value> {
             "javaScriptResult",
             json!({"value":any_value(),"truncated":{"type":"boolean"}}),
             &["value", "truncated"],
+        ),
+        tagged_fields(
+            "accessibilitySnapshot",
+            json!({
+                "pageId":id(),
+                "nodes":array(json!({"$ref":"#/$defs/AccessibilityNode"}), 2048),
+                "truncated":{"type":"boolean"}
+            }),
+            &["pageId", "nodes", "truncated"],
         ),
         tagged_fields(
             "intentExecution",
@@ -1100,4 +1125,18 @@ fn validate_number(schema: &Value, number: Option<f64>) -> bool {
         return false;
     }
     true
+}
+
+fn accessibility_node(depth: usize) -> Value {
+    let mut schema = object(
+        json!({
+            "role":string(1, 256),
+            "name":string(1, 4096)
+        }),
+        &[],
+    );
+    if depth < 32 {
+        schema["properties"]["children"] = array(accessibility_node(depth + 1), 256);
+    }
+    schema
 }
