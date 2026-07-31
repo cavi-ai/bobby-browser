@@ -1023,8 +1023,13 @@ impl SessionCoordinator {
         }) {
             return Err(CompanionSessionError::ConnectionClosed);
         }
+        // Keep other attachments' live grants: every runtime session holds its
+        // own attachment, and dropping them here would wedge their commands.
+        let now = now_unix_ms();
         state.grants.retain(|_, record| {
-            record.grant.profile_id != *profile_id || record.connection_id != session.connection_id
+            record.grant.attachment_id != grant.attachment_id
+                && (record.connection_id != session.connection_id
+                    || record.grant.expires_at_unix_ms > now)
         });
         state.grants.insert(
             grant.attachment_id.clone(),
@@ -2399,12 +2404,19 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(replacement.attachment_id, grant.attachment_id);
-        assert!(!coordinator
+        assert!(coordinator
             .state
             .lock()
             .await
             .grants
-            .contains_key(&grant.attachment_id));
+            .contains_key(&replacement.attachment_id));
+        assert!(coordinator
+            .state
+            .lock()
+            .await
+            .grants
+            .remove(&grant.attachment_id)
+            .is_some());
         let grant_gate = coordinator.grant_updates.lock().await;
 
         let release = tokio::time::timeout(
