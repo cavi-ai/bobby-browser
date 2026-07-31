@@ -111,6 +111,10 @@ export function isSessionState(value: unknown): value is SessionState {
     && isSessionExecutionPolicy(value.execution_policy);
 }
 
+export function isSessionStateList(value: unknown): value is SessionState[] {
+  return Array.isArray(value) && value.every(isSessionState);
+}
+
 export function isPageState(value: unknown): value is PageState {
   return hasExactKeys(value, ["id", "session_id", "url", "mode", "ready_state", "pending_requests"])
     && isUuid(value.id)
@@ -312,7 +316,7 @@ export function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoin
     && isStringArray(value.replayableInputs)
     && isEvidenceArray(value.evidence)
     && Array.isArray(value.recoveryHistory) && value.recoveryHistory.every((record) => hasExactKeys(record, ["recordedAt", "decision"]) && isIsoTimestamp(record.recordedAt) && isRecoveryDecision(record.decision))
-    && Array.isArray(value.recoveryReceipts) && value.recoveryReceipts.length === 0
+    && Array.isArray(value.recoveryReceipts)
     && isIsoTimestamp(value.createdAt);
 }
 

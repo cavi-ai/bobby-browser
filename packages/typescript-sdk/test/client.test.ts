@@ -100,6 +100,21 @@ test("preserves reconciliation metadata without exposing the bearer token", asyn
   });
 });
 
+test("listSessions returns the broker session array", async () => {
+  const time = new Date().toISOString();
+  const session = { id: SESSION_ID, profile: "default", proxy: null, page_ids: [], created_at: time, last_used_at: time, execution_policy: { javascriptEvaluation: false, visionAssist: false } };
+  await withServer((request, response) => {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, "/v1/sessions");
+    writeJson(response, 200, [session]);
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    const sessions = await client.listSessions();
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0]?.id, SESSION_ID);
+  });
+});
+
 test("does not retry a POST command after a transport failure", async () => {
   let requests = 0;
   await withServer((request) => {

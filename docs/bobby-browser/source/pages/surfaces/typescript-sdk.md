@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.2.1
+documentedVersion: 0.3.0
 ---
 
 # TypeScript SDK
@@ -53,6 +53,7 @@ Pass `options.idempotencyKey` on mutating POSTs for replay-safe retries.
 |---|---|---|
 | `runtimeInfo()` | `GET /v1/runtime` | |
 | `createSession(input, options?)` | `POST /v1/sessions` | |
+| `listSessions(options?)` | `GET /v1/sessions` | |
 | `openPage(input, options?)` | `POST /v1/pages` | |
 | `submit(envelope, options?)` | `POST /v1/commands` | Validates outcome vs status |
 | `checkpoint(input, options?)` | `POST /v1/checkpoints` | |
