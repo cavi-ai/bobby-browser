@@ -110,7 +110,14 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         site_url: harness.site_url(),
         upload_root: harness.upload_root().to_path_buf(),
     };
-    prove_snapshot_target_round_trip(&mut server, &session_id, &page_id, &metadata.site_url).await;
+    prove_snapshot_target_round_trip(
+        &mut server,
+        &session_id,
+        &page_id,
+        &metadata.site_url,
+        &metadata.upload_root,
+    )
+    .await;
     run_mcp_sample(&metadata, &mut server, &mut denied, &sid, &pid).await;
 }
 
@@ -119,6 +126,7 @@ async fn prove_snapshot_target_round_trip(
     session_id: &str,
     page_id: &str,
     site_url: &str,
+    upload_root: &std::path::Path,
 ) {
     let mut id = 1_000;
     tool(
@@ -140,7 +148,7 @@ async fn prove_snapshot_target_round_trip(
         json!({
             "sessionId": session_id,
             "pageId": page_id,
-            "expression": "document.body.innerHTML = `<label for=home>Phone</label><input id=home><label for=work>Phone</label><input id=work><button id=continue>Continue</button>`; document.querySelector('#continue').addEventListener('click', () => { document.title = 'clicked'; }); true",
+            "expression": "document.body.innerHTML = `<label for=home>Phone</label><input id=home><label for=work>Phone</label><input id=work><label for=resume>Resume</label><input id=resume type=file><button id=continue>Continue</button>`; document.querySelector('#continue').addEventListener('click', () => { document.title = 'clicked'; }); true",
             "awaitPromise": false
         }),
     )
@@ -173,6 +181,14 @@ async fn prove_snapshot_target_round_trip(
         .as_ref()
         .unwrap()
         .clone();
+    let resume_target = actionable_nodes_named(before_nodes, "Resume")
+        .into_iter()
+        .next()
+        .expect("command-ready Resume file input")
+        .target
+        .as_ref()
+        .unwrap()
+        .clone();
 
     tool(
         server,
@@ -199,6 +215,25 @@ async fn prove_snapshot_target_round_trip(
         }),
     )
     .await;
+
+    let upload_path = upload_root.join("snapshot-target-upload.txt");
+    std::fs::write(&upload_path, b"snapshot target upload\n").unwrap();
+    let upload = tool(
+        server,
+        &mut id,
+        "upload_files",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "target": resume_target,
+            "paths": [upload_path]
+        }),
+    )
+    .await;
+    let upload: CommandOutcome = serde_json::from_value(upload).unwrap();
+    assert!(completed(&upload)
+        .iter()
+        .any(|evidence| matches!(evidence, Evidence::Upload { paths, .. } if paths.len() == 1)));
 
     let after = tool(
         server,

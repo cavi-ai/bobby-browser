@@ -794,7 +794,7 @@ impl Server {
                     input.session_id,
                     Some(input.page_id),
                     types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
-                        selector: input.selector,
+                        selector: input.selector.unwrap_or_default(),
                         target: input.target,
                         paths: input.paths,
                     }),
@@ -1335,7 +1335,7 @@ page_scoped_args!(WaitForArgs {
 });
 
 page_scoped_args!(UploadFilesArgs {
-    selector: String,
+    selector: Option<String>,
     target: Option<types::TargetSpec>,
     paths: Vec<String>,
 });
