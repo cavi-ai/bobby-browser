@@ -70,24 +70,28 @@ pub fn resolve_candidates(
     };
     let mut ranked = candidates
         .iter()
-        .filter(|candidate| {
+        .enumerate()
+        .filter(|(_, candidate)| {
             candidate.state.attached && (!policy.require_visible || candidate.state.visible)
         })
-        .filter_map(|candidate| score(target, candidate, regex.as_ref()))
+        .filter_map(|(index, candidate)| {
+            score(target, candidate, regex.as_ref())
+                .map(|(candidate, evidence)| (index, candidate, evidence))
+        })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| {
         right
-            .1
+            .2
             .score
-            .cmp(&left.1.score)
-            .then_with(|| left.0.id.cmp(&right.0.id))
+            .cmp(&left.2.score)
+            .then_with(|| left.0.cmp(&right.0))
     });
     if ranked.is_empty() {
         return Ok(ResolutionDecision::NotFound);
     }
     if let Some(ordinal) = target.ordinal {
         return Ok(match ranked.get(ordinal) {
-            Some((candidate, evidence)) => ResolutionDecision::Resolved {
+            Some((_, candidate, evidence)) => ResolutionDecision::Resolved {
                 candidate: Box::new((*candidate).clone()),
                 evidence: evidence.clone(),
                 best_match_authorized: false,
@@ -96,10 +100,10 @@ pub fn resolve_candidates(
         });
     }
     let unique =
-        ranked.len() == 1 || ranked[0].1.score - ranked[1].1.score >= policy.uniqueness_margin;
-    let confident = ranked[0].1.score >= policy.confidence_floor;
+        ranked.len() == 1 || ranked[0].2.score - ranked[1].2.score >= policy.uniqueness_margin;
+    let confident = ranked[0].2.score >= policy.confidence_floor;
     if confident && (unique || target.allow_best_match) {
-        let (candidate, evidence) = &ranked[0];
+        let (_, candidate, evidence) = &ranked[0];
         return Ok(ResolutionDecision::Resolved {
             candidate: Box::new((*candidate).clone()),
             evidence: evidence.clone(),
@@ -107,7 +111,10 @@ pub fn resolve_candidates(
         });
     }
     Ok(ResolutionDecision::Ambiguous {
-        candidates: ranked.into_iter().map(|(_, evidence)| evidence).collect(),
+        candidates: ranked
+            .into_iter()
+            .map(|(_, _, evidence)| evidence)
+            .collect(),
     })
 }
 

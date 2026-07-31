@@ -133,9 +133,11 @@ export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
 export interface AccessibilitySnapshotCommand { maxNodes?: number | null }
+export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number }
 export interface AccessibilityNode {
   role?: string;
   name?: string;
+  target?: AccessibilityTarget;
   value?: string;
   description?: string;
   required?: boolean;

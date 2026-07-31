@@ -1,4 +1,5 @@
 import type {
+  AccessibilityTarget,
   CandidateEvidence,
   CommandError,
   CommandOutcome,
@@ -241,6 +242,7 @@ function isAccessibilityNode(value: unknown, depth = 0): boolean {
     && depth <= 32
     && (value.role === undefined || isString(value.role))
     && (value.name === undefined || isString(value.name))
+    && optional(value, "target", isAccessibilityTarget)
     && optional(value, "value", isString)
     && optional(value, "description", isString)
     && optional(value, "required", (item): item is boolean => typeof item === "boolean")
@@ -252,7 +254,14 @@ function isAccessibilityNode(value: unknown, depth = 0): boolean {
     && optional(value, "valueMin", isString)
     && optional(value, "valueMax", isString)
     && (value.children === undefined || (Array.isArray(value.children) && value.children.every((child) => isAccessibilityNode(child, depth + 1))))
-    && Object.keys(value).every((key) => ["role", "name", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "valueMin", "valueMax", "children"].includes(key));
+    && Object.keys(value).every((key) => ["role", "name", "target", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "valueMin", "valueMax", "children"].includes(key));
+}
+
+function isAccessibilityTarget(value: unknown): value is AccessibilityTarget {
+  return hasExactKeys(value, ["role", "accessibleName"], ["ordinal"])
+    && isString(value.role)
+    && isString(value.accessibleName)
+    && optional(value, "ordinal", (item): item is number => isSafeUnsigned(item, 2047));
 }
 
 function isExecutionRecord(value: unknown): value is ExecutionRecord {
