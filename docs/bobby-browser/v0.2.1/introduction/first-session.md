@@ -11,7 +11,7 @@ for agent hosts.
 ## 1. Bootstrap and serve
 
 ```bash
-cargo build -p cli
+cargo build -p bobby-browser
 ./target/debug/bobby init
 # copy the printed bearer, then:
 export AUTOMATION_RUNTIME_TOKEN='…plaintext bearer…'
