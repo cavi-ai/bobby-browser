@@ -2514,7 +2514,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let value_json = serde_json::to_string(&command.value)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let selection = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(!(element instanceof HTMLSelectElement))return 'not-select';const options=[...element.options].filter(option=>option.value==={value_json});if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value={value_json};element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value==={value_json}?'selected':'missing';}})()"),
+            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const options=[...element.options].filter(option=>option.value==={value_json});if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value={value_json};element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value==={value_json}?'selected':'missing';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -2524,7 +2524,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 return Ok(vec![
                     Evidence::Element {
                         selector: command.selector.clone(),
-                        text: None,
+                        text: Some(command.value.clone()),
                     },
                     self.evidence(InteractionPath::ExtensionApi),
                 ])
@@ -2544,6 +2544,22 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 ))
             }
             Some("not-select") => {}
+            Some(value @ ("checked:true" | "checked:false")) => {
+                return Ok(vec![
+                    Evidence::Element {
+                        selector: command.selector.clone(),
+                        text: Some(value.trim_start_matches("checked:").into()),
+                    },
+                    self.evidence(InteractionPath::ExtensionApi),
+                ])
+            }
+            Some("invalid-checked") | Some("radio-uncheck") => {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "checkable control requires a valid supported checked state",
+                    false,
+                ))
+            }
             _ => {
                 return Err(driver_error(
                     ErrorCode::BrowserCommandFailed,

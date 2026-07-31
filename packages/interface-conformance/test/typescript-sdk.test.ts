@@ -11,7 +11,7 @@ import { typescriptSdkDriver } from "../src/typescript-sdk.js";
 import { type OperationTimer, requestedPerformanceSamples, runPersistentPerformance } from "./performance-support.js";
 
 test("TypeScript SDK executes every canonical step on the authenticated Chrome runtime", { timeout: 1_800_000 }, async (t) => {
-  const child = spawn(process.env.CARGO ?? "cargo", ["run", "-q", "-p", "broker", "--example", "conformance_broker"], {
+  const child = spawn(process.env.CARGO ?? "cargo", ["run", "-q", "-p", "runtime-tests", "--example", "conformance_broker"], {
     cwd: new URL("../../../..", import.meta.url), stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";

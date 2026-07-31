@@ -427,7 +427,15 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, page, &command.selector, command.target.as_ref())
             .await?;
-        let observed = if resolved.is_select(page).await? {
+        let observed = if resolved.is_checkable(page).await? {
+            let checked = command.value.parse::<bool>().map_err(|_| {
+                driver_error(
+                    ErrorCode::InvalidRequest,
+                    "checkable controls require a boolean value",
+                )
+            })?;
+            resolved.set_checked(page, checked).await?.to_string()
+        } else if resolved.is_select(page).await? {
             resolved.select_option(page, &command.value).await?
         } else {
             resolved

@@ -32,11 +32,11 @@ export const semanticFormStation: GauntletStation<SemanticFormState, SemanticFor
     const name = form[state.fields.name];
     const email = form[state.fields.email];
     const plan = form[state.fields.plan];
-    if (typeof name === "string" && name.trim().length > 0 && typeof email === "string" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && plan === "pro") {
+    const acceptedTerms = form["accept-terms"];
+    if (typeof name === "string" && name.trim().length > 0 && typeof email === "string" && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) && plan === "pro" && acceptedTerms === true) {
       return passed("semantic-fields-verified", "semantic-form:verified");
     }
     return failed("postconditionFailed", "station", "complete-semantic-fields", "semantic-form:invalid", true);
   },
   reset(): void {},
 };
-

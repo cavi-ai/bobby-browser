@@ -726,6 +726,13 @@ impl ProductionBobby {
                     },
                 )
                 .await?;
+                self.fill_intent(
+                    page_id,
+                    "Accept terms",
+                    "checkbox",
+                    FillValue::Checked { checked: true },
+                )
+                .await?;
                 self.click(page_id, target_test_id("semantic-submit"), true)
                     .await?;
             }

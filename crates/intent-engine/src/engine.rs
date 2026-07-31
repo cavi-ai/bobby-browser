@@ -479,6 +479,19 @@ async fn act_fill(
                 )
                 .await
         }
+        FillValue::Checked { checked } => {
+            browser
+                .type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector,
+                        target: Some(target),
+                        value: checked.to_string(),
+                        clear_first: true,
+                    },
+                )
+                .await
+        }
         FillValue::Files { paths } => {
             browser
                 .upload_files(
@@ -522,6 +535,7 @@ fn fill_kind(value: &FillValue) -> &'static str {
     match value {
         FillValue::Text { .. } => "text",
         FillValue::Select { .. } => "select",
+        FillValue::Checked { .. } => "checked",
         FillValue::Files { .. } => "files",
     }
 }
