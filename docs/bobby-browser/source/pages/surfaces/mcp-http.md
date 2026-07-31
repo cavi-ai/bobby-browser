@@ -8,7 +8,9 @@ The served runtime (`bobby serve`) exposes the same MCP tool surface over
 streamable HTTP at `POST /v1/mcp` with bearer-only auth. Each tenant needs a
 URL and its scoped token.
 
-One JSON-RPC message per `POST`; `GET` is unsupported. Server state is isolated
+One JSON-RPC message per `POST`. `GET /v1/mcp` opens the streamable-HTTP
+SSE channel (keep-alive comments only today; no server-initiated messages yet).
+Server state is isolated
 per principal. A rotated or replaced bearer resets that principal's MCP
 lifecycle — clients must `initialize` again.
 
