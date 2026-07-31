@@ -69,6 +69,13 @@ pub struct ExtensionObservation {
     pub html: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExtensionAccessibilitySnapshot {
+    nodes: Vec<types::AccessibilityNode>,
+    truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionControl {
@@ -293,6 +300,70 @@ impl ExtensionObserver for CompanionExtensionObserver {
             _ => Err(driver_error(
                 ErrorCode::BrowserCommandFailed,
                 "extension returned an unexpected observation event",
+                false,
+            )),
+        }
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        max_nodes: u32,
+    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        if lease.expires_at <= Instant::now() {
+            return Err(lease_error());
+        }
+        let command_id = CommandId::new();
+        let action = ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            attachment_id: lease.attachment_id.clone(),
+            command_id: command_id.clone(),
+            page_id: page_id.clone(),
+            operation: "a11yTree".into(),
+            input: json!({"maxNodes": max_nodes}),
+            deadline_unix_ms: deadline_unix_ms(self.timeout),
+        };
+        match self
+            .server
+            .dispatch_action(action)
+            .await
+            .map_err(session_error)?
+        {
+            CompanionEvent::ActionCompleted(result)
+                if result.command_id == command_id
+                    && result.interaction_path == InteractionPath::ExtensionApi =>
+            {
+                let snapshot: ExtensionAccessibilitySnapshot =
+                    serde_json::from_value(result.output).map_err(|error| {
+                        driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            format!("invalid extension accessibility snapshot: {error}"),
+                            false,
+                        )
+                    })?;
+                if snapshot.nodes.len() > max_nodes as usize {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "extension accessibility snapshot exceeded its node bound",
+                        false,
+                    ));
+                }
+                Ok((snapshot.nodes, snapshot.truncated))
+            }
+            CompanionEvent::ActionCompleted(_) => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension accessibility snapshot returned an invalid execution path",
+                false,
+            )),
+            CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("extension accessibility snapshot failed ({code}): {message}"),
+                false,
+            )),
+            _ => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension returned an unexpected accessibility snapshot event",
                 false,
             )),
         }

@@ -3,11 +3,11 @@ use network_engine::state::{HttpCookie, ResponseStateDelta};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use types::{
-    CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, ElementState, ErrorCode, EvaluateJavaScriptCommand, Evidence,
-    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode,
-    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
-    WaitForCommand, WaitUntil,
+    AccessibilityNode, AccessibilitySnapshotCommand, CaptureScreenshotCommand,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
+    ElementState, ErrorCode, EvaluateJavaScriptCommand, Evidence, InspectCommand, ListPagesCommand,
+    NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -526,7 +526,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select>".into(),
+                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select><label for=password>Password</label><input id=password type=password autocomplete=current-password value=vault-secret-92 required>".into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -592,6 +592,42 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         Evidence::Configuration { name, value }
             if name == "formControlValidationMessage" && !value.is_empty()
     )));
+
+    let snapshot = worker
+        .a11y_snapshot(
+            &page_id,
+            &AccessibilitySnapshotCommand {
+                max_nodes: Some(128),
+            },
+        )
+        .await
+        .unwrap();
+    let nodes = snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("accessibility snapshot evidence");
+    fn find_form_node<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+    ) -> Option<&'a AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            (node.name.as_deref() == Some(name) && node.value.is_some())
+                .then_some(node)
+                .or_else(|| find_form_node(&node.children, name))
+        })
+    }
+    let email = find_form_node(nodes, "Email address").expect("email form node");
+    assert_eq!(email.value.as_deref(), Some("not-an-email"));
+    assert_eq!(email.required, Some(true));
+    assert_eq!(email.invalid, Some(true));
+    let password = find_form_node(nodes, "Password").expect("password form node");
+    assert_eq!(password.value.as_deref(), Some("[redacted]"));
+    assert!(!serde_json::to_string(nodes)
+        .unwrap()
+        .contains("vault-secret-92"));
 
     worker
         .type_text(

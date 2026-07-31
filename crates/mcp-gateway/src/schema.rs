@@ -1131,7 +1131,17 @@ fn accessibility_node(depth: usize) -> Value {
     let mut schema = object(
         json!({
             "role":string(1, 256),
-            "name":string(1, 4096)
+            "name":string(1, 4096),
+            "value":string(0, 4096),
+            "description":string(0, 4096),
+            "required":{"type":"boolean"},
+            "disabled":{"type":"boolean"},
+            "readOnly":{"type":"boolean"},
+            "invalid":{"type":"boolean"},
+            "checked":{"type":"boolean"},
+            "autocomplete":string(0, 256),
+            "valueMin":string(0, 256),
+            "valueMax":string(0, 256)
         }),
         &[],
     );
