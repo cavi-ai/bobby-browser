@@ -86,9 +86,10 @@ zero-based ordinals in accessibility-tree order (the second `Phone` textbox has
 
 ### Using `target` in commands
 
-**MCP `click` / `type_text`** — pass the snapshot `target` with `sessionId` and
-`pageId`; omit `selector`. A selector is required only on the legacy
-raw-selector path. See [MCP tools](../surfaces/mcp-tools.md).
+**MCP `click` / `type_text` / `upload_files`** — pass the snapshot `target`
+with `sessionId` and `pageId`; omit `selector`. `upload_files` also requires
+`paths`. A selector is required only on the legacy raw-selector path. See
+[MCP tools](../surfaces/mcp-tools.md).
 
 **Unique name (no ordinal)** — intents map cleanly via hints:
 

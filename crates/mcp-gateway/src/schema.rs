@@ -130,7 +130,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                 "paths": array(string(1, 4096), 16)
             }),
-            vec!["sessionId", "pageId", "selector", "paths"],
+            vec!["sessionId", "pageId", "paths"],
         ),
         "evaluate_javascript" => (
             json!({
