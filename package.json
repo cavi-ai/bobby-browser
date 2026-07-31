@@ -16,7 +16,7 @@
     "node": ">=22"
   },
   "scripts": {
-    ""docs:build": "node scripts/docs/build-bobby-browser.mjs --version 0.3.0 --tag v0.3.0 --commit 1c08f556c5901c1f3fc4024c0e4933c4f90b4718 --source-date-epoch 1785476501",
+    "docs:build": "node scripts/docs/build-bobby-browser.mjs --version 0.3.0 --tag v0.3.0 --commit 1c08f556c5901c1f3fc4024c0e4933c4f90b4718 --source-date-epoch 1785476501",
     "docs:verify": "node scripts/docs/verify-bobby-browser.mjs",
     "docs:test": "node --test --test-concurrency=1 scripts/docs/*.test.mjs",
     "docs:release-artifact": "node scripts/docs/release-artifact.mjs",
