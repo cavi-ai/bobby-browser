@@ -10,6 +10,7 @@ import {
   isRecoveryDecision,
   isRuntimeInfo,
   isSessionState,
+  isSessionStateList,
   isWorkflowCheckpoint,
 } from "../src/validators.js";
 import { isInterfaceError } from "../src/events.js";
@@ -159,6 +160,12 @@ test("deep validators accept every exact public response variant", () => {
   }), true);
 
   assert.equal(isWorkflowCheckpoint(checkpoint()), true);
+  const withReceipts = checkpoint();
+  withReceipts.recoveryReceipts = [{ recordedAt: TIME, opaque: "receipt payloads are passed through" }];
+  assert.equal(isWorkflowCheckpoint(withReceipts), true);
+  assert.equal(isSessionStateList([{ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } }]), true);
+  assert.equal(isSessionStateList([]), true);
+  assert.equal(isSessionStateList([{ id: "bad" }]), false);
   for (const decision of [
     { status: "resumed", checkpointId: ID, attemptId: ID_2, evidence: evidenceFixtures() },
     { status: "needsReconciliation", checkpointId: ID, attemptId: ID_2, reason: "inspect", evidence: [] },

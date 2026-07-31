@@ -1,7 +1,7 @@
 import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
-import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRuntimeInfo, isSessionState, isUuid, isWorkflowCheckpoint } from "./validators.js";
+import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -78,6 +78,7 @@ export class BrowserRuntimeClient {
 
   async runtimeInfo(options?: RequestOptions): Promise<RuntimeInfo> { return this.#json("GET", "/v1/runtime", undefined, options, isRuntimeInfo); }
   async createSession(input: CreateSessionRequest, options?: RequestOptions): Promise<SessionState> { return this.#json("POST", "/v1/sessions", input, options, isSessionState); }
+  async listSessions(options?: RequestOptions): Promise<SessionState[]> { return this.#json("GET", "/v1/sessions", undefined, options, isSessionStateList); }
   async openPage(input: OpenPageRequest, options?: RequestOptions): Promise<PageState> { return this.#json("POST", "/v1/pages", input, options, isPageState); }
 
   async submit(input: CommandEnvelope, options?: RequestOptions): Promise<CommandOutcome> {
