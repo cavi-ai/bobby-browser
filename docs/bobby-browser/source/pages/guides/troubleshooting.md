@@ -89,6 +89,10 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
   success. Re-locate and retry under a new attempt id / idempotency key.
 - Files need `file:upload` on the bearer — missing capability →
   `missingCapability`.
+- `completeForm` stops at the first failed field; evidence includes prior
+  successful fields plus the failing field. Fix that field (or hints), then
+  resubmit the whole form intent under a new attempt / idempotency key.
+  Duplicate or empty field `name`s are rejected before dispatch.
 
 ## Error catalog (`InterfaceErrorCode`)
 

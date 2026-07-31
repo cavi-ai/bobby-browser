@@ -16,7 +16,8 @@ dedicated intent HTTP routes or MCP tools — submit via `POST /v1/commands` /
 inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
 `locateEnvelope`, `fillEnvelope`, `submitAndVerifyEnvelope`,
 `waitForStateEnvelope`, `followEnvelope`, `dismissObstructionEnvelope`,
-`extractEnvelope`.
+`extractEnvelope`. Multi-field forms use `completeFormRuntimeCommand` with
+`intentEnvelope` (no dedicated `*Envelope` helper yet).
 
 ## Command classes
 
@@ -32,6 +33,7 @@ inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
 | `waitForState` | Replayable |
 | `extract` | Replayable |
 | `fill` | Reconciliable |
+| `completeForm` | Reconciliable |
 | `dismissObstruction` | Reconciliable |
 | `submitAndVerify` | Boundary |
 | `follow` | Boundary if `boundary: true`, else Reconciliable |
@@ -103,12 +105,67 @@ may be selected (`checked: true`) but cannot be unchecked directly
 (`checked: false` fails closed). Non-checkable targets must not use
 `kind: "checked"`.
 
-Use `completeForm` to apply an ordered, uniquely named list of fill fields as one reconciliable intent. Every field is resolved and verified before the next begins; execution stops at the first failure and retains evidence for fields already attempted. It never submits the form implicitly—submission remains a separate boundary intent.
 When `role` and exact `nearText` are supplied, `nearText` is the control's
 accessible name while `purpose` remains the agent's task description. This
 avoids requiring natural task phrasing to equal a page label. A fill completes
 only when the worker returns value/upload postcondition evidence; an action
 without verification evidence fails closed.
+
+### CompleteForm (Reconciliable)
+
+Apply an ordered, uniquely named list of fill fields as **one** intent.
+Each field is resolved and verified before the next begins; execution stops
+at the first failure and retains evidence for fields already attempted
+(including a `completeFormField` configuration evidence entry per field name).
+It never submits — use `submitAndVerify` (Boundary) afterward.
+
+Constraints (compile / SDK reject before dispatch):
+
+- `fields` non-empty, at most 128
+- each `name` non-empty and unique within the form
+- each field `purpose` and the form `purpose` obey intent purpose bounds
+- any `files` field still requires `file:upload` on the bearer
+
+```ts
+import {
+  completeFormRuntimeCommand,
+  intentEnvelope,
+  submitAndVerifyEnvelope,
+} from "@bobby-browser/sdk";
+
+await client.submit(
+  intentEnvelope(
+    meta,
+    completeFormRuntimeCommand({
+      purpose: "applicant contact form",
+      fields: [
+        {
+          name: "email",
+          purpose: "enter the applicant email",
+          hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
+          value: { kind: "text", text: "a@example.com", clearFirst: true },
+        },
+        {
+          name: "terms",
+          purpose: "accept terms",
+          hints: { role: "checkbox", nearText: { kind: "exact", value: "I agree" } },
+          value: { kind: "checked", checked: true },
+        },
+      ],
+    }),
+  ),
+  { idempotencyKey: crypto.randomUUID() },
+);
+
+await client.submit(
+  submitAndVerifyEnvelope(meta, "submit application", { /* WaitForCommand expectedState */ }),
+  { idempotencyKey: crypto.randomUUID() },
+);
+```
+
+Wire command:
+`{ kind: "intent", input: { kind: "completeForm", input: { purpose, fields } } }`
+where each field is `{ name, purpose, hints?, value }`.
 
 ### SubmitAndVerify (Boundary)
 

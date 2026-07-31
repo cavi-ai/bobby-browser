@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add verified `completeForm` intent (ordered uniquely named fill fields; no implicit submit).
 - Add `FillValue` kind `checked` for reliable checkbox/radio semantic fills on Chromium and Firefox.
 - Add `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` for session teardown.
 - Add the `activatePage` primitive (MCP `page_activate`) to bring a page to the front on Chromium and Firefox.
