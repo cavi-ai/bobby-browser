@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { gunzipSync } from "node:zlib";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { buildBobbyBrowserDocs } from "./build-bobby-browser.mjs";
-import { DOCUMENTED_VERSION } from "./lib.mjs";
+import { DOCUMENTED_VERSION, SOURCE_REL } from "./lib.mjs";
 import { createProductDocsReleaseArtifact } from "./release-artifact.mjs";
 
 const RELEASE = {
@@ -35,8 +35,12 @@ function tarEntries(archive) {
 
 test("builds deterministic safe archives with exact embedded identity and checksum", async () => {
   const output = await mkdtemp(path.join(tmpdir(), "bobby-docs-release-"));
+  const fixtureRoot = await mkdtemp(path.join(tmpdir(), "bobby-docs-source-"));
   try {
-    const { outputRoot } = await buildBobbyBrowserDocs(REPO_ROOT, RELEASE);
+    await cp(path.join(REPO_ROOT, SOURCE_REL), path.join(fixtureRoot, SOURCE_REL), {
+      recursive: true,
+    });
+    const { outputRoot } = await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
     const first = await createProductDocsReleaseArtifact({ docsRoot: outputRoot, outputDirectory: output, repository: REPOSITORY, ...RELEASE });
     const second = await createProductDocsReleaseArtifact({ docsRoot: outputRoot, outputDirectory: output, repository: REPOSITORY, ...RELEASE });
     assert.equal(first.artifactSha256, second.artifactSha256);
@@ -59,5 +63,6 @@ test("builds deterministic safe archives with exact embedded identity and checks
     });
   } finally {
     await rm(output, { recursive: true, force: true });
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });
