@@ -18,8 +18,10 @@ it is designed to be reached over loopback or an operator-controlled boundary.
 - **Bounded issuance.** Only `authority:admin` mints tokens; hashes are
   persisted, never bearers.
 - **No credentials in URLs, logs, or committed config.**
-- **Deny-by-default JavaScript and vision assists** with double gates
-  (capability + session `executionPolicy`).
+- **Deny-by-default JavaScript and vision assists** with gates
+  (capability + session `executionPolicy`, and for vision a configured
+  `[vision]` provider). Vision bearers stay in env vars (`token_env`), never
+  in committed config.
 - **Per-principal isolation** and bounded request/frame/result sizes.
 
 ## Deployment checklist
@@ -28,7 +30,9 @@ it is designed to be reached over loopback or an operator-controlled boundary.
 2. Use `bobby init` / secret manager for bootstrap; never commit bearers.
 3. Mint job principals with least privilege; revoke when done.
 4. Keep outbound `[http]` allowlists tight (defaults deny private/loopback egress).
-5. Treat CDP and MCP as equal trust surfaces to HTTP — same bearer rules.
+5. If enabling vision, use https (or loopback http) endpoints and rotate
+   `token_env` secrets outside git.
+6. Treat CDP and MCP as equal trust surfaces to HTTP — same bearer rules.
 
 Operational setup: [Authentication](../guides/auth.md). Capability matrix:
 [Capabilities](../concepts/capabilities.md). Multi-tenant model:
