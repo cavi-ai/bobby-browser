@@ -946,7 +946,7 @@ impl CdpConnection {
                 let cursor=params.get("cursor").and_then(Value::as_u64).unwrap_or(0);
                 if params.keys().any(|key| key!="cursor") { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.eventsRead accepts only cursor")); }
                 self.record_interface_event("events.read", json!({"cursor":cursor,"limit":64})).await;
-                match self.interface_events.read_after(types::EventCursor(cursor),64).await {
+                match self.interface_events.read_after_for(self.handle.principal_id(),types::EventCursor(cursor),64).await {
                     Ok(batch)=>Ok(serde_json::to_value(batch).unwrap_or(Value::Null)),
                     Err(_)=>return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"browser interface event history gap")),
                 }
@@ -1735,7 +1735,10 @@ impl CdpConnection {
 
     async fn record_interface_event(&self, event: &str, payload: Value) {
         self.interface_events
-            .append(Event::new(event, payload))
+            .append_for(
+                self.handle.principal_id().clone(),
+                Event::new(event, payload),
+            )
             .await;
     }
 
