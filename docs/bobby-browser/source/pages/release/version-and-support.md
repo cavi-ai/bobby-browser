@@ -1,16 +1,16 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Version and support
 
-Product docs line: **0.3.0**. Interface version string:
-**`2026-07-23`** (`CURRENT_INTERFACE_VERSION` / TypeScript `INTERFACE_VERSION`).
+Product docs line: **{{PRODUCT_VERSION}}**. Interface version string:
+**`{{INTERFACE_VERSION}}`** (`CURRENT_INTERFACE_VERSION` / TypeScript `INTERFACE_VERSION`).
 
 ## Support expectations (alpha)
 
 - Interfaces are stable enough to build against, but may change before 1.0.
-- Public docs are versioned under `docs/bobby-browser/v0.3.0` with an integrity
+- Public docs are versioned under `docs/bobby-browser/v{{PRODUCT_VERSION}}` with an integrity
   manifest (`CONSUMER.md`).
 - Registry publishes (npm / crates.io / Release binaries) may lag the git tag —
   verify with `npm view` / `cargo search` / GitHub Releases before documenting

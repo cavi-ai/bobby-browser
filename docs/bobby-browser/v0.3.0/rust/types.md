@@ -31,8 +31,18 @@ let _ = CreateSessionRequest {
 Prefer `types` for serde-compatible request/response bodies. Breaking changes
 remain possible while the product is alpha — pin versions deliberately.
 
+## Schema feature
+
+Enable Cargo feature `schema` to derive `schemars::JsonSchema` on the wire
+types (`PrimitiveCommand`, `IntentCommand`, `Evidence`, …). The MCP gateway
+keeps hand-bounded tool JSON Schemas in `crates/mcp-gateway/src/schema.rs` and
+runs `schema_parity` tests so advertised `kind` variants cannot drift from
+these Rust enums. Prefer regenerating or updating the hand schemas whenever
+you add a command or evidence variant — the parity tests fail closed.
+
 ## Next
 
 - [bobby-browser-client](bobby-browser-client.md)
 - [Capabilities](../concepts/capabilities.md)
 - [HTTP API](../surfaces/http-api.md)
+- [MCP tools](../surfaces/mcp-tools.md)

@@ -10,9 +10,23 @@ import {
   computeContentSha256,
   listFilesRecursive,
   resolveReleaseIdentity,
+  stampVersionTokens,
 } from "./lib.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+async function stampTree(root) {
+  const relativePaths = await listFilesRecursive(root, root);
+  for (const relativePath of relativePaths) {
+    if (!/\.(md|json)$/u.test(relativePath)) continue;
+    const absolute = path.join(root, relativePath);
+    const original = await readFile(absolute, "utf8");
+    const stamped = stampVersionTokens(original);
+    if (stamped !== original) {
+      await writeFile(absolute, stamped, "utf8");
+    }
+  }
+}
 
 export async function buildBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
   const release = resolveReleaseIdentity(releaseInput);
@@ -28,6 +42,7 @@ export async function buildBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
     path.join(sourceRoot, "navigation.json"),
     path.join(outputRoot, "navigation.json"),
   );
+  await stampTree(outputRoot);
 
   const relativePaths = await listFilesRecursive(outputRoot, outputRoot);
   const contentSha256 = await computeContentSha256(outputRoot, relativePaths);
@@ -74,12 +89,14 @@ if (isMain) {
     }
     return entries;
   }, []));
-  buildBobbyBrowserDocs(REPO_ROOT, {
-    version: values.version,
-    tag: values.tag,
-    commit: values.commit,
-    sourceDateEpoch: Number(values["source-date-epoch"]),
-  })
+  const releaseInput = {};
+  if (values.version !== undefined) releaseInput.version = values.version;
+  if (values.tag !== undefined) releaseInput.tag = values.tag;
+  if (values.commit !== undefined) releaseInput.commit = values.commit;
+  if (values["source-date-epoch"] !== undefined) {
+    releaseInput.sourceDateEpoch = Number(values["source-date-epoch"]);
+  }
+  buildBobbyBrowserDocs(REPO_ROOT, releaseInput)
     .then(({ outputRoot, manifest }) => {
       console.log(`built ${outputRoot}`);
       console.log(`contentSha256=${manifest.contentSha256}`);

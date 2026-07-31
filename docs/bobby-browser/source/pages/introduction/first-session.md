@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # First browser session
@@ -30,7 +30,7 @@ CORRELATION=$(uuidgen | tr '[:upper:]' '[:lower:]')
 DEADLINE=$(date -u -v+60S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+60 seconds' +%Y-%m-%dT%H:%M:%SZ)
 curl -sS http://127.0.0.1:7777/v1/runtime \
   -H "Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}" \
-  -H "x-interface-version: 2026-07-23" \
+  -H "x-interface-version: {{INTERFACE_VERSION}}" \
   -H "x-correlation-id: ${CORRELATION}" \
   -H "x-deadline: ${DEADLINE}"
 ```

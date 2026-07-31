@@ -79,5 +79,6 @@ jobs:
 
       - name: Docs artifact
         run: |
+          pnpm docs:build
           pnpm docs:verify
           pnpm docs:test

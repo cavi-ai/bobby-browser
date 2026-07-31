@@ -4,7 +4,6 @@
 
 - Fill / completeForm verification fails closed on native HTML constraint validity (`required`, `pattern`, length, range, …) and retains the browser validation message in evidence.
 - Guard MCP schema parity with schemars: `JsonSchema` derives on the wire types and tests that fail when the hand-bounded MCP tool schemas drift from the Rust command/evidence variants.
->>>>>> ff26702 (test(schema): drift guards for new rebased types)
 - Add verified `completeForm` intent (ordered uniquely named fill fields; no implicit submit).
 - Add `FillValue` kind `checked` for reliable checkbox/radio semantic fills on Chromium and Firefox.
 - Add the `accessibilitySnapshot` primitive (MCP `a11y_snapshot`): a compact tree capped at 2048 nodes, from Chrome's full AX tree on Chromium and the companion extension's DOM walker on Firefox. Form controls include current value, description, required/disabled/read-only/invalid/checked state, autocomplete, and numeric bounds; sensitive values are redacted.
