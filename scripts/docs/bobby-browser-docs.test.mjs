@@ -59,9 +59,36 @@ test("build rejects incomplete or inconsistent release identity", async () => {
     /commit/i,
   );
   await assert.rejects(
-    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, sourceDateEpoch: undefined }),
+    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, sourceDateEpoch: -1 }),
     /source date epoch/i,
   );
+  await assert.rejects(
+    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, version: "9.9.9" }),
+    /release version must be/,
+  );
+});
+
+test("build defaults release identity from git when args are omitted", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    const built = await buildBobbyBrowserDocs(fixtureRoot);
+    assert.equal(built.manifest.version, DOCUMENTED_VERSION);
+    assert.equal(built.manifest.release.tag, `v${DOCUMENTED_VERSION}`);
+    assert.match(built.manifest.release.commit, /^[a-f0-9]{40}$/);
+  });
+});
+
+test("stamped docs substitute product and interface version tokens", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    const page = await readFile(
+      path.join(fixtureRoot, OUTPUT_REL, "release/version-and-support.md"),
+      "utf8",
+    );
+    assert.match(page, new RegExp(`documentedVersion: ${DOCUMENTED_VERSION}`));
+    assert.doesNotMatch(page, /\{\{PRODUCT_VERSION\}\}/);
+    assert.doesNotMatch(page, /\{\{INTERFACE_VERSION\}\}/);
+    assert.match(page, new RegExp(DOCUMENTED_VERSION));
+  });
 });
 
 test("verify fails when a page is tampered", async () => {

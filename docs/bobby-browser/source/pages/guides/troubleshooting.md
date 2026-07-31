@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Troubleshooting
@@ -68,7 +68,7 @@ MCP HTTP still needs the broker context headers
 
 ## Interface version
 
-Send `x-interface-version: 2026-07-23`. Mismatch →
+Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
 `unsupportedInterfaceVersion`.
 
 ## Session lifecycle

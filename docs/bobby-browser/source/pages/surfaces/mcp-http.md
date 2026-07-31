@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # MCP over streamable HTTP
@@ -22,7 +22,7 @@ MCP over HTTP uses the same broker context headers as `/v1/*`:
 | Header | Example |
 |---|---|
 | `Authorization` | `Bearer ${AUTOMATION_RUNTIME_TOKEN}` |
-| `x-interface-version` | `2026-07-23` |
+| `x-interface-version` | `{{INTERFACE_VERSION}}` |
 | `x-correlation-id` | UUID |
 | `x-deadline` | RFC3339 UTC time in the future |
 | `Content-Type` | `application/json` |
@@ -37,7 +37,7 @@ MCP over HTTP uses the same broker context headers as `/v1/*`:
       "transport": "streamable-http",
       "headers": {
         "Authorization": "Bearer ${AUTOMATION_RUNTIME_TOKEN}",
-        "x-interface-version": "2026-07-23",
+        "x-interface-version": "{{INTERFACE_VERSION}}",
         "x-correlation-id": "00000000-0000-4000-8000-000000000001",
         "x-deadline": "2099-01-01T00:00:00Z"
       }
@@ -57,7 +57,7 @@ CORRELATION=$(uuidgen | tr '[:upper:]' '[:lower:]')
 DEADLINE=$(date -u -v+60S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+60 seconds' +%Y-%m-%dT%H:%M:%SZ)
 curl -sS http://127.0.0.1:7777/v1/mcp \
   -H "Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}" \
-  -H "x-interface-version: 2026-07-23" \
+  -H "x-interface-version: {{INTERFACE_VERSION}}" \
   -H "x-correlation-id: ${CORRELATION}" \
   -H "x-deadline: ${DEADLINE}" \
   -H "Content-Type: application/json" \
