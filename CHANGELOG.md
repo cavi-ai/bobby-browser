@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `GET /v1/events?stream=1` server-sent-event streaming with cursor frame ids and terminal gap frames.
+- `GET /v1/mcp` now opens the streamable-HTTP SSE channel (keep-alive) instead of 405.
+- The Firefox native host treats a companion server silent for 45s as dead and reconnects, recovering from half-open connections left by killed processes.
+
 - Share one BiDi connection across runtime sessions on a Firefox profile (Firefox RemoteAgent accepts a single WebDriver session per browser).
 - Keep prior attachment grants when issuing new ones, and renew attachment leases before expiry so sessions outlive the attachment TTL.
 - Companion extension: merge attachment grants instead of replacing them, and retry terminal native-auth states after a bounded cooldown instead of stopping until a browser restart.
