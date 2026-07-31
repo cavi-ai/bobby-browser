@@ -1343,3 +1343,135 @@ async fn create_session_stores_vision_assist_execution_policy() {
     let stored = runtime.sessions.get(&session.id).await.unwrap();
     assert!(stored.execution_policy.vision_assist);
 }
+
+#[tokio::test]
+async fn create_session_replays_retained_session_and_conflicts_before_dispatch() {
+    let (runtime, _, _) = runtime_with_workers(false);
+    let (api, handle) = authenticated(runtime).await;
+    let key = IdempotencyKey::try_from("sdk-retained-create-session").unwrap();
+
+    let first = api
+        .create_session(
+            handle.context(expiry(), Some(key.clone())),
+            request_profile("retained"),
+        )
+        .await
+        .unwrap();
+    let replayed = api
+        .create_session(
+            handle.context(expiry(), Some(key.clone())),
+            request_profile("retained"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.id, first.id);
+    assert_eq!(api.create_session_dispatch_count(), 1);
+
+    let conflict = api
+        .create_session(
+            handle.context(expiry(), Some(key)),
+            request_profile("different"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, InterfaceErrorCode::IdempotencyConflict);
+    assert_eq!(api.create_session_dispatch_count(), 1);
+}
+
+fn request_profile(profile: &str) -> CreateSessionRequest {
+    CreateSessionRequest {
+        profile: profile.into(),
+        proxy: None,
+        execution_policy: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn create_session_failure_abandons_the_reservation_so_retry_dispatches() {
+    let (runtime, _, _) = runtime_with_workers(true);
+    let (api, handle) = authenticated(runtime).await;
+    let key = IdempotencyKey::try_from("sdk-abandoned-create-session").unwrap();
+
+    assert!(api
+        .create_session(
+            handle.context(expiry(), Some(key.clone())),
+            request_profile("fails-once"),
+        )
+        .await
+        .is_err());
+    let session = api
+        .create_session(
+            handle.context(expiry(), Some(key)),
+            request_profile("fails-once"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(api.create_session_dispatch_count(), 2);
+    assert!(api
+        .list_sessions(handle.context(expiry(), None))
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == session.id));
+}
+
+#[tokio::test]
+async fn checkpoint_replays_retained_checkpoint_and_conflicts_before_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = RuntimeService::with_recovery(
+        Default::default(),
+        Default::default(),
+        RecoveryCoordinator::new(store),
+    );
+    let (api, handle) = authenticated_with(runtime, [Capability::RecoveryWrite]).await;
+    let key = IdempotencyKey::try_from("sdk-retained-checkpoint").unwrap();
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: PageId::new(),
+        restart_url: "https://example.test".into(),
+        current_url: "https://example.test".into(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Replayable,
+        invariants: Vec::new(),
+        replayable_inputs: Vec::new(),
+        evidence: Vec::new(),
+        recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
+        created_at: Utc::now(),
+    };
+
+    let first = api
+        .checkpoint(
+            handle.context(expiry(), Some(key.clone())),
+            checkpoint.clone(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let replayed = api
+        .checkpoint(
+            handle.context(expiry(), Some(key.clone())),
+            checkpoint.clone(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.checkpoint_id, first.checkpoint_id);
+    assert_eq!(api.checkpoint_dispatch_count(), 1);
+
+    let mut changed = checkpoint.clone();
+    changed.restart_url = "https://other.test".into();
+    let conflict = api
+        .checkpoint(handle.context(expiry(), Some(key)), changed, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.code, InterfaceErrorCode::IdempotencyConflict);
+    assert_eq!(api.checkpoint_dispatch_count(), 1);
+}

@@ -22,7 +22,8 @@ pub use events::{
     MAX_EVENT_PAYLOAD_NODES,
 };
 pub use idempotency::{
-    canonical_sha256, IdempotencyPermit, IdempotencyReservation, IdempotencyStore,
+    canonical_sha256, IdempotencyPermit, IdempotencyReservation, IdempotencyStore, RetainedOutcome,
+    SessionCheckpointOutcome,
 };
 pub use session_ownership::{
     SessionOwnershipAuthority, SessionOwnershipRecordError, SessionOwnershipRecorder,
