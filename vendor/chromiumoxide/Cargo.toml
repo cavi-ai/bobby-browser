@@ -12,17 +12,20 @@
 [package]
 edition = "2024"
 rust-version = "1.85"
-name = "chromiumoxide"
+name = "bobby-chromiumoxide"
 version = "0.9.1"
-authors = ["Matthias Seitz <matthias.seitz@outlook.de>"]
+authors = [
+    "Matthias Seitz <matthias.seitz@outlook.de>",
+    "Sasan Sotoodehfar",
+]
 build = false
 autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Library for interacting with a chrome instance with the chrome devtools protocol"
-homepage = "https://github.com/mattsse/chromiumoxide"
+description = "CAVI fork of chromiumoxide with iframe/pierce DOM helpers for bobby-browser"
+homepage = "https://github.com/cavi-ai/bobby-browser"
 readme = "README.md"
 keywords = [
     "chrome",
@@ -36,7 +39,13 @@ categories = [
     "development-tools::testing",
 ]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/mattsse/chromiumoxide"
+repository = "https://github.com/cavi-ai/bobby-browser"
+exclude = [
+    "examples/*",
+    "tests/*",
+    "Cargo.toml.orig",
+    ".github/*",
+]
 
 [features]
 bytes = ["dep:bytes"]
@@ -120,10 +129,12 @@ path = "examples/storage-cookie.rs"
 name = "wiki"
 path = "examples/wiki.rs"
 
-[[test]]
-name = "chromiumoxide_tests"
-path = "tests/lib.rs"
-harness = true
+# Upstream browser integration tests are not run in this workspace (CI has no
+# exclusive Chromium profile). Re-enable locally against a real Chrome if needed.
+# [[test]]
+# name = "chromiumoxide_tests"
+# path = "tests/lib.rs"
+# harness = true
 
 [dependencies.async-tungstenite]
 version = "0.32"

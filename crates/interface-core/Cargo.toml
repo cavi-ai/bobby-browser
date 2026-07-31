@@ -5,10 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [dependencies]
-artifact-store = { path = "../artifact-store" }
+artifact-store = { path = "../artifact-store", version = "0.3.0" }
 async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
@@ -20,7 +20,7 @@ sha2.workspace = true
 subtle.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types" }
+types = { path = "../types", version = "0.3.0" }
 uuid.workspace = true
 
 [dev-dependencies]

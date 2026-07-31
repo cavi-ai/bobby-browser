@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [dependencies]
 anyhow.workspace = true
@@ -19,16 +19,16 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-types = { path = "../types" }
-interface-core = { path = "../interface-core" }
-sdk-core = { path = "../sdk-core" }
-config = { path = "../config" }
-artifact-store = { path = "../artifact-store" }
+types = { path = "../types", version = "0.3.0" }
+interface-core = { path = "../interface-core", version = "0.3.0" }
+sdk-core = { path = "../sdk-core", version = "0.3.0" }
+config = { path = "../config", version = "0.3.0" }
+artifact-store = { path = "../artifact-store", version = "0.3.0" }
 
 [dev-dependencies]
 async-trait.workspace = true
 tempfile.workspace = true
-page-runtime = { path = "../page-runtime" }
-session-manager = { path = "../session-manager" }
-worker-pool = { path = "../worker-pool" }
-workflow-journal = { path = "../workflow-journal" }
+page-runtime = { path = "../page-runtime", version = "0.3.0" }
+session-manager = { path = "../session-manager", version = "0.3.0" }
+worker-pool = { path = "../worker-pool", version = "0.3.0" }
+workflow-journal = { path = "../workflow-journal", version = "0.3.0" }

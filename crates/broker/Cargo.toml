@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [dependencies]
 anyhow.workspace = true
@@ -23,16 +23,15 @@ tower.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
-types = { path = "../types" }
-sdk-core = { path = "../sdk-core" }
-config = { path = "../config" }
-interface-core = { path = "../interface-core" }
-artifact-store = { path = "../artifact-store" }
-mcp-gateway = { path = "../mcp-gateway" }
-worker-pool = { path = "../worker-pool" }
-observability = { path = "../observability" }
+types = { path = "../types", version = "0.3.0" }
+sdk-core = { path = "../sdk-core", version = "0.3.0" }
+config = { path = "../config", version = "0.3.0" }
+interface-core = { path = "../interface-core", version = "0.3.0" }
+artifact-store = { path = "../artifact-store", version = "0.3.0" }
+mcp-gateway = { path = "../mcp-gateway", version = "0.3.0" }
+worker-pool = { path = "../worker-pool", version = "0.3.0" }
+observability = { path = "../observability", version = "0.3.0" }
 
 [dev-dependencies]
 futures-util.workspace = true
-interface-conformance = { path = "../interface-conformance" }
 tempfile.workspace = true

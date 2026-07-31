@@ -24,7 +24,7 @@ if [[ ! -f "$BOBBY_COMPANION_EXTENSION/manifest.json" ]]; then
   echo "BOBBY_COMPANION_EXTENSION must name the companion extension build directory" >&2
   exit 2
 fi
-cargo build -p cli -p runtime-tests
+cargo build -p bobby-browser -p runtime-tests
 
 if [[ -n "${BOBBY_NATIVE_MESSAGING_DIR:-}" ]]; then
   native_messaging_dir="$BOBBY_NATIVE_MESSAGING_DIR"

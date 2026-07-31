@@ -2,6 +2,10 @@
 name = "skill-runtime"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
 
 [features]
 default = []
@@ -13,5 +17,5 @@ chrono.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-types = { path = "../types" }
+types = { path = "../types", version = "0.3.0" }
 
