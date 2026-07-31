@@ -1134,6 +1134,28 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         navigate["inputSchema"]["required"],
         json!(["sessionId", "pageId", "url"])
     );
+    let click = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "click")
+        .unwrap();
+    assert_eq!(
+        click["inputSchema"]["required"],
+        json!(["sessionId", "pageId"]),
+        "semantic snapshot targets must not require a legacy CSS selector"
+    );
+    let type_text = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "type_text")
+        .unwrap();
+    assert_eq!(
+        type_text["inputSchema"]["required"],
+        json!(["sessionId", "pageId", "value"]),
+        "semantic snapshot targets must not require a legacy CSS selector"
+    );
 
     let mutate_only = fixture_server(vec![Capability::BrowserMutate]).await;
     let listed = mutate_only

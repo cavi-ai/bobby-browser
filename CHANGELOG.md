@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Allow MCP `click` and `type_text` to consume accessibility-snapshot targets without also requiring a legacy CSS selector.
 - Add command-ready semantic targets to actionable accessibility-snapshot nodes; duplicate role/name pairs receive deterministic tree-order ordinals without exposing DOM or browser IDs.
 - Plumb real screenshot bytes into vision escalation (`screenshot_bytes` on Chromium and Firefox workers); empty frames no longer reach providers.
 - Add an HTTP vision-assist provider (`[vision]` config: https or loopback endpoint, bearer via env var) with response validation and fail-closed escalation.

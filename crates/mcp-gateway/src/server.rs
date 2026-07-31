@@ -635,7 +635,7 @@ impl Server {
                     input.session_id,
                     Some(input.page_id),
                     types::PrimitiveCommand::Click(types::ClickCommand {
-                        selector: input.selector,
+                        selector: input.selector.unwrap_or_default(),
                         target: input.target,
                         boundary: input.boundary.unwrap_or(false),
                         expected_url: input.expected_url,
@@ -653,7 +653,7 @@ impl Server {
                     input.session_id,
                     Some(input.page_id),
                     types::PrimitiveCommand::TypeText(types::TypeTextCommand {
-                        selector: input.selector,
+                        selector: input.selector.unwrap_or_default(),
                         target: input.target,
                         value: input.value,
                         clear_first: input.clear_first.unwrap_or(false),
@@ -1306,14 +1306,14 @@ page_scoped_args!(NavigateArgs {
 });
 
 page_scoped_args!(ClickArgs {
-    selector: String,
+    selector: Option<String>,
     target: Option<types::TargetSpec>,
     boundary: Option<bool>,
     expected_url: Option<String>,
 });
 
 page_scoped_args!(TypeTextArgs {
-    selector: String,
+    selector: Option<String>,
     target: Option<types::TargetSpec>,
     value: String,
     clear_first: Option<bool>,

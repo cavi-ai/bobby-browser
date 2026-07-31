@@ -86,6 +86,10 @@ needed. Unique role/name pairs omit `ordinal`. Repeated pairs receive stable,
 zero-based ordinals in accessibility-tree order, so the second `Phone` textbox
 has `ordinal: 1`. Targets are omitted when the name is redacted.
 
+For flat MCP `type_text` and `click`, send that `target` with `sessionId` and
+`pageId`; omit `selector`. A selector is required only when the caller chooses
+the legacy raw-selector path.
+
 Use the resulting command target with `fill` / `completeForm`, then verify with
 intent evidence — do not treat the snapshot alone as postcondition proof.
 
