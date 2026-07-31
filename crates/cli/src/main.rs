@@ -723,7 +723,14 @@ enum CliCommand {
         path: Option<PathBuf>,
     },
     /// Run the runtime server (default)
-    Serve,
+    Serve {
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+        #[arg(long)]
+        bootstrap_env: Option<PathBuf>,
+    },
     /// Run the Firefox native-messaging host
     FirefoxNativeHost {
         /// Absolute path to the native-host descriptor JSON
@@ -761,26 +768,38 @@ enum CliCommand {
         timeout_secs: u64,
     },
     /// Check local setup: config, bootstrap credential, storage, browsers
-    Doctor,
+    Doctor {
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+        #[arg(long)]
+        bootstrap_env: Option<PathBuf>,
+        /// Skip probing GET /healthz on the configured bind address
+        #[arg(long)]
+        skip_health: bool,
+    },
 }
 
 pub async fn run() -> Result<()> {
-    match Cli::parse_args().command.unwrap_or(CliCommand::Serve) {
+    match Cli::parse_args().command.unwrap_or(CliCommand::Serve {
+        config: None,
+        bootstrap_env: None,
+    }) {
         CliCommand::Init {
             force,
             ttl_days,
             path,
         } => run_init(force, ttl_days, path)?,
-        CliCommand::Serve => {
-            let config_path = std::env::var("BOBBY_BROWSER_CONFIG")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("./config.toml"));
+        CliCommand::Serve {
+            config,
+            bootstrap_env,
+        } => {
+            let config_path = resolve_config_path(config);
             let config_existed = config_path.exists();
             let config = AppConfig::load(&config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let bootstrap_path = std::env::var("BOBBY_BROWSER_BOOTSTRAP_ENV")
-                .map(PathBuf::from)
-                .unwrap_or(bootstrap_local::default_bootstrap_path()?);
+            let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
             let resolved = bootstrap_local::resolve_startup_credential_with(
                 &config.server.host,
                 &bootstrap_path,
@@ -836,10 +855,29 @@ pub async fn run() -> Result<()> {
             run_firefox_profile_enroll(descriptor, bind, bidi_url, profile_dir, timeout_secs)
                 .await?
         }
-        CliCommand::Doctor => run_doctor()?,
+        CliCommand::Doctor {
+            config,
+            bootstrap_env,
+            skip_health,
+        } => run_doctor(config, bootstrap_env, !skip_health)?,
     }
 
     Ok(())
+}
+
+fn resolve_config_path(cli: Option<PathBuf>) -> PathBuf {
+    cli.or_else(|| std::env::var_os("BOBBY_BROWSER_CONFIG").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("./config.toml"))
+}
+
+fn resolve_bootstrap_path(cli: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = cli {
+        return Ok(path);
+    }
+    if let Some(path) = std::env::var_os("BOBBY_BROWSER_BOOTSTRAP_ENV") {
+        return Ok(PathBuf::from(path));
+    }
+    bootstrap_local::default_bootstrap_path()
 }
 
 async fn run_firefox_profile_enroll(
@@ -887,16 +925,18 @@ async fn run_firefox_profile_enroll(
     Ok(())
 }
 
-fn run_doctor() -> Result<()> {
+fn run_doctor(
+    config_cli: Option<PathBuf>,
+    bootstrap_cli: Option<PathBuf>,
+    check_health: bool,
+) -> Result<()> {
     let mut failures = 0usize;
     let mut warnings = 0usize;
     let report = |status: &str, check: &str, detail: String| {
         eprintln!("[{status}] {check}: {detail}");
     };
 
-    let config_path = std::env::var("BOBBY_BROWSER_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("./config.toml"));
+    let config_path = resolve_config_path(config_cli);
     let config = match AppConfig::load(&config_path) {
         Ok(config) => {
             let source = if config_path.exists() {
@@ -1023,7 +1063,7 @@ fn run_doctor() -> Result<()> {
     if broker::StartupCredential::from_env().is_ok() {
         report("ok", "bootstrap", "credential from environment".to_string());
     } else {
-        match bootstrap_local::default_bootstrap_path() {
+        match resolve_bootstrap_path(bootstrap_cli) {
             Ok(path) if path.exists() => report(
                 "ok",
                 "bootstrap",
@@ -1106,9 +1146,44 @@ fn run_doctor() -> Result<()> {
         );
     }
 
+    if check_health {
+        if let Some(config) = &config {
+            let url = format!(
+                "http://{}:{}/healthz",
+                config.server.host, config.server.port
+            );
+            match probe_healthz(&url) {
+                Ok(()) => report("ok", "healthz", format!("{url} responded")),
+                Err(error) => {
+                    warnings += 1;
+                    report(
+                        "warn",
+                        "healthz",
+                        format!("{url} not reachable ({error}); is `bobby serve` running?"),
+                    );
+                }
+            }
+        }
+    }
+
     eprintln!("doctor: {failures} failure(s), {warnings} warning(s)");
     if failures > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn probe_healthz(url: &str) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build healthz HTTP client")?;
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("GET {url}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("unexpected status {}", response.status());
     }
     Ok(())
 }

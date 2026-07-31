@@ -23,6 +23,18 @@ Confirm liveness: `curl -sS http://127.0.0.1:7777/healthz` → `{"ok":true}`.
 Authenticated routes live under `/v1/*` only (for example `GET /v1/runtime`).
 See [Authentication](../guides/auth.md).
 
+### Optional: raw HTTP smoke (`GET /v1/runtime`)
+
+```bash
+CORRELATION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+DEADLINE=$(date -u -v+60S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+60 seconds' +%Y-%m-%dT%H:%M:%SZ)
+curl -sS http://127.0.0.1:7777/v1/runtime \
+  -H "Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}" \
+  -H "x-interface-version: 2026-07-23" \
+  -H "x-correlation-id: ${CORRELATION}" \
+  -H "x-deadline: ${DEADLINE}"
+```
+
 ## 2. TypeScript: session → page → navigate
 
 Install the published package, or use the workspace package from this repo:
@@ -111,4 +123,6 @@ There are no dedicated intent MCP tools; intents go only through
 - Auth and path mistakes: [Authentication](../guides/auth.md),
   [HTTP API](../surfaces/http-api.md).
 
-Next: [TypeScript SDK](../surfaces/typescript-sdk.md) · [HTTP API](../surfaces/http-api.md) · [Quickstart](quickstart.md)
+Next: [TypeScript SDK](../surfaces/typescript-sdk.md) ·
+[Rust HTTP client](../rust/bobby-browser-client.md) ·
+[HTTP API](../surfaces/http-api.md) · [Quickstart](quickstart.md)

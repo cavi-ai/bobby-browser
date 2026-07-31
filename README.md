@@ -11,11 +11,14 @@ strings.
 
 ```bash
 cargo build -p bobby-browser --release
+./target/release/bobby --help
 ./target/release/bobby init
-./target/release/bobby serve
+./target/release/bobby doctor
+./target/release/bobby serve --config ./config.toml
 ```
 
-Then open `http://127.0.0.1:7777/healthz`.
+Then open `http://127.0.0.1:7777/healthz`. CLI details:
+[docs CLI reference](docs/bobby-browser/source/pages/guides/cli.md).
 
 ## Use from TypeScript
 
@@ -39,6 +42,29 @@ Until the package is on the public registry, build from this repo:
 ```bash
 pnpm install
 pnpm --filter @bobby-browser/sdk test
+```
+
+## Use from Rust (HTTP)
+
+Package: `bobby-browser-client` (crates.io after publish). Crate book:
+[docs/bobby-browser/source/pages/rust/index.md](docs/bobby-browser/source/pages/rust/index.md).
+
+```bash
+cargo add bobby-browser-client
+# from this repo:
+cargo test -p bobby-browser-client
+```
+
+```rust,no_run
+use bobby_browser_client::BrowserRuntimeClient;
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = BrowserRuntimeClient::new(
+    "http://127.0.0.1:7777",
+    std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
+)?;
+let _info = client.runtime_info(None).await?;
+# Ok(()) }
 ```
 
 > **Alpha.** The interfaces and contracts described here are stable enough to

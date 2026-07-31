@@ -6,23 +6,26 @@ documentedVersion: 0.3.0
 
 ```bash
 bobby serve
-# or:
-cargo run -p bobby-browser -- serve
-# with an explicit config file:
-BOBBY_BROWSER_CONFIG=/path/to/config.toml bobby serve
+bobby serve --config /path/to/config.toml
+bobby serve --config ./config.toml --bootstrap-env ./bootstrap.env
+# from source:
+cargo run -p bobby-browser -- serve --config ./config.toml
 ```
 
-Override the bootstrap secret path with `BOBBY_BROWSER_BOOTSTRAP_ENV` when it is
-not at the default OS config location (`…/bobby-browser/bootstrap.env`). Prefer
-`bobby init` before first serve on non-loopback binds.
+Environment equivalents: `BOBBY_BROWSER_CONFIG`, `BOBBY_BROWSER_BOOTSTRAP_ENV`.
+Prefer `bobby init` before first serve on non-loopback binds. Full flag list:
+[CLI reference](cli.md).
 
 Then open:
 
 - `http://127.0.0.1:7777/healthz` — unauthenticated liveness
-- Authenticated routes under `/v1/*` (for example `GET /v1/runtime`) — bearer + interface headers required
+- Authenticated routes under `/v1/*` (for example `GET /v1/runtime`) — bearer +
+  interface headers required
 
-There is no `/runtime` route. Use `/v1/runtime`. See [Authentication](auth.md) and the [HTTP API reference](../surfaces/http-api.md).
+There is no `/runtime` route. Use `/v1/runtime`. See [Authentication](auth.md)
+and the [HTTP API reference](../surfaces/http-api.md).
 
-Do not expose the runtime to untrusted networks; reach it over loopback or an operator-controlled boundary.
+`bobby doctor` can probe `/healthz` after the server is up.
 
-To exercise the deterministic skill course locally, build `@bobby-browser/gauntlet` and run the opt-in production championship described in the [browser gauntlet guide](gauntlet.md).
+Do not expose the runtime to untrusted networks; reach it over loopback or an
+operator-controlled boundary.
