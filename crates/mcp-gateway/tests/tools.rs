@@ -1026,3 +1026,181 @@ fn assert_closed_typed_objects(schema: &Value) {
         _ => {}
     }
 }
+
+#[tokio::test]
+async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
+    let all = [
+        Capability::BrowserMutate,
+        Capability::FileDownload,
+        Capability::FileUpload,
+        Capability::JavascriptEvaluate,
+    ];
+    let server = fixture_server(all.to_vec()).await;
+    let listed = server
+        .handle_message(request(70, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for expected in [
+        "navigate",
+        "click",
+        "type_text",
+        "inspect",
+        "screenshot",
+        "wait_for",
+        "page_list",
+        "page_close",
+        "download_url",
+        "upload_files",
+        "evaluate_javascript",
+    ] {
+        assert!(
+            names.contains(&expected.to_owned()),
+            "missing {expected}: {names:?}"
+        );
+    }
+    let navigate = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "navigate")
+        .unwrap();
+    assert_eq!(
+        navigate["inputSchema"]["required"],
+        json!(["sessionId", "pageId", "url"])
+    );
+
+    let mutate_only = fixture_server(vec![Capability::BrowserMutate]).await;
+    let listed = mutate_only
+        .handle_message(request(71, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    for visible in [
+        "navigate",
+        "click",
+        "type_text",
+        "inspect",
+        "screenshot",
+        "wait_for",
+        "page_list",
+        "page_close",
+    ] {
+        assert!(
+            names.contains(&visible.to_owned()),
+            "{visible} must be visible: {names:?}"
+        );
+    }
+    for hidden in ["download_url", "upload_files", "evaluate_javascript"] {
+        assert!(
+            !names.contains(&hidden.to_owned()),
+            "{hidden} must be hidden: {names:?}"
+        );
+    }
+    let denied = mutate_only
+        .handle_message(request(72, "tools/call", json!({
+            "name":"download_url",
+            "arguments":{"sessionId":SessionId::new().0.to_string(),"url":"https://example.test/file","maxBytes":1024}
+        })))
+        .await
+        .unwrap();
+    assert_eq!(denied["error"]["code"], -32601, "{denied}");
+}
+
+#[tokio::test]
+async fn flat_browser_tools_validate_arguments_and_submit_envelopes() {
+    let runtime = Arc::new(authenticated_with_browser_mutate().await);
+    let server = Server::new(runtime);
+    initialize(&server).await;
+
+    let missing_url = server
+        .handle_message(request(80, "tools/call", json!({
+            "name":"navigate",
+            "arguments":{"sessionId":SessionId::new().0.to_string(),"pageId":types::PageId::new().0.to_string()}
+        })))
+        .await
+        .unwrap();
+    assert_eq!(missing_url["error"]["code"], -32602, "{missing_url}");
+
+    let unknown_field = server
+        .handle_message(request(81, "tools/call", json!({
+            "name":"click",
+            "arguments":{"sessionId":SessionId::new().0.to_string(),"pageId":types::PageId::new().0.to_string(),"selector":"#go","surprise":true}
+        })))
+        .await
+        .unwrap();
+    assert_eq!(unknown_field["error"]["code"], -32602, "{unknown_field}");
+
+    let navigated = server
+        .handle_message(request(
+            82,
+            "tools/call",
+            json!({
+                "name":"navigate",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "url":"https://example.test/",
+                    "waitUntil":"interactive",
+                    "timeoutMs":5000
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(navigated["error"].is_null(), "{navigated}");
+    assert_eq!(navigated["result"]["isError"], json!(false));
+    assert_eq!(
+        navigated["result"]["structuredContent"]["status"],
+        json!("failed"),
+        "{navigated}"
+    );
+    assert!(navigated["result"]["structuredContent"]["commandId"].is_string());
+
+    let evaluated = server
+        .handle_message(request(
+            83,
+            "tools/call",
+            json!({
+                "name":"evaluate_javascript",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "expression":"document.title"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(evaluated["error"].is_null(), "{evaluated}");
+    assert!(evaluated["result"]["structuredContent"]["commandId"].is_string());
+}
+
+async fn authenticated_with_browser_mutate() -> AuthenticatedRuntime {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000030")),
+            [
+                Capability::BrowserMutate,
+                Capability::FileDownload,
+                Capability::FileUpload,
+                Capability::JavascriptEvaluate,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    AuthenticatedRuntime::new(RuntimeService::default(), handle)
+}
