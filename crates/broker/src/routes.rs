@@ -199,6 +199,14 @@ async fn events(
     Extension(request): Extension<AuthenticatedRequest>,
 ) -> Result<Response, ProtocolError> {
     authorize_boundary(&request, InterfaceOperation::SubscribeEvents)?;
+    if query.stream {
+        return Ok(event_stream_response(
+            state.events.clone(),
+            request.context.principal_id.clone(),
+            query.after,
+            query.limit,
+        ));
+    }
     let wait = (request.context.deadline - Utc::now())
         .to_std()
         .map_err(|_| deadline_error(&request.context.correlation_id))?;
@@ -219,6 +227,95 @@ async fn events(
         )),
         Err(_) => Err(deadline_error(&request.context.correlation_id)),
     }
+}
+
+const EVENT_STREAM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Server-sent-event stream of the principal-scoped event history. Each event
+/// is sent with `id` set to its cursor so clients resume with `after` (or the
+/// standard `Last-Event-ID` header). A cursor gap is terminal: an `event.gap`
+/// notification is emitted and the stream closes, matching the 409 poll path.
+fn event_stream_response(
+    store: interface_core::EventStore,
+    principal: types::PrincipalId,
+    after: u64,
+    limit: usize,
+) -> Response {
+    use axum::response::sse::Event as SseEvent;
+    use futures_util::stream;
+
+    enum Read {
+        Events(std::collections::VecDeque<interface_core::Event>),
+        Gap(interface_core::EventGap),
+        Heartbeat,
+    }
+    struct Cursor {
+        after: u64,
+        limit: usize,
+        pending: std::collections::VecDeque<interface_core::Event>,
+        done: bool,
+    }
+
+    let stream = stream::unfold(
+        (
+            store,
+            principal,
+            Cursor {
+                after,
+                limit,
+                pending: Default::default(),
+                done: false,
+            },
+        ),
+        |(store, principal, mut cursor)| async move {
+            loop {
+                if cursor.done {
+                    return None;
+                }
+                if let Some(event) = cursor.pending.pop_front() {
+                    cursor.after = event.cursor.0;
+                    let sse = SseEvent::default()
+                        .id(event.cursor.0.to_string())
+                        .event(event.kind.clone())
+                        .json_data(&event.payload)
+                        .unwrap_or_else(|_| SseEvent::default().data(""));
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(sse),
+                        (store, principal, cursor),
+                    ));
+                }
+                let outcome = {
+                    let read = store.read_after_for(&principal, cursor.after.into(), cursor.limit);
+                    tokio::pin!(read);
+                    match tokio::time::timeout(EVENT_STREAM_HEARTBEAT, read).await {
+                        Ok(Ok(batch)) => Read::Events(batch.events.into()),
+                        Ok(Err(gap)) => Read::Gap(gap),
+                        Err(_) => Read::Heartbeat,
+                    }
+                };
+                match outcome {
+                    Read::Events(events) => {
+                        cursor.pending = events;
+                    }
+                    Read::Gap(gap) => {
+                        cursor.done = true;
+                        let sse = SseEvent::default()
+                            .event("event.gap")
+                            .json_data(gap)
+                            .unwrap_or_else(|_| SseEvent::default().data(""));
+                        return Some((Ok(sse), (store, principal, cursor)));
+                    }
+                    Read::Heartbeat => {
+                        return Some((
+                            Ok(SseEvent::default().comment("keep-alive")),
+                            (store, principal, cursor),
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    axum::response::sse::Sse::new(stream).into_response()
 }
 
 async fn artifact(
@@ -404,6 +501,7 @@ fn parse_json<T: DeserializeOwned>(
 pub(crate) struct EventQuery {
     after: u64,
     limit: usize,
+    stream: bool,
 }
 
 pub(crate) async fn validate_request_boundary(
@@ -505,8 +603,10 @@ fn parse_event_query(
     }
     let mut after = None;
     let mut limit = None;
+    let mut stream = None;
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
         match key.as_ref() {
+            "stream" if stream.is_none() => stream = Some(matches!(value.as_ref(), "1" | "true")),
             "after" if after.is_none() => {
                 after = Some(value.parse::<u64>().map_err(|_| {
                     ProtocolError::invalid_with(
@@ -543,6 +643,7 @@ fn parse_event_query(
     Ok(EventQuery {
         after: after.unwrap_or(0),
         limit,
+        stream: stream.unwrap_or(false),
     })
 }
 

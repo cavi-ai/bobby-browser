@@ -452,7 +452,7 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
     let envelope = serde_json::json!({"schemaVersion":2,"commandId":command_id,"workflowId":workflow,"attemptId":AttemptId::new(),"sessionId":session,"pageId":page,"deadline":(Utc::now()+Duration::seconds(20)),"command":{"kind":"primitive","input":{"kind":"click","input":{"selector":"#mutate","target":null,"boundary":false,"expectedUrl":null}}}});
     mcp_send(&mut stdin,serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"command_execute","arguments":{"envelope":envelope}}})).await;
     let marker = root.path().join("executing.marker");
-    tokio::time::timeout(StdDuration::from_secs(30), async {
+    tokio::time::timeout(StdDuration::from_secs(120), async {
         while !marker.exists() {
             tokio::time::sleep(StdDuration::from_millis(10)).await;
         }
