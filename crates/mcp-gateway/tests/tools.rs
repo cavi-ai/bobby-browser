@@ -526,7 +526,7 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
 // to checkpoint the resulting `Evidence::JavaScriptResult` — pre-dispatch, with
 // `INVALID_PARAMS`, before `runtime.checkpoint` was ever called.
 #[tokio::test]
-async fn checkpoint_save_schema_accepts_evidence_containing_a_javascript_result_item() {
+async fn checkpoint_save_schema_accepts_javascript_and_actionable_accessibility_evidence() {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
         .issue(
@@ -560,10 +560,26 @@ async fn checkpoint_save_schema_accepts_evidence_containing_a_javascript_result_
         recovery_receipts: vec![],
         created_at: Utc::now(),
     };
-    let evidence = vec![Evidence::JavaScriptResult {
-        value: json!({"answer": 42}),
-        truncated: false,
-    }];
+    let evidence = vec![
+        Evidence::JavaScriptResult {
+            value: json!({"answer": 42}),
+            truncated: false,
+        },
+        Evidence::AccessibilitySnapshot {
+            page_id: checkpoint.page_id.clone(),
+            nodes: vec![types::AccessibilityNode {
+                role: Some("textbox".into()),
+                name: Some("Email".into()),
+                target: Some(types::AccessibilityTarget {
+                    role: "textbox".into(),
+                    accessible_name: "Email".into(),
+                    ordinal: Some(1),
+                }),
+                ..types::AccessibilityNode::default()
+            }],
+            truncated: false,
+        },
+    ];
 
     let response = server
         .handle_message(request(
@@ -585,7 +601,7 @@ async fn checkpoint_save_schema_accepts_evidence_containing_a_javascript_result_
     assert_eq!(
         runtime.checkpoint_dispatch_count(),
         1,
-        "schema validation must accept a javaScriptResult evidence item and reach \
+        "schema validation must accept JavaScript and actionable accessibility evidence and reach \
          dispatch: {response}"
     );
 }

@@ -191,6 +191,7 @@ fn definitions() -> Value {
         "CompleteFormField": complete_form_field(),
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
+        "AccessibilityTarget": accessibility_target(),
         "AccessibilityNode": accessibility_node(0),
         "WaitForCommand": wait_for_command(),
         "TargetSpec": target_spec(),
@@ -1132,6 +1133,7 @@ fn accessibility_node(depth: usize) -> Value {
         json!({
             "role":string(1, 256),
             "name":string(1, 4096),
+            "target":{"$ref":"#/$defs/AccessibilityTarget"},
             "value":string(0, 4096),
             "description":string(0, 4096),
             "required":{"type":"boolean"},
@@ -1149,4 +1151,15 @@ fn accessibility_node(depth: usize) -> Value {
         schema["properties"]["children"] = array(accessibility_node(depth + 1), 256);
     }
     schema
+}
+
+fn accessibility_target() -> Value {
+    object(
+        json!({
+            "role":string(1, 256),
+            "accessibleName":string(1, 4096),
+            "ordinal":{"type":"integer","minimum":0,"maximum":2047}
+        }),
+        &["role", "accessibleName"],
+    )
 }
