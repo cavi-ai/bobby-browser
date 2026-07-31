@@ -180,6 +180,7 @@ fn definitions() -> Value {
         "IntentCommand": {"oneOf": intent_commands()},
         "IntentHints": intent_hints(),
         "FillValue": {"oneOf": fill_values()},
+        "CompleteFormField": complete_form_field(),
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
         "WaitForCommand": wait_for_command(),
@@ -203,20 +204,41 @@ fn definitions() -> Value {
             "recordedAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
             "decision":{"$ref":"#/$defs/RecoveryDecision"}
         }), &["recordedAt","decision"]),
-        "WorkflowCheckpoint": object(json!({
-            "schemaVersion":{"type":"integer","const":1},
-            "checkpointId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(), "pageId":id(),
-            "restartUrl":string(1, MAX_URL_BYTES), "currentUrl":string(1, MAX_URL_BYTES),
-            "cursor":nullable(id()), "boundaryCommandId":nullable(id()),
-            "recoveryClass":{"type":"string","enum":["replayable","reconciliable","boundary"]},
-            "invariants":array(json!({"$ref":"#/$defs/CheckpointInvariant"}), MAX_COLLECTION_ITEMS),
-            "replayableInputs":array(string(0, MAX_STRING_BYTES), MAX_COLLECTION_ITEMS),
-            "evidence":array(json!({"$ref":"#/$defs/Evidence"}), MAX_EVIDENCE_ITEMS),
-            "recoveryHistory":array(json!({"$ref":"#/$defs/RecoveryRecord"}), MAX_COLLECTION_ITEMS),
-            "recoveryReceipts":{"type":"array","maxItems":0},
-            "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
-        }), &["schemaVersion","checkpointId","workflowId","attemptId","sessionId","pageId","restartUrl","currentUrl","recoveryClass","invariants","replayableInputs","evidence","createdAt"])
+        "WorkflowCheckpoint": workflow_checkpoint()
     })
+}
+
+fn workflow_checkpoint() -> Value {
+    object(
+        json!({
+                "schemaVersion":{"type":"integer","const":1},
+                "checkpointId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(), "pageId":id(),
+                "restartUrl":string(1, MAX_URL_BYTES), "currentUrl":string(1, MAX_URL_BYTES),
+                "cursor":nullable(id()), "boundaryCommandId":nullable(id()),
+                "recoveryClass":{"type":"string","enum":["replayable","reconciliable","boundary"]},
+                "invariants":array(json!({"$ref":"#/$defs/CheckpointInvariant"}), MAX_COLLECTION_ITEMS),
+                "replayableInputs":array(string(0, MAX_STRING_BYTES), MAX_COLLECTION_ITEMS),
+                "evidence":array(json!({"$ref":"#/$defs/Evidence"}), MAX_EVIDENCE_ITEMS),
+                "recoveryHistory":array(json!({"$ref":"#/$defs/RecoveryRecord"}), MAX_COLLECTION_ITEMS),
+                "recoveryReceipts":{"type":"array","maxItems":0},
+                "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
+        }),
+        &[
+            "schemaVersion",
+            "checkpointId",
+            "workflowId",
+            "attemptId",
+            "sessionId",
+            "pageId",
+            "restartUrl",
+            "currentUrl",
+            "recoveryClass",
+            "invariants",
+            "replayableInputs",
+            "evidence",
+            "createdAt",
+        ],
+    )
 }
 
 fn runtime_commands() -> Vec<Value> {
@@ -247,6 +269,16 @@ fn intent_commands() -> Vec<Value> {
                     "value":{"$ref":"#/$defs/FillValue"}
                 }),
                 &["purpose", "value"],
+            ),
+        ),
+        tagged_input(
+            "completeForm",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS)
+                }),
+                &["purpose", "fields"],
             ),
         ),
         tagged_input(
@@ -374,6 +406,18 @@ fn fill_values() -> Vec<Value> {
             &["paths"],
         ),
     ]
+}
+
+fn complete_form_field() -> Value {
+    object(
+        json!({
+            "name":string(1, MAX_STRING_BYTES),
+            "purpose":string(1, 256),
+            "hints":{"$ref":"#/$defs/IntentHints"},
+            "value":{"$ref":"#/$defs/FillValue"}
+        }),
+        &["name", "purpose", "value"],
+    )
 }
 
 fn wait_for_command() -> Value {
@@ -848,6 +892,9 @@ fn sha256() -> Value {
 }
 fn array(items: Value, max: usize) -> Value {
     json!({"type":"array","items":items,"maxItems":max})
+}
+fn nonempty_array(items: Value, max: usize) -> Value {
+    json!({"type":"array","items":items,"minItems":1,"maxItems":max})
 }
 fn nullable(schema: Value) -> Value {
     json!({"oneOf":[schema,{"type":"null"}]})

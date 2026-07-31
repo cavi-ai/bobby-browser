@@ -1,9 +1,52 @@
 use intent_engine::{compile_intent, CompileError, IntentPlan};
 use types::{
-    DismissObstructionIntent, ExtractField, ExtractIntent, ExtractValueKind, FillIntent, FillValue,
-    FollowIntent, IntentCommand, IntentHints, LocateIntent, TextMatch, WaitCondition,
-    WaitForCommand, WaitForStateIntent, WaitUntil,
+    CompleteFormField, CompleteFormIntent, DismissObstructionIntent, ExtractField, ExtractIntent,
+    ExtractValueKind, FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints,
+    LocateIntent, TextMatch, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
 };
+
+#[test]
+fn compile_complete_form_preserves_order_and_rejects_duplicate_names() {
+    let field = |name: &str, label: &str| CompleteFormField {
+        name: name.into(),
+        purpose: format!("fill {name}"),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            near_text: Some(TextMatch::Exact(label.into())),
+            ..Default::default()
+        },
+        value: FillValue::Text {
+            text: name.into(),
+            clear_first: true,
+        },
+    };
+    let plan = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "complete application".into(),
+        fields: vec![field("name", "Full name"), field("email", "Email address")],
+    }))
+    .unwrap();
+    let IntentPlan::CompleteForm { fields } = plan else {
+        panic!("expected complete form")
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["name", "email"]
+    );
+    assert_eq!(
+        fields[0].target.accessible_name.as_deref(),
+        Some("Full name")
+    );
+
+    let error = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "complete application".into(),
+        fields: vec![field("name", "Full name"), field("name", "Email address")],
+    }))
+    .unwrap_err();
+    assert!(matches!(error, CompileError::DuplicateFieldName(name) if name == "name"));
+}
 
 #[test]
 fn compile_locate_uses_purpose_as_accessible_name_hint() {

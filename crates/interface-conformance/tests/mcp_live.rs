@@ -19,9 +19,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, Evidence, FillIntent, FillValue, InspectCommand, IntentCommand,
-    IntentHints, NavigateCommand, PrimitiveCommand, RuntimeCommand, ScreenshotMode, TextMatch,
-    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, Evidence, FillValue,
+    InspectCommand, IntentCommand, IntentHints, NavigateCommand, PrimitiveCommand, RuntimeCommand,
+    ScreenshotMode, TextMatch, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -212,17 +212,21 @@ async fn run_mcp_sample(
             session_id: sid.clone(),
             page_id: Some(pid.clone()),
             deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
-            command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
-                purpose: "enter the applicant name".into(),
-                hints: IntentHints {
-                    role: Some("textbox".into()),
-                    near_text: Some(TextMatch::Exact("Name".into())),
-                    ..IntentHints::default()
-                },
-                value: FillValue::Text {
-                    text: "Ada Lovelace".into(),
-                    clear_first: true,
-                },
+            command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
+                purpose: "complete the applicant form".into(),
+                fields: vec![CompleteFormField {
+                    name: "name".into(),
+                    purpose: "enter the applicant name".into(),
+                    hints: IntentHints {
+                        role: Some("textbox".into()),
+                        near_text: Some(TextMatch::Exact("Name".into())),
+                        ..IntentHints::default()
+                    },
+                    value: FillValue::Text {
+                        text: "Ada Lovelace".into(),
+                        clear_first: true,
+                    },
+                }],
             })),
         },
     )
