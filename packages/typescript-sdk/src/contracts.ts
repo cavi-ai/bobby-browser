@@ -133,7 +133,21 @@ export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
 export interface AccessibilitySnapshotCommand { maxNodes?: number | null }
-export interface AccessibilityNode { role?: string; name?: string; children?: AccessibilityNode[] }
+export interface AccessibilityNode {
+  role?: string;
+  name?: string;
+  value?: string;
+  description?: string;
+  required?: boolean;
+  disabled?: boolean;
+  readOnly?: boolean;
+  invalid?: boolean;
+  checked?: boolean;
+  autocomplete?: string;
+  valueMin?: string;
+  valueMax?: string;
+  children?: AccessibilityNode[];
+}
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }

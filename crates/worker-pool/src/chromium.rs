@@ -1549,6 +1549,30 @@ fn compact_ax_tree(
             .filter(|value| !value.is_empty())
     }
 
+    fn property_text(node: &AxNode, name: &str) -> Option<String> {
+        node.properties
+            .as_ref()?
+            .iter()
+            .find(|property| property.name.as_ref() == name)?
+            .value
+            .value
+            .as_ref()
+            .and_then(|value| match value {
+                serde_json::Value::String(value) => Some(value.clone()),
+                serde_json::Value::Bool(value) => Some(value.to_string()),
+                serde_json::Value::Number(value) => Some(value.to_string()),
+                _ => None,
+            })
+    }
+
+    fn property_bool(node: &AxNode, name: &str) -> Option<bool> {
+        property_text(node, name).and_then(|value| match value.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+    }
+
     let by_id: HashMap<&str, &AxNode> = raw
         .iter()
         .map(|node| (node.node_id.as_ref(), node))
@@ -1565,24 +1589,50 @@ fn compact_ax_tree(
         if depth < 64 {
             if let Some(child_ids) = &node.child_ids {
                 for child_id in child_ids {
-                    if let Some(child) = build(child_id.as_ref(), by_id, budget, depth + 1) {
-                        children.push(child);
+                    if let Some(mut child) = build(child_id.as_ref(), by_id, budget, depth + 1) {
+                        if child.role.is_none() && child.name.is_none() {
+                            children.append(&mut child.children);
+                        } else {
+                            children.push(child);
+                        }
                     }
                 }
             }
         }
         if node.ignored {
-            return None;
+            return (!children.is_empty()).then_some(types::AccessibilityNode {
+                children,
+                ..types::AccessibilityNode::default()
+            });
         }
         let role = text(&node.role);
         let name = text(&node.name);
+        let autocomplete = property_text(node, "autocomplete");
+        let raw_value = text(&node.value);
+        let masked_value = raw_value.as_deref().is_some_and(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|character| matches!(character, '•' | '●' | '*' | '◦'))
+        });
+        let password_control = autocomplete
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("password"));
+        let value = if masked_value || password_control {
+            raw_value.map(|_| "[redacted]".to_owned())
+        } else {
+            raw_value
+        };
         // Skip unlabeled generic wrappers; keep their children by re-parenting.
         if matches!(
             role.as_deref(),
             None | Some("generic" | "InlineTextBox" | "none")
         ) && name.is_none()
         {
-            return None;
+            return (!children.is_empty()).then_some(types::AccessibilityNode {
+                children,
+                ..types::AccessibilityNode::default()
+            });
         }
         if *budget == 0 {
             return None;
@@ -1591,6 +1641,16 @@ fn compact_ax_tree(
         Some(types::AccessibilityNode {
             role,
             name,
+            value,
+            description: text(&node.description),
+            required: property_bool(node, "required"),
+            disabled: property_bool(node, "disabled"),
+            read_only: property_bool(node, "readonly"),
+            invalid: property_text(node, "invalid").map(|value| value != "false"),
+            checked: property_bool(node, "checked"),
+            autocomplete,
+            value_min: property_text(node, "valuemin"),
+            value_max: property_text(node, "valuemax"),
             children,
         })
     }
@@ -1633,9 +1693,45 @@ mod tests {
     };
 
     use super::{
-        apply_state_commit, clamp_js_timeout_ms, snapshot_cookie, text_matches, HttpBridgeState,
+        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, snapshot_cookie, text_matches,
+        HttpBridgeState,
     };
     use types::{ErrorCode, TextMatch};
+
+    #[test]
+    fn accessibility_snapshot_preserves_form_state_and_redacts_masked_values() {
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> = serde_json::from_value(serde_json::json!([{
+            "nodeId": "root",
+            "ignored": true,
+            "childIds": ["1"]
+        }, {
+            "nodeId": "1",
+            "ignored": false,
+            "parentId": "root",
+            "role": {"type": "role", "value": "textbox"},
+            "name": {"type": "computedString", "value": "Password"},
+            "description": {"type": "computedString", "value": "At least eight characters"},
+            "value": {"type": "string", "value": "••••••••"},
+            "properties": [
+                {"name": "required", "value": {"type": "boolean", "value": true}},
+                {"name": "invalid", "value": {"type": "token", "value": "true"}},
+                {"name": "readonly", "value": {"type": "boolean", "value": false}},
+                {"name": "autocomplete", "value": {"type": "token", "value": "current-password"}}
+            ]
+        }])).expect("valid CDP AX fixture");
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 10);
+        assert!(!truncated);
+        assert_eq!(nodes[0].value.as_deref(), Some("[redacted]"));
+        assert_eq!(
+            nodes[0].description.as_deref(),
+            Some("At least eight characters")
+        );
+        assert_eq!(nodes[0].required, Some(true));
+        assert_eq!(nodes[0].invalid, Some(true));
+        assert_eq!(nodes[0].read_only, Some(false));
+        assert_eq!(nodes[0].autocomplete.as_deref(), Some("current-password"));
+    }
 
     // The underlying reap/register/kill mechanics are engine-agnostic and
     // tested directly in `process_registry`. These tests cover only the

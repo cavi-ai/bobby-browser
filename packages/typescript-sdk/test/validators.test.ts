@@ -174,7 +174,7 @@ test("deep validators accept every exact public response variant", () => {
   assert.equal(isEvidence({
     kind: "accessibilitySnapshot",
     pageId: ID,
-    nodes: [{ role: "main", children: [{ role: "button", name: "Continue" }] }],
+    nodes: [{ role: "main", children: [{ role: "textbox", name: "Email", value: "broken", description: "Use a work address", required: true, disabled: false, readOnly: false, invalid: true, checked: false, autocomplete: "email", valueMin: "1", valueMax: "10" }] }],
     truncated: false,
   }), true);
   assert.equal(isEvidence({ kind: "accessibilitySnapshot", pageId: ID, nodes: [{ role: 3 }], truncated: false }), false);
