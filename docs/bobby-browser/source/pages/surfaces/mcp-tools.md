@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.2.1
+documentedVersion: 0.3.0
 ---
 
 # MCP tools reference
@@ -40,10 +40,6 @@ Live JSON Schemas for tool arguments are defined in
 `profile`; `page_open` takes `sessionId`; `command_execute` takes `envelope`
 and optional `idempotencyKey`). MCP argument names are camelCase even where
 some HTTP request bodies use snake_case.
-
-Files under `schemas/mcp/tools/` in this repository use older names
-(`session.create`, `page.goto`, …) and do **not** match the eight tools above —
-do not treat those filenames as the current public MCP catalog.
 
 ## Lifecycle notes
 
