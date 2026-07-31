@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CLOSURE = {
     "artifact-store",
     "bobby-browser",
+    "bobby-browser-client",
     "broker",
     "checkpoint-store",
     "companion-core",

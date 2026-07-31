@@ -5,8 +5,8 @@ documentedVersion: 0.3.0
 # Configuration
 
 `bobby serve` loads `./config.toml` at startup, overridable with
-`BOBBY_BROWSER_CONFIG`. A missing file uses built-in defaults; a malformed file
-fails startup and names the path.
+`--config` / `BOBBY_BROWSER_CONFIG`. A missing file uses built-in defaults; a
+malformed file fails startup and names the path.
 
 The committed
 [`config.toml`](https://github.com/cavi-ai/bobby-browser/blob/main/config.toml)
@@ -23,6 +23,7 @@ documents every field and mirrors `AppConfig` (`crates/config`).
 | `[interface]` | `max_request_bytes`, `max_event_batch`, `max_event_retention` | 1 MiB / 256 / 16k |
 | `[interface]` | `max_principals`, `max_in_flight_per_principal` | capacity / fairness |
 | `[http]` | outbound allowlists and body/timeout caps | egress policy |
+| engine selection | `AUTOMATION_RUNTIME_BROWSER_SELECTION` JSON | default exact **Firefox** |
 
 ## Bootstrap env (not in config.toml)
 
@@ -30,8 +31,8 @@ Credentials are never stored in `config.toml`. Resolve via:
 
 1. `AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN` /
    `…_PRINCIPAL` / `…_CAPABILITIES` / `…_EXPIRES_AT`
-2. Secret file (`BOBBY_BROWSER_BOOTSTRAP_ENV` or OS config
+2. Secret file (`--bootstrap-env` / `BOBBY_BROWSER_BOOTSTRAP_ENV` or OS config
    `…/bobby-browser/bootstrap.env` from `bobby init`)
 3. Loopback auto-init on `bobby serve`
 
-See [Authentication](auth.md) and [Run the server](run.md).
+See [Authentication](auth.md), [CLI reference](cli.md), and [Run the server](run.md).

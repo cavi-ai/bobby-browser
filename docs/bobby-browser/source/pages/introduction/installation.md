@@ -7,40 +7,51 @@ documentedVersion: 0.3.0
 ## Prerequisites
 
 - Rust toolchain matching `rust-toolchain.toml`
-- Node.js 22+ and pnpm for TypeScript packages
-- Chromium (managed by the runtime for browser workflows) when running live browser proofs
+- Node.js 22+ and pnpm for TypeScript packages (SDK / docs)
+- Firefox (default engine) and/or Chromium when running live browser workflows
 
-## Clone and build
+## Build from source (always works)
 
 ```bash
 git clone https://github.com/cavi-ai/bobby-browser.git
 cd bobby-browser
-cargo build -p bobby-browser
-pnpm install
+cargo build -p bobby-browser --release
+./target/release/bobby doctor
+./target/release/bobby --help
 ```
 
-The cargo package is `bobby-browser`; the binary is `bobby`:
+Package name: `bobby-browser`. Binary name: `bobby`.
+
+## Install from registries (when published)
 
 ```bash
-./target/debug/bobby doctor
+# CLI — after crates.io publish succeeds for this version
+cargo install bobby-browser
+
+# TypeScript SDK — after npm publish succeeds
+npm install @bobby-browser/sdk
+
+# Rust HTTP client — after crates.io publish
+cargo add bobby-browser-client
 ```
+
+Do not treat registry installs as available until `npm view` / `cargo search`
+shows the version you need. GitHub Release binaries (when cut) unpack to a
+`bobby` binary; see the repository Releases page.
 
 ## Bootstrap credential
 
-Run `bobby init` to generate a local bootstrap secret. It writes a dotenv file
-with the four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables under the OS config
-directory (`…/bobby-browser/bootstrap.env`, mode `0600` where supported). Override
-the path with `BOBBY_BROWSER_BOOTSTRAP_ENV` or `bobby init --path <file>`.
-
 ```bash
-./target/debug/bobby init
+./target/release/bobby init
+# or: bobby init --path ./bootstrap.env
 ```
 
-`bobby init` prints the plaintext bearer once. Map that value to
-`AUTOMATION_RUNTIME_TOKEN` (or `Authorization: Bearer`) for SDK clients that use
-the bootstrap principal directly. Never commit the plaintext token or put it in
-`config.toml`.
+Writes a dotenv with `AUTOMATION_RUNTIME_BOOTSTRAP_*` under the OS config dir
+(or `--path`). Prints the plaintext bearer once — map it to
+`AUTOMATION_RUNTIME_TOKEN` for clients. Never commit secrets into `config.toml`.
 
-You can also supply the same env contract through a protected process input or
-secret manager. Use the non-secret placeholder `$AUTOMATION_RUNTIME_TOKEN` in
-examples only.
+## Next
+
+- [CLI reference](../guides/cli.md)
+- [Quickstart](quickstart.md)
+- [First browser session](first-session.md)
