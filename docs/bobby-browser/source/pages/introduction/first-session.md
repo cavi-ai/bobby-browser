@@ -90,6 +90,26 @@ const outcome = await client.submit(
 );
 
 console.log(outcome.status, outcome);
+
+// Optional: bring a background page forward (primitive activatePage)
+await client.submit(
+  {
+    schemaVersion: 2,
+    commandId: randomUUID(),
+    workflowId: randomUUID(),
+    attemptId: randomUUID(),
+    sessionId: session.id,
+    pageId: page.id,
+    deadline: new Date(Date.now() + 60_000).toISOString(),
+    command: {
+      kind: "primitive",
+      input: { kind: "activatePage", input: { pageId: page.id } },
+    },
+  },
+  { idempotencyKey: randomUUID() },
+);
+
+await client.deleteSession(session.id);
 ```
 
 For goal-oriented steps, use intent helpers (`locateEnvelope`, …) from
