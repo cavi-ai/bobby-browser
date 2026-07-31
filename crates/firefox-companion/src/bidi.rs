@@ -310,6 +310,49 @@ impl BidiClient {
         ended?;
         closed
     }
+
+    /// Whether the underlying connection can still accept commands. A dead
+    /// client is replaced by the factory that shares it.
+    pub fn is_alive(&self) -> bool {
+        !self.shared.closing.load(Ordering::Acquire)
+            && self
+                .shared
+                .terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+    }
+}
+
+/// A worker handle onto a profile-wide shared BiDi session. Firefox's
+/// RemoteAgent accepts exactly one WebDriver session per browser, so all
+/// workers for a profile multiplex over one connection (correlated commands,
+/// broadcast events). Closing an individual worker must not end the shared
+/// session; the owning factory decides when the connection dies.
+#[derive(Clone)]
+pub struct SharedBiDiTransport {
+    client: BidiClient,
+}
+
+impl SharedBiDiTransport {
+    pub fn new(client: BidiClient) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl BidiTransport for SharedBiDiTransport {
+    async fn send(&self, method: &str, params: Value) -> Result<Value, CommandError> {
+        self.client.send(method, params).await
+    }
+
+    fn subscribe_events(&self) -> Option<broadcast::Receiver<BidiEvent>> {
+        Some(self.client.subscribe_events())
+    }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -334,7 +377,6 @@ impl BidiTransport for BidiClient {
     fn subscribe_events(&self) -> Option<broadcast::Receiver<BidiEvent>> {
         Some(BidiClient::subscribe_events(self))
     }
-
     async fn close(&self) -> Result<(), CommandError> {
         BidiClient::close(self).await
     }

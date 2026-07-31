@@ -2696,3 +2696,71 @@ async fn page_context_map_rejects_growth_beyond_its_bound() {
         MAX_TRACKED_PAGES
     );
 }
+
+#[derive(Default)]
+struct RenewingObserver {
+    renewals: AtomicUsize,
+}
+
+#[async_trait]
+impl ExtensionObserver for RenewingObserver {
+    async fn begin_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        page_id: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        let _ = page_id;
+        Ok(Box::new(FakePageBinding {
+            nonce: "b5f6319a-6b36-43cb-9464-d337fc9d8201".into(),
+        }))
+    }
+
+    async fn observe(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        Ok(observation())
+    }
+
+    async fn release_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    async fn renew_lease(&self, lease: &AttachmentLease) -> Result<AttachmentLease, CommandError> {
+        self.renewals.fetch_add(1, Ordering::SeqCst);
+        let mut renewed = lease.clone();
+        renewed.expires_at = Instant::now() + Duration::from_secs(300);
+        Ok(renewed)
+    }
+}
+
+#[tokio::test]
+async fn worker_renews_attachment_lease_before_expiry() {
+    let observer = Arc::new(RenewingObserver::default());
+    let mut short_lease = lease();
+    short_lease.expires_at = Instant::now() + Duration::from_millis(400);
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        short_lease,
+        FakeBidi::new(vec![]),
+        observer.clone(),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while observer.renewals.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("attachment lease was not renewed before expiry");
+    drop(worker);
+}

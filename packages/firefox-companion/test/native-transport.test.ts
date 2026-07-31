@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   MAX_NATIVE_MESSAGE_BYTES,
   NativeCompanionTransport,
+  TERMINAL_AUTH_COOLDOWN_MS,
 } from "../src/native-transport.js";
 
 class ListenerSet<T extends (...arguments_: never[]) => unknown> {
@@ -262,13 +263,19 @@ test("native transport reconnects after a native host disconnect", () => {
   assert.deepEqual(connected[1]?.sent, [pairRequest]);
 });
 
-test("terminal invalid-auth status prevents native host respawn", () => {
+test("terminal invalid-auth status schedules a bounded cooldown reconnect", () => {
   const port = new FakePort();
   const delays: number[] = [];
+  const scheduled: Array<() => void> = [];
+  let connections = 0;
   const transport = new NativeCompanionTransport({
-    connectNative: () => port,
-    scheduleReconnect(_callback, delayMs) {
+    connectNative: () => {
+      connections += 1;
+      return port;
+    },
+    scheduleReconnect(callback, delayMs) {
       delays.push(delayMs);
+      scheduled.push(callback);
       return 1;
     },
     cancelReconnect() {},
@@ -282,7 +289,10 @@ test("terminal invalid-auth status prevents native host respawn", () => {
   port.onDisconnect.emit();
   transport.start(() => {});
 
-  assert.deepEqual(delays, []);
+  assert.deepEqual(delays, [TERMINAL_AUTH_COOLDOWN_MS]);
+  assert.equal(connections, 1);
+  scheduled[0]?.();
+  assert.equal(connections, 2);
 });
 
 test("failed native launches use bounded exponential backoff and reset after success", () => {

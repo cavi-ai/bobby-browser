@@ -537,7 +537,11 @@ export class CompanionBackground {
     if (grant.expiresAtUnixMs <= now) {
       throw new Error("attachment grant is expired");
     }
-    const leases = new Map<string, PageLease>();
+    // Merge, not replace: every runtime session holds its own attachment, and
+    // dropping earlier attachments' leases would wedge their in-flight work.
+    for (const [key, lease] of this.#leases) {
+      if (lease.attachmentId === grant.attachmentId) this.#leases.delete(key);
+    }
     for (const page of grant.pages) {
       const target = this.#targets.get(page.targetId);
       if (!target) throw new Error("attachment grant names an undiscovered browser target");
@@ -550,10 +554,8 @@ export class CompanionBackground {
         frameId: target.frameId,
         expiresAtUnixMs: grant.expiresAtUnixMs,
       };
-      leases.set(routeKey(lease.attachmentId, lease.pageId), lease);
+      this.#leases.set(routeKey(lease.attachmentId, lease.pageId), lease);
     }
-    this.#leases.clear();
-    for (const [key, lease] of leases) this.#leases.set(key, lease);
   }
 
   #removeExpired(now: number): void {
