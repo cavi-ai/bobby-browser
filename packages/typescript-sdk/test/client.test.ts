@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import test from "node:test";
 import { inspect } from "node:util";
 
-import { BrowserRuntimeClient, RuntimeClientError, type Capability, type CommandEnvelope, type EventOptions, type InterfaceErrorCode } from "../src/index.js";
+import { BrowserRuntimeClient, INTERFACE_VERSION, RuntimeClientError, type Capability, type CommandEnvelope, type EventOptions, type InterfaceErrorCode } from "../src/index.js";
 
 const TOKEN = "test-bearer-token";
 const COMMAND_ID = "00000000-0000-4000-8000-000000000001";
@@ -31,7 +31,7 @@ async function withServer(
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { "content-type": "application/json", "x-interface-version": "2026-07-23" });
+  response.writeHead(status, { "content-type": "application/json", "x-interface-version": INTERFACE_VERSION });
   response.end(JSON.stringify(body));
 }
 

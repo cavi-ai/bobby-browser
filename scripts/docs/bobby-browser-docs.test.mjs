@@ -59,9 +59,36 @@ test("build rejects incomplete or inconsistent release identity", async () => {
     /commit/i,
   );
   await assert.rejects(
-    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, sourceDateEpoch: undefined }),
+    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, sourceDateEpoch: -1 }),
     /source date epoch/i,
   );
+  await assert.rejects(
+    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, version: "9.9.9" }),
+    /release version must be/,
+  );
+});
+
+test("build defaults release identity from git when args are omitted", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    const built = await buildBobbyBrowserDocs(fixtureRoot);
+    assert.equal(built.manifest.version, DOCUMENTED_VERSION);
+    assert.equal(built.manifest.release.tag, `v${DOCUMENTED_VERSION}`);
+    assert.match(built.manifest.release.commit, /^[a-f0-9]{40}$/);
+  });
+});
+
+test("stamped docs substitute product and interface version tokens", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    const page = await readFile(
+      path.join(fixtureRoot, OUTPUT_REL, "release/version-and-support.md"),
+      "utf8",
+    );
+    assert.match(page, new RegExp(`documentedVersion: ${DOCUMENTED_VERSION}`));
+    assert.doesNotMatch(page, /\{\{PRODUCT_VERSION\}\}/);
+    assert.doesNotMatch(page, /\{\{INTERFACE_VERSION\}\}/);
+    assert.match(page, new RegExp(DOCUMENTED_VERSION));
+  });
 });
 
 test("verify fails when a page is tampered", async () => {
@@ -142,4 +169,50 @@ test("generated docs publish the Bobby skill and gauntlet operator guides", asyn
     assert.match(gauntlet, /BOBBY_CHAMPIONSHIP_ENGINE/);
     assert.match(gauntlet, /target\/bobby-championship/);
   });
+});
+
+test("docs source pins versions only through tokens", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const { INTERFACE_VERSION } = await import("./lib.mjs");
+  async function collect(directory) {
+    /** @type {string[]} */
+    const files = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) files.push(...(await collect(absolute)));
+      else if (entry.isFile() && /\.(md|json)$/u.test(entry.name)) files.push(absolute);
+    }
+    return files;
+  }
+  const productLiteral = new RegExp(`\\b${DOCUMENTED_VERSION.replaceAll(".", "\\.")}\\b`, "u");
+  const interfaceLiteral = new RegExp(`\\b${INTERFACE_VERSION.replaceAll(".", "\\.")}\\b`, "u");
+  const sourceRoot = path.join(REPO_ROOT, SOURCE_REL);
+  for (const file of await collect(sourceRoot)) {
+    const text = await readFile(file, "utf8");
+    assert.equal(
+      productLiteral.test(text),
+      false,
+      `${file} hardcodes product version ${DOCUMENTED_VERSION}; use {{PRODUCT_VERSION}}`,
+    );
+    assert.equal(
+      interfaceLiteral.test(text),
+      false,
+      `${file} hardcodes interface version ${INTERFACE_VERSION}; use {{INTERFACE_VERSION}}`,
+    );
+  }
+});
+
+test("committed docs artifact matches a rebuild from source tokens", async () => {
+  const committed = JSON.parse(
+    await readFile(path.join(REPO_ROOT, OUTPUT_REL, "manifest.json"), "utf8"),
+  );
+  const release = {
+    version: committed.version,
+    tag: committed.release.tag,
+    commit: committed.release.commit,
+    sourceDateEpoch: Math.floor(Date.parse(committed.generatedAt) / 1000),
+  };
+  const rebuilt = await buildBobbyBrowserDocs(REPO_ROOT, release);
+  assert.equal(rebuilt.manifest.contentSha256, committed.contentSha256);
+  await verifyBobbyBrowserDocs(REPO_ROOT, release);
 });
