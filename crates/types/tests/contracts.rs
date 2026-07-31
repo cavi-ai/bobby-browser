@@ -705,6 +705,7 @@ fn follow_runtime_command_envelope_golden_json() {
                         "hints": {
                             "role": null,
                             "nearText": null,
+                            "ordinal": null,
                             "framePath": [],
                             "shadowPath": [],
                             "allowBestMatch": false
@@ -803,6 +804,7 @@ fn dismiss_obstruction_runtime_command_envelope_golden_json() {
                         "hints": {
                             "role": null,
                             "nearText": null,
+                            "ordinal": null,
                             "framePath": [],
                             "shadowPath": [],
                             "allowBestMatch": false
@@ -911,6 +913,7 @@ fn extract_runtime_command_envelope_golden_json() {
                             "hints": {
                                 "role": null,
                                 "nearText": null,
+                                "ordinal": null,
                                 "framePath": [],
                                 "shadowPath": [],
                                 "allowBestMatch": false
@@ -1022,6 +1025,7 @@ fn locate_runtime_command_envelope_golden_json() {
                         "hints": {
                             "role": null,
                             "nearText": null,
+                            "ordinal": null,
                             "framePath": [],
                             "shadowPath": [],
                             "allowBestMatch": false

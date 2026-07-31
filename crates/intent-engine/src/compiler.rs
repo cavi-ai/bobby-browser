@@ -190,6 +190,7 @@ fn validate_purpose(purpose: &str) -> Result<&str, CompileError> {
 fn compile_target(purpose: &str, hints: &IntentHints) -> TargetSpec {
     let mut target = TargetSpec {
         role: hints.role.clone(),
+        ordinal: hints.ordinal,
         frame_path: hints.frame_path.iter().cloned().map(Box::new).collect(),
         shadow_path: hints.shadow_path.iter().cloned().map(Box::new).collect(),
         allow_best_match: hints.allow_best_match,
