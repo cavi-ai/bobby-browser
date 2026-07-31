@@ -14,7 +14,7 @@ use types::{
     Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
     FillValue, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
     OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeCommand,
-    RuntimeError, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
+    RuntimeError, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint, WorkflowId,
 };
 
 use crate::RuntimeService;
@@ -177,6 +177,21 @@ impl RuntimeInterface for AuthenticatedRuntime {
                 .collect(),
             None => sessions,
         })
+    }
+
+    async fn delete_session(&self, ctx: RequestContext, session: SessionId) -> InterfaceResult<()> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::DeleteSession)?;
+        self.require_owned_session(&ctx, &session)?;
+        self.inner
+            .sessions
+            .delete(&session)
+            .await
+            .map_err(|error| map_runtime_error(&ctx, error))?;
+        if let Some(ownership) = &self.session_ownership {
+            ownership.release_authenticated_session(&ctx.principal_id, &session);
+        }
+        Ok(())
     }
 
     async fn create_session(

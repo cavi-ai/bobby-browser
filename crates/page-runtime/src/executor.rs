@@ -493,6 +493,18 @@ impl PageRuntime {
                     Err(verification_error("upload returned no file evidence"))
                 }
             }
+            PrimitiveCommand::ActivatePage(_) => {
+                if evidence.iter().any(|item| {
+                    matches!(
+                        item,
+                        Evidence::Page { .. } | Evidence::BrowserExecution { .. }
+                    )
+                }) {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("page activation returned no page evidence"))
+                }
+            }
             PrimitiveCommand::OpenPage(_) | PrimitiveCommand::ClosePage(_) => {
                 if evidence
                     .iter()

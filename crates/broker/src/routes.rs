@@ -28,6 +28,10 @@ pub(crate) fn protected_router() -> Router<AppState> {
     Router::new()
         .route("/v1/runtime", get(runtime_info))
         .route("/v1/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/v1/sessions/{session}",
+            axum::routing::delete(delete_session),
+        )
         .route("/v1/pages", post(open_page))
         .route("/v1/commands", post(submit_command))
         .route("/v1/checkpoints", post(checkpoint))
@@ -340,6 +344,24 @@ async fn issue_principal(
         })),
     )
         .into_response())
+}
+
+async fn delete_session(
+    Path(session): Path<String>,
+    Extension(request): Extension<AuthenticatedRequest>,
+) -> Result<Response, ProtocolError> {
+    let session = types::SessionId(Uuid::parse_str(&session).map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?);
+    request
+        .runtime
+        .delete_session(request.context, session)
+        .await
+        .map_err(ProtocolError::from)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn revoke_principal(

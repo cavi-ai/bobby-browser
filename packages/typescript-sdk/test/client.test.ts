@@ -115,6 +115,19 @@ test("listSessions returns the broker session array", async () => {
   });
 });
 
+test("deleteSession sends DELETE and accepts 204", async () => {
+  await withServer((request, response) => {
+    assert.equal(request.method, "DELETE");
+    assert.equal(request.url, `/v1/sessions/${SESSION_ID}`);
+    response.writeHead(204);
+    response.end();
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    await client.deleteSession(SESSION_ID);
+    await assert.rejects(client.deleteSession("not-a-uuid"), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  });
+});
+
 test("does not retry a POST command after a transport failure", async () => {
   let requests = 0;
   await withServer((request) => {

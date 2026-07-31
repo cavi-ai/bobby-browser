@@ -23,10 +23,12 @@ Tools are advertised only when the principal holds the required capability.
 |---|---|---|
 | `runtime_info` | `session:read` | Runtime capability and health information |
 | `session_create` | `session:write` | Create a browser session |
+| `session_close` | `session:write` | Close a session and release its worker |
 | `session_list` | `session:read` | List sessions visible to the principal |
 | `page_open` | `page:write` | Open a page in an owned session |
 | `page_list` | `browser:mutate` | List pages in an owned session |
 | `page_close` | `browser:mutate` | Close a page in an owned session |
+| `page_activate` | `browser:mutate` | Bring a page to the front |
 | `navigate` | `browser:mutate` | Navigate a page to a URL |
 | `click` | `browser:mutate` | Click an element |
 | `type_text` | `browser:mutate` | Type text into an element |
