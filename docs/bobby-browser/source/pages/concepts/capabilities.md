@@ -59,7 +59,7 @@ Submitting a command still requires `browser:mutate`. Nested commands add:
 | File download | `file:download` |
 | Evaluate JavaScript | `javascript:evaluate` (+ session `executionPolicy.javascriptEvaluation`) |
 | Any intent | `intent:execute` |
-| Intent + file fill | `intent:execute` and `file:upload` |
+| Intent + file fill (`fill` / `completeForm` with `files`) | `intent:execute` and `file:upload` |
 | Vision escalation | `vision:assist` (+ session `executionPolicy.visionAssist`) |
 
 Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` set when known.
