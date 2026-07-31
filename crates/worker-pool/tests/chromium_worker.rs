@@ -596,6 +596,27 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
     assert!(observed
         .iter()
         .any(|item| matches!(item, Evidence::Inspection { text, .. } if text == "ca")));
+    for (role, name) in [("checkbox", "Product updates"), ("radio", "Professional")] {
+        let evidence = worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: String::new(),
+                    target: Some(TargetSpec {
+                        role: Some(role.into()),
+                        accessible_name: Some(name.into()),
+                        ..TargetSpec::default()
+                    }),
+                    value: "true".into(),
+                    clear_first: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(evidence.iter().any(
+            |item| matches!(item, Evidence::Element { text: Some(value), .. } if value == "true")
+        ));
+    }
     worker.close().await.unwrap();
 }
 

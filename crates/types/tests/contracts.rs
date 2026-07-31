@@ -556,6 +556,19 @@ fn create_session_request_honors_explicit_execution_policy_grant() {
 }
 
 #[test]
+fn checked_fill_value_round_trips_as_camel_case() {
+    let value = FillValue::Checked { checked: true };
+    assert_eq!(
+        serde_json::to_value(&value).unwrap(),
+        json!({"kind":"checked","checked":true})
+    );
+    assert!(matches!(
+        serde_json::from_value::<FillValue>(json!({"kind":"checked","checked":false})).unwrap(),
+        FillValue::Checked { checked: false }
+    ));
+}
+
+#[test]
 fn intent_commands_round_trip_and_classes() {
     let locate = IntentCommand::Locate(LocateIntent {
         purpose: "Continue".into(),

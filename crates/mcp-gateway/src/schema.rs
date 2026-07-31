@@ -364,6 +364,11 @@ fn fill_values() -> Vec<Value> {
             &["option"],
         ),
         tagged_fields(
+            "checked",
+            json!({"checked":{"type":"boolean"}}),
+            &["checked"],
+        ),
+        tagged_fields(
             "files",
             json!({"paths":array(string(1, MAX_STRING_BYTES), 64)}),
             &["paths"],
