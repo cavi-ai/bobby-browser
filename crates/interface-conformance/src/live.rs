@@ -89,13 +89,14 @@ impl ChromeRuntimeHarness {
     }
 }
 
-pub fn all_capabilities() -> [Capability; 13] {
+pub fn all_capabilities() -> [Capability; 14] {
     [
         Capability::SessionRead,
         Capability::SessionWrite,
         Capability::PageRead,
         Capability::PageWrite,
         Capability::BrowserMutate,
+        Capability::IntentExecute,
         Capability::FileUpload,
         Capability::FileDownload,
         Capability::JavascriptEvaluate,

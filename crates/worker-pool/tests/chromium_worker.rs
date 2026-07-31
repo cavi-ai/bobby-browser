@@ -502,6 +502,105 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn form_controls_have_normalized_roles_names_constraints_and_native_selection() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        )),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let candidates = worker
+        .collect_candidates(&page_id, &TargetSpec::default())
+        .await
+        .unwrap();
+    let email = candidates
+        .iter()
+        .find(|item| item.css.as_deref() == Some("#email"))
+        .unwrap();
+    assert_eq!(email.name.as_deref(), Some("Email address"));
+    assert_eq!(
+        email.attributes.get("required").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        email.attributes.get("autocomplete").map(String::as_str),
+        Some("email")
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .find(|item| item.css.as_deref() == Some("#updates"))
+            .and_then(|item| item.role.as_deref()),
+        Some("checkbox")
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .find(|item| item.css.as_deref() == Some("#pro"))
+            .and_then(|item| item.role.as_deref()),
+        Some("radio")
+    );
+
+    worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("combobox".into()),
+                    accessible_name: Some("Region".into()),
+                    ..TargetSpec::default()
+                }),
+                value: "ca".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+    let observed = worker
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("#region".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(observed
+        .iter()
+        .any(|item| matches!(item, Evidence::Inspection { text, .. } if text == "ca")));
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {

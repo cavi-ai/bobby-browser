@@ -19,8 +19,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PrimitiveCommand,
-    RuntimeCommand, ScreenshotMode, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, Evidence, FillIntent, FillValue, InspectCommand, IntentCommand,
+    IntentHints, NavigateCommand, PrimitiveCommand, RuntimeCommand, ScreenshotMode, TextMatch,
+    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -200,6 +201,32 @@ async fn run_mcp_sample(
     )
     .await;
     event_ordering.push("navigation.completed".to_owned());
+    command(
+        server,
+        &mut id,
+        &CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: workflow.clone(),
+            attempt_id: attempt.clone(),
+            session_id: sid.clone(),
+            page_id: Some(pid.clone()),
+            deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+            command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
+                purpose: "enter the applicant name".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    near_text: Some(TextMatch::Exact("Name".into())),
+                    ..IntentHints::default()
+                },
+                value: FillValue::Text {
+                    text: "Ada Lovelace".into(),
+                    clear_first: true,
+                },
+            })),
+        },
+    )
+    .await;
     let fixture = metadata.upload_root.join("canonical-upload.txt");
     let fixture_bytes = b"bounded fixture\n";
     std::fs::write(&fixture, fixture_bytes).unwrap();
