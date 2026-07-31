@@ -75,7 +75,34 @@ await client.submit(
 );
 ```
 
-`FillValue` kinds: `text`, `select`, `checked`, and `files` (files need `file:upload`). `checked` accepts a boolean and applies only to checkbox or radio controls; radios may be selected but are not directly unchecked.
+`FillValue` kinds:
+
+| Kind | Shape | Notes |
+|---|---|---|
+| `text` | `{ kind: "text", text, clearFirst? }` | Default path for textboxes |
+| `select` | `{ kind: "select", option }` | Exact option **value**, not label |
+| `checked` | `{ kind: "checked", checked: boolean }` | Checkbox / radio only |
+| `files` | `{ kind: "files", paths }` | Requires `file:upload` |
+
+Checkbox / radio example:
+
+```ts
+await client.submit(
+  fillEnvelope(
+    meta,
+    "accept terms",
+    { kind: "checked", checked: true },
+    { role: "checkbox", nearText: { kind: "exact", value: "I agree" } },
+  ),
+  { idempotencyKey: crypto.randomUUID() },
+);
+```
+
+`checked` toggles via a real click when the control's state differs. Radios
+may be selected (`checked: true`) but cannot be unchecked directly
+(`checked: false` fails closed). Non-checkable targets must not use
+`kind: "checked"`.
+
 When `role` and exact `nearText` are supplied, `nearText` is the control's
 accessible name while `purpose` remains the agent's task description. This
 avoids requiring natural task phrasing to equal a page label. A fill completes

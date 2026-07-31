@@ -10,8 +10,9 @@ URL and its scoped token.
 
 One JSON-RPC message per `POST`. `GET /v1/mcp` opens the streamable-HTTP
 SSE channel (keep-alive comments only today; no server-initiated messages yet).
-Server state is isolated
-per principal. A rotated or replaced bearer resets that principal's MCP
+Clients that expect a GET channel for streamable HTTP should open it with the
+same bearer and interface headers as `POST`. Server state is isolated per
+principal. A rotated or replaced bearer resets that principal's MCP
 lifecycle — clients must `initialize` again.
 
 ## Required HTTP headers

@@ -140,7 +140,10 @@ backoff, so restarts of either side self-heal).
 - Firefox's RemoteAgent accepts a single WebDriver BiDi session per browser,
   so all runtime sessions on a profile share one BiDi connection; page
   attachments stay per-session and renew automatically before their TTL.
+  New attachment grants merge with prior grants instead of replacing them.
 - If pairing is interrupted (serve restart, rotated descriptor), the
   extension retries with a bounded cooldown instead of giving up until a
   browser restart. A killed serve cannot brick later pairing: descriptor
   publication recovers its own leftover files.
+- The native host treats a companion server silent for ~45s as dead and
+  reconnects, recovering half-open connections left by killed processes.

@@ -30,8 +30,9 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | POST | `/v1/principals` | Issue scoped bearer | `authority:admin` |
 | DELETE | `/v1/principals/{principal}` | Revoke principal | `authority:admin` |
 
-MCP streamable HTTP is also mounted at `POST /v1/mcp` — see
-[MCP over HTTP](mcp-http.md) and [MCP tools](mcp-tools.md).
+MCP streamable HTTP is mounted at `POST /v1/mcp` (JSON-RPC) and
+`GET /v1/mcp` (SSE keep-alive channel) — see [MCP over HTTP](mcp-http.md)
+and [MCP tools](mcp-tools.md).
 
 ## Request bodies (high level)
 
