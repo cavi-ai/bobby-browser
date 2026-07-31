@@ -25,10 +25,25 @@ Tools are advertised only when the principal holds the required capability.
 | `session_create` | `session:write` | Create a browser session |
 | `session_list` | `session:read` | List sessions visible to the principal |
 | `page_open` | `page:write` | Open a page in an owned session |
+| `page_list` | `browser:mutate` | List pages in an owned session |
+| `page_close` | `browser:mutate` | Close a page in an owned session |
+| `navigate` | `browser:mutate` | Navigate a page to a URL |
+| `click` | `browser:mutate` | Click an element |
+| `type_text` | `browser:mutate` | Type text into an element |
+| `inspect` | `browser:mutate` | Read page state, optionally element-scoped |
+| `screenshot` | `browser:mutate` | Capture a screenshot artifact |
+| `wait_for` | `browser:mutate` | Wait for a page condition |
+| `download_url` | `browser:mutate` + `file:download` | Download a URL with digest evidence |
+| `upload_files` | `browser:mutate` + `file:upload` | Set files on a file input |
+| `evaluate_javascript` | `browser:mutate` + `javascript:evaluate` | Evaluate JavaScript (also session-policy gated) |
 | `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
 | `events_read` | `session:read` | Read retained events after a cursor |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
+
+The flat browser tools (`navigate` … `evaluate_javascript`) build the command
+envelope for you (ids and deadline are server-generated) and return the same
+`CommandOutcome` shape as `command_execute`, including artifact evidence.
 
 Intents and skills are **not** separate MCP tools. Submit intent command
 envelopes only through `command_execute` (nested
