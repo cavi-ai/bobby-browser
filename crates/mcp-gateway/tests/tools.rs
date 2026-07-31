@@ -7,9 +7,9 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{
     AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, DismissObstructionIntent,
-    Evidence, FollowIntent, IntentCommand, IntentHints, LocateIntent, PrimitiveCommand,
-    RuntimeCommand, SessionId, TextMatch, WaitCondition, WaitForCommand, WorkflowCheckpoint,
-    WorkflowId,
+    Evidence, FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints, LocateIntent,
+    PrimitiveCommand, RuntimeCommand, SessionId, TextMatch, WaitCondition, WaitForCommand,
+    WorkflowCheckpoint, WorkflowId,
 };
 use types::{Capability, PrincipalId};
 use uuid::uuid;
@@ -634,6 +634,48 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
 
     // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
     assert_ne!(response["error"]["code"], -32602, "{response}");
+}
+
+#[tokio::test]
+async fn command_execute_schema_accepts_fill_intent_with_explicit_near_text() {
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
+    initialize(&server).await;
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
+            purpose: "enter the applicant name".into(),
+            hints: IntentHints {
+                role: Some("textbox".into()),
+                near_text: Some(TextMatch::Exact("Name".into())),
+                ..IntentHints::default()
+            },
+            value: FillValue::Text {
+                text: "Ada".into(),
+                clear_first: true,
+            },
+        })),
+    };
+    let envelope_value = serde_json::to_value(&envelope).unwrap();
+    let response = server
+        .handle_message(request(
+            71,
+            "tools/call",
+            json!({
+                "name":"command_execute", "arguments":{"envelope":envelope_value}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        response["error"]["code"], -32602,
+        "{response}; envelope={envelope_value}"
+    );
 }
 
 #[tokio::test]

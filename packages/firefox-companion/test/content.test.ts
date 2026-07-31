@@ -47,7 +47,7 @@ test("observeDocument returns page identity, visible text, labels, roles, and st
     <main>
       <h1>Sign in</h1>
       <label for="email">Email address</label>
-      <input id="email" name="email" type="email" value="user@example.test">
+      <input id="email" name="email" type="email" value="user@example.test" required autocomplete="email">
       <button data-testid="submit-login">Continue</button>
       <span hidden>not visible</span>
     </main>
@@ -65,6 +65,7 @@ test("observeDocument returns page identity, visible text, labels, roles, and st
     name: "Email address",
     label: "Email address",
     value: "user@example.test",
+    attributes: { autocomplete: "email", name: "email", required: "true", type: "email" },
     disabled: false,
   });
   assert.equal(observed.controls[1]?.cssPath, '[data-testid="submit-login"]');

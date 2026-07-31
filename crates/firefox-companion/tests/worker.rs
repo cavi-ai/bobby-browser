@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -608,6 +608,7 @@ fn observation() -> ExtensionObservation {
             name: Some("Confirm".into()),
             label: None,
             value: None,
+            attributes: BTreeMap::new(),
             disabled: false,
         }],
         html: Some("<main>Observed text</main>".into()),
@@ -1993,6 +1994,9 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
     ]);
     let mut observed = observation();
     observed.controls[0].label = Some("Full name".into());
+    observed.controls[0]
+        .attributes
+        .insert("required".into(), "true".into());
     let worker = worker(bidi.clone(), FakeObserver::new(observed)).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
@@ -2004,6 +2008,7 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
                 selector: String::new(),
                 target: Some(types::TargetSpec {
                     label: Some("Full name".into()),
+                    attributes: BTreeMap::from([("required".into(), "true".into())]),
                     ..Default::default()
                 }),
                 value: "Ada".into(),
@@ -2029,6 +2034,9 @@ async fn semantic_inspect_resolves_label_and_returns_sanitized_control_value() {
     observed.visible_text.clear();
     observed.controls[0].label = Some("Full name".into());
     observed.controls[0].value = Some("Ada Lovelace".into());
+    observed.controls[0]
+        .attributes
+        .insert("required".into(), "true".into());
     let observer = FakeObserver::new(observed);
     let worker = worker(bidi, observer.clone()).await;
     let page = PageId::new();
@@ -2041,6 +2049,7 @@ async fn semantic_inspect_resolves_label_and_returns_sanitized_control_value() {
                 selector: None,
                 target: Some(types::TargetSpec {
                     label: Some("Full name".into()),
+                    attributes: BTreeMap::from([("required".into(), "true".into())]),
                     ..Default::default()
                 }),
                 include_html: false,
