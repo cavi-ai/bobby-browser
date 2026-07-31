@@ -250,12 +250,31 @@ await client.submit(
 
 ## Vision double-gate
 
-Vision-assisted resolution is **deny-by-default**. Both must pass:
+Vision-assisted resolution is **deny-by-default**. All three must pass:
 
 1. Bearer holds `vision:assist`
 2. Session created with `executionPolicy.visionAssist = true`
+3. A provider is configured (no provider, no escalation)
 
 Otherwise vision escalation is denied.
+
+## Vision provider
+
+Configure one HTTP provider in `config.toml`:
+
+```toml
+[vision]
+endpoint_url = "https://vision.example.test/propose" # https, or http on loopback only
+token_env = "BOBBY_VISION_TOKEN"                  # env var holding the bearer (never in the file)
+timeout_ms = 15000
+```
+
+The runtime posts `{purpose, intentKind, stuck, screenshotPng}` (base64 PNG)
+and expects `{confidence, action}` where action is
+`{kind: "click", x, y}` | `{kind: "typeText", text}` | `{kind: "extractValue", value}`.
+Invalid responses, out-of-range confidence, and transport failures decline
+the escalation; proposals still pass the engine's 0.75 confidence floor and
+sha256-pinned verification before any browser action.
 
 ## Purpose bounds
 

@@ -190,6 +190,12 @@ pub trait BrowserWorker: Send + Sync {
     async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
+    /// In-memory viewport PNG for machine consumers (vision assist). Unlike
+    /// `capture_screenshot`, no artifact is persisted and no evidence emitted.
+    async fn screenshot_bytes(&self, _page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        Err(unsupported_error())
+    }
+
     async fn a11y_snapshot(
         &self,
         _page_id: &PageId,

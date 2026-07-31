@@ -84,15 +84,21 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
-        // Worker API returns artifact evidence only; PNG bytes for the vision
-        // provider are not yet plumbed through BrowserWorker (production providers
-        // are out of scope for this phase). Unit tests inject PNG via FakeBrowser.
+        // Real PNG bytes when the worker supports them; workers without byte
+        // plumbing keep the prior artifact-only behavior and vision providers
+        // receive an empty frame (their own confidence floor rejects).
+        let bytes = self
+            .lease
+            .worker()
+            .screenshot_bytes(page_id)
+            .await
+            .unwrap_or_default();
         let evidence = self
             .lease
             .worker()
             .capture_screenshot(page_id, command)
             .await?;
-        Ok((Vec::new(), evidence))
+        Ok((bytes, evidence))
     }
 }
 

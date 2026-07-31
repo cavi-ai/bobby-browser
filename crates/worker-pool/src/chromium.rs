@@ -534,6 +534,26 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let bytes = page
+            .screenshot(
+                ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .build(),
+            )
+            .await
+            .map_err(screenshot_error)?;
+        if bytes.len() > MAX_VISION_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "screenshot exceeded the vision byte bound",
+            ));
+        }
+        Ok(bytes)
+    }
+
     async fn a11y_snapshot(
         &self,
         page_id: &PageId,
@@ -1524,6 +1544,8 @@ fn timeout_error(timeout_ms: u64) -> CommandError {
         retryable: true,
     }
 }
+
+const MAX_VISION_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
 
 const DEFAULT_A11Y_MAX_NODES: u32 = 256;
 const MAX_A11Y_NODES: u32 = 2048;
