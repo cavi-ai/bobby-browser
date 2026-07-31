@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # TypeScript SDK
@@ -41,7 +41,7 @@ strips a trailing `/v1` if present). Bearer is the plaintext from `bobby init`
 Every request sends:
 
 - `Authorization: Bearer …`
-- `x-interface-version: 2026-07-23` (`INTERFACE_VERSION`)
+- `x-interface-version: {{INTERFACE_VERSION}}` (`INTERFACE_VERSION`)
 - `x-correlation-id` (UUID; override via `options.correlationId`)
 - `x-deadline` (from `options.deadline` / `timeoutMs`, default 30s)
 
@@ -71,8 +71,10 @@ Build envelopes with helpers from the package (`locateEnvelope`,
 `fillEnvelope`, `submitAndVerifyEnvelope`, `waitForStateEnvelope`,
 `followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
 them to `submit`. Multi-field verified forms use `completeFormRuntimeCommand`
-plus `intentEnvelope`. `FillValue` kinds: `text`, `select`, `checked`, `files`
-(see [Intent commands](../guides/intents.md)).
+plus `intentEnvelope`. `FillValue` kinds: `text`, `select`, `checked`, `files`.
+`AccessibilityNode` form-state fields on a11y snapshots:
+[Accessibility snapshot](../guides/accessibility-snapshot.md).
+Intent details: [Intent commands](../guides/intents.md).
 
 ## Errors
 

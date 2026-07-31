@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Quickstart
@@ -45,7 +45,7 @@ const client = new BrowserRuntimeClient({
 const info = await client.runtimeInfo();
 ```
 
-The SDK sets `Authorization`, `x-interface-version` (`2026-07-23`),
+The SDK sets `Authorization`, `x-interface-version` (`{{INTERFACE_VERSION}}`),
 `x-correlation-id`, `x-deadline`, and `idempotency-key` on mutating POSTs. Raw
 HTTP callers must send those headers themselves — see [Authentication](../guides/auth.md).
 

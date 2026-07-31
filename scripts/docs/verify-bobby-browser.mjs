@@ -64,7 +64,21 @@ const isMain =
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isMain) {
-  verifyBobbyBrowserDocs()
+  const values = Object.fromEntries(process.argv.slice(2).reduce((entries, option, index, args) => {
+    if (option.startsWith("--") && args[index + 1] && !args[index + 1].startsWith("--")) {
+      entries.push([option.slice(2), args[index + 1]]);
+    }
+    return entries;
+  }, []));
+  const releaseInput = Object.keys(values).length === 0 ? undefined : {
+    ...(values.version !== undefined ? { version: values.version } : {}),
+    ...(values.tag !== undefined ? { tag: values.tag } : {}),
+    ...(values.commit !== undefined ? { commit: values.commit } : {}),
+    ...(values["source-date-epoch"] !== undefined
+      ? { sourceDateEpoch: Number(values["source-date-epoch"]) }
+      : {}),
+  };
+  verifyBobbyBrowserDocs(REPO_ROOT, releaseInput)
     .then(({ contentSha256 }) => {
       console.log(`verified contentSha256=${contentSha256}`);
     })

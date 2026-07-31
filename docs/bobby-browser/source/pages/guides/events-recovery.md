@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Events and recovery
@@ -32,7 +32,7 @@ Pass `stream=1` for a server-sent-event stream instead of a JSON batch:
 ```http
 GET /v1/events?after=0&limit=100&stream=1
 Authorization: Bearer …
-x-interface-version: 2026-07-23
+x-interface-version: {{INTERFACE_VERSION}}
 x-correlation-id: …
 x-deadline: …
 ```

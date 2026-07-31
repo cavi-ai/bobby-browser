@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Overview
@@ -11,7 +11,7 @@ credentials are never accepted in URLs or query strings.
 
 > **Alpha.** Interfaces are stable enough to build against, but may still change
 > before 1.0. See the [security model](../security/model.md) before exposing any
-> deployment. Interface version: **`2026-07-23`**.
+> deployment. Interface version: **`{{INTERFACE_VERSION}}`**.
 
 ## Which surface?
 
