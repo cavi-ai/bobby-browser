@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # types
@@ -10,7 +10,7 @@ Shared wire types for HTTP, MCP, and embed paths: capabilities, command
 envelopes (including primitives such as `activatePage` /
 `AccessibilitySnapshot` and intents such as `CompleteForm` / `Fill`),
 session/page state, recovery types, and `CURRENT_INTERFACE_VERSION`
-(`2026-07-23`).
+(`{{INTERFACE_VERSION}}`).
 
 ```bash
 cargo add types

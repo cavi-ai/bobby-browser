@@ -1,6 +1,7 @@
 {
   "name": "bobby-browser",
   "private": true,
+  "version": "0.3.0",
   "description": "Browser automation runtime with authenticated, capability-scoped control surfaces",
   "license": "MIT",
   "repository": {
@@ -16,7 +17,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "docs:build": "node scripts/docs/build-bobby-browser.mjs --version 0.3.0 --tag v0.3.0 --commit cc5e6d71eca6f0768fcecee2d35bf91a518f1fd8 --source-date-epoch 1785520163",
+    "docs:build": "node scripts/docs/build-bobby-browser.mjs",
     "docs:verify": "node scripts/docs/verify-bobby-browser.mjs",
     "docs:test": "node --test --test-concurrency=1 scripts/docs/*.test.mjs",
     "docs:release-artifact": "node scripts/docs/release-artifact.mjs",

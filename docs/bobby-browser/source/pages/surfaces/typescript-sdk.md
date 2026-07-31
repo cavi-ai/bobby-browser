@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # TypeScript SDK
@@ -41,7 +41,7 @@ strips a trailing `/v1` if present). Bearer is the plaintext from `bobby init`
 Every request sends:
 
 - `Authorization: Bearer …`
-- `x-interface-version: 2026-07-23` (`INTERFACE_VERSION`)
+- `x-interface-version: {{INTERFACE_VERSION}}` (`INTERFACE_VERSION`)
 - `x-correlation-id` (UUID; override via `options.correlationId`)
 - `x-deadline` (from `options.deadline` / `timeoutMs`, default 30s)
 
