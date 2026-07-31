@@ -14,10 +14,19 @@ Server state is isolated
 per principal. A rotated or replaced bearer resets that principal's MCP
 lifecycle — clients must `initialize` again.
 
-## Client config example
+## Required HTTP headers
 
-Use the bootstrap (or issued) bearer in `Authorization`. The TypeScript SDK
-convention `AUTOMATION_RUNTIME_TOKEN` is the same plaintext value.
+MCP over HTTP uses the same broker context headers as `/v1/*`:
+
+| Header | Example |
+|---|---|
+| `Authorization` | `Bearer ${AUTOMATION_RUNTIME_TOKEN}` |
+| `x-interface-version` | `2026-07-23` |
+| `x-correlation-id` | UUID |
+| `x-deadline` | RFC3339 UTC time in the future |
+| `Content-Type` | `application/json` |
+
+## Client config example
 
 ```json
 {
@@ -26,18 +35,33 @@ convention `AUTOMATION_RUNTIME_TOKEN` is the same plaintext value.
       "url": "http://127.0.0.1:7777/v1/mcp",
       "transport": "streamable-http",
       "headers": {
-        "Authorization": "Bearer ${AUTOMATION_RUNTIME_TOKEN}"
+        "Authorization": "Bearer ${AUTOMATION_RUNTIME_TOKEN}",
+        "x-interface-version": "2026-07-23",
+        "x-correlation-id": "00000000-0000-4000-8000-000000000001",
+        "x-deadline": "2099-01-01T00:00:00Z"
       }
     }
   }
 }
 ```
 
-MCP over HTTP still requires the broker interface context headers on the
-underlying HTTP transport when your client sends them; the browser-runtime
-broker path uses `Authorization`, `x-interface-version`, `x-correlation-id`,
-and `x-deadline` (see [Authentication](../guides/auth.md)). Prefer an MCP
-client that can attach those headers, or use the TypeScript SDK / stdio gateway.
+Prefer an MCP client that can refresh `x-correlation-id` and `x-deadline` per
+request. For a single-process local agent, [MCP stdio](mcp-stdio.md) may be
+simpler.
+
+## curl smoke (`initialize`)
+
+```bash
+CORRELATION=$(uuidgen | tr '[:upper:]' '[:lower:]')
+DEADLINE=$(date -u -v+60S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+60 seconds' +%Y-%m-%dT%H:%M:%SZ)
+curl -sS http://127.0.0.1:7777/v1/mcp \
+  -H "Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}" \
+  -H "x-interface-version: 2026-07-23" \
+  -H "x-correlation-id: ${CORRELATION}" \
+  -H "x-deadline: ${DEADLINE}" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
 
 ## Lifecycle
 

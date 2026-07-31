@@ -27,6 +27,7 @@ crates=(
   mcp-gateway
   broker
   firefox-companion
+  bobby-browser-client
   bobby-browser
 )
 
