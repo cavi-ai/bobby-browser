@@ -29,7 +29,7 @@ Tools are advertised only when the principal holds the required capability.
 | `page_list` | `browser:mutate` | List pages in an owned session |
 | `page_close` | `browser:mutate` | Close a page in an owned session |
 | `page_activate` | `browser:mutate` | Bring a page to the front |
-| `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree |
+| `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree (`maxNodes` optional, 1…2048; default 256) |
 | `navigate` | `browser:mutate` | Navigate a page to a URL |
 | `click` | `browser:mutate` | Click an element |
 | `type_text` | `browser:mutate` | Type text into an element |
@@ -44,14 +44,17 @@ Tools are advertised only when the principal holds the required capability.
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
 
-The flat browser tools (`navigate` … `evaluate_javascript`) build the command
-envelope for you (ids and deadline are server-generated) and return the same
-`CommandOutcome` shape as `command_execute`, including artifact evidence.
+The flat browser tools (`navigate` … `evaluate_javascript`, plus
+`page_activate` / `a11y_snapshot`) build the command envelope for you (ids and
+deadline are server-generated) and return the same `CommandOutcome` shape as
+`command_execute`, including artifact / accessibility evidence.
 
 Intents and skills are **not** separate MCP tools. Submit intent command
 envelopes only through `command_execute` (nested
 `{ kind: "intent", input: { kind: "locate" \| … } }`). Nested capabilities such
 as `intent:execute` still apply inside the runtime.
+
+Compact accessibility trees: [Accessibility snapshot](../guides/accessibility-snapshot.md).
 
 Live JSON Schemas for tool arguments are defined in
 `crates/mcp-gateway/src/schema.rs` (for example `session_create` requires
