@@ -1200,3 +1200,25 @@ fn wait_evidence_includes_excluded_classes_when_present() {
     let value = serde_json::to_value(&without).unwrap();
     assert!(value.get("excludedClasses").is_none());
 }
+
+#[test]
+fn accessibility_snapshot_action_target_round_trips_without_dom_identifiers() {
+    let page_id = PageId::new();
+    let value = json!({
+        "kind": "accessibilitySnapshot",
+        "pageId": page_id,
+        "nodes": [{
+            "role": "textbox",
+            "name": "Email address",
+            "target": {
+                "role": "textbox",
+                "accessibleName": "Email address",
+                "ordinal": 1
+            }
+        }],
+        "truncated": false
+    });
+
+    let evidence: Evidence = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(evidence).unwrap(), value);
+}

@@ -60,8 +60,8 @@ Successful outcomes include `Evidence.accessibilitySnapshot`:
 ### Node shape
 
 Every node is still a compact `{ role, name, children? }` tree — no DOM
-selectors, bounds, or raw HTML. Form controls may also carry structured state
-(all optional; omitted when unknown):
+selectors, bounds, raw HTML, or browser backend IDs. Form controls may also
+carry structured state (all optional; omitted when unknown):
 
 | Field | Wire | Meaning |
 |---|---|---|
@@ -74,13 +74,20 @@ selectors, bounds, or raw HTML. Form controls may also carry structured state
 | `checked` | boolean | Checkbox / radio checked state |
 | `autocomplete` | string | Autocomplete token |
 | `valueMin` / `valueMax` | string | Numeric / range bounds when exposed |
+| `target` | `{ role, accessibleName, ordinal? }` | Command-ready semantic target |
 
 Sensitive values (password controls, masked AX values, companion secret
 heuristics) serialize as `"[redacted]"` rather than the live contents.
 
-Use the tree to plan `fill` / `completeForm` targeting (`role` + exact
-`nearText` from `name`), then verify with intent evidence — do not treat the
-snapshot alone as a postcondition proof.
+Actionable nodes with a non-empty accessible name include a command-ready
+`target`. Copy its `role`, `accessibleName`, and optional `ordinal` directly
+into a command's `TargetSpec`; no DOM selector or engine-specific identifier is
+needed. Unique role/name pairs omit `ordinal`. Repeated pairs receive stable,
+zero-based ordinals in accessibility-tree order, so the second `Phone` textbox
+has `ordinal: 1`. Targets are omitted when the name is redacted.
+
+Use the resulting command target with `fill` / `completeForm`, then verify with
+intent evidence — do not treat the snapshot alone as postcondition proof.
 
 ## Engine notes
 
