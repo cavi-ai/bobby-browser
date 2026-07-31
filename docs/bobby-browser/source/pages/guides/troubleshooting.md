@@ -78,6 +78,18 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
   TypeScript `deleteSession`
 - Bring a page forward: primitive `activatePage` or MCP `page_activate`
 
+## Semantic fill failures
+
+- Prefer exact `nearText` + `role` when the accessible name is known; leave
+  `purpose` as the agent task phrase.
+- `kind: "select"` matches option **value**, not visible label.
+- `kind: "checked"` is only for checkbox/radio. Radios accept
+  `checked: true` only — unchecking a radio fails closed.
+- A fill without postcondition evidence fails; do not treat a silent click as
+  success. Re-locate and retry under a new attempt id / idempotency key.
+- Files need `file:upload` on the bearer — missing capability →
+  `missingCapability`.
+
 ## Error catalog (`InterfaceErrorCode`)
 
 | Code | Meaning |
