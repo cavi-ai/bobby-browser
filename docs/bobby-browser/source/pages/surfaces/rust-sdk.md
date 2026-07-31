@@ -4,32 +4,47 @@ documentedVersion: 0.3.0
 
 # Rust SDK
 
-In-process and embedded control uses workspace crates. The installable CLI
-package on crates.io is `bobby-browser` (`cargo install bobby-browser` → `bobby`)
-once the maintainer publish pass completes; until then build from source.
+Two ways to use Rust with bobby-browser:
 
-## Crate map
+1. **Remote HTTP** — [`bobby-browser-client`](../rust/bobby-browser-client.md)
+   (Supported tier), mirroring `@bobby-browser/sdk`
+2. **Embed** — workspace crates such as `interface-core` / `sdk-core` / `broker`
+   (Embed tier) — see the [Rust crate book](../rust/index.md)
 
-| Crate | Role |
-|---|---|
-| `bobby-browser` | `bobby` binary (`init`, `serve`, …); lib crate name remains `cli` |
-| `broker` | Authenticated HTTP `/v1/*` + MCP HTTP mount |
-| `sdk-core` | Runtime interface implementation behind the broker |
-| `interface-core` | Authority store, events, idempotency, authorization |
-| `types` | Shared wire types, capabilities, commands, interface version |
-| `config` | `AppConfig` / `config.toml` schema |
-| `mcp-gateway` | MCP stdio process |
-| `cdp-gateway` | Authenticated CDP discovery + DevTools WebSockets |
-| `intent-engine` / `page-runtime` / `session-manager` / … | Execution engines |
+The installable CLI package is `bobby-browser` (`cargo install bobby-browser` →
+`bobby`) once published; until then build from source.
 
-Build the CLI: `cargo build -p bobby-browser`. Workspace tests: `cargo test --workspace`
-(some live browser tests are ignored until Chromium is installed).
+## HTTP client (recommended for apps)
 
-## Embed vs HTTP
+```rust,no_run
+use bobby_browser_client::BrowserRuntimeClient;
 
-- **HTTP / TypeScript / MCP HTTP** — talk to `bobby serve` with bearer + interface headers.
-- **Embed** — construct `AuthorityStore` / runtime interfaces in-process (same
-  capability model). Minimal authority sketch:
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = BrowserRuntimeClient::new(
+    "http://127.0.0.1:7777",
+    std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
+)?;
+let info = client.runtime_info(None).await?;
+let _ = info;
+# Ok(()) }
+```
+
+## Crate map (summary)
+
+| Crate | Tier | Role |
+|---|---|---|
+| `bobby-browser-client` | Supported | HTTP `/v1` client |
+| `types` | Supported | Wire types |
+| `bobby-browser` | Supported (CLI) | `bobby` binary; lib name `cli` |
+| `interface-core` / `sdk-core` / `broker` | Embed | In-process runtime |
+| engines / stores | Internal | Install closure only |
+
+Full tiered list: [Rust crate book](../rust/index.md).
+
+Build the CLI: `cargo build -p bobby-browser`. Workspace tests:
+`cargo test --workspace`.
+
+## Embed sketch
 
 ```rust,no_run
 use chrono::{Duration, Utc};
@@ -57,6 +72,7 @@ plaintext bearers. HTTP issuance for remote principals is
 
 ## Next
 
-- [Quickstart](../introduction/quickstart.md)
+- [Rust crate book](../rust/index.md)
+- [CLI reference](../guides/cli.md)
 - [HTTP API](http-api.md)
 - [Capabilities](../concepts/capabilities.md)

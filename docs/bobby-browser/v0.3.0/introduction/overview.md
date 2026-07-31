@@ -17,21 +17,15 @@ credentials are never accepted in URLs or query strings.
 
 | Goal | Start here |
 |---|---|
+| Install / run the CLI | [Installation](installation.md) · [CLI reference](../guides/cli.md) |
 | First successful navigate | [First browser session](first-session.md) |
 | Application code in Node/TS | [TypeScript SDK](../surfaces/typescript-sdk.md) |
-| Raw HTTP / curl / non-TS | [HTTP API](../surfaces/http-api.md) + [Authentication](../guides/auth.md) |
+| Application code in Rust (HTTP) | [bobby-browser-client](../rust/bobby-browser-client.md) |
+| Embed in Rust | [Rust crate book](../rust/index.md) · [Rust SDK](../surfaces/rust-sdk.md) |
+| Raw HTTP / curl | [HTTP API](../surfaces/http-api.md) + [Authentication](../guides/auth.md) |
 | Agent host (Claude, Cursor, …) | [MCP tools](../surfaces/mcp-tools.md) via [stdio](../surfaces/mcp-stdio.md) or [HTTP](../surfaces/mcp-http.md) |
 | Playwright / Puppeteer | [Authenticated CDP](../surfaces/cdp.md) (primitives only) |
-| Embed in Rust | [Rust SDK](../surfaces/rust-sdk.md) |
 
-Surfaces:
-
-- Rust SDK / in-process authority
-- TypeScript SDK over HTTP
-- MCP over stdio
-- MCP over streamable HTTP (`POST /v1/mcp`)
-- Playwright / Puppeteer over authenticated CDP
-
-The runtime is **multi-principal**: one instance serves many tenants, each with
-a capability-scoped bearer, per-principal in-flight quota, and durable token
-records.
+Default browser engine preference is **Firefox** (with Chromium available when
+selected). The runtime is **multi-principal**: one instance serves many tenants,
+each with a capability-scoped bearer.
