@@ -13,6 +13,7 @@ export const NATIVE_HOST_NAME = "com.bobby_browser.companion";
 export const MAX_NATIVE_MESSAGE_BYTES = MAX_COMPANION_PAYLOAD_BYTES;
 const INITIAL_RECONNECT_DELAY_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 5_000;
+export const TERMINAL_AUTH_COOLDOWN_MS = 15_000;
 
 export type NativePairRequest = {
   kind: "pair";
@@ -288,6 +289,7 @@ export class NativeCompanionTransport {
 
   stop(): void {
     this.#running = false;
+    this.#terminalAuth = false;
     if (this.#reconnectHandle !== undefined) {
       (this.#dependencies.cancelReconnect ?? clearTimeout)(this.#reconnectHandle as never);
       this.#reconnectHandle = undefined;
@@ -310,12 +312,27 @@ export class NativeCompanionTransport {
         const validated = validateInbound(message);
         if (validated === undefined || !this.#listener) return;
         if (validated.kind === "nativeStatus") {
+          // A terminal auth status (invalidAuth/revoked) means the host read a
+          // stale or rotated descriptor, not that pairing is impossible
+          // forever: the next respawn reads the current descriptor. Cool down
+          // instead of stopping permanently so a rotated pairing code
+          // self-heals without a browser restart.
           this.#terminalAuth = true;
-          this.#running = false;
           this.#port = undefined;
           if (this.#reconnectHandle !== undefined) {
             (this.#dependencies.cancelReconnect ?? clearTimeout)(this.#reconnectHandle as never);
             this.#reconnectHandle = undefined;
+          }
+          if (this.#running) {
+            const schedule =
+              this.#dependencies.scheduleReconnect ??
+              ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+            this.#reconnectHandle = schedule(() => {
+              this.#reconnectHandle = undefined;
+              this.#terminalAuth = false;
+              this.#reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+              this.#connect();
+            }, TERMINAL_AUTH_COOLDOWN_MS);
           }
           return;
         }

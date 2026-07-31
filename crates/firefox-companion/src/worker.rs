@@ -37,7 +37,7 @@ use types::{
 use url::Url;
 use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
 
-use crate::bidi::{BidiClient, BidiEvent, BidiTransport};
+use crate::bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -117,6 +117,17 @@ pub trait ExtensionObserver: Send + Sync {
         lease: &AttachmentLease,
         page_id: &PageId,
     ) -> Result<(), CommandError>;
+
+    /// Renew a live attachment lease, returning the extended lease. Observers
+    /// that cannot renew leave leases to expire at their original TTL.
+    async fn renew_lease(&self, lease: &AttachmentLease) -> Result<AttachmentLease, CommandError> {
+        let _ = lease;
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "attachment lease renewal is not supported by this observer",
+            false,
+        ))
+    }
 }
 
 struct CompanionPageBinding {
@@ -167,6 +178,19 @@ impl CompanionExtensionObserver {
 impl ExtensionObserver for CompanionExtensionObserver {
     fn operation_timeout(&self) -> Duration {
         self.timeout
+    }
+
+    async fn renew_lease(&self, lease: &AttachmentLease) -> Result<AttachmentLease, CommandError> {
+        let grant = self
+            .server
+            .renew_grant(&lease.attachment_id)
+            .await
+            .map_err(session_error)?;
+        self.server
+            .registry()
+            .resolve_attachment(&grant.attachment_id)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true))
     }
 
     async fn begin_page_binding(
@@ -277,6 +301,7 @@ pub struct FirefoxCompanionFactory {
     artifacts: Option<ArtifactStore>,
     upload_roots: Vec<PathBuf>,
     downloads_dir: Option<PathBuf>,
+    shared_transport: Option<BidiClient>,
 }
 
 impl FirefoxCompanionFactory {
@@ -296,7 +321,16 @@ impl FirefoxCompanionFactory {
             artifacts: None,
             upload_roots: Vec::new(),
             downloads_dir: None,
+            shared_transport: None,
         }
+    }
+
+    /// Reuse an existing profile-wide BiDi session instead of opening one per
+    /// worker. Firefox's RemoteAgent accepts exactly one active WebDriver
+    /// session, so multi-session runtimes must share the connection.
+    pub fn with_shared_transport(mut self, client: BidiClient) -> Self {
+        self.shared_transport = Some(client);
+        self
     }
 
     pub fn with_artifacts(mut self, artifacts: ArtifactStore) -> Self {
@@ -319,8 +353,12 @@ impl FirefoxCompanionFactory {
 impl WorkerFactory for FirefoxCompanionFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         validate_lease(&self.lease)?;
-        let transport =
-            Arc::new(BidiClient::connect_session(self.bidi_url.clone(), self.timeout).await?);
+        let transport: Arc<dyn BidiTransport> = match &self.shared_transport {
+            Some(client) => Arc::new(SharedBiDiTransport::new(client.clone())),
+            None => {
+                Arc::new(BidiClient::connect_session(self.bidi_url.clone(), self.timeout).await?)
+            }
+        };
         let mut worker = FirefoxCompanionWorker::new(
             WorkerId::new(),
             self.profile_dir.clone(),
@@ -347,7 +385,7 @@ enum PageContext {
 pub struct FirefoxCompanionWorker {
     id: WorkerId,
     profile_dir: PathBuf,
-    lease: AttachmentLease,
+    lease: Arc<std::sync::RwLock<AttachmentLease>>,
     transport: Arc<dyn BidiTransport>,
     observer: Arc<dyn ExtensionObserver>,
     pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
@@ -357,6 +395,7 @@ pub struct FirefoxCompanionWorker {
     shutdown: Arc<WorkerShutdown>,
     cleanup_failure: Arc<TaskMutex<Option<CommandError>>>,
     cleanup_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
+    renewal_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
     session_id: Option<SessionId>,
     artifacts: Option<ArtifactStore>,
     upload_roots: Vec<PathBuf>,
@@ -377,6 +416,7 @@ struct WorkerShutdownResources {
     page_cleanups: Arc<RwLock<HashMap<PageId, OpenPageCleanup>>>,
     cleanup_failure: Arc<TaskMutex<Option<CommandError>>>,
     cleanup_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
+    renewal_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
 }
 
 #[derive(Clone)]
@@ -855,6 +895,11 @@ impl FirefoxCompanionWorker {
             }
         }))));
         let (shutdown_result, _) = watch::channel(None);
+        let lease = Arc::new(std::sync::RwLock::new(lease));
+        let renewal_task = Arc::new(TaskMutex::new(Some(tokio::spawn(renew_lease_task(
+            Arc::clone(&lease),
+            Arc::clone(&observer),
+        )))));
         Ok(Self {
             id,
             profile_dir,
@@ -872,6 +917,7 @@ impl FirefoxCompanionWorker {
             }),
             cleanup_failure,
             cleanup_task,
+            renewal_task,
             session_id: None,
             artifacts: None,
             upload_roots: Vec::new(),
@@ -892,6 +938,7 @@ impl FirefoxCompanionWorker {
             page_cleanups: Arc::clone(&self.page_cleanups),
             cleanup_failure: Arc::clone(&self.cleanup_failure),
             cleanup_task: Arc::clone(&self.cleanup_task),
+            renewal_task: Arc::clone(&self.renewal_task),
         };
         let shutdown = Arc::clone(&self.shutdown);
         let runtime = shutdown.runtime.clone();
@@ -958,17 +1005,25 @@ impl FirefoxCompanionWorker {
         {
             return Err(error);
         }
-        if self.lease.expires_at <= Instant::now() {
+        if self.current_lease().expires_at <= Instant::now() {
             return Err(lease_error());
         }
         Ok(())
     }
 
+    fn current_lease(&self) -> AttachmentLease {
+        self.lease
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn evidence(&self, interaction_path: InteractionPath) -> Evidence {
+        let lease = self.current_lease();
         Evidence::BrowserExecution {
-            engine: engine_name(&self.lease.identity.engine).into(),
-            browser_version: self.lease.identity.browser_version.clone(),
-            profile_id: self.lease.profile_id.0.to_string(),
+            engine: engine_name(&lease.identity.engine).into(),
+            browser_version: lease.identity.browser_version.clone(),
+            profile_id: lease.profile_id.0.to_string(),
             interaction_path: interaction_path_name(interaction_path).into(),
         }
     }
@@ -1005,11 +1060,11 @@ impl FirefoxCompanionWorker {
 
     async fn open_page_owned(&self, page_id: PageId) -> Result<OpenPageGuard, CommandError> {
         self.ensure_active()?;
-        if !self.lease.capabilities.tabs {
+        if !self.current_lease().capabilities.tabs {
             return Err(capability_error("tab creation"));
         }
         let resources = PageOpenResources {
-            lease: self.lease.clone(),
+            lease: self.current_lease(),
             transport: Arc::clone(&self.transport),
             observer: Arc::clone(&self.observer),
             pages: Arc::clone(&self.pages),
@@ -1130,7 +1185,7 @@ impl FirefoxCompanionWorker {
         let observation = self
             .observer
             .observe(
-                &self.lease,
+                &self.current_lease(),
                 page_id,
                 &InspectCommand {
                     selector: None,
@@ -1402,7 +1457,7 @@ impl FirefoxCompanionWorker {
         let page_id = PageId::new();
         let binding = self
             .observer
-            .begin_page_binding(&self.lease, &page_id)
+            .begin_page_binding(&self.current_lease(), &page_id)
             .await?;
         let original_title = capture_context_title(&self.transport, context).await?;
         set_context_binding_title(&self.transport, context, binding.nonce()).await?;
@@ -1741,7 +1796,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        if !self.lease.capabilities.navigate {
+        if !self.current_lease().capabilities.navigate {
             return Err(capability_error("navigation"));
         }
         let context = self.context(page_id).await?;
@@ -1787,7 +1842,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        if !self.lease.capabilities.observe {
+        if !self.current_lease().capabilities.observe {
             return Err(capability_error("extension observation"));
         }
         let context = self.context(page_id).await?;
@@ -1857,7 +1912,10 @@ impl BrowserWorker for FirefoxCompanionWorker {
         } else {
             command
         };
-        let mut observation = self.observer.observe(&self.lease, page_id, command).await?;
+        let mut observation = self
+            .observer
+            .observe(&self.current_lease(), page_id, command)
+            .await?;
         if !command.include_html {
             observation.html = None;
         }
@@ -2828,13 +2886,10 @@ async fn run_worker_shutdown(resources: WorkerShutdownResources) -> Result<(), C
         failures.extend(cleanup.run().await);
     }
     resources.pages.write().await.clear();
-    if let Some(task) = resources
-        .cleanup_task
-        .lock()
-        .expect("cleanup task mutex poisoned")
-        .take()
-    {
-        task.abort();
+    for slot in [&resources.cleanup_task, &resources.renewal_task] {
+        if let Some(task) = slot.lock().expect("worker task mutex poisoned").take() {
+            task.abort();
+        }
     }
     match tokio::time::timeout(
         resources.observer.operation_timeout(),
@@ -3215,6 +3270,44 @@ fn keyboard_actions(context: &str, value: &str, clear_first: bool) -> Value {
             "actions": actions,
         }]
     })
+}
+
+/// Renews the worker's attachment lease at half the remaining TTL, keeping
+/// long-lived sessions usable past the original attachment expiry. A renewal
+/// failure is retried shortly; once the lease actually expires the task stops
+/// and operation-level lease validation reports the expiry.
+async fn renew_lease_task(
+    lease: Arc<std::sync::RwLock<AttachmentLease>>,
+    observer: Arc<dyn ExtensionObserver>,
+) {
+    loop {
+        let wait = {
+            let current = lease
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let remaining = current.expires_at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            remaining.div_f64(2.0).max(Duration::from_millis(250))
+        };
+        tokio::time::sleep(wait).await;
+        let current = lease
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match observer.renew_lease(&current).await {
+            Ok(renewed) => {
+                *lease
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = renewed;
+            }
+            Err(_) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
 }
 
 fn validate_lease(lease: &AttachmentLease) -> Result<(), CommandError> {

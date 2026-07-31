@@ -229,6 +229,65 @@ test("discovery is not a grant and only an explicit UUID grant can route", async
   ]);
 });
 
+test("a grant for a second attachment preserves the first attachment's leases", async () => {
+  const transport = new FakeTransport();
+  const routed: unknown[] = [];
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage(tabId, _message, frameId) {
+      routed.push({ tabId, frameId });
+      return {};
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 4 }]);
+
+  await background.receive({
+    kind: "grant",
+    input: {
+      protocolVersion: 1,
+      attachmentId: "5d0f8d76-5bb2-4b5d-9f2c-0d3f2c0f8a11",
+      profileId: CONNECT_OPTIONS.profileId,
+      expiresAtUnixMs: 61_000,
+      pages: [
+        {
+          targetId: targetId(9, 4),
+          pageId: "6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b",
+        },
+      ],
+    },
+  });
+
+  const action = (attachmentId: string, pageId: string, commandId: string) =>
+    background.receive({
+      kind: "action",
+      input: {
+        protocolVersion: 1,
+        attachmentId,
+        commandId,
+        pageId,
+        operation: "observe",
+        input: {},
+        deadlineUnixMs: 60_000,
+      },
+    });
+  await action(ATTACHMENT_ID, pageId(9, 4), "11111111-1111-4111-8111-111111111111");
+  await action(
+    "5d0f8d76-5bb2-4b5d-9f2c-0d3f2c0f8a11",
+    "6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b",
+    "22222222-2222-4222-8222-222222222222",
+  );
+  assert.deepEqual(routed, [
+    { tabId: 9, frameId: 4 },
+    { tabId: 9, frameId: 4 },
+  ]);
+});
+
 test("manifest installs content receivers in subframes and newly opened blank contexts", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../manifest.json", import.meta.url), "utf8"),

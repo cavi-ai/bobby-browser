@@ -230,6 +230,7 @@ pub struct AppState {
     // process exits.
     principal_permits: Arc<RwLock<HashMap<PrincipalId, Arc<Semaphore>>>>,
     mcp_servers: mcp_http::McpServers,
+    mcp_resources: mcp_gateway::ArtifactResources,
 }
 
 impl AppState {
@@ -252,6 +253,7 @@ impl AppState {
             in_flight_requests: Arc::new(Semaphore::new(interface.max_connections)),
             principal_permits: Arc::new(RwLock::new(HashMap::new())),
             mcp_servers: mcp_http::McpServers::default(),
+            mcp_resources: mcp_gateway::ArtifactResources::default(),
             interface,
         }
     }
@@ -259,6 +261,15 @@ impl AppState {
     pub fn with_boundaries(mut self, events: EventStore, artifacts: ArtifactCatalog) -> Self {
         self.events = events;
         self.artifacts = artifacts;
+        self
+    }
+
+    /// Gives `/v1/mcp` the same trusted artifact boundary `/v1/artifacts` uses. Without
+    /// it the MCP surface falls back to `ArtifactResources::default()`, which carries no
+    /// `ArtifactReader` and therefore denies admission to every screenshot and download
+    /// a tool call produces — the bytes are captured but never retrievable.
+    pub fn with_mcp_resources(mut self, resources: mcp_gateway::ArtifactResources) -> Self {
+        self.mcp_resources = resources;
         self
     }
 }
@@ -628,12 +639,13 @@ where
     let runtime = build_runtime(config.clone()).await?;
     gate.validate_at(now())?;
     let (ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
+    let artifact_store = artifact_store::ArtifactStore::new(
+        &config.browser.artifacts_dir,
+        config.browser.max_artifact_bytes,
+        config.browser.max_screenshot_dimension,
+    );
     let artifact_reader = ArtifactReader::new(
-        artifact_store::ArtifactStore::new(
-            &config.browser.artifacts_dir,
-            config.browser.max_artifact_bytes,
-            config.browser.max_screenshot_dimension,
-        ),
+        artifact_store.clone(),
         ownership,
         config.browser.max_artifact_bytes,
         interface_core::ArtifactOwnershipLimits {
@@ -660,8 +672,20 @@ where
         )
         .with_boundaries(
             events,
-            ArtifactCatalog::new(artifact_reader, config.interface.max_event_retention),
-        ),
+            ArtifactCatalog::new(
+                artifact_reader.clone(),
+                config.interface.max_event_retention,
+            ),
+        )
+        // The same `ArtifactReader` instance backs both surfaces, so one ownership
+        // ledger accounts for artifacts however they were produced.
+        .with_mcp_resources(mcp_gateway::ArtifactResources::production(
+            artifact_reader,
+            artifact_store,
+            config.browser.downloads_dir.clone(),
+            config.http.max_download_bytes,
+            config.interface.max_event_retention,
+        )),
     );
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
     let listener = gate.bind_if_valid_at(now(), || bind_listener(addr)).await?;
