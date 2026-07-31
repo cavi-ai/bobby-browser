@@ -59,6 +59,7 @@ impl RuntimeCommand {
 pub enum IntentCommand {
     Locate(LocateIntent),
     Fill(FillIntent),
+    CompleteForm(CompleteFormIntent),
     SubmitAndVerify(SubmitAndVerifyIntent),
     WaitForState(WaitForStateIntent),
     Follow(FollowIntent),
@@ -70,7 +71,9 @@ impl IntentCommand {
     pub fn class(&self) -> CommandClass {
         match self {
             Self::Locate(_) | Self::WaitForState(_) | Self::Extract(_) => CommandClass::Replayable,
-            Self::Fill(_) | Self::DismissObstruction(_) => CommandClass::Reconciliable,
+            Self::Fill(_) | Self::CompleteForm(_) | Self::DismissObstruction(_) => {
+                CommandClass::Reconciliable
+            }
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
             Self::Follow(intent) => {
                 if intent.boundary {
@@ -108,6 +111,23 @@ pub struct FillIntent {
     #[serde(default)]
     pub hints: IntentHints,
     pub value: FillValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteFormField {
+    pub name: String,
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: IntentHints,
+    pub value: FillValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteFormIntent {
+    pub purpose: String,
+    pub fields: Vec<CompleteFormField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,6 +6,8 @@ use types::{
     WaitForCommand, MAX_INTENT_PURPOSE_BYTES,
 };
 
+const MAX_FORM_FIELDS: usize = 128;
+
 #[derive(Debug, Clone)]
 pub enum IntentPlan {
     Locate {
@@ -14,6 +16,9 @@ pub enum IntentPlan {
     Fill {
         target: TargetSpec,
         value: FillValue,
+    },
+    CompleteForm {
+        fields: Vec<CompleteFormFieldPlan>,
     },
     SubmitAndVerify {
         target: TargetSpec,
@@ -49,6 +54,14 @@ pub struct ExtractFieldPlan {
     pub value: ExtractValueKind,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompleteFormFieldPlan {
+    pub name: String,
+    pub purpose: String,
+    pub target: TargetSpec,
+    pub value: FillValue,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CompileError {
     #[error("intent purpose must not be empty")]
@@ -57,6 +70,10 @@ pub enum CompileError {
     PurposeTooLong,
     #[error("extract intent must include at least one field")]
     NoExtractFields,
+    #[error("complete form intent must include at least one field")]
+    NoFormFields,
+    #[error("complete form intent exceeds {MAX_FORM_FIELDS} fields")]
+    TooManyFormFields,
     #[error("extract field name must not be empty")]
     EmptyFieldName,
     #[error("duplicate extract field name: {0}")]
@@ -77,6 +94,33 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                 target: compile_target(purpose, &intent.hints),
                 value: intent.value.clone(),
             })
+        }
+        IntentCommand::CompleteForm(intent) => {
+            validate_purpose(&intent.purpose)?;
+            if intent.fields.is_empty() {
+                return Err(CompileError::NoFormFields);
+            }
+            if intent.fields.len() > MAX_FORM_FIELDS {
+                return Err(CompileError::TooManyFormFields);
+            }
+            let mut names = HashSet::new();
+            let mut fields = Vec::with_capacity(intent.fields.len());
+            for field in &intent.fields {
+                if field.name.trim().is_empty() {
+                    return Err(CompileError::EmptyFieldName);
+                }
+                if !names.insert(field.name.clone()) {
+                    return Err(CompileError::DuplicateFieldName(field.name.clone()));
+                }
+                let purpose = validate_purpose(&field.purpose)?;
+                fields.push(CompleteFormFieldPlan {
+                    name: field.name.clone(),
+                    purpose: purpose.into(),
+                    target: compile_target(purpose, &field.hints),
+                    value: field.value.clone(),
+                });
+            }
+            Ok(IntentPlan::CompleteForm { fields })
         }
         IntentCommand::SubmitAndVerify(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;

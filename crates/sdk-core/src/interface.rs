@@ -425,6 +425,14 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
         {
             vec![Capability::IntentExecute, Capability::FileUpload]
         }
+        RuntimeCommand::Intent(IntentCommand::CompleteForm(form))
+            if form
+                .fields
+                .iter()
+                .any(|field| matches!(field.value, FillValue::Files { .. })) =>
+        {
+            vec![Capability::IntentExecute, Capability::FileUpload]
+        }
         RuntimeCommand::Intent(_) => vec![Capability::IntentExecute],
     }
 }

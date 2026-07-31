@@ -166,6 +166,8 @@ export type FillValue =
   | { kind: "checked"; checked: boolean }
   | { kind: "files"; paths: string[] };
 export interface FillIntent { purpose: string; hints?: IntentHints; value: FillValue; }
+export interface CompleteFormField { name: string; purpose: string; hints?: IntentHints; value: FillValue; }
+export interface CompleteFormIntent { purpose: string; fields: CompleteFormField[]; }
 export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
 /** boundary mirrors ClickCommand.boundary: set true when activating the control may perform a mutating/side-effecting action. */
@@ -188,6 +190,7 @@ export interface ExtractIntent { purpose: string; fields: ExtractField[]; }
 export type IntentCommand =
   | { kind: "locate"; input: LocateIntent }
   | { kind: "fill"; input: FillIntent }
+  | { kind: "completeForm"; input: CompleteFormIntent }
   | { kind: "submitAndVerify"; input: SubmitAndVerifyIntent }
   | { kind: "waitForState"; input: WaitForStateIntent }
   | { kind: "follow"; input: FollowIntent }

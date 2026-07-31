@@ -9,7 +9,7 @@ use types::{
     WaitForCommand,
 };
 
-use crate::compiler::{compile_intent, ExtractFieldPlan, IntentPlan};
+use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
 use crate::stuck::{never_escalates, StuckKind};
 use crate::verify::{
     compatible, execution_record, execution_record_with_path, summarize_target, verify_fill,
@@ -118,6 +118,9 @@ impl IntentEngine {
             IntentPlan::Fill { target, value } => {
                 execute_fill(intent, page_id, browser, vision, target, value).await
             }
+            IntentPlan::CompleteForm { fields } => {
+                execute_complete_form(page_id, browser, vision, fields).await
+            }
             IntentPlan::SubmitAndVerify {
                 target,
                 expected_state,
@@ -150,6 +153,39 @@ impl IntentEngine {
             }
         }
     }
+}
+
+async fn execute_complete_form(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    fields: Vec<CompleteFormFieldPlan>,
+) -> IntentOutcome {
+    let mut evidence = Vec::new();
+    for field in fields {
+        evidence.push(Evidence::Configuration {
+            name: "completeFormField".into(),
+            value: field.name.clone(),
+        });
+        let intent = IntentCommand::Fill(types::FillIntent {
+            purpose: field.purpose,
+            hints: types::IntentHints::default(),
+            value: field.value.clone(),
+        });
+        match execute_fill(&intent, page_id, browser, vision, field.target, field.value).await {
+            IntentOutcome::Completed {
+                evidence: mut field_evidence,
+            } => evidence.append(&mut field_evidence),
+            IntentOutcome::Failed {
+                error,
+                evidence: mut field_evidence,
+            } => {
+                evidence.append(&mut field_evidence);
+                return IntentOutcome::Failed { error, evidence };
+            }
+        }
+    }
+    IntentOutcome::Completed { evidence }
 }
 
 async fn execute_locate(
