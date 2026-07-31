@@ -153,14 +153,19 @@ if (process.argv[1] && import.meta.filename === process.argv[1]) {
     if (option.startsWith("--") && args[index + 1] && !args[index + 1].startsWith("--")) entries.push([option.slice(2), args[index + 1]]);
     return entries;
   }, []));
+  const releaseInput = {
+    ...(values.version !== undefined ? { version: values.version } : {}),
+    ...(values.tag !== undefined ? { tag: values.tag } : {}),
+    ...(values.commit !== undefined ? { commit: values.commit } : {}),
+    ...(values["source-date-epoch"] !== undefined
+      ? { sourceDateEpoch: Number(values["source-date-epoch"]) }
+      : {}),
+  };
   createProductDocsReleaseArtifact({
     docsRoot: path.resolve(values["docs-root"]),
     outputDirectory: path.resolve(values.output),
-    version: values.version,
-    tag: values.tag,
     repository: values.repository,
-    commit: values.commit,
-    sourceDateEpoch: Number(values["source-date-epoch"]),
+    ...releaseInput,
   }).then((result) => {
     process.stdout.write(`${JSON.stringify(result.envelope)}\n`);
   }).catch((error) => {
