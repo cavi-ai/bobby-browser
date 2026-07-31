@@ -72,7 +72,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "boundary": {"type":"boolean"},
                 "expectedUrl": nullable(string(1, MAX_URL_BYTES))
             }),
-            vec!["sessionId", "pageId", "selector"],
+            vec!["sessionId", "pageId"],
         ),
         "type_text" => (
             json!({
@@ -83,7 +83,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "value": string(0, MAX_STRING_BYTES),
                 "clearFirst": {"type":"boolean"}
             }),
-            vec!["sessionId", "pageId", "selector", "value"],
+            vec!["sessionId", "pageId", "value"],
         ),
         "inspect" => (
             json!({

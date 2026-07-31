@@ -49,6 +49,10 @@ The flat browser tools (`navigate` … `evaluate_javascript`, plus
 deadline are server-generated) and return the same `CommandOutcome` shape as
 `command_execute`, including artifact / accessibility evidence.
 
+`click` and `type_text` accept either a raw `selector` or a semantic `target`.
+Targets returned by `a11y_snapshot` can be passed through unchanged; a legacy
+selector is not required when `target` is present.
+
 Intents and skills are **not** separate MCP tools. Submit intent command
 envelopes only through `command_execute` (nested
 `{ kind: "intent", input: { kind: "locate" \| … } }`). Nested capabilities such
