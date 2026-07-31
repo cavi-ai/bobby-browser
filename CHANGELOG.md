@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fill / completeForm verification fails closed on native HTML constraint validity (`required`, `pattern`, length, range, …) and retains the browser validation message in evidence.
 - Add verified `completeForm` intent (ordered uniquely named fill fields; no implicit submit).
 - Add `FillValue` kind `checked` for reliable checkbox/radio semantic fills on Chromium and Firefox.
 - Add the `accessibilitySnapshot` primitive (MCP `a11y_snapshot`): a compact `{role, name, children}` tree capped at 2048 nodes, from Chrome's full AX tree on Chromium and the companion extension's DOM walker on Firefox.

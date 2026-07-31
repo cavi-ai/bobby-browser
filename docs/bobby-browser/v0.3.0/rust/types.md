@@ -7,9 +7,10 @@ documentedVersion: 0.3.0
 **Tier: Supported**
 
 Shared wire types for HTTP, MCP, and embed paths: capabilities, command
-envelopes (including primitives such as `activatePage` and intents such as
-`CompleteForm` / `Fill`), session/page state, recovery types, and
-`CURRENT_INTERFACE_VERSION` (`2026-07-23`).
+envelopes (including primitives such as `activatePage` /
+`AccessibilitySnapshot` and intents such as `CompleteForm` / `Fill`),
+session/page state, recovery types, and `CURRENT_INTERFACE_VERSION`
+(`2026-07-23`).
 
 ```bash
 cargo add types

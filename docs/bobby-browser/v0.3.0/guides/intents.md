@@ -105,12 +105,31 @@ may be selected (`checked: true`) but cannot be unchecked directly
 (`checked: false` fails closed). Non-checkable targets must not use
 `kind: "checked"`.
 
-Fill verification also reads the browser's native constraint-validity state. A value that was typed successfully but violates `required`, `pattern`, length, range, or other browser constraints fails with `verificationFailed`; the bounded browser validation message remains in evidence so an agent can correct only the rejected field without rewriting accepted values.
 When `role` and exact `nearText` are supplied, `nearText` is the control's
 accessible name while `purpose` remains the agent's task description. This
 avoids requiring natural task phrasing to equal a page label. A fill completes
 only when the worker returns value/upload postcondition evidence; an action
 without verification evidence fails closed.
+
+### Native constraint validity
+
+After a successful type/select/check, fill verification also reads the
+browser's native constraint-validity state (`willValidate` /
+`validity.valid`). A value that was committed but violates `required`,
+`pattern`, length, range, type, or other HTML constraints fails closed with
+`verificationFailed`.
+
+Evidence carries:
+
+| Configuration key | Meaning |
+|---|---|
+| `formControlValid` | `"true"` / `"false"` |
+| `formControlValidationMessage` | Browser message, bounded (≤1024 chars) |
+
+Use the message to correct **only** the rejected field (especially inside
+`completeForm`, which stops at the first failure and keeps prior field
+evidence). Non-validating controls (`willValidate === false`) are treated as
+valid for this check.
 
 ### CompleteForm (Reconciliable)
 

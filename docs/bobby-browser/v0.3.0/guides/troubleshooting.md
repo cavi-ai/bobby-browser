@@ -93,6 +93,17 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
   successful fields plus the failing field. Fix that field (or hints), then
   resubmit the whole form intent under a new attempt / idempotency key.
   Duplicate or empty field `name`s are rejected before dispatch.
+- Native HTML constraints: if evidence has `formControlValid: "false"`, read
+  `formControlValidationMessage` and correct that value. Do not treat a
+  committed DOM value as success when constraint validity failed.
+
+## Accessibility snapshot
+
+- Primitive `accessibilitySnapshot` / MCP `a11y_snapshot` needs only
+  `browser:mutate`.
+- Default `maxNodes` is 256 (clamp 1…2048). Large pages set `truncated: true`
+  — raise `maxNodes` or narrow the viewport / DOM before retrying.
+- Guide: [Accessibility snapshot](accessibility-snapshot.md).
 
 ## Error catalog (`InterfaceErrorCode`)
 
