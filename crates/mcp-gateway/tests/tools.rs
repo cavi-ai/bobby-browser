@@ -1156,6 +1156,17 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         json!(["sessionId", "pageId", "value"]),
         "semantic snapshot targets must not require a legacy CSS selector"
     );
+    let upload_files = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "upload_files")
+        .unwrap();
+    assert_eq!(
+        upload_files["inputSchema"]["required"],
+        json!(["sessionId", "pageId", "paths"]),
+        "semantic snapshot targets must not require a legacy CSS selector"
+    );
 
     let mutate_only = fixture_server(vec![Capability::BrowserMutate]).await;
     let listed = mutate_only
