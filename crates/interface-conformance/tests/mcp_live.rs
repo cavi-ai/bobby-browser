@@ -19,9 +19,10 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
     AccessibilityNode, AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, Evidence, FillValue,
-    InspectCommand, IntentCommand, IntentHints, NavigateCommand, PrimitiveCommand, RuntimeCommand,
-    ScreenshotMode, TextMatch, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, Evidence, FillIntent,
+    FillValue, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, TextMatch, UploadFilesCommand, WaitUntil, WorkflowCheckpoint,
+    WorkflowId,
 };
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -173,6 +174,7 @@ async fn prove_snapshot_target_round_trip(
     assert_eq!(phones.len(), 2);
     assert_eq!(phones[0].target.as_ref().unwrap().ordinal, Some(0));
     assert_eq!(phones[1].target.as_ref().unwrap().ordinal, Some(1));
+    let work_phone_target = phones[1].target.as_ref().unwrap().clone();
     let continue_target = actionable_nodes_named(before_nodes, "Continue")
         .into_iter()
         .next()
@@ -190,19 +192,31 @@ async fn prove_snapshot_target_round_trip(
         .unwrap()
         .clone();
 
-    tool(
-        server,
-        &mut id,
-        "type_text",
-        json!({
-            "sessionId": session_id,
-            "pageId": page_id,
-            "target": phones[1].target,
-            "value": "555-0102",
-            "clearFirst": true
-        }),
-    )
-    .await;
+    let fill = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: types::SessionId(uuid::Uuid::parse_str(session_id).unwrap()),
+        page_id: Some(types::PageId(uuid::Uuid::parse_str(page_id).unwrap())),
+        deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+        command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
+            purpose: "enter the work phone".into(),
+            hints: IntentHints {
+                role: Some(work_phone_target.role),
+                near_text: Some(TextMatch::Exact(work_phone_target.accessible_name)),
+                ordinal: work_phone_target.ordinal,
+                ..IntentHints::default()
+            },
+            value: FillValue::Text {
+                text: "555-0102".into(),
+                clear_first: true,
+            },
+        })),
+    };
+    let fill: CommandOutcome =
+        serde_json::from_value(command(server, &mut id, &fill).await).unwrap();
+    completed(&fill);
 
     tool(
         server,
