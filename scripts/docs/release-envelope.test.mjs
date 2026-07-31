@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createReleaseEnvelope } from "./create-release-envelope.mjs";
+import { DOCUMENTED_VERSION } from "./lib.mjs";
+
+const VERSION = DOCUMENTED_VERSION;
+const TAG = `v${DOCUMENTED_VERSION}`;
 
 test("creates the exact cavi-home product-docs envelope", () => {
   assert.deepEqual(createReleaseEnvelope({
-    version: "0.2.1",
-    tag: "v0.2.1",
+    version: VERSION,
+    tag: TAG,
     repository: "cavi-ai/bobby-browser",
     commit: "a".repeat(40),
     artifactSha256: "b".repeat(64),
@@ -14,12 +18,12 @@ test("creates the exact cavi-home product-docs envelope", () => {
     schemaVersion: 1,
     slug: "bobby-browser",
     kind: "product-docs",
-    version: "0.2.1",
-    tag: "v0.2.1",
+    version: VERSION,
+    tag: TAG,
     repository: "cavi-ai/bobby-browser",
     commit: "a".repeat(40),
     artifact: {
-      url: "https://github.com/cavi-ai/bobby-browser/releases/download/v0.2.1/bobby-browser-docs-v0.2.1.tar.gz",
+      url: `https://github.com/cavi-ai/bobby-browser/releases/download/${TAG}/bobby-browser-docs-${TAG}.tar.gz`,
       sha256: "b".repeat(64),
       format: "tar.gz",
     },
@@ -28,8 +32,8 @@ test("creates the exact cavi-home product-docs envelope", () => {
 
 test("rejects mismatched tags, repositories, commits, and digests", () => {
   const valid = {
-    version: "0.2.1",
-    tag: "v0.2.1",
+    version: VERSION,
+    tag: TAG,
     repository: "cavi-ai/bobby-browser",
     commit: "a".repeat(40),
     artifactSha256: "b".repeat(64),

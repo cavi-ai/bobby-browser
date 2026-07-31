@@ -23,26 +23,27 @@ path = "src/bin/cli.rs"
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+clap.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-artifact-store = { path = "../artifact-store", version = "0.2.1" }
+artifact-store = { path = "../artifact-store", version = "0.3.0" }
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-broker = { path = "../broker", version = "0.2.1" }
-config = { path = "../config", version = "0.2.1" }
-companion-protocol = { path = "../companion-protocol", version = "0.2.1" }
-companion-core = { path = "../companion-core", version = "0.2.1" }
-firefox-companion = { path = "../firefox-companion", version = "0.2.1" }
-observability = { path = "../observability", version = "0.2.1" }
+broker = { path = "../broker", version = "0.3.0" }
+config = { path = "../config", version = "0.3.0" }
+companion-protocol = { path = "../companion-protocol", version = "0.3.0" }
+companion-core = { path = "../companion-core", version = "0.3.0" }
+firefox-companion = { path = "../firefox-companion", version = "0.3.0" }
+observability = { path = "../observability", version = "0.3.0" }
 libc = "0.2"
 serde_json.workspace = true
 serde.workspace = true
-types = { path = "../types", version = "0.2.1" }
+types = { path = "../types", version = "0.3.0" }
 uuid.workspace = true
 url.workspace = true
-worker-pool = { path = "../worker-pool", version = "0.2.1" }
+worker-pool = { path = "../worker-pool", version = "0.3.0" }
 
 [dev-dependencies]
 tempfile.workspace = true

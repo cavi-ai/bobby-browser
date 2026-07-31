@@ -42,6 +42,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "anstream"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d"
+dependencies = [
+ "anstyle",
+ "anstyle-parse",
+ "anstyle-query",
+ "anstyle-wincon",
+ "colorchoice",
+ "is_terminal_polyfill",
+ "utf8parse",
+]
+
+[[package]]
+name = "anstyle"
+version = "1.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
+
+[[package]]
+name = "anstyle-parse"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e"
+dependencies = [
+ "utf8parse",
+]
+
+[[package]]
+name = "anstyle-query"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "anstyle-wincon"
+version = "3.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+dependencies = [
+ "anstyle",
+ "once_cell_polyfill",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -49,7 +99,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "artifact-store"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -231,13 +281,14 @@ dependencies = [
 
 [[package]]
 name = "bobby-browser"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "artifact-store",
  "async-trait",
  "broker",
  "chrono",
+ "clap",
  "companion-core",
  "companion-protocol",
  "config",
@@ -290,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "broker"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -375,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "cdp-gateway"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -427,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "checkpoint-store"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde_json",
@@ -511,6 +562,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap"
+version = "4.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+dependencies = [
+ "clap_builder",
+ "clap_derive",
+]
+
+[[package]]
+name = "clap_builder"
+version = "4.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "clap_lex",
+ "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d012d2b9d65aca7f18f4d9878a045bc17899bba951561ba5ec3c2ba1eed9a061"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
+name = "clap_lex"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -518,6 +609,12 @@ checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "colorchoice"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
@@ -531,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "companion-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum",
  "companion-protocol",
@@ -550,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "companion-protocol"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -577,7 +674,7 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "config"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -778,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "dom-engine"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "regex",
@@ -862,7 +959,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "firefox-companion"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -1399,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "intent-engine"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "dom-engine",
@@ -1413,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "interface-conformance"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -1435,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "interface-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -1460,6 +1557,12 @@ name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+
+[[package]]
+name = "is_terminal_polyfill"
+version = "1.70.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itoa"
@@ -1528,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "js-engine"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1652,7 +1755,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-gateway"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -1730,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "network-engine"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cookie",
@@ -1781,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "observability"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "config",
@@ -1800,6 +1903,12 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "once_cell_polyfill"
+version = "1.70.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openssl"
@@ -1852,7 +1961,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "page-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -2206,7 +2315,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "release-gates"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "companion-protocol",
  "libc",
@@ -2316,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-tests"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -2514,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "sdk-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "artifact-store",
  "async-trait",
@@ -2669,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "session-manager"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2767,7 +2876,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2829,6 +2938,12 @@ dependencies = [
  "proc-macro2",
  "quote",
 ]
+
+[[package]]
+name = "strsim"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "subtle"
@@ -2904,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "test-site"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum",
  "brotli",
@@ -3316,7 +3431,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "types"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -3368,6 +3483,12 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
+
+[[package]]
+name = "utf8parse"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
@@ -3732,7 +3853,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worker-pool"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "artifact-store",
@@ -3761,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "workflow-journal"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",

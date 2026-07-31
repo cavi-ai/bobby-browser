@@ -1381,7 +1381,8 @@ async fn unsupported_protocols(harness: &ChromeRuntimeHarness) -> SecurityResult
 }
 
 async fn idempotency_mismatch() -> SecurityResult {
-    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let store: IdempotencyStore =
+        IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
     let principal = PrincipalId::from_uuid(uuid::Uuid::new_v4());
     let key = IdempotencyKey::try_from("release-security-idempotency")
         .map_err(|error| error.to_string())?;

@@ -12,24 +12,24 @@ default = []
 test-support = ["skill-runtime/test-support"]
 
 [dependencies]
-artifact-store = { path = "../artifact-store", version = "0.2.1" }
+artifact-store = { path = "../artifact-store", version = "0.3.0" }
 async-trait.workspace = true
-checkpoint-store = { path = "../checkpoint-store", version = "0.2.1" }
+checkpoint-store = { path = "../checkpoint-store", version = "0.3.0" }
 chrono.workspace = true
-companion-protocol = { path = "../companion-protocol", version = "0.2.1" }
-dom-engine = { path = "../dom-engine", version = "0.2.1" }
-intent-engine = { path = "../intent-engine", version = "0.2.1" }
-network-engine = { path = "../network-engine", version = "0.2.1" }
+companion-protocol = { path = "../companion-protocol", version = "0.3.0" }
+dom-engine = { path = "../dom-engine", version = "0.3.0" }
+intent-engine = { path = "../intent-engine", version = "0.3.0" }
+network-engine = { path = "../network-engine", version = "0.3.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-skill-runtime = { path = "../skill-runtime", version = "0.2.1" }
+skill-runtime = { path = "../skill-runtime", version = "0.3.0" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.2.1" }
-worker-pool = { path = "../worker-pool", version = "0.2.1" }
-workflow-journal = { path = "../workflow-journal", version = "0.2.1" }
+types = { path = "../types", version = "0.3.0" }
+worker-pool = { path = "../worker-pool", version = "0.3.0" }
+workflow-journal = { path = "../workflow-journal", version = "0.3.0" }
 
 [dev-dependencies]
 tempfile.workspace = true

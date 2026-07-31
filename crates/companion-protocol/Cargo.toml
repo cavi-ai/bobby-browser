@@ -10,4 +10,4 @@ publish = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-types = { path = "../types", version = "0.2.1" }
+types = { path = "../types", version = "0.3.0" }
