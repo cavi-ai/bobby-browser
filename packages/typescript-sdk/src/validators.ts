@@ -241,8 +241,18 @@ function isAccessibilityNode(value: unknown, depth = 0): boolean {
     && depth <= 32
     && (value.role === undefined || isString(value.role))
     && (value.name === undefined || isString(value.name))
+    && optional(value, "value", isString)
+    && optional(value, "description", isString)
+    && optional(value, "required", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "disabled", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "readOnly", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "invalid", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "checked", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "autocomplete", isString)
+    && optional(value, "valueMin", isString)
+    && optional(value, "valueMax", isString)
     && (value.children === undefined || (Array.isArray(value.children) && value.children.every((child) => isAccessibilityNode(child, depth + 1))))
-    && Object.keys(value).every((key) => key === "role" || key === "name" || key === "children");
+    && Object.keys(value).every((key) => ["role", "name", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "valueMin", "valueMax", "children"].includes(key));
 }
 
 function isExecutionRecord(value: unknown): value is ExecutionRecord {
