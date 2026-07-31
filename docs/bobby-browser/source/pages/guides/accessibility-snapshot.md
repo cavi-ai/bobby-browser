@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Accessibility snapshot
@@ -46,28 +46,50 @@ When the live tree exceeds the budget, evidence sets `truncated: true`.
 
 ## Evidence
 
-Successful outcomes include `Evidence.AccessibilitySnapshot`:
+Successful outcomes include `Evidence.accessibilitySnapshot`:
 
 ```ts
 {
   kind: "accessibilitySnapshot",
   pageId: string,
-  nodes: Array<{ role?: string; name?: string; children?: … }>,
+  nodes: AccessibilityNode[],
   truncated: boolean,
 }
 ```
 
-Each node is `{ role, name, children }` only — no DOM selectors, bounds, or
-raw HTML.
+### Node shape
+
+Every node is still a compact `{ role, name, children? }` tree — no DOM
+selectors, bounds, or raw HTML. Form controls may also carry structured state
+(all optional; omitted when unknown):
+
+| Field | Wire | Meaning |
+|---|---|---|
+| `value` | string | Current control value (redacted when sensitive) |
+| `description` | string | Accessible description when present |
+| `required` | boolean | Required constraint |
+| `disabled` | boolean | Disabled |
+| `readOnly` | boolean | Read-only |
+| `invalid` | boolean | Currently invalid |
+| `checked` | boolean | Checkbox / radio checked state |
+| `autocomplete` | string | Autocomplete token |
+| `valueMin` / `valueMax` | string | Numeric / range bounds when exposed |
+
+Sensitive values (password controls, masked AX values, companion secret
+heuristics) serialize as `"[redacted]"` rather than the live contents.
+
+Use the tree to plan `fill` / `completeForm` targeting (`role` + exact
+`nearText` from `name`), then verify with intent evidence — do not treat the
+snapshot alone as a postcondition proof.
 
 ## Engine notes
 
 - **Chromium** — normalizes Chrome's full accessibility tree; ignored nodes
   are skipped and children re-parented; unnamed generic containers are kept
-  only for structure.
-- **Firefox** — companion extension DOM walker; hidden-aware; values that look
-  like secrets (for example password / secret field contents) are redacted
-  from names.
+  only for structure; form properties come from AX attributes.
+- **Firefox** — companion extension DOM walker; hidden-aware; form attributes
+  and validity-related flags are projected into the same node shape; secret-
+  like names/values are redacted.
 
 ## Next
 
