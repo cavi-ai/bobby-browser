@@ -120,7 +120,30 @@ async fn mcp_requires_bearer_and_rejects_get() {
         .oneshot(request)
         .await
         .expect("router accepts get to /v1/mcp");
-    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn mcp_get_opens_a_keepalive_sse_stream_for_authenticated_principals() {
+    let (app, _authority, admin_bearer) = app_with_admin(4).await;
+    let bearer = issue_bearer(&app, &admin_bearer, PRINCIPAL_A, &["session:read"]).await;
+    let request = Request::get("/v1/mcp")
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .expect("get request builds");
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router accepts get to /v1/mcp");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
 }
 
 #[tokio::test]
