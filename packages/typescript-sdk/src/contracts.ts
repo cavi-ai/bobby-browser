@@ -163,6 +163,7 @@ export interface LocateIntent { purpose: string; hints?: IntentHints; }
 export type FillValue =
   | { kind: "text"; text: string; clearFirst?: boolean }
   | { kind: "select"; option: string }
+  | { kind: "checked"; checked: boolean }
   | { kind: "files"; paths: string[] };
 export interface FillIntent { purpose: string; hints?: IntentHints; value: FillValue; }
 export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }

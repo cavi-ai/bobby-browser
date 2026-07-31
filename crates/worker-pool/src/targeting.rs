@@ -165,6 +165,22 @@ impl ResolvedTarget {
             .await
     }
 
+    pub async fn is_checkable(&self, page: &Page) -> Result<bool, CommandError> {
+        self.eval(
+            page,
+            "return el instanceof HTMLInputElement && (el.type==='checkbox'||el.type==='radio')",
+        )
+        .await
+    }
+
+    pub async fn set_checked(&self, page: &Page, checked: bool) -> Result<bool, CommandError> {
+        let checked = if checked { "true" } else { "false" };
+        self.eval(
+            page,
+            &format!("if(el.type==='radio'&&!{checked})throw new Error('radio controls cannot be unchecked directly');if(el.checked!=={checked}){{el.click()}}return el.checked"),
+        )
+        .await
+    }
     /// Select a native option by exact value and reread the committed value.
     pub async fn select_option(&self, page: &Page, value: &str) -> Result<String, CommandError> {
         let value = serde_json::to_string(value).map_err(|error| {

@@ -122,6 +122,9 @@ pub enum FillValue {
     Select {
         option: String,
     },
+    Checked {
+        checked: bool,
+    },
     Files {
         paths: Vec<String>,
     },
