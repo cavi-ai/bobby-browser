@@ -6,6 +6,7 @@ use crate::{AttemptId, CommandId, PageId};
 /// One node of a compact accessibility tree as returned by the
 /// `accessibilitySnapshot` primitive on any engine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccessibilityNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]

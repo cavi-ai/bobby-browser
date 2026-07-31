@@ -457,6 +457,7 @@ pub struct AccessibilitySnapshotCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClickAndWaitForPopupCommand {
     pub selector: String,

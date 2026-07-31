@@ -42,24 +42,22 @@ fn hand_kinds(def: &str) -> BTreeSet<String> {
 
 #[test]
 fn primitive_command_variants_match_the_wire_type() {
-    let generated = schemars_kinds(&serde_json::to_value(schemars::schema_for!(
-        types::PrimitiveCommand
-    )).unwrap());
+    let generated = schemars_kinds(
+        &serde_json::to_value(schemars::schema_for!(types::PrimitiveCommand)).unwrap(),
+    );
     assert_eq!(generated, hand_kinds("PrimitiveCommand"));
 }
 
 #[test]
 fn intent_command_variants_match_the_wire_type() {
-    let generated = schemars_kinds(&serde_json::to_value(schemars::schema_for!(
-        types::IntentCommand
-    )).unwrap());
+    let generated =
+        schemars_kinds(&serde_json::to_value(schemars::schema_for!(types::IntentCommand)).unwrap());
     assert_eq!(generated, hand_kinds("IntentCommand"));
 }
 
 #[test]
 fn evidence_variants_match_the_wire_type() {
-    let generated = schemars_kinds(&serde_json::to_value(schemars::schema_for!(
-        types::Evidence
-    )).unwrap());
+    let generated =
+        schemars_kinds(&serde_json::to_value(schemars::schema_for!(types::Evidence)).unwrap());
     assert_eq!(generated, hand_kinds("Evidence"));
 }
