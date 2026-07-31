@@ -15,6 +15,7 @@ const MAX_NAME_BYTES: usize = 128;
 const MAX_POSTCONDITION_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "skill", content = "action", rename_all = "camelCase")]
 pub enum SkillCommand {
     Ghost(SkillGhostCommand),
@@ -22,6 +23,7 @@ pub enum SkillCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SkillGhostCommand {
     On,
@@ -30,6 +32,7 @@ pub enum SkillGhostCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SkillZigZagZigCommand {
     Run,
@@ -38,6 +41,7 @@ pub enum SkillZigZagZigCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SkillCapability {
     EngineSelection,
@@ -50,6 +54,7 @@ pub enum SkillCapability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SkillFailure {
     UnsupportedCapability,
@@ -64,6 +69,7 @@ pub enum SkillFailure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SkillTactic {
     ObserveAgain,
@@ -76,6 +82,7 @@ pub enum SkillTactic {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum SkillBrowserEngine {
     Firefox,
@@ -193,6 +200,7 @@ pub struct SkillProfile {
 }
 
 #[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SkillProfileWire {
     schema_version: u16,
@@ -264,6 +272,7 @@ impl Serialize for SkillProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     rename_all = "camelCase",
     deny_unknown_fields,
@@ -280,6 +289,7 @@ pub struct SkillDecision {
 }
 
 #[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SkillDecisionWire {
     tactic: SkillTactic,
@@ -366,6 +376,7 @@ impl Serialize for SkillDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
@@ -395,6 +406,7 @@ pub enum SkillOutcome {
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 enum SkillOutcomeWire {
     Applied {
         evidence: Vec<SkillEvidenceRef>,
@@ -527,6 +539,7 @@ impl TryFrom<SkillOutcomeWire> for SkillOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     rename_all = "camelCase",
     deny_unknown_fields,
@@ -538,6 +551,7 @@ pub struct SkillEvidenceRef {
 }
 
 #[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SkillEvidenceRefWire {
     artifact_id: String,
@@ -705,6 +719,7 @@ struct SkillIssuedDecisionWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillCommandIdentity {
     pub command_id: CommandId,
