@@ -27,6 +27,10 @@ impl RuntimeInterface for RecordingRuntime {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(vec![])
     }
+    async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
     async fn create_session(
         &self,
         _: RequestContext,

@@ -20,6 +20,7 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | GET | `/v1/runtime` | Runtime info | `session:read` |
 | GET | `/v1/sessions` | List sessions | `session:read` |
 | POST | `/v1/sessions` | Create session | `session:write` |
+| DELETE | `/v1/sessions/{sessionId}` | Delete session (204) | `session:write` |
 | POST | `/v1/pages` | Open page | `page:write` |
 | POST | `/v1/commands` | Submit command envelope | `browser:mutate` (+ nested caps for upload / download / JS / intents) |
 | POST | `/v1/checkpoints` | Persist workflow checkpoint | `recovery:write` |

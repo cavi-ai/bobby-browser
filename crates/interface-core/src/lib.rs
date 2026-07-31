@@ -9,7 +9,8 @@ use chrono::Utc;
 use types::{
     Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
     InterfaceError, InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState,
-    RecoveryDecision, RequestContext, RuntimeInfo, SessionState, WorkflowCheckpoint, WorkflowId,
+    RecoveryDecision, RequestContext, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint,
+    WorkflowId,
 };
 
 pub use artifacts::{
@@ -36,6 +37,7 @@ pub type InterfaceResult<T> = Result<T, InterfaceError>;
 pub trait RuntimeInterface: Send + Sync {
     async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo>;
     async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>>;
+    async fn delete_session(&self, ctx: RequestContext, session: SessionId) -> InterfaceResult<()>;
     async fn create_session(
         &self,
         ctx: RequestContext,

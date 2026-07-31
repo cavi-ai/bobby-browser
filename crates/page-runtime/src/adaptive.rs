@@ -468,6 +468,7 @@ async fn browser_execute(
         PrimitiveCommand::OpenPage(command) => lease.worker().open_page_command(command).await?,
         PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await?,
         PrimitiveCommand::ClosePage(command) => lease.worker().close_page_command(command).await?,
+        PrimitiveCommand::ActivatePage(command) => lease.worker().activate_page(command).await?,
         PrimitiveCommand::ClickAndWaitForPopup(command) => {
             lease
                 .worker()

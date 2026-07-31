@@ -141,6 +141,17 @@ impl SessionOwnershipRecorder {
         Ok(())
     }
 
+    /// Releases a session previously recorded by this principal. Releasing a
+    /// session the principal does not own is a no-op, so callers can release
+    /// after delete without re-checking ownership first.
+    pub fn release_authenticated_session(&self, principal: &PrincipalId, session: &SessionId) {
+        if let Ok(mut state) = self.inner.state.write() {
+            if state.owners.get(session) == Some(principal) {
+                state.owners.remove(session);
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn inject_finalize_failure_once_for_test(&self) {
         if let Ok(mut state) = self.inner.state.write() {

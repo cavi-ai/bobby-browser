@@ -2773,3 +2773,33 @@ async fn worker_renews_attachment_lease_before_expiry() {
     .expect("attachment lease was not renewed before expiry");
     drop(worker);
 }
+
+#[tokio::test]
+async fn activate_page_sends_bidi_activation_for_the_pages_context() {
+    let bidi = FakeBidi::new(vec![]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    worker
+        .activate_page(&types::ActivatePageCommand {
+            page_id: page_id.clone(),
+        })
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    assert!(
+        calls.iter().any(|call| {
+            call.method == "browsingContext.activate" && call.params.get("context").is_some()
+        }),
+        "{calls:?}"
+    );
+
+    let missing = worker
+        .activate_page(&types::ActivatePageCommand {
+            page_id: PageId::new(),
+        })
+        .await;
+    assert!(missing.is_err());
+}
