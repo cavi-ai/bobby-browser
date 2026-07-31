@@ -160,6 +160,33 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    pub async fn is_select(&self, page: &Page) -> Result<bool, CommandError> {
+        self.eval(page, "return el instanceof HTMLSelectElement")
+            .await
+    }
+
+    /// Select a native option by exact value and reread the committed value.
+    pub async fn select_option(&self, page: &Page, value: &str) -> Result<String, CommandError> {
+        let value = serde_json::to_string(value).map_err(|error| {
+            target_error(
+                ErrorCode::InvalidRequest,
+                format!("invalid select value: {error}"),
+            )
+        })?;
+        let script = format!(
+            "if (!(el instanceof HTMLSelectElement)) throw new Error('resolved control is not a select'); const matches=[...el.options].filter(option=>option.value==={value}); if(matches.length!==1||matches[0].disabled) throw new Error('select option is missing, ambiguous, or disabled'); el.value={value}; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return el.value"
+        );
+        if let Some(element) = &self.native {
+            let selected = element
+                .call_js_fn_by_value(format!("function() {{ const el=this; {script}; }}"), false)
+                .await
+                .map_err(cdp_error)?;
+            return serde_json::from_value(selected)
+                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error));
+        }
+        self.eval(page, &script).await
+    }
+
     pub async fn screenshot(&self, page: &Page) -> Result<Vec<u8>, CommandError> {
         let page = self.execution_page(page);
         if let Some(element) = &self.native {
@@ -747,7 +774,10 @@ fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
     let prefix = serde_json::to_string(&prefix)
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
     Ok(format!(
-        r#"let n=0,out=[]; const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>x.innerText.trim()).join(' '):null;const role=el.getAttribute('role')||({{BUTTON:'button',A:'link',IFRAME:'iframe',INPUT:el.type==='checkbox'?'checkbox':'textbox',TEXTAREA:'textbox',SELECT:'combobox'}}[el.tagName]||null);const name=el.getAttribute('aria-label')||label||el.innerText?.trim()||el.value||null;const attributes={{}};for(const a of el.attributes)if(a.name==='name'||a.name==='type'||a.name==='src'||a.name==='href'||a.name==='value'||a.name.startsWith('data-'))attributes[a.name]=a.value;const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
+        r#"let n=0,out=[];
+const labelledBy=el=>(el.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>el.ownerDocument.getElementById(id)?.innerText?.trim()||'').filter(Boolean).join(' ')||null;
+const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
+const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>x.innerText.trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||el.innerText?.trim()||null;const attributes={{}};for(const a of el.attributes)if(['name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
     ))
 }
 

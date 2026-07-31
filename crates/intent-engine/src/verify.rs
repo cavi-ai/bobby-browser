@@ -103,7 +103,8 @@ pub fn compatible(value: &FillValue, candidate: &Candidate) -> bool {
 }
 
 /// Verify fill postconditions from worker evidence when present.
-/// Missing evidence is treated as unverified-but-ok (act already succeeded).
+/// Missing evidence is a verification failure: an action completing is not
+/// proof that a reactive application accepted or retained the value.
 pub fn verify_fill(value: &FillValue, evidence: &[Evidence]) -> Result<(), String> {
     match value {
         FillValue::Text { text, .. } => verify_typed_value(text, evidence),
@@ -123,7 +124,7 @@ fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), Strin
         })
         .collect::<Vec<_>>();
     if observed.is_empty() {
-        return Ok(());
+        return Err("missing typed-value evidence".into());
     }
     if observed
         .iter()
@@ -143,7 +144,7 @@ fn verify_upload_paths(expected: &[String], evidence: &[Evidence]) -> Result<(),
         _ => None,
     });
     let Some(observed) = observed else {
-        return Ok(());
+        return Err("missing upload evidence".into());
     };
     if observed.len() != expected.len() {
         return Err(format!(

@@ -116,6 +116,7 @@ pub enum FillValue {
     Text {
         text: String,
         #[serde(default)]
+        #[serde(rename = "clearFirst")]
         clear_first: bool,
     },
     Select {

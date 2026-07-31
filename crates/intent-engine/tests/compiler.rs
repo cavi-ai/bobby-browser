@@ -69,6 +69,29 @@ fn compile_fill_maps_purpose_to_text_when_role_absent() {
 }
 
 #[test]
+fn compile_fill_uses_near_text_as_the_control_name_without_conflating_task_purpose() {
+    let plan = compile_intent(&IntentCommand::Fill(FillIntent {
+        purpose: "enter the applicant email".into(),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            near_text: Some(TextMatch::Exact("Email address".into())),
+            ..IntentHints::default()
+        },
+        value: FillValue::Text {
+            text: "ada@example.test".into(),
+            clear_first: true,
+        },
+    }))
+    .expect("compile");
+    let IntentPlan::Fill { target, .. } = plan else {
+        panic!("expected Fill plan");
+    };
+    assert_eq!(target.role.as_deref(), Some("textbox"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Email address"));
+    assert_eq!(target.text, None);
+}
+
+#[test]
 fn compile_follow_carries_target_expected_destination_and_boundary_flag() {
     let plan = compile_intent(&IntentCommand::Follow(FollowIntent {
         purpose: "Details".into(),

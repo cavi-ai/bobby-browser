@@ -285,6 +285,37 @@ async fn fill_select_types_option_via_type_text() {
 }
 
 #[tokio::test]
+async fn fill_fails_when_the_worker_returns_no_postcondition_evidence() {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Email")]),
+        calls: Arc::new(Mutex::new(CallLog::default())),
+        type_text_evidence: Vec::new(),
+        upload_evidence: Vec::new(),
+    };
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Email",
+            Some("textbox"),
+            FillValue::Text {
+                text: "ada@example.test".into(),
+                clear_first: true,
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        IntentOutcome::Failed { error, .. }
+            if error.code == ErrorCode::VerificationFailed
+                && error.message.contains("missing typed-value evidence")
+    ));
+}
+
+#[tokio::test]
 async fn fill_files_uploads_and_verifies() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = FakeBrowser {
