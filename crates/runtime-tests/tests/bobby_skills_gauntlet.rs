@@ -29,11 +29,11 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
-    ElementState, Evidence, FillIntent, FillValue, InspectCommand, IntentCommand, IntentHints,
-    NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId,
-    SkillBrowserEngine, SkillCapability, SkillFailure, SkillOutcome, SkillProfileRequest,
-    SkillSessionState, TargetSpec, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
-    WorkflowId,
+    CompleteFormField, CompleteFormIntent, ElementState, Evidence, FillIntent, FillValue,
+    InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, SessionId, SkillBrowserEngine, SkillCapability, SkillFailure,
+    SkillOutcome, SkillProfileRequest, SkillSessionState, TargetSpec, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 use worker_pool::{
@@ -697,42 +697,72 @@ impl ProductionBobby {
                     .await?;
             }
             "semantic-form" => {
-                self.fill_intent(
-                    page_id,
-                    "Full name",
-                    "textbox",
-                    FillValue::Text {
-                        text: "Ada Lovelace".into(),
-                        clear_first: true,
-                    },
-                )
-                .await?;
-                self.fill_intent(
-                    page_id,
-                    "Email address",
-                    "textbox",
-                    FillValue::Text {
-                        text: "ada@example.test".into(),
-                        clear_first: true,
-                    },
-                )
-                .await?;
-                self.fill_intent(
-                    page_id,
-                    "Plan",
-                    "combobox",
-                    FillValue::Select {
-                        option: "pro".into(),
-                    },
-                )
-                .await?;
-                self.fill_intent(
-                    page_id,
-                    "Accept terms",
-                    "checkbox",
-                    FillValue::Checked { checked: true },
-                )
-                .await?;
+                let field =
+                    |name: &str, label: &str, role: &str, value: FillValue| CompleteFormField {
+                        name: name.into(),
+                        purpose: format!("fill {label}"),
+                        hints: IntentHints {
+                            role: Some(role.into()),
+                            near_text: Some(types::TextMatch::Exact(label.into())),
+                            ..Default::default()
+                        },
+                        value,
+                    };
+                let fields = vec![
+                    field(
+                        "name",
+                        "Full name",
+                        "textbox",
+                        FillValue::Text {
+                            text: "Ada Lovelace".into(),
+                            clear_first: true,
+                        },
+                    ),
+                    field(
+                        "email",
+                        "Email address",
+                        "textbox",
+                        FillValue::Text {
+                            text: "ada@example.test".into(),
+                            clear_first: true,
+                        },
+                    ),
+                    field(
+                        "plan",
+                        "Plan",
+                        "combobox",
+                        FillValue::Select {
+                            option: "pro".into(),
+                        },
+                    ),
+                    field(
+                        "terms",
+                        "Accept terms",
+                        "checkbox",
+                        FillValue::Checked { checked: true },
+                    ),
+                ];
+                let outcome = self
+                    .runtime
+                    .execute(CommandEnvelope {
+                        schema_version: CommandEnvelope::SCHEMA_VERSION,
+                        command_id: CommandId::new(),
+                        workflow_id: self.workflow_id.clone(),
+                        attempt_id: self.attempt_id.clone(),
+                        session_id: self.session_id.clone(),
+                        page_id: Some(page_id.clone()),
+                        deadline: Utc::now() + Duration::seconds(30),
+                        command: RuntimeCommand::Intent(IntentCommand::CompleteForm(
+                            CompleteFormIntent {
+                                purpose: "complete semantic form".into(),
+                                fields,
+                            },
+                        )),
+                    })
+                    .await;
+                if !matches!(outcome, CommandOutcome::Completed { .. }) {
+                    return Err(test_error(format!("complete form failed: {outcome:?}")));
+                }
                 self.click(page_id, target_test_id("semantic-submit"), true)
                     .await?;
             }

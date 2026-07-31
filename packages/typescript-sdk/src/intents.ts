@@ -9,6 +9,7 @@ import {
   DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS,
   MAX_INTENT_PURPOSE_BYTES,
   type CommandEnvelope,
+  type CompleteFormIntent,
   type DismissObstructionIntent,
   type ExtractField,
   type ExtractIntent,
@@ -88,6 +89,21 @@ export function fillRuntimeCommand(input: FillIntent): RuntimeCommand {
       },
     },
   };
+}
+
+export function completeFormRuntimeCommand(input: CompleteFormIntent): RuntimeCommand {
+  assertIntentPurpose(input.purpose);
+  if (input.fields.length === 0) throw new Error("completeForm fields must not be empty");
+  if (input.fields.length > 128) throw new Error("completeForm fields must not exceed 128 items");
+  const names = new Set<string>();
+  const fields = input.fields.map((field) => {
+    if (field.name.trim().length === 0) throw new Error("completeForm field name must not be empty");
+    if (names.has(field.name)) throw new Error(`duplicate completeForm field name: ${field.name}`);
+    names.add(field.name);
+    assertIntentPurpose(field.purpose);
+    return { ...field, hints: withHints(field.hints), value: normalizeFillValue(field.value) };
+  });
+  return { kind: "intent", input: { kind: "completeForm", input: { purpose: input.purpose, fields } } };
 }
 
 function normalizeFillValue(value: FillValue): FillValue {

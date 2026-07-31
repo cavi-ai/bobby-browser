@@ -344,7 +344,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        7
+        8
     );
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,

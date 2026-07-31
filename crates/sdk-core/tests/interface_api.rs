@@ -19,10 +19,11 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use types::{
     AttemptId, Capability, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError,
-    CommandId, CommandOutcome, CreateSessionRequest, Evidence, FillIntent, FillValue,
-    IdempotencyKey, InspectCommand, IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent,
-    NavigateCommand, OpenPageRequest, PageId, PrincipalId, RequestContext, RuntimeCommand,
-    SessionId, TypeTextCommand, WorkerId, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, CreateSessionRequest,
+    Evidence, FillIntent, FillValue, IdempotencyKey, InspectCommand, IntentCommand, IntentHints,
+    InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrincipalId,
+    RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId, WorkflowCheckpoint,
+    WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -1247,6 +1248,24 @@ fn fill_files_intent_envelope(session_id: SessionId) -> CommandEnvelope {
     }
 }
 
+fn complete_form_files_intent_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope {
+        session_id,
+        command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "Complete application".into(),
+            fields: vec![CompleteFormField {
+                name: "resume".into(),
+                purpose: "Resume".into(),
+                hints: IntentHints::default(),
+                value: FillValue::Files {
+                    paths: vec!["./data/uploads/cv.pdf".into()],
+                },
+            }],
+        })),
+        ..submit_request()
+    }
+}
+
 #[tokio::test]
 async fn fill_files_intent_without_file_upload_capability_is_denied_before_dispatch() {
     let runtime = RuntimeService::default();
@@ -1273,6 +1292,40 @@ async fn fill_files_intent_without_file_upload_capability_is_denied_before_dispa
 
     let error = api
         .submit(context, fill_files_intent_envelope(session.id))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileUpload));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn complete_form_files_without_file_upload_capability_is_denied_before_dispatch() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::IntentExecute,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let error = api
+        .submit(context, complete_form_files_intent_envelope(session.id))
         .await
         .unwrap_err();
 
