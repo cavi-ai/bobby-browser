@@ -6,6 +6,7 @@ use crate::{AttemptId, CommandId, PageId};
 /// One node of a compact accessibility tree as returned by the
 /// `accessibilitySnapshot` primitive on any engine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccessibilityNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,6 +38,7 @@ pub struct AccessibilityNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
@@ -82,6 +84,7 @@ pub enum CommandOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -204,6 +207,7 @@ pub enum Evidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum IntentResolutionPath {
     Deterministic,
@@ -211,6 +215,7 @@ pub enum IntentResolutionPath {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionRecord {
     pub intent_kind: String,
@@ -301,6 +306,7 @@ impl CommandOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionPath {
     DirectHttp,
@@ -309,6 +315,7 @@ pub enum ExecutionPath {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionReason {
     EligibleStaticDocument,
@@ -322,6 +329,7 @@ pub enum ExecutionReason {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateEvidence {
     pub role: Option<String>,
@@ -331,6 +339,7 @@ pub struct CandidateEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TargetFingerprint {
     pub page_id: PageId,
@@ -341,6 +350,7 @@ pub struct TargetFingerprint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PageEvidence {
     pub page_id: PageId,
@@ -349,6 +359,7 @@ pub struct PageEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandError {
     pub code: ErrorCode,
@@ -358,6 +369,7 @@ pub struct CommandError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
     InvalidRequest,
@@ -392,6 +404,7 @@ pub enum ErrorCode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorLayer {
     Interface,
@@ -406,6 +419,7 @@ pub enum ErrorLayer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum CommandPhase {
     Accepted,
@@ -419,6 +433,7 @@ pub enum CommandPhase {
 }
 
 #[derive(Debug, Error, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RuntimeError {
     #[error("not found: {0}")]
     NotFound(String),
