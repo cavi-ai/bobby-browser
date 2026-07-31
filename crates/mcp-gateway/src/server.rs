@@ -377,11 +377,13 @@ impl Server {
             "events_read",
             "inspect",
             "navigate",
+            "page_activate",
             "page_close",
             "page_list",
             "page_open",
             "runtime_info",
             "screenshot",
+            "session_close",
             "session_create",
             "session_list",
             "type_text",
@@ -561,6 +563,16 @@ impl Server {
                     .await
                     .and_then(to_json)
             }
+            "session_close" => {
+                let input: SessionCloseArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                self.runtime
+                    .delete_session(context, input.session_id)
+                    .await
+                    .and_then(|()| to_json(json!({"closed": true})))
+            }
             "page_open" => {
                 let input: PageOpenArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
@@ -720,6 +732,20 @@ impl Server {
                     input.session_id,
                     Some(page_id.clone()),
                     types::PrimitiveCommand::ClosePage(types::ClosePageCommand { page_id }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "page_activate" => {
+                let input: PageCloseArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let page_id = input.page_id;
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(page_id.clone()),
+                    types::PrimitiveCommand::ActivatePage(types::ActivatePageCommand { page_id }),
                 );
                 self.submit_envelope(context, envelope).await
             }
@@ -1310,6 +1336,12 @@ struct PageListArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionCloseArgs {
+    session_id: types::SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PageCloseArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
@@ -1468,7 +1500,9 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
     match name {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
         "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
-        | "wait_for" | "page_list" | "page_close" => Some(&[types::Capability::BrowserMutate]),
+        | "wait_for" | "page_list" | "page_close" | "page_activate" => {
+            Some(&[types::Capability::BrowserMutate])
+        }
         "download_url" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::FileDownload,
@@ -1483,7 +1517,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),
-        "session_create" => Some(&[types::Capability::SessionWrite]),
+        "session_close" | "session_create" => Some(&[types::Capability::SessionWrite]),
         _ => None,
     }
 }
@@ -1500,12 +1534,14 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "wait_for"
         | "page_list"
         | "page_close"
+        | "page_activate"
         | "download_url"
         | "upload_files"
         | "evaluate_javascript" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
+        "session_close" => Some(types::InterfaceOperation::DeleteSession),
         "session_create" => Some(types::InterfaceOperation::CreateSession),
         "session_list" => Some(types::InterfaceOperation::ReadSession),
         "workflow_recover" => Some(types::InterfaceOperation::RecoverWorkflow),
@@ -1523,11 +1559,13 @@ fn tool_description(name: &str) -> &'static str {
         "events_read" => "Read retained runtime events after a cursor.",
         "inspect" => "Read page state, optionally element-scoped.",
         "navigate" => "Navigate a page to a URL.",
+        "page_activate" => "Bring a page to the front in an owned session.",
         "page_close" => "Close a page in an owned session.",
         "page_list" => "List pages in an owned session.",
         "page_open" => "Open a page in an owned session.",
         "runtime_info" => "Read runtime capability and health information.",
         "screenshot" => "Capture a screenshot artifact of a page or element.",
+        "session_close" => "Close a browser session and release its worker.",
         "session_create" => "Create a browser session.",
         "session_list" => "List browser sessions visible to the principal.",
         "type_text" => "Type text into an element.",

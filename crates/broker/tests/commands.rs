@@ -30,6 +30,10 @@ impl RuntimeInterface for FakeRuntime {
         unreachable!()
     }
 
+    async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
+        unreachable!()
+    }
+
     async fn create_session(
         &self,
         _: RequestContext,

@@ -327,7 +327,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        16
+        17
     );
     let runtime_command = &command_schema["inputSchema"]["$defs"]["RuntimeCommand"]["oneOf"];
     assert_eq!(
@@ -1097,6 +1097,7 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         "wait_for",
         "page_list",
         "page_close",
+        "page_activate",
         "download_url",
         "upload_files",
         "evaluate_javascript",
@@ -1137,6 +1138,7 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         "wait_for",
         "page_list",
         "page_close",
+        "page_activate",
     ] {
         assert!(
             names.contains(&visible.to_owned()),
@@ -1245,4 +1247,47 @@ async fn authenticated_with_browser_mutate() -> AuthenticatedRuntime {
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
     AuthenticatedRuntime::new(RuntimeService::default(), handle)
+}
+
+#[tokio::test]
+async fn session_close_deletes_an_owned_session() {
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+    let created = server
+        .handle_message(request(
+            90,
+            "tools/call",
+            json!({
+                "name":"session_create","arguments":{"profile":"close-me"}
+            }),
+        ))
+        .await
+        .unwrap();
+    let session_id = created["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap();
+
+    let closed = server
+        .handle_message(request(
+            91,
+            "tools/call",
+            json!({
+                "name":"session_close","arguments":{"sessionId":session_id}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(closed["error"].is_null(), "{closed}");
+    assert_eq!(closed["result"]["structuredContent"]["closed"], json!(true));
+
+    let missing = server
+        .handle_message(request(
+            92,
+            "tools/call",
+            json!({
+                "name":"session_close","arguments":{"sessionId":session_id}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing["error"]["code"], -32000, "{missing}");
 }

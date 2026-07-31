@@ -130,6 +130,7 @@ export interface TypeTextCommand { selector: string; target: TargetSpec | null; 
 export interface UploadFilesCommand { selector: string; target: TargetSpec | null; paths: string[]; }
 export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }
+export interface ActivatePageCommand { pageId: Id; }
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
@@ -145,6 +146,7 @@ export type PrimitiveCommand =
   | { kind: "openPage"; input: OpenPageCommand }
   | { kind: "listPages"; input: null }
   | { kind: "closePage"; input: ClosePageCommand }
+  | { kind: "activatePage"; input: ActivatePageCommand }
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }

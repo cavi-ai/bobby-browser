@@ -79,6 +79,14 @@ export class BrowserRuntimeClient {
   async runtimeInfo(options?: RequestOptions): Promise<RuntimeInfo> { return this.#json("GET", "/v1/runtime", undefined, options, isRuntimeInfo); }
   async createSession(input: CreateSessionRequest, options?: RequestOptions): Promise<SessionState> { return this.#json("POST", "/v1/sessions", input, options, isSessionState); }
   async listSessions(options?: RequestOptions): Promise<SessionState[]> { return this.#json("GET", "/v1/sessions", undefined, options, isSessionStateList); }
+  async deleteSession(sessionId: string, options?: RequestOptions): Promise<void> {
+    if (!isUuid(sessionId)) throw this.#protocol("session id must be a UUID");
+    const scoped = await this.#request("DELETE", `/v1/sessions/${encodeURIComponent(sessionId)}`, undefined, options);
+    try {
+      if (scoped.response.status === 204) return;
+      throw this.#responseError(scoped.response.status, await this.#readJson(scoped.response, scoped.scope));
+    } finally { scoped.scope.dispose(); }
+  }
   async openPage(input: OpenPageRequest, options?: RequestOptions): Promise<PageState> { return this.#json("POST", "/v1/pages", input, options, isPageState); }
 
   async submit(input: CommandEnvelope, options?: RequestOptions): Promise<CommandOutcome> {

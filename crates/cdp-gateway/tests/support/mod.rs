@@ -30,6 +30,10 @@ impl RuntimeInterface for PageCreatingRuntime {
     async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
         Ok(vec![self.session.clone()])
     }
+    async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
+        unreachable!()
+    }
+
     async fn create_session(
         &self,
         _: RequestContext,
@@ -124,6 +128,10 @@ impl RuntimeInterface for StaticRuntime {
     async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
         Ok(self.sessions.clone())
     }
+    async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
+        unreachable!()
+    }
+
     async fn create_session(
         &self,
         _: RequestContext,
@@ -162,6 +170,10 @@ impl RuntimeInterface for BlockingRuntime {
     async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
         Ok(self.block().await)
     }
+    async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
+        unreachable!()
+    }
+
     async fn create_session(
         &self,
         _: RequestContext,

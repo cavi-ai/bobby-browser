@@ -2838,6 +2838,24 @@ impl BrowserWorker for FirefoxCompanionWorker {
         Ok(vec![self.evidence(InteractionPath::EngineNative)])
     }
 
+    async fn activate_page(
+        &self,
+        command: &types::ActivatePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(&command.page_id).await?;
+        self.transport
+            .send("browsingContext.activate", json!({"context": context}))
+            .await
+            .map_err(|error| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    format!("Firefox page activation failed: {}", error.message),
+                    true,
+                )
+            })?;
+        Ok(vec![self.evidence(InteractionPath::EngineNative)])
+    }
+
     async fn close(&self) -> Result<(), CommandError> {
         {
             let _lifecycle = self.lifecycle.lock().await;

@@ -130,6 +130,13 @@ pub trait BrowserWorker: Send + Sync {
     async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
+    async fn activate_page(
+        &self,
+        _command: &types::ActivatePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
     async fn close_page_command(
         &self,
         _command: &ClosePageCommand,

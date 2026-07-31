@@ -2,9 +2,15 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
+- Add `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` for session teardown.
+- Add the `activatePage` primitive (MCP `page_activate`) to bring a page to the front on Chromium and Firefox.
+
+=======
 - Add `GET /v1/events?stream=1` server-sent-event streaming with cursor frame ids and terminal gap frames.
 - `GET /v1/mcp` now opens the streamable-HTTP SSE channel (keep-alive) instead of 405.
 - The Firefox native host treats a companion server silent for 45s as dead and reconnects, recovering from half-open connections left by killed processes.
+>>>>>>> origin/main
 
 - Share one BiDi connection across runtime sessions on a Firefox profile (Firefox RemoteAgent accepts a single WebDriver session per browser).
 - Keep prior attachment grants when issuing new ones, and renew attachment leases before expiry so sessions outlive the attachment TTL.

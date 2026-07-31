@@ -1475,3 +1475,62 @@ async fn checkpoint_replays_retained_checkpoint_and_conflicts_before_dispatch() 
     assert_eq!(conflict.code, InterfaceErrorCode::IdempotencyConflict);
     assert_eq!(api.checkpoint_dispatch_count(), 1);
 }
+
+#[tokio::test]
+async fn delete_session_releases_the_session_worker_and_ownership() {
+    let (runtime, pool, closes) = runtime_with_workers(false);
+    let (api, context, ownership, _) = session_owned_runtime(runtime.clone(), 4).await;
+    let session = api
+        .create_session(context.clone(), request_profile("delete-me"))
+        .await
+        .unwrap();
+    assert_eq!(pool.active_workers().await, 1);
+
+    api.delete_session(context.clone(), session.id.clone())
+        .await
+        .unwrap();
+    assert!(runtime.list_sessions().await.is_empty());
+    assert_eq!(closes.load(Ordering::SeqCst), 1);
+    assert!(!ownership.owns_session(&context.principal_id, &session.id));
+
+    let denied = api.delete_session(context, session.id).await.unwrap_err();
+    assert_eq!(denied.code, InterfaceErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn delete_session_rejects_another_principals_session_as_not_found() {
+    let (runtime, _, _) = runtime_with_workers(false);
+    let (api, context, _, recorder) = session_owned_runtime(runtime.clone(), 4).await;
+    let session = api
+        .create_session(context.clone(), request_profile("owned"))
+        .await
+        .unwrap();
+    let authority = AuthorityStore::in_memory();
+    let other_token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000077")),
+            [Capability::SessionWrite],
+            expiry(),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let other_handle = authority.verify(&other_token).await.unwrap();
+    let other = AuthenticatedRuntime::with_session_ownership(
+        runtime.clone(),
+        other_handle.clone(),
+        recorder,
+    );
+
+    let denied = other
+        .delete_session(other_handle.context(expiry(), None), session.id.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, InterfaceErrorCode::NotFound);
+    let _ = &context;
+    assert!(runtime
+        .list_sessions()
+        .await
+        .iter()
+        .any(|listed| listed.id == session.id));
+}
