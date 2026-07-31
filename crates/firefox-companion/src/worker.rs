@@ -3022,10 +3022,11 @@ impl BrowserWorker for FirefoxCompanionWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         self.context(page_id).await?;
         let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
-        let (nodes, truncated) = self
+        let (mut nodes, truncated) = self
             .observer
             .a11y_snapshot(&self.current_lease(), page_id, max_nodes)
             .await?;
+        worker_pool::annotate_accessibility_targets(&mut nodes);
         Ok(vec![
             Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),
