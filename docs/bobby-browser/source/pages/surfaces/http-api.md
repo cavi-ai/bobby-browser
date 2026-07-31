@@ -46,6 +46,9 @@ validators / Rust types.
 - **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,
   `command` where `command` is `{ kind: "primitive"|"intent", input: … }`).
   Primitive `activatePage` uses `{ kind: "activatePage", input: { pageId } }`.
+  Primitive `accessibilitySnapshot` uses
+  `{ kind: "accessibilitySnapshot", input: { maxNodes? } }` (default 256,
+  max 2048; see [Accessibility snapshot](../guides/accessibility-snapshot.md)).
 - **POST `/v1/checkpoints`** — checkpoint request with verified evidence (see SDK `CheckpointRequest`)
 - **POST `/v1/principals`** — `{ principalId, capabilities, expiresAt }` → `201` with one-time `bearer`
 - **GET `/v1/events`** — query `after` (cursor) and `limit` (bounded; SDK max 256).
@@ -82,5 +85,7 @@ Command outcomes may map to `200` / `403` / `409` / `429` / `503` depending on
 
 - Typed client: [TypeScript SDK](typescript-sdk.md)
 - Rust HTTP client: [bobby-browser-client](../rust/bobby-browser-client.md)
+- [MCP tools](mcp-tools.md)
+- Compact a11y trees: [Accessibility snapshot](../guides/accessibility-snapshot.md)
 - Tutorial: [First browser session](../introduction/first-session.md)
 - Headers and mint curl: [Authentication](../guides/auth.md)

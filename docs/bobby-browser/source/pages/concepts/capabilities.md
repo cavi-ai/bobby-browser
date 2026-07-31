@@ -41,9 +41,10 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 | IssuePrincipal | `POST /v1/principals` | `authority:admin` |
 | RevokePrincipal | `DELETE /v1/principals/{id}` | `authority:admin` |
 
-`activatePage` / MCP `page_activate` is a **primitive command** (via
-`command_execute` or the flat MCP tool), not a separate `/v1/pages/...` route.
-It still requires `browser:mutate`.
+`activatePage` / MCP `page_activate` and `accessibilitySnapshot` / MCP
+`a11y_snapshot` are **primitive commands** (via `command_execute` or the flat
+MCP tools), not separate `/v1/pages/...` routes. Both still require
+`browser:mutate`. See [Accessibility snapshot](../guides/accessibility-snapshot.md).
 
 Some interface operations (`ReadPage`, `ClosePage`, `ReadCheckpoint`,
 `CaptureArtifact`) exist in the type map for authority checks; prefer the

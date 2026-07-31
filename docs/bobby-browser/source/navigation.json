@@ -37,6 +37,7 @@
         { "title": "CLI reference", "path": "guides/cli.md" },
         { "title": "Authentication", "path": "guides/auth.md" },
         { "title": "JavaScript evaluation", "path": "guides/javascript-eval.md" },
+        { "title": "Accessibility snapshot", "path": "guides/accessibility-snapshot.md" },
         { "title": "Intent commands", "path": "guides/intents.md" },
         { "title": "Bobby skills", "path": "guides/skills.md" },
         { "title": "Browser gauntlet", "path": "guides/gauntlet.md" },
