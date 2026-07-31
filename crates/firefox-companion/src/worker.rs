@@ -120,6 +120,22 @@ pub trait ExtensionObserver: Send + Sync {
         page_id: &PageId,
     ) -> Result<(), CommandError>;
 
+    /// Capture a compact accessibility tree for the page. Returns the tree
+    /// and whether it was truncated to the node bound.
+    async fn a11y_snapshot(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        max_nodes: u32,
+    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        let _ = (lease, page_id, max_nodes);
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "accessibility snapshot is not supported by this observer",
+            false,
+        ))
+    }
+
     /// Renew a live attachment lease, returning the extended lease. Observers
     /// that cannot renew leave leases to expire at their original TTL.
     async fn renew_lease(&self, lease: &AttachmentLease) -> Result<AttachmentLease, CommandError> {
@@ -2852,6 +2868,27 @@ impl BrowserWorker for FirefoxCompanionWorker {
             return Err(cleanup_failures_error(&failures));
         }
         Ok(vec![self.evidence(InteractionPath::EngineNative)])
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.context(page_id).await?;
+        let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
+        let (nodes, truncated) = self
+            .observer
+            .a11y_snapshot(&self.current_lease(), page_id, max_nodes)
+            .await?;
+        Ok(vec![
+            Evidence::AccessibilitySnapshot {
+                page_id: page_id.clone(),
+                nodes,
+                truncated,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ])
     }
 
     async fn activate_page(

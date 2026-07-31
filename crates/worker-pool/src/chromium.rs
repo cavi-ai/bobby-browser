@@ -525,6 +525,32 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let result = page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
+            )
+            .await
+            .map_err(command_failed)?
+            .result;
+        let max_nodes = command
+            .max_nodes
+            .unwrap_or(DEFAULT_A11Y_MAX_NODES)
+            .clamp(1, MAX_A11Y_NODES) as usize;
+        let (nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
+        Ok(vec![Evidence::AccessibilitySnapshot {
+            page_id: page_id.clone(),
+            nodes,
+            truncated,
+        }])
+    }
+
     async fn activate_page(
         &self,
         command: &types::ActivatePageCommand,
@@ -1488,6 +1514,104 @@ fn timeout_error(timeout_ms: u64) -> CommandError {
         layer: ErrorLayer::Driver,
         retryable: true,
     }
+}
+
+const DEFAULT_A11Y_MAX_NODES: u32 = 256;
+const MAX_A11Y_NODES: u32 = 2048;
+
+/// Collapses Chrome's flat AXNode list into the engine-shared compact tree.
+/// Nodes Chrome marks ignored are skipped (their children are re-parented
+/// upward); generic containers without names are kept only as structure.
+fn compact_ax_tree(
+    raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+    max_nodes: usize,
+) -> (Vec<types::AccessibilityNode>, bool) {
+    use chromiumoxide::cdp::browser_protocol::accessibility::AxNode;
+    use std::collections::HashMap;
+
+    fn text(
+        value: &Option<chromiumoxide::cdp::browser_protocol::accessibility::AxValue>,
+    ) -> Option<String> {
+        value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .filter(|value| !value.is_empty())
+    }
+
+    let by_id: HashMap<&str, &AxNode> = raw
+        .iter()
+        .map(|node| (node.node_id.as_ref(), node))
+        .collect();
+    let mut budget = max_nodes;
+    fn build(
+        id: &str,
+        by_id: &HashMap<&str, &AxNode>,
+        budget: &mut usize,
+        depth: usize,
+    ) -> Option<types::AccessibilityNode> {
+        let node = by_id.get(id)?;
+        let mut children = Vec::new();
+        if depth < 64 {
+            if let Some(child_ids) = &node.child_ids {
+                for child_id in child_ids {
+                    if let Some(child) = build(child_id.as_ref(), by_id, budget, depth + 1) {
+                        children.push(child);
+                    }
+                }
+            }
+        }
+        if node.ignored {
+            return None;
+        }
+        let role = text(&node.role);
+        let name = text(&node.name);
+        // Skip unlabeled generic wrappers; keep their children by re-parenting.
+        if matches!(
+            role.as_deref(),
+            None | Some("generic" | "InlineTextBox" | "none")
+        ) && name.is_none()
+        {
+            return None;
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        Some(types::AccessibilityNode {
+            role,
+            name,
+            children,
+        })
+    }
+
+    fn lift(node: types::AccessibilityNode, lifted: &mut Vec<types::AccessibilityNode>) {
+        lifted.push(node);
+    }
+
+    let roots: Vec<&str> = raw
+        .iter()
+        .filter(|node| {
+            node.parent_id
+                .as_ref()
+                .is_none_or(|parent| !by_id.contains_key(parent.as_ref()))
+        })
+        .map(|node| node.node_id.as_ref())
+        .collect();
+    let mut roots_built: Vec<types::AccessibilityNode> = Vec::new();
+    for root in &roots {
+        if let Some(mut node) = build(root, &by_id, &mut budget, 0) {
+            // Re-parent children of skipped nodes upward.
+            if node.role.is_none() && node.name.is_none() {
+                roots_built.append(&mut node.children);
+            } else {
+                lift(node, &mut roots_built);
+            }
+        }
+    }
+    let truncated = budget == 0 && raw.len() > max_nodes;
+    (roots_built, truncated)
 }
 
 #[cfg(test)]

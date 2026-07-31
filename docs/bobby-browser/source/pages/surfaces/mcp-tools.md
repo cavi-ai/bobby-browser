@@ -29,6 +29,7 @@ Tools are advertised only when the principal holds the required capability.
 | `page_list` | `browser:mutate` | List pages in an owned session |
 | `page_close` | `browser:mutate` | Close a page in an owned session |
 | `page_activate` | `browser:mutate` | Bring a page to the front |
+| `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree |
 | `navigate` | `browser:mutate` | Navigate a page to a URL |
 | `click` | `browser:mutate` | Click an element |
 | `type_text` | `browser:mutate` | Type text into an element |

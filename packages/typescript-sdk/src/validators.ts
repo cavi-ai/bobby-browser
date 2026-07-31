@@ -231,8 +231,18 @@ export function isEvidence(value: unknown): value is Evidence {
     case "browserExecution": return hasExactKeys(value, ["kind", "engine", "browserVersion", "profileId", "interactionPath"]) && isString(value.engine) && isString(value.browserVersion) && isString(value.profileId) && isString(value.interactionPath);
     case "javaScriptResult": return hasExactKeys(value, ["kind", "value", "truncated"]) && isJsonValue(value.value) && typeof value.truncated === "boolean";
     case "intentExecution": return hasExactKeys(value, ["kind", "record"]) && isExecutionRecord(value.record);
+    case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     default: return false;
   }
+}
+
+function isAccessibilityNode(value: unknown, depth = 0): boolean {
+  return isRecord(value)
+    && depth <= 32
+    && (value.role === undefined || isString(value.role))
+    && (value.name === undefined || isString(value.name))
+    && (value.children === undefined || (Array.isArray(value.children) && value.children.every((child) => isAccessibilityNode(child, depth + 1))))
+    && Object.keys(value).every((key) => key === "role" || key === "name" || key === "children");
 }
 
 function isExecutionRecord(value: unknown): value is ExecutionRecord {

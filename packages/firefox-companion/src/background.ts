@@ -409,7 +409,7 @@ export class CompanionBackground {
         input.commandId,
         deadlineExceeded ? "deadlineExceeded" : "actionFailed",
         deadlineExceeded ? "the command deadline expired" : "the content action failed",
-        input.operation !== "observe",
+        input.operation !== "observe" && input.operation !== "a11yTree",
       );
     }
   }

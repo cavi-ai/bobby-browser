@@ -3,6 +3,19 @@ use thiserror::Error;
 
 use crate::{AttemptId, CommandId, PageId};
 
+/// One node of a compact accessibility tree as returned by the
+/// `accessibilitySnapshot` primitive on any engine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessibilityNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<AccessibilityNode>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "status",
@@ -143,6 +156,11 @@ pub enum Evidence {
     },
     JavaScriptResult {
         value: serde_json::Value,
+        truncated: bool,
+    },
+    AccessibilitySnapshot {
+        page_id: PageId,
+        nodes: Vec<AccessibilityNode>,
         truncated: bool,
     },
     IntentExecution {

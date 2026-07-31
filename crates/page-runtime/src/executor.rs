@@ -493,6 +493,18 @@ impl PageRuntime {
                     Err(verification_error("upload returned no file evidence"))
                 }
             }
+            PrimitiveCommand::AccessibilitySnapshot(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::AccessibilitySnapshot { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "accessibility snapshot returned no snapshot evidence",
+                    ))
+                }
+            }
             PrimitiveCommand::ActivatePage(_) => {
                 if evidence.iter().any(|item| {
                     matches!(
