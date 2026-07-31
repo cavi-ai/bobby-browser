@@ -89,6 +89,15 @@ impl RuntimeInterface for CountingRuntime {
         self.inner.open_page(ctx, req).await
     }
 
+    async fn delete_session(
+        &self,
+        ctx: RequestContext,
+        session: types::SessionId,
+    ) -> InterfaceResult<()> {
+        self.count();
+        self.inner.delete_session(ctx, session).await
+    }
+
     async fn submit(
         &self,
         ctx: RequestContext,
@@ -484,4 +493,58 @@ async fn deadlines_are_strictly_bounded_before_dispatch() {
     let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "invalidRequest");
+}
+
+#[tokio::test]
+async fn delete_session_route_removes_the_session_and_returns_204() {
+    let (app, token) = authenticated_app(
+        [Capability::SessionWrite, Capability::SessionRead],
+        InterfaceConfig::default(),
+    )
+    .await;
+    let created = app
+        .clone()
+        .oneshot(authorized(
+            "POST",
+            "/v1/sessions",
+            &token,
+            Body::from(r#"{"profile":"route-delete","proxy":null}"#),
+        ))
+        .await
+        .unwrap();
+    let body = to_bytes(created.into_body(), 8192).await.unwrap();
+    let session: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let session_id = session["id"].as_str().unwrap();
+
+    let deleted = app
+        .clone()
+        .oneshot(authorized(
+            "DELETE",
+            &format!("/v1/sessions/{session_id}"),
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+    let listed = app
+        .clone()
+        .oneshot(authorized("GET", "/v1/sessions", &token, Body::empty()))
+        .await
+        .unwrap();
+    let body = to_bytes(listed.into_body(), 8192).await.unwrap();
+    let sessions: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(sessions.as_array().unwrap().len(), 0);
+
+    let missing = app
+        .oneshot(authorized(
+            "DELETE",
+            &format!("/v1/sessions/{session_id}"),
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }

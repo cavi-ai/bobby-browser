@@ -512,6 +512,21 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn activate_page(
+        &self,
+        command: &types::ActivatePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(&command.page_id).ok_or_else(page_missing)?;
+        page.activate().await.map_err(command_failed)?;
+        let evidence = page_evidence(command.page_id.clone(), page).await?;
+        Ok(vec![Evidence::Page {
+            page_id: evidence.page_id,
+            url: evidence.url,
+            title: evidence.title,
+        }])
+    }
+
     async fn click_and_wait_for_popup(
         &self,
         page_id: &PageId,

@@ -36,6 +36,15 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["profile"],
         ),
         "page_open" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        "page_close" => (
+            json!({"sessionId": id(), "pageId": id()}),
+            vec!["sessionId", "pageId"],
+        ),
+        "page_activate" => (
+            json!({"sessionId": id(), "pageId": id()}),
+            vec!["sessionId", "pageId"],
+        ),
+        "session_close" => (json!({"sessionId": id()}), vec!["sessionId"]),
         "navigate" => (
             json!({
                 "sessionId": id(),
@@ -96,10 +105,6 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["sessionId", "pageId", "condition", "timeoutMs"],
         ),
         "page_list" => (json!({"sessionId": id()}), vec!["sessionId"]),
-        "page_close" => (
-            json!({"sessionId": id(), "pageId": id()}),
-            vec!["sessionId", "pageId"],
-        ),
         "download_url" => (
             json!({
                 "sessionId": id(),
@@ -477,6 +482,7 @@ fn primitive_commands() -> Vec<Value> {
         ),
         tagged_input("listPages", json!({"type":"null"})),
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
+        tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("clickAndWaitForPopup", click_wait_input()),
         tagged_input("clickAndWaitForDownload", click_wait_input()),
         tagged_input(

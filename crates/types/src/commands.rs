@@ -236,6 +236,7 @@ pub enum PrimitiveCommand {
     OpenPage(OpenPageCommand),
     ListPages(ListPagesCommand),
     ClosePage(ClosePageCommand),
+    ActivatePage(ActivatePageCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
     ClickAndWaitForDownload(ClickAndWaitForDownloadCommand),
     WaitFor(WaitForCommand),
@@ -287,6 +288,7 @@ impl PrimitiveCommand {
             | Self::OpenPage(_)
             | Self::ListPages(_)
             | Self::WaitFor(_)
+            | Self::ActivatePage(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
             Self::DownloadUrl(_)
             | Self::TypeText(_)
@@ -383,6 +385,12 @@ pub struct ListPagesCommand;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClosePageCommand {
+    pub page_id: PageId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivatePageCommand {
     pub page_id: PageId,
 }
 
