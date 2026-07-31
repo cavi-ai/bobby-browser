@@ -17,7 +17,7 @@ use std::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
-    AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
+    AccessibilityNode, AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
     CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, Evidence, FillValue,
     InspectCommand, IntentCommand, IntentHints, NavigateCommand, PrimitiveCommand, RuntimeCommand,
@@ -88,7 +88,11 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         &mut server,
         &mut setup_id,
         "session_create",
-        json!({"profile":"mcp-conformance","proxy":null}),
+        json!({
+            "profile":"mcp-conformance",
+            "proxy":null,
+            "executionPolicy":{"javascriptEvaluation":true,"visionAssist":false}
+        }),
     )
     .await;
     let session_id = session["id"].as_str().unwrap().to_owned();
@@ -106,7 +110,154 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         site_url: harness.site_url(),
         upload_root: harness.upload_root().to_path_buf(),
     };
+    prove_snapshot_target_round_trip(&mut server, &session_id, &page_id, &metadata.site_url).await;
     run_mcp_sample(&metadata, &mut server, &mut denied, &sid, &pid).await;
+}
+
+async fn prove_snapshot_target_round_trip(
+    server: &mut dyn McpEndpoint,
+    session_id: &str,
+    page_id: &str,
+    site_url: &str,
+) {
+    let mut id = 1_000;
+    tool(
+        server,
+        &mut id,
+        "navigate",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "url": site_url,
+            "waitUntil": "domContentLoaded"
+        }),
+    )
+    .await;
+    tool(
+        server,
+        &mut id,
+        "evaluate_javascript",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "expression": "document.body.innerHTML = `<label for=home>Phone</label><input id=home><label for=work>Phone</label><input id=work><button id=continue>Continue</button>`; document.querySelector('#continue').addEventListener('click', () => { document.title = 'clicked'; }); true",
+            "awaitPromise": false
+        }),
+    )
+    .await;
+
+    let before = tool(
+        server,
+        &mut id,
+        "a11y_snapshot",
+        json!({"sessionId":session_id,"pageId":page_id,"maxNodes":64}),
+    )
+    .await;
+    let before: CommandOutcome = serde_json::from_value(before).unwrap();
+    let before_nodes = completed(&before)
+        .iter()
+        .find_map(|evidence| match evidence {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("MCP accessibility snapshot evidence");
+    let phones = actionable_nodes_named(before_nodes, "Phone");
+    assert_eq!(phones.len(), 2);
+    assert_eq!(phones[0].target.as_ref().unwrap().ordinal, Some(0));
+    assert_eq!(phones[1].target.as_ref().unwrap().ordinal, Some(1));
+    let continue_target = actionable_nodes_named(before_nodes, "Continue")
+        .into_iter()
+        .next()
+        .expect("command-ready Continue button")
+        .target
+        .as_ref()
+        .unwrap()
+        .clone();
+
+    tool(
+        server,
+        &mut id,
+        "type_text",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "target": phones[1].target,
+            "value": "555-0102",
+            "clearFirst": true
+        }),
+    )
+    .await;
+
+    tool(
+        server,
+        &mut id,
+        "click",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "target": continue_target
+        }),
+    )
+    .await;
+
+    let after = tool(
+        server,
+        &mut id,
+        "a11y_snapshot",
+        json!({"sessionId":session_id,"pageId":page_id,"maxNodes":64}),
+    )
+    .await;
+    let after: CommandOutcome = serde_json::from_value(after).unwrap();
+    let after_nodes = completed(&after)
+        .iter()
+        .find_map(|evidence| match evidence {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("MCP accessibility snapshot evidence after fill");
+    let phones = actionable_nodes_named(after_nodes, "Phone");
+    assert_eq!(phones[0].value.as_deref().unwrap_or_default(), "");
+    assert_eq!(phones[1].value.as_deref(), Some("555-0102"));
+
+    let title = tool(
+        server,
+        &mut id,
+        "evaluate_javascript",
+        json!({
+            "sessionId":session_id,
+            "pageId":page_id,
+            "expression":"document.title",
+            "awaitPromise":false
+        }),
+    )
+    .await;
+    let title: CommandOutcome = serde_json::from_value(title).unwrap();
+    assert!(completed(&title).iter().any(|evidence| matches!(
+        evidence,
+        Evidence::JavaScriptResult { value, .. } if value == "clicked"
+    )));
+}
+
+fn actionable_nodes_named<'a>(
+    nodes: &'a [AccessibilityNode],
+    name: &str,
+) -> Vec<&'a AccessibilityNode> {
+    fn collect<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+        output: &mut Vec<&'a AccessibilityNode>,
+    ) {
+        for node in nodes {
+            if node.name.as_deref() == Some(name) && node.target.is_some() {
+                output.push(node);
+            }
+            collect(&node.children, name, output);
+        }
+    }
+
+    let mut output = Vec::new();
+    collect(nodes, name, &mut output);
+    output
 }
 
 async fn run_mcp_stdio_performance(samples: usize) {
