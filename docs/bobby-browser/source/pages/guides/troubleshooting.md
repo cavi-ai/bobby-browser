@@ -103,6 +103,9 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
   `browser:mutate`.
 - Default `maxNodes` is 256 (clamp 1…2048). Large pages set `truncated: true`
   — raise `maxNodes` or narrow the viewport / DOM before retrying.
+- Form-control nodes may include `value`, `required`, `invalid`, `checked`,
+  bounds, and related flags. Password / masked values appear as
+  `"[redacted]"`.
 - Guide: [Accessibility snapshot](accessibility-snapshot.md).
 
 ## Error catalog (`InterfaceErrorCode`)

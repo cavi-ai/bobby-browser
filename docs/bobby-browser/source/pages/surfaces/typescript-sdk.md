@@ -71,8 +71,10 @@ Build envelopes with helpers from the package (`locateEnvelope`,
 `fillEnvelope`, `submitAndVerifyEnvelope`, `waitForStateEnvelope`,
 `followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
 them to `submit`. Multi-field verified forms use `completeFormRuntimeCommand`
-plus `intentEnvelope`. `FillValue` kinds: `text`, `select`, `checked`, `files`
-(see [Intent commands](../guides/intents.md)).
+plus `intentEnvelope`. `FillValue` kinds: `text`, `select`, `checked`, `files`.
+`AccessibilityNode` form-state fields on a11y snapshots:
+[Accessibility snapshot](../guides/accessibility-snapshot.md).
+Intent details: [Intent commands](../guides/intents.md).
 
 ## Errors
 
