@@ -127,7 +127,7 @@ export interface NavigateCommand { url: string; waitUntil: WaitUntil; timeoutMs:
 export interface DownloadUrlCommand { url: string; expectedContentType: string | null; maxBytes: number; }
 export interface InspectCommand { selector: string | null; target: TargetSpec | null; includeHtml: boolean; }
 export interface ClickCommand { selector: string; target: TargetSpec | null; boundary: boolean; expectedUrl: string | null; }
-export interface TypeTextCommand { selector: string; target: TargetSpec | null; value: string; clearFirst: boolean; }
+export interface TypeTextCommand { selector: string; target: TargetSpec | null; value: string; clearFirst: boolean; expectedUrl?: string | null; }
 export interface UploadFilesCommand { selector: string; target: TargetSpec | null; paths: string[]; }
 export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }

@@ -498,6 +498,7 @@ async fn act_fill(
                         target: Some(target),
                         value: text.clone(),
                         clear_first: *clear_first,
+                        expected_url: None,
                     },
                 )
                 .await
@@ -511,6 +512,7 @@ async fn act_fill(
                         target: Some(target),
                         value: option.clone(),
                         clear_first: true,
+                        expected_url: None,
                     },
                 )
                 .await
@@ -524,6 +526,7 @@ async fn act_fill(
                         target: Some(target),
                         value: checked.to_string(),
                         clear_first: true,
+                        expected_url: None,
                     },
                 )
                 .await
@@ -1716,6 +1719,7 @@ async fn execute_vision_action(
                         target: None,
                         value: text.clone(),
                         clear_first: false,
+                        expected_url: None,
                     },
                 )
                 .await

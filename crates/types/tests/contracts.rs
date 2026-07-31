@@ -316,6 +316,7 @@ fn commands_expose_recovery_class() {
             target: None,
             value: "Ada".into(),
             clear_first: true,
+            expected_url: None,
         })
         .class(),
         CommandClass::Reconciliable

@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Allow MCP `click` and `type_text` to consume accessibility-snapshot targets without also requiring a legacy CSS selector.
+- Recover stale Firefox companion attachments: a cycled companion connection now re-grants and retries once instead of failing every later action with `ConnectionClosed`; lease renewal re-grants dead attachments.
+- Add `expectedUrl` to `typeText` (all surfaces): typing fails before mutation when the page URL does not match, so agents cannot type into the wrong page.
+>>>>>> 40cc7eb (fix(firefox): recover stale companion attachments; add typeText expectedUrl guard)
 - Add command-ready semantic targets to actionable accessibility-snapshot nodes; duplicate role/name pairs receive deterministic tree-order ordinals without exposing DOM or browser IDs.
 - Plumb real screenshot bytes into vision escalation (`screenshot_bytes` on Chromium and Firefox workers); empty frames no longer reach providers.
 - Add an HTTP vision-assist provider (`[vision]` config: https or loopback endpoint, bearer via env var) with response validation and fail-closed escalation.
