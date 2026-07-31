@@ -57,6 +57,7 @@ const FORBIDDEN_SECRET_FIELD =
   /(?:pairing[_-]?code|bearer|authorization|endpoint|credential|password|passwd|api[-_]?key|token|secret)/i;
 const SECRET_VALUE = /(?:^|\s)(?:bearer|basic)\s+/i;
 const PRIVATE_SECRET_VALUE = /private[-_ ]?(?:token|secret|key)/i;
+const SELECTOR_SYNTAX = /[\s>+~()[\]]/;
 const SENSITIVE_URL_QUERY_KEYS = new Set([
   "authorization",
   "bearer",
@@ -137,6 +138,9 @@ function isCapabilities(value: unknown): value is CompanionCapabilities {
 
 function assertSafeUrl(value: string): void {
   if (!/^[a-z][a-z\d+.-]*:/i.test(value)) return;
+  // A CSS path such as `div:nth-of-type(2) > a` parses as a URL with the scheme
+  // `div:`, so selector syntax without an explicit `scheme://` is not a URL.
+  if (SELECTOR_SYNTAX.test(value) && !/^[a-z][a-z\d+.-]*:\/\//i.test(value)) return;
   let url: URL;
   try {
     url = new URL(value);
