@@ -103,6 +103,7 @@ may be selected (`checked: true`) but cannot be unchecked directly
 (`checked: false` fails closed). Non-checkable targets must not use
 `kind: "checked"`.
 
+Use `completeForm` to apply an ordered, uniquely named list of fill fields as one reconciliable intent. Every field is resolved and verified before the next begins; execution stops at the first failure and retains evidence for fields already attempted. It never submits the form implicitly—submission remains a separate boundary intent.
 When `role` and exact `nearText` are supplied, `nearText` is the control's
 accessible name while `purpose` remains the agent's task description. This
 avoids requiring natural task phrasing to equal a page label. A fill completes

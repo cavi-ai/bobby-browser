@@ -5,10 +5,49 @@ use async_trait::async_trait;
 use dom_engine::{Candidate, CandidateState};
 use intent_engine::{compatible, IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, Evidence, FillIntent,
-    FillValue, IntentCommand, IntentHints, IntentResolutionPath, PageId, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandError, CompleteFormField, CompleteFormIntent,
+    ErrorCode, Evidence, FillIntent, FillValue, IntentCommand, IntentHints, IntentResolutionPath,
+    PageId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
+
+#[tokio::test]
+async fn complete_form_fills_fields_in_order_without_submitting() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Full name"), textbox("Email address")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: vec![Evidence::Element {
+            selector: String::new(),
+            text: Some("Ada".into()),
+        }],
+        upload_evidence: vec![],
+    };
+    let field = |name: &str, label: &str| CompleteFormField {
+        name: name.into(),
+        purpose: format!("fill {label}"),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            near_text: Some(types::TextMatch::Exact(label.into())),
+            ..Default::default()
+        },
+        value: FillValue::Text {
+            text: "Ada".into(),
+            clear_first: true,
+        },
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete application".into(),
+            fields: vec![field("name", "Full name"), field("email", "Email address")],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert_eq!(calls.lock().unwrap().type_text.len(), 2);
+}
 
 #[derive(Default)]
 struct CallLog {
