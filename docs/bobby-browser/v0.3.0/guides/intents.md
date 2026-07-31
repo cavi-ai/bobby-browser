@@ -75,7 +75,7 @@ await client.submit(
 );
 ```
 
-`FillValue` kinds: `text`, `select`, `files` (files need `file:upload`).
+`FillValue` kinds: `text`, `select`, `checked`, and `files` (files need `file:upload`). `checked` accepts a boolean and applies only to checkbox or radio controls; radios may be selected but are not directly unchecked.
 When `role` and exact `nearText` are supplied, `nearText` is the control's
 accessible name while `purpose` remains the agent's task description. This
 avoids requiring natural task phrasing to equal a page label. A fill completes

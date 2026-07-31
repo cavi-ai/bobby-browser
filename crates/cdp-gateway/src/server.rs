@@ -1451,7 +1451,7 @@ impl CdpConnection {
                 let world = request.params.get("worldName").and_then(Value::as_str);
                 let playwright = source == Some("") && world.is_some_and(|name| !name.is_empty() && name.len() <= 256);
                 let puppeteer = source == Some("//# sourceURL=pptr:internal")
-                    && world == Some("__puppeteer_utility_world__25.3.0");
+                    && world == Some("__puppeteer_utility_world__25.4.0");
                 if request.params.as_object().is_none_or(|params| params.len() != 2) || !(playwright || puppeteer) {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "only pinned bounded client initialization signatures are supported"));
                 }

@@ -191,6 +191,19 @@ fn compatible_matches_worker_candidate_signals() {
         },
         &textbox("Email")
     ));
+    assert!(compatible(
+        &FillValue::Checked { checked: true },
+        &candidate("updates", Some("checkbox"), "Updates", BTreeMap::new())
+    ));
+    assert!(compatible(
+        &FillValue::Checked { checked: true },
+        &candidate(
+            "professional",
+            Some("radio"),
+            "Professional",
+            BTreeMap::new()
+        )
+    ));
 }
 
 #[tokio::test]

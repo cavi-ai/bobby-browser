@@ -99,6 +99,7 @@ pub fn compatible(value: &FillValue, candidate: &Candidate) -> bool {
             !is_file_input && matches!(role, "textbox" | "searchbox" | "spinbutton")
         }
         FillValue::Select { .. } => !is_file_input && matches!(role, "combobox" | "listbox"),
+        FillValue::Checked { .. } => matches!(role, "checkbox" | "radio"),
     }
 }
 
@@ -109,6 +110,7 @@ pub fn verify_fill(value: &FillValue, evidence: &[Evidence]) -> Result<(), Strin
     match value {
         FillValue::Text { text, .. } => verify_typed_value(text, evidence),
         FillValue::Select { option } => verify_typed_value(option, evidence),
+        FillValue::Checked { checked } => verify_typed_value(&checked.to_string(), evidence),
         FillValue::Files { paths } => verify_upload_paths(paths, evidence),
     }
 }

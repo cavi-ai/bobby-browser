@@ -181,9 +181,11 @@ function renderSemanticForm(document: Document, station: HTMLElement, controller
   const plan = document.createElement("select"); plan.name = state.fields.plan; plan.setAttribute("aria-label", "Plan");
   for (const value of ["starter", "pro"]) { const option = document.createElement("option"); option.value = value; option.textContent = value === "pro" ? "Professional" : "Starter"; plan.append(option); }
   planLabel.append(plan);
+  const termsLabel = document.createElement("label"); termsLabel.textContent = "Accept terms";
+  const terms = document.createElement("input"); terms.type = "checkbox"; terms.name = "accept-terms"; termsLabel.prepend(terms);
   const submit = buttonFor(document, "Submit form", "submit"); submit.dataset.testid = "semantic-submit";
-  form.append(name.label, email.label, planLabel, submit);
-  form.addEventListener("submit", (event) => { event.preventDefault(); report(controller.verify("semantic-form", { values: { [state.fields.name]: name.input.value, [state.fields.email]: email.input.value, [state.fields.plan]: plan.value } })); });
+  form.append(name.label, email.label, planLabel, termsLabel, submit);
+  form.addEventListener("submit", (event) => { event.preventDefault(); report(controller.verify("semantic-form", { values: { [state.fields.name]: name.input.value, [state.fields.email]: email.input.value, [state.fields.plan]: plan.value, "accept-terms": terms.checked } })); });
   station.prepend(form);
 }
 
@@ -320,4 +322,3 @@ function latestFileReceipt(input: HTMLInputElement, publish: (receipt: { name: s
 function encodeBase64(value: string): string { return btoa(new TextEncoder().encode(value).reduce((encoded, byte) => encoded + String.fromCharCode(byte), "")); }
 
 if (typeof document !== "undefined") mountGauntlet(document.querySelector<HTMLElement>("#app") ?? document.body, window.location.pathname, window.location.search);
-
