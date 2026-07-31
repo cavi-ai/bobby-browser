@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { buildBobbyBrowserDocs } from "./build-bobby-browser.mjs";
 import { verifyBobbyBrowserDocs } from "./verify-bobby-browser.mjs";
-import { OUTPUT_REL } from "./lib.mjs";
+import { DOCUMENTED_VERSION, OUTPUT_REL } from "./lib.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const RELEASE = Object.freeze({
-  version: "0.2.1",
-  tag: "v0.2.1",
+  version: DOCUMENTED_VERSION,
+  tag: `v${DOCUMENTED_VERSION}`,
   commit: "aa5184347037c04c42064a702ce1dc7d5b16c75b",
   sourceDateEpoch: 1784953886,
 });
@@ -71,7 +71,7 @@ test("verify fails when navigation points at a missing page", async () => {
       path.join(fixtureRoot, "docs/bobby-browser/source/navigation.json"),
       JSON.stringify({
         title: "bobby-browser",
-        version: "0.2.1",
+        version: DOCUMENTED_VERSION,
         sections: [
           {
             title: "Introduction",
