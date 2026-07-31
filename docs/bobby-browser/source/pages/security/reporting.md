@@ -4,8 +4,17 @@ documentedVersion: 0.3.0
 
 # Reporting vulnerabilities
 
-**Please do not open a public issue for security vulnerabilities.**
+Report security issues privately. Do not open public GitHub issues for
+vulnerabilities that could put operators or end users at risk.
 
-Report privately through GitHub's private vulnerability reporting on this repository (Security → Report a vulnerability). Include reproduction steps, impact, and affected versions when known.
+Preferred channel and response expectations are documented in
+[SECURITY.md](https://github.com/cavi-ai/bobby-browser/blob/main/SECURITY.md)
+in the repository root.
 
-See [SECURITY.md](https://github.com/cavi-ai/bobby-browser/blob/main/SECURITY.md) for the complete reporting guidance.
+Include:
+
+- Affected version / commit
+- Reproduction steps (loopback-only if possible)
+- Impact (auth bypass, capability escalation, secret leakage, …)
+
+See also the [security model](model.md) summary.
