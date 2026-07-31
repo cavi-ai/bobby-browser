@@ -70,7 +70,8 @@ There is no principals helper on the client today — mint/revoke with raw HTTP
 Build envelopes with helpers from the package (`locateEnvelope`,
 `fillEnvelope`, `submitAndVerifyEnvelope`, `waitForStateEnvelope`,
 `followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
-them to `submit`. See [Intent commands](../guides/intents.md).
+them to `submit`. `FillValue` kinds: `text`, `select`, `checked`, `files`
+(see [Intent commands](../guides/intents.md)).
 
 ## Errors
 
