@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use interface_core::{
     canonical_sha256, AuthorizationGuard, CapabilityHandle, IdempotencyReservation,
-    IdempotencyStore, InterfaceResult, RuntimeInterface, SessionOwnershipRecorder,
+    IdempotencyStore, InterfaceResult, RuntimeInterface, SessionCheckpointOutcome,
+    SessionOwnershipRecorder,
 };
 use types::{
     Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
@@ -23,6 +24,7 @@ pub struct AuthenticatedRuntime {
     inner: RuntimeService,
     authorization: AuthorizationGuard,
     idempotency: IdempotencyStore,
+    lifecycle_idempotency: IdempotencyStore<SessionCheckpointOutcome>,
     submit_dispatches: Arc<AtomicUsize>,
     create_session_dispatches: Arc<AtomicUsize>,
     checkpoint_dispatches: Arc<AtomicUsize>,
@@ -43,6 +45,7 @@ impl AuthenticatedRuntime {
             inner,
             authorization: AuthorizationGuard::new(authority),
             idempotency,
+            lifecycle_idempotency: IdempotencyStore::default(),
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
             create_session_dispatches: Arc::new(AtomicUsize::new(0)),
             checkpoint_dispatches: Arc::new(AtomicUsize::new(0)),
@@ -59,6 +62,7 @@ impl AuthenticatedRuntime {
             inner,
             authorization: AuthorizationGuard::new(authority),
             idempotency: IdempotencyStore::default(),
+            lifecycle_idempotency: IdempotencyStore::default(),
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
             create_session_dispatches: Arc::new(AtomicUsize::new(0)),
             checkpoint_dispatches: Arc::new(AtomicUsize::new(0)),
@@ -98,6 +102,58 @@ impl AuthenticatedRuntime {
         }
         Ok(())
     }
+
+    async fn dispatch_create_session(
+        &self,
+        ctx: &RequestContext,
+        req: CreateSessionRequest,
+    ) -> InterfaceResult<SessionState> {
+        let ownership_reservation = self
+            .session_ownership
+            .as_ref()
+            .map(|ownership| ownership.reserve(ctx.principal_id.clone()))
+            .transpose()
+            .map_err(|_| {
+                error_with(
+                    ctx,
+                    InterfaceErrorCode::ResourceExhausted,
+                    "session ownership capacity exhausted",
+                )
+            })?;
+        self.create_session_dispatches
+            .fetch_add(1, Ordering::AcqRel);
+        let session = match self.inner.create_session(req).await {
+            Ok(session) => session,
+            Err(error) => {
+                drop(ownership_reservation);
+                return Err(map_runtime_error(ctx, error));
+            }
+        };
+        if let Some(reservation) = ownership_reservation {
+            if reservation.finalize(session.id.clone()).is_err() {
+                let _ = self.inner.sessions.delete(&session.id).await;
+                return Err(error_with(
+                    ctx,
+                    InterfaceErrorCode::ResourceExhausted,
+                    "session ownership finalization failed",
+                ));
+            }
+        }
+        Ok(session)
+    }
+
+    async fn dispatch_checkpoint(
+        &self,
+        ctx: &RequestContext,
+        checkpoint: WorkflowCheckpoint,
+        evidence: Vec<Evidence>,
+    ) -> InterfaceResult<WorkflowCheckpoint> {
+        self.checkpoint_dispatches.fetch_add(1, Ordering::AcqRel);
+        self.inner
+            .checkpoint(checkpoint, evidence)
+            .await
+            .map_err(|_| internal_error(ctx))
+    }
 }
 
 #[async_trait]
@@ -130,38 +186,46 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<SessionState> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateSession)?;
-        let ownership_reservation = self
-            .session_ownership
-            .as_ref()
-            .map(|ownership| ownership.reserve(ctx.principal_id.clone()))
-            .transpose()
-            .map_err(|_| {
-                error_with(
-                    &ctx,
-                    InterfaceErrorCode::ResourceExhausted,
-                    "session ownership capacity exhausted",
-                )
-            })?;
-        self.create_session_dispatches
-            .fetch_add(1, Ordering::AcqRel);
-        let session = match self.inner.create_session(req).await {
-            Ok(session) => session,
-            Err(error) => {
-                drop(ownership_reservation);
-                return Err(map_runtime_error(&ctx, error));
-            }
+        let Some(key) = ctx.idempotency_key.clone() else {
+            return self.dispatch_create_session(&ctx, req).await;
         };
-        if let Some(reservation) = ownership_reservation {
-            if reservation.finalize(session.id.clone()).is_err() {
-                let _ = self.inner.sessions.delete(&session.id).await;
-                return Err(error_with(
-                    &ctx,
-                    InterfaceErrorCode::ResourceExhausted,
-                    "session ownership finalization failed",
-                ));
+        let digest = canonical_sha256(&req)?;
+        let reservation = self
+            .lifecycle_idempotency
+            .reserve(
+                ctx.principal_id.clone(),
+                key,
+                InterfaceOperation::CreateSession,
+                digest,
+                Utc::now(),
+                ctx.deadline,
+                ctx.correlation_id.clone(),
+            )
+            .await?;
+        match reservation {
+            IdempotencyReservation::Replay(SessionCheckpointOutcome::Session(session)) => {
+                Ok(session)
+            }
+            IdempotencyReservation::Replay(_) => Err(internal_error(&ctx)),
+            IdempotencyReservation::Acquired(permit) => {
+                match self.dispatch_create_session(&ctx, req).await {
+                    Ok(session) => {
+                        self.lifecycle_idempotency
+                            .finish(
+                                permit,
+                                SessionCheckpointOutcome::Session(session.clone()),
+                                Utc::now(),
+                            )
+                            .await?;
+                        Ok(session)
+                    }
+                    Err(error) => {
+                        self.lifecycle_idempotency.abandon(permit).await;
+                        Err(error)
+                    }
+                }
             }
         }
-        Ok(session)
     }
 
     async fn open_page(
@@ -231,13 +295,6 @@ impl RuntimeInterface for AuthenticatedRuntime {
                     self.idempotency.abandon(permit).await;
                     return Err(error);
                 }
-                if let Err(error) = self
-                    .authorization
-                    .authorize(&ctx, InterfaceOperation::SubmitCommand)
-                {
-                    self.idempotency.abandon(permit).await;
-                    return Err(error);
-                }
                 self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
                 let outcome = self
                     .inner
@@ -260,11 +317,46 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
         self.require_owned_session(&ctx, &checkpoint.session_id)?;
-        self.checkpoint_dispatches.fetch_add(1, Ordering::AcqRel);
-        self.inner
-            .checkpoint(checkpoint, evidence)
-            .await
-            .map_err(|_| internal_error(&ctx))
+        let Some(key) = ctx.idempotency_key.clone() else {
+            return self.dispatch_checkpoint(&ctx, checkpoint, evidence).await;
+        };
+        let digest = canonical_sha256(&(&checkpoint, &evidence))?;
+        let reservation = self
+            .lifecycle_idempotency
+            .reserve(
+                ctx.principal_id.clone(),
+                key,
+                InterfaceOperation::CreateCheckpoint,
+                digest,
+                Utc::now(),
+                ctx.deadline,
+                ctx.correlation_id.clone(),
+            )
+            .await?;
+        match reservation {
+            IdempotencyReservation::Replay(SessionCheckpointOutcome::Checkpoint(checkpoint)) => {
+                Ok(checkpoint)
+            }
+            IdempotencyReservation::Replay(_) => Err(internal_error(&ctx)),
+            IdempotencyReservation::Acquired(permit) => {
+                match self.dispatch_checkpoint(&ctx, checkpoint, evidence).await {
+                    Ok(checkpoint) => {
+                        self.lifecycle_idempotency
+                            .finish(
+                                permit,
+                                SessionCheckpointOutcome::Checkpoint(checkpoint.clone()),
+                                Utc::now(),
+                            )
+                            .await?;
+                        Ok(checkpoint)
+                    }
+                    Err(error) => {
+                        self.lifecycle_idempotency.abandon(permit).await;
+                        Err(error)
+                    }
+                }
+            }
+        }
     }
 
     async fn recover(
