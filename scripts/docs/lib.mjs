@@ -1,9 +1,20 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+function workspacePackageVersion() {
+  const manifest = readFileSync(path.join(REPO_ROOT, "Cargo.toml"), "utf8");
+  const match = manifest.match(/\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"/s);
+  if (!match) throw new Error("workspace package version not found in Cargo.toml");
+  return match[1];
+}
 
 export const PRODUCT_ID = "bobby-browser";
-export const DOCUMENTED_VERSION = "0.2.1";
+export const DOCUMENTED_VERSION = workspacePackageVersion();
 export const SOURCE_REL = "docs/bobby-browser/source";
 export const OUTPUT_REL = `docs/bobby-browser/v${DOCUMENTED_VERSION}`;
 const STABLE_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;

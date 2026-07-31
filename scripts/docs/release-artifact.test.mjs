@@ -6,11 +6,12 @@ import path from "node:path";
 import test from "node:test";
 
 import { buildBobbyBrowserDocs } from "./build-bobby-browser.mjs";
+import { DOCUMENTED_VERSION } from "./lib.mjs";
 import { createProductDocsReleaseArtifact } from "./release-artifact.mjs";
 
 const RELEASE = {
-  version: "0.2.1",
-  tag: "v0.2.1",
+  version: DOCUMENTED_VERSION,
+  tag: `v${DOCUMENTED_VERSION}`,
   commit: "aa5184347037c04c42064a702ce1dc7d5b16c75b",
   sourceDateEpoch: 1784953886,
 };
