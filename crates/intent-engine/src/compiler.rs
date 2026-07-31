@@ -152,10 +152,19 @@ fn compile_target(purpose: &str, hints: &IntentHints) -> TargetSpec {
         ..TargetSpec::default()
     };
 
-    if hints.role.is_some() {
-        target.accessible_name = Some(purpose.to_owned());
-    } else {
-        target.text = Some(TextMatch::Contains(purpose.to_owned()));
+    match &hints.near_text {
+        Some(TextMatch::Exact(name)) if hints.role.is_some() => {
+            target.accessible_name = Some(name.clone());
+        }
+        Some(matcher) => {
+            target.text = Some(matcher.clone());
+        }
+        None if hints.role.is_some() => {
+            target.accessible_name = Some(purpose.to_owned());
+        }
+        None => {
+            target.text = Some(TextMatch::Contains(purpose.to_owned()));
+        }
     }
 
     target

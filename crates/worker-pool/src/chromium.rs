@@ -427,13 +427,18 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, page, &command.selector, command.target.as_ref())
             .await?;
-        resolved
-            .type_text(page, &command.value, command.clear_first)
-            .await?;
+        let observed = if resolved.is_select(page).await? {
+            resolved.select_option(page, &command.value).await?
+        } else {
+            resolved
+                .type_text(page, &command.value, command.clear_first)
+                .await?;
+            resolved.value(page).await?.unwrap_or_default()
+        };
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
-                text: Some(command.value.clone()),
+                text: Some(observed),
             },
             resolved.evidence,
         ])

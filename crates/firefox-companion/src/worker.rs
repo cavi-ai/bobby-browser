@@ -83,6 +83,8 @@ pub struct ExtensionControl {
     pub label: Option<String>,
     #[serde(default)]
     pub value: Option<String>,
+    #[serde(default)]
+    pub attributes: std::collections::BTreeMap<String, String>,
     pub disabled: bool,
 }
 
@@ -1214,7 +1216,7 @@ impl FirefoxCompanionWorker {
                     name: control.name,
                     label: control.label,
                     text,
-                    attributes: Default::default(),
+                    attributes: control.attributes,
                     state: CandidateState {
                         attached: true,
                         visible: true,

@@ -125,6 +125,7 @@ export type PageObservation = {
     name?: string;
     label?: string;
     value?: string;
+    attributes: Record<string, string>;
     disabled: boolean;
   }>;
   html?: string;
@@ -634,6 +635,16 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
     const testId = sensitive
       ? undefined
       : observationString(element.getAttribute("data-testid"));
+    const attributes: Record<string, string> = {};
+    if (!sensitive) {
+      for (const name of ["name", "type", "placeholder", "autocomplete", "pattern", "min", "max", "step", "multiple"] as const) {
+        const value = observationString(element.getAttribute(name));
+        if (value) attributes[name] = value;
+      }
+      for (const name of ["required", "readonly", "checked", "multiple"] as const) {
+        if ((element as unknown as Record<string, unknown>)[name] === true) attributes[name] = "true";
+      }
+    }
     const control = {
       cssPath: observedPath,
       ...(testId ? { testId } : {}),
@@ -641,6 +652,7 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       name: sensitive && observedName ? REDACTED : observedName,
       label,
       value: controlValue(element, sensitive),
+      attributes,
       disabled:
         element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
     };
