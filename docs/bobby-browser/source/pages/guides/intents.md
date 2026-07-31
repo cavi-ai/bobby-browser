@@ -254,13 +254,18 @@ Vision-assisted resolution is **deny-by-default**. All three must pass:
 
 1. Bearer holds `vision:assist`
 2. Session created with `executionPolicy.visionAssist = true`
-3. A provider is configured (no provider, no escalation)
+3. A provider is configured under `[vision]` (no `endpoint_url`, no escalation)
 
-Otherwise vision escalation is denied.
+Otherwise vision escalation is denied (`VisionAssistDenied` / failed).
+
+When gates pass and deterministic resolution sticks, the engine captures a real
+PNG via `screenshot_bytes` (Chromium and Firefox) and posts it to the provider.
+Empty frames are not sent.
 
 ## Vision provider
 
-Configure one HTTP provider in `config.toml`:
+Configure one HTTP provider in `config.toml` (also listed under
+[Configuration](configuration.md#vision)):
 
 ```toml
 [vision]
@@ -269,11 +274,30 @@ token_env = "BOBBY_VISION_TOKEN"                  # env var holding the bearer (
 timeout_ms = 15000
 ```
 
-The runtime posts `{purpose, intentKind, stuck, screenshotPng}` (base64 PNG)
-and expects `{confidence, action}` where action is
-`{kind: "click", x, y}` | `{kind: "typeText", text}` | `{kind: "extractValue", value}`.
-Invalid responses, out-of-range confidence, and transport failures decline
-the escalation; proposals still pass the engine's 0.75 confidence floor and
+The runtime `POST`s JSON:
+
+```json
+{
+  "purpose": "…",
+  "intentKind": "locate",
+  "stuck": "zeroCandidates",
+  "screenshotPng": "<base64 PNG>"
+}
+```
+
+and expects:
+
+```json
+{
+  "confidence": 0.9,
+  "action": { "kind": "click", "x": 12.0, "y": 34.0 }
+}
+```
+
+`action.kind` is one of `click` (`x`,`y`), `typeText` (`text`), or
+`extractValue` (`value`). Invalid responses, out-of-range confidence, oversized
+bodies, and transport failures **decline** the escalation (fail closed).
+Accepted proposals still require the engine's **0.75** confidence floor and
 sha256-pinned verification before any browser action.
 
 ## Purpose bounds

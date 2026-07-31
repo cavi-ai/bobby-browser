@@ -52,6 +52,20 @@ Controls egress from the runtime (downloads, fetches), not the broker listen
 socket: `allow_loopback`, `allow_private_network`, redirect/body/timeout caps,
 `max_concurrent_requests`. Defaults deny private/loopback egress.
 
+## `[vision]`
+
+Deny-by-default HTTP vision-assist provider. Unset `endpoint_url` means
+escalation is unavailable even when the bearer and session opt in.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `endpoint_url` | unset | Provider URL — **https**, or **http only on loopback** |
+| `token_env` | unset | Env var name holding the provider bearer (never store the token here) |
+| `timeout_ms` | `15000` | Per-proposal HTTP timeout |
+
+Request / response shapes and confidence floor: [Intent commands](intents.md#vision-provider).
+Capability + session gates: [Capabilities](../concepts/capabilities.md).
+
 ## `[interface]`
 
 | Field | Default | Meaning |

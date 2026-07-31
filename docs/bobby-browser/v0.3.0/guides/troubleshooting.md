@@ -106,7 +106,20 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
 - Form-control nodes may include `value`, `required`, `invalid`, `checked`,
   bounds, and related flags. Password / masked values appear as
   `"[redacted]"`.
+- Actionable nodes expose `target: { role, accessibleName, ordinal? }`. Use
+  intents for unique names; when `ordinal` is set, disambiguate with a
+  primitive `TargetSpec` or MCP `click` / `type_text` with `target` and no
+  `selector` (IntentHints have no ordinal).
 - Guide: [Accessibility snapshot](accessibility-snapshot.md).
+
+## Vision assist
+
+- Needs **all three**: `vision:assist` capability, session
+  `executionPolicy.visionAssist = true`, and `[vision].endpoint_url`.
+- Token lives in the env named by `token_env` — never in `config.toml`.
+- Endpoint must be https (or http on loopback). Bad proposals fail closed.
+- Guide: [Intent commands](intents.md#vision-provider) /
+  [Configuration](configuration.md#vision).
 
 ## Error catalog (`InterfaceErrorCode`)
 

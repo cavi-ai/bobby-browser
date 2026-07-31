@@ -80,18 +80,80 @@ Sensitive values (password controls, masked AX values, companion secret
 heuristics) serialize as `"[redacted]"` rather than the live contents.
 
 Actionable nodes with a non-empty accessible name include a command-ready
-`target`. Copy its `role`, `accessibleName`, and optional `ordinal` directly
-into a command's `TargetSpec`; no DOM selector or engine-specific identifier is
-needed. Unique role/name pairs omit `ordinal`. Repeated pairs receive stable,
-zero-based ordinals in accessibility-tree order, so the second `Phone` textbox
-has `ordinal: 1`. Targets are omitted when the name is redacted.
+`target`. Unique role/name pairs omit `ordinal`. Repeated pairs receive stable,
+zero-based ordinals in accessibility-tree order (the second `Phone` textbox has
+`ordinal: 1`). Targets are omitted when the name is redacted.
 
-For flat MCP `type_text` and `click`, send that `target` with `sessionId` and
-`pageId`; omit `selector`. A selector is required only when the caller chooses
-the legacy raw-selector path.
+### Using `target` in commands
 
-Use the resulting command target with `fill` / `completeForm`, then verify with
-intent evidence — do not treat the snapshot alone as postcondition proof.
+**MCP `click` / `type_text`** — pass the snapshot `target` with `sessionId` and
+`pageId`; omit `selector`. A selector is required only on the legacy
+raw-selector path. See [MCP tools](../surfaces/mcp-tools.md).
+
+**Unique name (no ordinal)** — intents map cleanly via hints:
+
+```ts
+const node = /* AccessibilityNode with target */;
+await client.submit(
+  fillEnvelope(
+    meta,
+    "enter phone",
+    { kind: "text", text: "555-0100", clearFirst: true },
+    {
+      role: node.target!.role,
+      nearText: { kind: "exact", value: node.target!.accessibleName },
+    },
+  ),
+  { idempotencyKey: crypto.randomUUID() },
+);
+```
+
+**Duplicate role/name (`ordinal` set)** — `IntentHints` have no ordinal field.
+Disambiguate with a primitive whose `TargetSpec` carries the ordinal (no CSS /
+backend id required), or pass that same `target` through MCP `type_text` /
+`click` without a selector:
+
+```ts
+await client.submit(
+  {
+    schemaVersion: 2,
+    commandId: crypto.randomUUID(),
+    workflowId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    sessionId: session.id,
+    pageId: page.id,
+    deadline: new Date(Date.now() + 60_000).toISOString(),
+    command: {
+      kind: "primitive",
+      input: {
+        kind: "typeText",
+        input: {
+          selector: "",
+          target: {
+            css: null,
+            testId: null,
+            role: node.target!.role,
+            accessibleName: node.target!.accessibleName,
+            label: null,
+            text: null,
+            attributes: {},
+            framePath: [],
+            shadowPath: [],
+            ordinal: node.target!.ordinal ?? null,
+            allowBestMatch: false,
+          },
+          value: "555-0100",
+          clearFirst: true,
+        },
+      },
+    },
+  },
+  { idempotencyKey: crypto.randomUUID() },
+);
+```
+
+Always verify with command / intent evidence — do not treat the snapshot alone
+as postcondition proof.
 
 ## Engine notes
 
