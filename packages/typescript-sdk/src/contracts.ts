@@ -131,6 +131,8 @@ export interface UploadFilesCommand { selector: string; target: TargetSpec | nul
 export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
+export interface AccessibilitySnapshotCommand { maxNodes?: number | null }
+export interface AccessibilityNode { role?: string; name?: string; children?: AccessibilityNode[] }
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
@@ -147,6 +149,7 @@ export type PrimitiveCommand =
   | { kind: "listPages"; input: null }
   | { kind: "closePage"; input: ClosePageCommand }
   | { kind: "activatePage"; input: ActivatePageCommand }
+  | { kind: "accessibilitySnapshot"; input: AccessibilitySnapshotCommand }
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }

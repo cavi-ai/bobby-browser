@@ -749,6 +749,109 @@ function target(document: Document, input: Record<string, unknown>): Element {
   return element;
 }
 
+const A11Y_MAX_DEPTH = 32;
+const A11Y_MAX_NODES = 2048;
+const A11Y_STRUCTURAL_ROLES = new Set([
+  "banner",
+  "navigation",
+  "main",
+  "contentinfo",
+  "complementary",
+  "form",
+  "search",
+  "region",
+  "heading",
+  "list",
+  "listitem",
+  "table",
+  "row",
+  "cell",
+  "columnheader",
+  "rowheader",
+  "img",
+  "figure",
+  "dialog",
+  "alert",
+  "status",
+  "progressbar",
+  "separator",
+]);
+
+type A11yNode = { role?: string; name?: string; children?: A11yNode[] };
+
+function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode[]; truncated: boolean } {
+  let maxNodes = 256;
+  if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
+    maxNodes = Math.min(Math.max(1, maxNodesInput), A11Y_MAX_NODES);
+  }
+  const root = document.documentElement;
+  const state = { remaining: maxNodes, truncated: false };
+  if (!root) return { nodes: [], truncated: false };
+
+  const structuralRole = (element: Element): string | undefined => {
+    const tag = element.tagName.toLowerCase();
+    const landmark: Record<string, string> = {
+      header: "banner",
+      nav: "navigation",
+      main: "main",
+      footer: "contentinfo",
+      aside: "complementary",
+      form: "form",
+      section: "region",
+      ul: "list",
+      ol: "list",
+      li: "listitem",
+      table: "table",
+      tr: "row",
+      td: "cell",
+      th: "columnheader",
+      img: "img",
+      figure: "figure",
+      dialog: "dialog",
+      hr: "separator",
+    };
+    if (landmark[tag]) return landmark[tag];
+    if (/^h[1-6]$/.test(tag)) return "heading";
+    return undefined;
+  };
+
+  const build = (element: Element, depth: number): A11yNode | undefined => {
+    const budget: WorkBudget = { remaining: 64 };
+    const sensitive = isSensitiveControl(element, budget);
+    const role = implicitRole(element, !sensitive) ?? structuralRole(element);
+    const name = sensitive
+      ? REDACTED
+      : accessibleName(element, labelText(element, new Map(), budget), budget, sensitive);
+    const children: A11yNode[] = [];
+    if (depth < A11Y_MAX_DEPTH) {
+      for (const child of Array.from(element.children).slice(0, 256)) {
+        if (state.remaining <= 0) break;
+        const built = build(child, depth + 1);
+        if (built) children.push(built);
+      }
+    }
+    if (isElementHidden(element)) return undefined;
+    if (!role) return children.length ? { children } : undefined;
+    if (state.remaining <= 0) {
+      state.truncated = true;
+      return undefined;
+    }
+    state.remaining -= 1;
+    const node: A11yNode = { role };
+    if (name) node.name = name;
+    if (children.length) node.children = children;
+    return node;
+  };
+
+  const tree = build(root, 0);
+  let nodes = tree ? [tree] : [];
+  while (nodes.length === 1 && !nodes[0].role && !nodes[0].name && nodes[0].children) {
+    nodes = nodes[0].children;
+  }
+  if (state.remaining <= 0) state.truncated = true;
+  return { nodes, truncated: state.truncated };
+}
+
 export function executeContentAction(
   document: Document,
   operation: string,
@@ -757,6 +860,9 @@ export function executeContentAction(
   const parsed = actionInput(input);
   if (operation === "observe") {
     return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
+  }
+  if (operation === "a11yTree") {
+    return a11yTree(document, parsed.maxNodes);
   }
   const element = target(document, parsed);
   switch (operation) {
