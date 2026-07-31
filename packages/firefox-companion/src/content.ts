@@ -777,7 +777,21 @@ const A11Y_STRUCTURAL_ROLES = new Set([
   "separator",
 ]);
 
-type A11yNode = { role?: string; name?: string; children?: A11yNode[] };
+type A11yNode = {
+  role?: string;
+  name?: string;
+  value?: string;
+  description?: string;
+  required?: boolean;
+  disabled?: boolean;
+  readOnly?: boolean;
+  invalid?: boolean;
+  checked?: boolean;
+  autocomplete?: string;
+  valueMin?: string;
+  valueMax?: string;
+  children?: A11yNode[];
+};
 
 function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode[]; truncated: boolean } {
   let maxNodes = 256;
@@ -787,6 +801,13 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
   const root = document.documentElement;
   const state = { remaining: maxNodes, truncated: false };
   if (!root) return { nodes: [], truncated: false };
+  const labelsByControlId = new Map<string, Element>();
+  for (const label of Array.from(document.querySelectorAll("label[for]")).slice(0, 4_096)) {
+    const controlId = label.getAttribute("for");
+    if (controlId && byteLength(controlId) <= MAX_SELECTOR_LENGTH && !labelsByControlId.has(controlId)) {
+      labelsByControlId.set(controlId, label);
+    }
+  }
 
   const structuralRole = (element: Element): string | undefined => {
     const tag = element.tagName.toLowerCase();
@@ -821,7 +842,7 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     const role = implicitRole(element, !sensitive) ?? structuralRole(element);
     const name = sensitive
       ? REDACTED
-      : accessibleName(element, labelText(element, new Map(), budget), budget, sensitive);
+      : accessibleName(element, labelText(element, labelsByControlId, budget), budget, sensitive);
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
       for (const child of Array.from(element.children).slice(0, 256)) {
@@ -839,14 +860,38 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     state.remaining -= 1;
     const node: A11yNode = { role };
     if (name) node.name = name;
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) {
+      const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+      node.value = controlValue(element, sensitive) ?? "";
+      node.required = control.required;
+      node.disabled = control.disabled;
+      node.invalid = !control.validity.valid;
+      if (element.tagName !== "SELECT") {
+        node.readOnly = (control as HTMLInputElement | HTMLTextAreaElement).readOnly;
+      }
+      if (element.tagName === "INPUT") {
+        const input = control as HTMLInputElement;
+        if (["checkbox", "radio"].includes(input.type)) node.checked = input.checked;
+        const autocomplete = observationString(input.autocomplete);
+        if (autocomplete) node.autocomplete = autocomplete;
+        const valueMin = observationString(input.min);
+        const valueMax = observationString(input.max);
+        if (valueMin) node.valueMin = valueMin;
+        if (valueMax) node.valueMax = valueMax;
+      }
+      const description = observationString(element.getAttribute("aria-description"));
+      if (description) node.description = description;
+    }
     if (children.length) node.children = children;
     return node;
   };
 
   const tree = build(root, 0);
   let nodes = tree ? [tree] : [];
-  while (nodes.length === 1 && !nodes[0].role && !nodes[0].name && nodes[0].children) {
-    nodes = nodes[0].children;
+  while (nodes.length === 1) {
+    const onlyNode = nodes[0];
+    if (!onlyNode || onlyNode.role || onlyNode.name || !onlyNode.children) break;
+    nodes = onlyNode.children;
   }
   if (state.remaining <= 0) state.truncated = true;
   return { nodes, truncated: state.truncated };

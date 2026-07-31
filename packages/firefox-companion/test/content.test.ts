@@ -462,3 +462,32 @@ test("a11yTree builds a bounded, hidden-aware, redacting accessibility tree", ()
   };
   assert.equal(bounded.truncated, true);
 });
+
+test("a11yTree exposes bounded form state without leaking sensitive values", () => {
+  const secret = "vault-secret-92";
+  const document = documentFor(`
+    <form>
+      <label for="email">Email address</label>
+      <input id="email" type="email" value="broken" required autocomplete="email">
+      <label><input id="terms" type="checkbox" checked disabled> Accept terms</label>
+      <label for="password">Password</label>
+      <input id="password" type="password" value="${secret}" required>
+    </form>
+  `);
+
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 64 }) as {
+    nodes: Array<Record<string, unknown>>;
+    truncated: boolean;
+  };
+  const encoded = JSON.stringify(result.nodes);
+
+  assert.match(encoded, /"name":"Email address"/);
+  assert.match(encoded, /"value":"broken"/);
+  assert.match(encoded, /"required":true/);
+  assert.match(encoded, /"invalid":true/);
+  assert.match(encoded, /"autocomplete":"email"/);
+  assert.match(encoded, /"checked":true/);
+  assert.match(encoded, /"disabled":true/);
+  assert.match(encoded, /"value":"\[redacted\]"/);
+  assert.equal(encoded.includes(secret), false);
+});
