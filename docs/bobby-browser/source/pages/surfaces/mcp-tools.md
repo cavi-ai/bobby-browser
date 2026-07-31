@@ -54,13 +54,16 @@ envelopes only through `command_execute` (nested
 `{ kind: "intent", input: { kind: "locate" \| … } }`). Nested capabilities such
 as `intent:execute` still apply inside the runtime.
 
-Compact accessibility trees: [Accessibility snapshot](../guides/accessibility-snapshot.md).
+Compact accessibility trees (including form-control state):
+[Accessibility snapshot](../guides/accessibility-snapshot.md).
 
 Live JSON Schemas for tool arguments are defined in
 `crates/mcp-gateway/src/schema.rs` (for example `session_create` requires
 `profile`; `page_open` takes `sessionId`; `command_execute` takes `envelope`
 and optional `idempotencyKey`). MCP argument names are camelCase even where
-some HTTP request bodies use snake_case.
+some HTTP request bodies use snake_case. The gateway's `schema_parity` tests
+compare hand-bounded `kind` variant sets to schemars output from the
+`types` crate (`schema` feature) so command/evidence drift fails CI.
 
 ## Lifecycle notes
 
