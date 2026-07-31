@@ -5,7 +5,7 @@ mod selection;
 mod skill_adapter;
 mod targeting;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -31,6 +31,66 @@ pub use skill_adapter::{
     CHROMIUM_PRODUCTION_SKILL_PROFILE_VERSION, FIREFOX_PRODUCTION_SKILL_PROFILE_VERSION,
     PRODUCTION_SKILL_CAPABILITIES,
 };
+
+/// Adds command-ready semantic targets to actionable accessibility nodes.
+/// Duplicate role/name pairs receive an ordinal in tree traversal order,
+/// matching the candidate collection order used by the resolver.
+pub fn annotate_accessibility_targets(nodes: &mut [types::AccessibilityNode]) {
+    fn actionable(role: &str) -> bool {
+        matches!(
+            role,
+            "button"
+                | "checkbox"
+                | "combobox"
+                | "link"
+                | "listbox"
+                | "radio"
+                | "searchbox"
+                | "slider"
+                | "spinbutton"
+                | "switch"
+                | "textbox"
+        )
+    }
+
+    fn count(nodes: &[types::AccessibilityNode], totals: &mut BTreeMap<(String, String), usize>) {
+        for node in nodes {
+            if let (Some(role), Some(name)) = (&node.role, &node.name) {
+                if actionable(role) && !name.is_empty() && name != "[redacted]" {
+                    *totals.entry((role.clone(), name.clone())).or_default() += 1;
+                }
+            }
+            count(&node.children, totals);
+        }
+    }
+
+    fn annotate(
+        nodes: &mut [types::AccessibilityNode],
+        totals: &BTreeMap<(String, String), usize>,
+        seen: &mut BTreeMap<(String, String), usize>,
+    ) {
+        for node in nodes {
+            if let (Some(role), Some(name)) = (&node.role, &node.name) {
+                let key = (role.clone(), name.clone());
+                if actionable(role) && !name.is_empty() && name != "[redacted]" {
+                    let index = seen.entry(key.clone()).or_default();
+                    node.target = Some(types::AccessibilityTarget {
+                        role: role.clone(),
+                        accessible_name: name.clone(),
+                        ordinal: (totals.get(&key).copied().unwrap_or_default() > 1)
+                            .then_some(*index),
+                    });
+                    *index += 1;
+                }
+            }
+            annotate(&mut node.children, totals, seen);
+        }
+    }
+
+    let mut totals = BTreeMap::new();
+    count(nodes, &mut totals);
+    annotate(nodes, &totals, &mut BTreeMap::new());
+}
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
     root.join(session_id.0.to_string())

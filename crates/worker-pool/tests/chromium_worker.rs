@@ -526,7 +526,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select><label for=password>Password</label><input id=password type=password autocomplete=current-password value=vault-secret-92 required>".into(),
+                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select><label for=phone-home>Phone</label><input id=phone-home><label for=phone-work>Phone</label><input id=phone-work><label for=password>Password</label><input id=password type=password autocomplete=current-password value=vault-secret-92 required>".into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -628,6 +628,60 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
     assert!(!serde_json::to_string(nodes)
         .unwrap()
         .contains("vault-secret-92"));
+
+    fn collect_named<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+        output: &mut Vec<&'a AccessibilityNode>,
+    ) {
+        for node in nodes {
+            if node.name.as_deref() == Some(name) && node.target.is_some() {
+                output.push(node);
+            }
+            collect_named(&node.children, name, output);
+        }
+    }
+    let mut phones = Vec::new();
+    collect_named(nodes, "Phone", &mut phones);
+    assert_eq!(phones.len(), 2);
+    assert_eq!(phones[0].target.as_ref().unwrap().ordinal, Some(0));
+    assert_eq!(phones[1].target.as_ref().unwrap().ordinal, Some(1));
+    let work_phone = phones[1].target.as_ref().unwrap();
+    worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some(work_phone.role.clone()),
+                    accessible_name: Some(work_phone.accessible_name.clone()),
+                    ordinal: work_phone.ordinal,
+                    ..TargetSpec::default()
+                }),
+                value: "555-0102".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+    let candidates = worker
+        .collect_candidates(&page_id, &TargetSpec::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .find(|candidate| candidate.css.as_deref() == Some("#phone-home"))
+            .map(|candidate| candidate.text.as_str()),
+        Some("")
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .find(|candidate| candidate.css.as_deref() == Some("#phone-work"))
+            .map(|candidate| candidate.text.as_str()),
+        Some("555-0102")
+    );
 
     worker
         .type_text(
