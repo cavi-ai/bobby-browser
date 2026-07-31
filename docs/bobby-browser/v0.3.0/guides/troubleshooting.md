@@ -108,7 +108,8 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
   `"[redacted]"`.
 - Actionable nodes expose `target: { role, accessibleName, ordinal? }`. Use
   intents for unique names; when `ordinal` is set, disambiguate with a
-  primitive `TargetSpec` (IntentHints have no ordinal).
+  primitive `TargetSpec` or MCP `click` / `type_text` with `target` and no
+  `selector` (IntentHints have no ordinal).
 - Guide: [Accessibility snapshot](accessibility-snapshot.md).
 
 ## Vision assist
