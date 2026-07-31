@@ -52,8 +52,15 @@ jobs:
           cargo build --release -p bobby-browser --target "${{ matrix.target }}"
           VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$VERSION" == "$GITHUB_REF_NAME" ]]; then
-            VERSION="$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -1)"
-            VERSION="${VERSION:-0.0.0-dev}"
+            VERSION="$(python3 - <<'PY'
+import pathlib, re
+text = pathlib.Path("Cargo.toml").read_text()
+match = re.search(r'\[workspace\.package\][^[]*?\bversion\s*=\s*"([^"]+)"', text, re.S)
+if not match:
+    raise SystemExit("workspace package version not found in Cargo.toml")
+print(match.group(1))
+PY
+)"
           fi
           STAGE="bobby-browser-${VERSION}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
           mkdir -p "$STAGE"

@@ -275,7 +275,7 @@ mod tests {
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
             json!({
-                "version": "0.3.0",
+                "version": env!("CARGO_PKG_VERSION"),
                 "capabilities": ["session:read"],
                 "active_sessions": 0,
                 "queued_jobs": 0,
@@ -296,7 +296,7 @@ mod tests {
 
         let client = BrowserRuntimeClient::new(format!("http://{addr}/v1"), "test-token").unwrap();
         let info = client.runtime_info(None).await.unwrap();
-        assert_eq!(info.version, "0.3.0");
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.active_sessions, 0);
     }
 
