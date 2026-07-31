@@ -584,6 +584,14 @@ fn compose_worker_factory_with_enrollment(
         registrations,
         RequiredCapabilities::default(),
     ));
+    if !selector.can_select(&preference) {
+        anyhow::bail!(
+            "browser engine preference {preference:?} cannot be satisfied by the configured worker \
+             registrations: every session_create would fail. Configure a matching profile in \
+             AUTOMATION_RUNTIME_BROWSER_SELECTION (for Firefox: profileId, bidiUrl, profileDir, \
+             companionBind, descriptorPath) or change the preference."
+        );
+    }
     Ok(Arc::new(SelectedWorkerFactory::new(selector, preference)))
 }
 
@@ -622,14 +630,83 @@ pub fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
         .map_err(Into::into)
 }
 
-pub async fn run() -> Result<()> {
-    let cmd = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "serve".to_string());
+#[derive(clap::Parser)]
+#[command(name = "bobby", version, about = "bobby-browser automation runtime")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
 
-    match cmd.as_str() {
-        "init" => run_init()?,
-        "serve" => {
+impl Cli {
+    fn parse_args() -> Self {
+        <Self as clap::Parser>::parse()
+    }
+}
+
+#[derive(clap::Subcommand)]
+enum CliCommand {
+    /// Generate a loopback bootstrap credential
+    Init {
+        /// Overwrite an existing bootstrap file
+        #[arg(long)]
+        force: bool,
+        /// Days until the bootstrap credential expires
+        #[arg(long, default_value_t = bootstrap_local::DEFAULT_TTL_DAYS as u32)]
+        ttl_days: u32,
+        /// Bootstrap env file path
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    /// Run the runtime server (default)
+    Serve,
+    /// Run the Firefox native-messaging host
+    FirefoxNativeHost {
+        /// Absolute path to the native-host descriptor JSON
+        #[arg(long)]
+        descriptor: PathBuf,
+    },
+    /// Install the Firefox native-host wrapper and manifest
+    InstallFirefoxNativeHost {
+        #[arg(long)]
+        wrapper: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        cli: PathBuf,
+        #[arg(long)]
+        descriptor: PathBuf,
+    },
+    /// Run a one-time Firefox companion enrollment and print the discovered
+    /// profile id as a ready-to-use AUTOMATION_RUNTIME_BROWSER_SELECTION value
+    EnrollFirefoxProfile {
+        /// Absolute path the native-host descriptor is published to
+        #[arg(long)]
+        descriptor: PathBuf,
+        /// Loopback address the pairing server binds to
+        #[arg(long, default_value = "127.0.0.1:9876")]
+        bind: SocketAddr,
+        /// BiDi WebSocket URL of the running Firefox (e.g. ws://127.0.0.1:9222/session)
+        #[arg(long)]
+        bidi_url: String,
+        /// Firefox profile directory the companion extension runs in
+        #[arg(long)]
+        profile_dir: PathBuf,
+        /// Seconds to wait for the extension to pair
+        #[arg(long, default_value_t = 120)]
+        timeout_secs: u64,
+    },
+    /// Check local setup: config, bootstrap credential, storage, browsers
+    Doctor,
+}
+
+pub async fn run() -> Result<()> {
+    match Cli::parse_args().command.unwrap_or(CliCommand::Serve) {
+        CliCommand::Init {
+            force,
+            ttl_days,
+            path,
+        } => run_init(force, ttl_days, path)?,
+        CliCommand::Serve => {
             let config_path = std::env::var("BOBBY_BROWSER_CONFIG")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("./config.toml"));
@@ -674,52 +751,329 @@ pub async fn run() -> Result<()> {
                 compose_worker_factory(&config, parse_selection(selection_json.as_deref())?)?;
             broker::serve_with_worker_factory(config, startup, factory).await?
         }
-        "firefox-native-host" => {
+        CliCommand::FirefoxNativeHost { descriptor } => {
             let _telemetry = observability::init(&Default::default())?;
-            run_configured_native_host().await?
+            run_configured_native_host(descriptor).await?
         }
-        "install-firefox-native-host" => install_configured_native_host()?,
-        "doctor" => println!("ok"),
-        other => {
-            eprintln!("unknown command: {other}");
-            std::process::exit(2);
+        CliCommand::InstallFirefoxNativeHost {
+            wrapper,
+            manifest,
+            cli,
+            descriptor,
+        } => install_configured_native_host(wrapper, manifest, cli, descriptor)?,
+        CliCommand::EnrollFirefoxProfile {
+            descriptor,
+            bind,
+            bidi_url,
+            profile_dir,
+            timeout_secs,
+        } => {
+            run_firefox_profile_enroll(descriptor, bind, bidi_url, profile_dir, timeout_secs)
+                .await?
         }
+        CliCommand::Doctor => run_doctor()?,
     }
 
     Ok(())
 }
 
-fn run_init() -> Result<()> {
-    let values = std::env::args().skip(2).collect::<Vec<_>>();
-    let mut force = false;
-    let mut ttl_days = bootstrap_local::DEFAULT_TTL_DAYS as u32;
-    let mut path = None;
-    let mut index = 0;
-    while index < values.len() {
-        match values[index].as_str() {
-            "--force" => {
-                force = true;
-                index += 1;
+async fn run_firefox_profile_enroll(
+    descriptor: PathBuf,
+    bind: SocketAddr,
+    bidi_url: String,
+    profile_dir: PathBuf,
+    timeout_secs: u64,
+) -> Result<()> {
+    if timeout_secs == 0 {
+        anyhow::bail!("--timeout-secs must be positive");
+    }
+    let enrollment = start_firefox_profile_enrollment(
+        FirefoxProfileEnrollmentConfig {
+            companion_bind: bind,
+            descriptor_path: descriptor.clone(),
+            timeout: Duration::from_secs(timeout_secs),
+            pairing_code_ttl: Duration::from_secs(300),
+            attachment_ttl: Duration::from_secs(300),
+        },
+        Arc::new(|_| {}),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    let enrolled = enrollment
+        .wait()
+        .await
+        .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    let profile_id = enrolled.profile_id().0.to_string();
+    let selection = serde_json::json!({
+        "preference": { "mode": "exact", "engine": "firefox", "profileId": profile_id },
+        "firefox": [{
+            "profileId": profile_id,
+            "bidiUrl": bidi_url,
+            "profileDir": profile_dir,
+            "companionBind": bind.to_string(),
+            "descriptorPath": descriptor,
+            "timeoutMs": 30_000,
+            "pairingCodeTtlMs": 300_000,
+            "attachmentTtlMs": 300_000,
+        }],
+    });
+    println!("{selection}");
+    eprintln!("Enrollment paired. Export the line above as AUTOMATION_RUNTIME_BROWSER_SELECTION.");
+    Ok(())
+}
+
+fn run_doctor() -> Result<()> {
+    let mut failures = 0usize;
+    let mut warnings = 0usize;
+    let report = |status: &str, check: &str, detail: String| {
+        eprintln!("[{status}] {check}: {detail}");
+    };
+
+    let config_path = std::env::var("BOBBY_BROWSER_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("./config.toml"));
+    let config = match AppConfig::load(&config_path) {
+        Ok(config) => {
+            let source = if config_path.exists() {
+                config_path.display().to_string()
+            } else {
+                "built-in defaults (no config file)".to_string()
+            };
+            report("ok", "config", source);
+            Some(config)
+        }
+        Err(error) => {
+            failures += 1;
+            report("fail", "config", format!("{error:#}"));
+            None
+        }
+    };
+
+    let selection_raw = std::env::var("AUTOMATION_RUNTIME_BROWSER_SELECTION").ok();
+    let selection = match parse_selection(selection_raw.as_deref()) {
+        Ok(selection) => {
+            report(
+                "ok",
+                "browser-selection",
+                if selection_raw.is_some() {
+                    "AUTOMATION_RUNTIME_BROWSER_SELECTION parses".to_string()
+                } else {
+                    "default (Firefox, exact)".to_string()
+                },
+            );
+            Some(selection)
+        }
+        Err(error) => {
+            failures += 1;
+            report("fail", "browser-selection", format!("{error:#}"));
+            None
+        }
+    };
+
+    if let (Some(config), Some(selection)) = (&config, &selection) {
+        match compose_worker_factory(config, selection.clone()) {
+            Ok(_) => report(
+                "ok",
+                "engine-satisfiability",
+                "engine preference can be satisfied by configured registrations".to_string(),
+            ),
+            Err(error) => {
+                failures += 1;
+                report("fail", "engine-satisfiability", format!("{error:#}"));
             }
-            "--ttl-days" => {
-                let value = values
-                    .get(index + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--ttl-days requires a value"))?;
-                ttl_days = value
-                    .parse()
-                    .with_context(|| format!("invalid --ttl-days value {value}"))?;
-                index += 2;
+        }
+        for profile in &selection.firefox {
+            match Url::parse(&profile.bidi_url) {
+                Ok(url) if matches!(url.scheme(), "ws" | "wss") => {
+                    let reachable = url
+                        .socket_addrs(|| Some(if url.scheme() == "wss" { 443 } else { 80 }))
+                        .map(|addrs| {
+                            addrs.iter().any(|addr| {
+                                std::net::TcpStream::connect_timeout(
+                                    addr,
+                                    Duration::from_millis(500),
+                                )
+                                .is_ok()
+                            })
+                        })
+                        .unwrap_or(false);
+                    if reachable {
+                        report(
+                            "ok",
+                            "firefox-bidi",
+                            format!("{} reachable", profile.bidi_url),
+                        );
+                    } else {
+                        warnings += 1;
+                        report(
+                            "warn",
+                            "firefox-bidi",
+                            format!(
+                                "{} not reachable (is Firefox running with --remote-debugging-port?)",
+                                profile.bidi_url
+                            ),
+                        );
+                    }
+                }
+                _ => {
+                    failures += 1;
+                    report(
+                        "fail",
+                        "firefox-bidi",
+                        format!(
+                            "profile {} has an invalid bidiUrl (expected ws:// or wss://)",
+                            profile.profile_id
+                        ),
+                    );
+                }
             }
-            "--path" => {
-                let value = values
-                    .get(index + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--path requires a value"))?;
-                path = Some(PathBuf::from(value));
-                index += 2;
+            if profile.profile_dir.exists() {
+                report(
+                    "ok",
+                    "firefox-profile-dir",
+                    profile.profile_dir.display().to_string(),
+                );
+            } else {
+                warnings += 1;
+                report(
+                    "warn",
+                    "firefox-profile-dir",
+                    format!("{} does not exist yet", profile.profile_dir.display()),
+                );
             }
-            other => anyhow::bail!("unknown init flag: {other}"),
+            if profile.companion_bind.parse::<SocketAddr>().is_err() {
+                failures += 1;
+                report(
+                    "fail",
+                    "firefox-companion-bind",
+                    format!(
+                        "profile {} has an invalid companionBind",
+                        profile.profile_id
+                    ),
+                );
+            }
         }
     }
+
+    if broker::StartupCredential::from_env().is_ok() {
+        report("ok", "bootstrap", "credential from environment".to_string());
+    } else {
+        match bootstrap_local::default_bootstrap_path() {
+            Ok(path) if path.exists() => report(
+                "ok",
+                "bootstrap",
+                format!("credential file at {}", path.display()),
+            ),
+            Ok(path) => {
+                warnings += 1;
+                report(
+                    "warn",
+                    "bootstrap",
+                    format!(
+                        "no credential yet; `bobby serve` will generate one at {}",
+                        path.display()
+                    ),
+                );
+            }
+            Err(error) => {
+                failures += 1;
+                report("fail", "bootstrap", format!("{error:#}"));
+            }
+        }
+    }
+
+    if let Some(config) = &config {
+        for (name, dir) in [
+            (
+                "storage-journal-dir",
+                config
+                    .storage
+                    .journal_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            ),
+            (
+                "storage-checkpoints-dir",
+                config.storage.checkpoints_dir.clone(),
+            ),
+            ("artifacts-dir", config.browser.artifacts_dir.clone()),
+        ] {
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => report("ok", name, dir.display().to_string()),
+                Err(error) => {
+                    failures += 1;
+                    report("fail", name, format!("{}: {error}", dir.display()));
+                }
+            }
+        }
+    }
+
+    let firefox = which_binary(&["firefox", "firefox-esr"])
+        || [
+            "/Applications/Firefox.app",
+            "/Applications/Firefox Developer Edition.app",
+            "/Applications/Firefox Nightly.app",
+        ]
+        .iter()
+        .any(|bundle| Path::new(bundle).exists());
+    if firefox {
+        report("ok", "firefox", "found".to_string());
+    } else {
+        warnings += 1;
+        report(
+            "warn",
+            "firefox",
+            "not found on PATH or /Applications (default engine)".to_string(),
+        );
+    }
+    let chromium = which_binary(&["google-chrome", "chromium", "chrome"])
+        || Path::new("/Applications/Google Chrome.app").exists()
+        || Path::new("/Applications/Chromium.app").exists();
+    if chromium {
+        report("ok", "chromium", "found".to_string());
+    } else {
+        warnings += 1;
+        report(
+            "warn",
+            "chromium",
+            "not found (required for Chromium engine selection)".to_string(),
+        );
+    }
+
+    eprintln!("doctor: {failures} failure(s), {warnings} warning(s)");
+    if failures > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn which_binary(names: &[&str]) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| {
+        names.iter().any(|name| {
+            let candidate = dir.join(name);
+            candidate.is_file() && is_executable(&candidate)
+        })
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
+}
+
+fn run_init(force: bool, ttl_days: u32, path: Option<PathBuf>) -> Result<()> {
     let path = match path {
         Some(path) => path,
         None => bootstrap_local::default_bootstrap_path()?,
@@ -736,25 +1090,17 @@ fn run_init() -> Result<()> {
     Ok(())
 }
 
-fn install_configured_native_host() -> Result<()> {
-    let values = std::env::args().skip(2).collect::<Vec<_>>();
-    if values.len() != 8 {
-        anyhow::bail!(
-            "install-firefox-native-host requires --wrapper, --manifest, --cli, and --descriptor"
-        );
-    }
-    let value = |flag: &str| -> Result<PathBuf> {
-        values
-            .chunks_exact(2)
-            .find(|pair| pair[0] == flag)
-            .map(|pair| PathBuf::from(&pair[1]))
-            .ok_or_else(|| anyhow::anyhow!("missing {flag}"))
-    };
+fn install_configured_native_host(
+    wrapper: PathBuf,
+    manifest: PathBuf,
+    cli: PathBuf,
+    descriptor: PathBuf,
+) -> Result<()> {
     install_native_host(NativeHostInstallConfig {
-        wrapper_path: value("--wrapper")?,
-        manifest_path: value("--manifest")?,
-        cli_path: value("--cli")?,
-        descriptor_path: value("--descriptor")?,
+        wrapper_path: wrapper,
+        manifest_path: manifest,
+        cli_path: cli,
+        descriptor_path: descriptor,
     })?;
     Ok(())
 }
@@ -972,18 +1318,12 @@ fn install_exact_file(
     result
 }
 
-async fn run_configured_native_host() -> Result<()> {
-    let mut args = std::env::args().skip(2);
-    let flag = args.next();
-    let path = args.next();
-    if flag.as_deref() != Some("--descriptor") || path.is_none() || args.next().is_some() {
-        anyhow::bail!("firefox-native-host requires --descriptor <absolute-path>");
-    }
-    let path = path.expect("validated descriptor argument");
-    if !Path::new(&path).is_absolute() {
+async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
+    if !descriptor_path.is_absolute() {
         anyhow::bail!("firefox native-host descriptor path must be absolute");
     }
-    let descriptor: NativeHostDescriptor = serde_json::from_slice(&std::fs::read(path)?)?;
+    let descriptor: NativeHostDescriptor =
+        serde_json::from_slice(&std::fs::read(descriptor_path)?)?;
     run_native_host(
         tokio::io::stdin(),
         tokio::io::stdout(),
@@ -1024,10 +1364,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn composed_factory_enforces_exact_firefox_without_fallback() {
+    async fn unsatisfiable_exact_firefox_preference_fails_at_composition() {
         let config = AppConfig::default();
         let profile_id = ProfileId::new();
-        let factory = compose_worker_factory(
+        let error = match compose_worker_factory(
             &config,
             BrowserSelectionConfig {
                 preference: EnginePreferenceConfig::Exact {
@@ -1036,14 +1376,12 @@ mod tests {
                 },
                 firefox: Vec::new(),
             },
-        )
-        .unwrap();
-
-        let error = match factory.launch(&SessionId::new()).await {
+        ) {
+            Ok(_) => panic!("unsatisfiable exact Firefox preference unexpectedly composed"),
             Err(error) => error,
-            Ok(_) => panic!("exact Firefox unexpectedly launched Chromium"),
         };
-        assert_eq!(error.code, types::ErrorCode::PolicyDenied);
+
+        assert!(error.to_string().contains("cannot be satisfied"));
     }
 
     #[test]
