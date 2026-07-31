@@ -2,6 +2,7 @@
 members = [
   "crates/broker",
   "crates/cli",
+  "crates/bobby-browser-client",
   "crates/config",
   "crates/types",
   "crates/skill-runtime",
