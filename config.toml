@@ -70,6 +70,12 @@ request_timeout_ms = 30000
 # Maximum number of outbound HTTP requests in flight at once.
 max_concurrent_requests = 8
 
+[vision]
+# Vision-assist provider (disabled when endpoint_url is unset).
+# endpoint_url = "https://vision.example.test/propose"
+# token_env = "BOBBY_VISION_TOKEN"
+# timeout_ms = 15000
+
 [interface]
 # Maximum size, in bytes, of a single interface request.
 max_request_bytes = 1048576

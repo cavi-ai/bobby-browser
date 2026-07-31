@@ -160,6 +160,7 @@ async fn adaptive_http() {
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
     };
     let (runtime, workers, artifacts) = build_runtime(&config).await;
     let session = runtime

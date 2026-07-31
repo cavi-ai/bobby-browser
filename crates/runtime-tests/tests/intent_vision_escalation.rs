@@ -97,6 +97,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
     };
 
     let runtime = RuntimeService::build_with_vision_assist(&config, assist)
