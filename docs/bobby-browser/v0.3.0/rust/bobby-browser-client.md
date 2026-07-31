@@ -7,7 +7,7 @@ documentedVersion: 0.3.0
 **Tier: Supported**
 
 Typed HTTP client for a running `bobby serve` instance. Mirrors
-`@bobby-browser/sdk` (`BrowserRuntimeClient`).
+`@bobby-browser/sdk` (`BrowserRuntimeClient`) for the common `/v1` path.
 
 ```bash
 cargo add bobby-browser-client
@@ -17,6 +17,7 @@ cargo test -p bobby-browser-client
 
 ```rust,no_run
 use bobby_browser_client::BrowserRuntimeClient;
+use types::CreateSessionRequest;
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let client = BrowserRuntimeClient::new(
@@ -24,6 +25,17 @@ let client = BrowserRuntimeClient::new(
     std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
 )?;
 let info = client.runtime_info(None).await?;
+let session = client
+    .create_session(
+        &CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        },
+        None,
+    )
+    .await?;
+client.delete_session(&session.id, None).await?;
 let _ = info;
 # Ok(()) }
 ```
@@ -33,12 +45,15 @@ Every request sends `Authorization: Bearer …`, `x-interface-version`,
 
 ## Surface
 
-- `runtime_info`
-- `create_session` / `list_sessions`
-- `open_page`
-- `submit` (`CommandEnvelope`)
+| Method | HTTP |
+|---|---|
+| `runtime_info` | `GET /v1/runtime` |
+| `create_session` / `list_sessions` / `delete_session` | sessions |
+| `open_page` | `POST /v1/pages` |
+| `submit` | `POST /v1/commands` |
 
-More TS methods (events, artifacts, recovery) may land in later releases.
+Events, artifacts, checkpoints, and recovery helpers may still be missing
+versus the TypeScript SDK — use raw HTTP or extend the crate when needed.
 
 ## Next
 

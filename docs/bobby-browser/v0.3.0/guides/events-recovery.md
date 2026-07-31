@@ -8,7 +8,7 @@ This page owns **event cursors and `EventGap`**. Durable checkpoints and
 reconciliation ownership live in
 [Evidence and checkpoints](../concepts/evidence-checkpoints.md).
 
-## Reading events
+## Reading events (batch)
 
 `GET /v1/events?after=<cursor>&limit=<n>` requires `session:read`.
 `limit` is bounded by interface config (`max_event_batch`, default 256).
@@ -24,6 +24,22 @@ for await (const event of client.events(0, { limit: 100 })) {
 
 Persist the last processed event cursor. Reconnect with that cursor to resume
 exactly.
+
+## Reading events (SSE)
+
+Pass `stream=1` for a server-sent-event stream instead of a JSON batch:
+
+```http
+GET /v1/events?after=0&limit=100&stream=1
+Authorization: Bearer …
+x-interface-version: 2026-07-23
+x-correlation-id: …
+x-deadline: …
+```
+
+Each event arrives as an SSE frame whose `id` is its cursor. A retention gap
+arrives as a terminal `event.gap` frame. Prefer the TypeScript SDK iterator
+unless you need raw SSE.
 
 ## EventGap
 
@@ -41,9 +57,17 @@ Any loss at accepted, prepared, executing, verifying, or result-prepared
 boundaries that cannot prove the outcome remains `NeedsReconciliation`.
 
 ```ts
-const decision = await client.recover(workflowId, { idempotencyKey: crypto.randomUUID() });
+const decision = await client.recover(workflowId, {
+  idempotencyKey: crypto.randomUUID(),
+});
 ```
 
 Skill-assisted recovery (internal skill runtime / gauntlet) follows the same
 authority rules — see [Bobby skills](skills.md). Public HTTP/MCP clients use
 `checkpoint` + `recover` only.
+
+## Next
+
+- [Evidence and checkpoints](../concepts/evidence-checkpoints.md)
+- [HTTP API](../surfaces/http-api.md)
+- [Troubleshooting](troubleshooting.md)
