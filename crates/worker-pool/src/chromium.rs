@@ -443,10 +443,19 @@ impl BrowserWorker for ChromiumWorker {
                 .await?;
             resolved.value(page).await?.unwrap_or_default()
         };
+        let validity = resolved.form_control_validity(page).await?;
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: Some(observed),
+            },
+            Evidence::Configuration {
+                name: "formControlValid".into(),
+                value: validity.valid.to_string(),
+            },
+            Evidence::Configuration {
+                name: "formControlValidationMessage".into(),
+                value: validity.validation_message,
             },
             resolved.evidence,
         ])

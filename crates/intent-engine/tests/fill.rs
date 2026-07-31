@@ -368,6 +368,56 @@ async fn fill_fails_when_the_worker_returns_no_postcondition_evidence() {
 }
 
 #[tokio::test]
+async fn fill_rejects_browser_invalid_control_even_when_value_matches() {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Postal code")]),
+        calls: Arc::new(Mutex::new(CallLog::default())),
+        type_text_evidence: vec![
+            Evidence::Element {
+                selector: "#postal-code".into(),
+                text: Some("12".into()),
+            },
+            Evidence::Configuration {
+                name: "formControlValid".into(),
+                value: "false".into(),
+            },
+            Evidence::Configuration {
+                name: "formControlValidationMessage".into(),
+                value: "Please match the requested format.".into(),
+            },
+        ],
+        upload_evidence: Vec::new(),
+    };
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Postal code",
+            Some("textbox"),
+            FillValue::Text {
+                text: "12".into(),
+                clear_first: true,
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        IntentOutcome::Failed { error, evidence }
+            if error.code == ErrorCode::VerificationFailed
+                && error.message.contains("Please match the requested format")
+                && evidence.iter().any(|item| matches!(
+                    item,
+                    Evidence::Configuration { name, value }
+                        if name == "formControlValid" && value == "false"
+                ))
+    ));
+}
+
+#[tokio::test]
 async fn fill_files_uploads_and_verifies() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = FakeBrowser {

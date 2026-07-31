@@ -69,6 +69,13 @@ struct BrowserCandidate {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormControlValidity {
+    pub valid: bool,
+    pub validation_message: String,
+}
+
 impl ResolvedTarget {
     fn execution_page<'a>(&'a self, fallback: &'a Page) -> &'a Page {
         self.execution_page.as_ref().unwrap_or(fallback)
@@ -123,6 +130,17 @@ impl ResolvedTarget {
 
     pub async fn enabled(&self, page: &Page) -> Result<bool, CommandError> {
         self.eval(page, "return !el.disabled").await
+    }
+
+    pub async fn form_control_validity(
+        &self,
+        page: &Page,
+    ) -> Result<FormControlValidity, CommandError> {
+        self.eval(
+            page,
+            "const validates=typeof el.willValidate==='boolean'&&el.willValidate;const message=validates&&!el.validity.valid?el.validationMessage:'';return {valid:!validates||el.validity.valid,validationMessage:message.slice(0,1024)}",
+        )
+        .await
     }
 
     pub async fn type_text(
