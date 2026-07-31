@@ -526,7 +526,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select>".into(),
+                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select>".into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -565,6 +565,33 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
             .and_then(|item| item.role.as_deref()),
         Some("radio")
     );
+
+    let invalid = worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Email address".into()),
+                    ..TargetSpec::default()
+                }),
+                value: "not-an-email".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(invalid.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, value }
+            if name == "formControlValid" && value == "false"
+    )));
+    assert!(invalid.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, value }
+            if name == "formControlValidationMessage" && !value.is_empty()
+    )));
 
     worker
         .type_text(

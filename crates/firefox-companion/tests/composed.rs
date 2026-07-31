@@ -81,6 +81,15 @@ impl BidiTransport for BindingBidi {
             "script.evaluate"
                 if params["expression"]
                     .as_str()
+                    .is_some_and(|value| value.contains("JSON.stringify({valid:")) =>
+            {
+                Ok(
+                    json!({"result": {"type": "string", "value": "{\"valid\":true,\"message\":\"\"}"}}),
+                )
+            }
+            "script.evaluate"
+                if params["expression"]
+                    .as_str()
                     .is_some_and(|value| value.starts_with("document.querySelector(")) =>
             {
                 Ok(json!({"result": {"type": "node", "sharedId": "native-target"}}))

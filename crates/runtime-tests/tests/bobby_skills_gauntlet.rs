@@ -29,11 +29,11 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
-    CompleteFormField, CompleteFormIntent, ElementState, Evidence, FillIntent, FillValue,
-    InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId, PrimitiveCommand,
-    RuntimeCommand, ScreenshotMode, SessionId, SkillBrowserEngine, SkillCapability, SkillFailure,
-    SkillOutcome, SkillProfileRequest, SkillSessionState, TargetSpec, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    CompleteFormField, CompleteFormIntent, ElementState, ErrorCode, Evidence, FillIntent,
+    FillValue, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId,
+    PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SkillBrowserEngine,
+    SkillCapability, SkillFailure, SkillOutcome, SkillProfileRequest, SkillSessionState,
+    TargetSpec, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 use worker_pool::{
@@ -767,6 +767,31 @@ impl ProductionBobby {
                     .await?;
             }
             "validation" => {
+                let rejected = self
+                    .fill_intent_outcome(
+                        page_id,
+                        "Rejected value",
+                        "textbox",
+                        FillValue::Text {
+                            text: "12".into(),
+                            clear_first: true,
+                        },
+                    )
+                    .await;
+                if !matches!(
+                    rejected,
+                    CommandOutcome::Failed { ref error, ref evidence, .. }
+                        if error.code == ErrorCode::VerificationFailed
+                            && evidence.iter().any(|item| matches!(
+                                item,
+                                Evidence::Configuration { name, value }
+                                    if name == "formControlValid" && value == "false"
+                            ))
+                ) {
+                    return Err(test_error(format!(
+                        "invalid form value did not fail with browser validity evidence: {rejected:?}"
+                    )));
+                }
                 self.fill_intent(
                     page_id,
                     "Rejected value",
@@ -903,8 +928,23 @@ impl ProductionBobby {
         role: &str,
         value: FillValue,
     ) -> TestResult<()> {
-        let outcome = self
-            .runtime
+        let outcome = self.fill_intent_outcome(page_id, label, role, value).await;
+        match outcome {
+            CommandOutcome::Completed { .. } => Ok(()),
+            other => Err(test_error(format!(
+                "semantic fill failed for {label}: {other:?}"
+            ))),
+        }
+    }
+
+    async fn fill_intent_outcome(
+        &self,
+        page_id: &PageId,
+        label: &str,
+        role: &str,
+        value: FillValue,
+    ) -> CommandOutcome {
+        self.runtime
             .execute(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id: CommandId::new(),
@@ -923,13 +963,7 @@ impl ProductionBobby {
                     value,
                 })),
             })
-            .await;
-        match outcome {
-            CommandOutcome::Completed { .. } => Ok(()),
-            other => Err(test_error(format!(
-                "semantic fill failed for {label}: {other:?}"
-            ))),
-        }
+            .await
     }
 
     async fn click_popup_and_reconcile(&self, popup: &PageId, opener: &PageId) -> TestResult<()> {

@@ -105,6 +105,7 @@ may be selected (`checked: true`) but cannot be unchecked directly
 (`checked: false` fails closed). Non-checkable targets must not use
 `kind: "checked"`.
 
+Fill verification also reads the browser's native constraint-validity state. A value that was typed successfully but violates `required`, `pattern`, length, range, or other browser constraints fails with `verificationFailed`; the bounded browser validation message remains in evidence so an agent can correct only the rejected field without rewriting accepted values.
 When `role` and exact `nearText` are supplied, `nearText` is the control's
 accessible name while `purpose` remains the agent's task description. This
 avoids requiring natural task phrasing to equal a page label. A fill completes
