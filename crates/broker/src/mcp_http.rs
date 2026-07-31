@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::Utc;
 use interface_core::CapabilityHandle;
-use mcp_gateway::{ArtifactResources, Server};
+use mcp_gateway::Server;
 use tokio::sync::RwLock;
 use types::{CorrelationId, PrincipalId};
 
@@ -79,7 +79,7 @@ impl McpServers {
             // and this principal's `events_read` MCP tool observe one stream rather
             // than two independent, diverging histories.
             state.events.clone(),
-            ArtifactResources::default(),
+            state.mcp_resources.clone(),
         ));
         entries.insert(principal, (handle, server.clone()));
         server

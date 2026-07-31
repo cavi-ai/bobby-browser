@@ -125,6 +125,9 @@ impl BrowserWorker for TestWorker {
             text: Some(command.value.clone()),
         }])
     }
+    fn supports_http_state(&self) -> bool {
+        true
+    }
     async fn http_state(
         &self,
         _: &PageId,
