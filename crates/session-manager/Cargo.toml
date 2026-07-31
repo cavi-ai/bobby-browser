@@ -11,8 +11,8 @@ publish = true
 chrono.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.2.1" }
-worker-pool = { path = "../worker-pool", version = "0.2.1" }
+types = { path = "../types", version = "0.3.0" }
+worker-pool = { path = "../worker-pool", version = "0.3.0" }
 
 [dev-dependencies]
 async-trait.workspace = true

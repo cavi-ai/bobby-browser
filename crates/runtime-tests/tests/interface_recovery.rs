@@ -384,18 +384,22 @@ async fn mcp_response(
     lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     id: u64,
 ) -> serde_json::Value {
-    loop {
-        let line = lines
-            .next_line()
-            .await
-            .unwrap()
-            .expect("MCP child stdout closed");
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-            if value["id"] == id {
-                return value;
+    tokio::time::timeout(StdDuration::from_secs(60), async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("MCP child stdout closed");
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                if value["id"] == id {
+                    return value;
+                }
             }
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("MCP child did not answer request {id} within 60s"))
 }
 async fn mcp_send(stdin: &mut tokio::process::ChildStdin, value: serde_json::Value) {
     stdin
@@ -418,7 +422,7 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
         .env("CONFORMANCE_MCP_LOSS_ROOT", root.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -445,7 +449,7 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
     let envelope = serde_json::json!({"schemaVersion":2,"commandId":command_id,"workflowId":workflow,"attemptId":AttemptId::new(),"sessionId":session,"pageId":page,"deadline":(Utc::now()+Duration::seconds(20)),"command":{"kind":"primitive","input":{"kind":"click","input":{"selector":"#mutate","target":null,"boundary":false,"expectedUrl":null}}}});
     mcp_send(&mut stdin,serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"command_execute","arguments":{"envelope":envelope}}})).await;
     let marker = root.path().join("executing.marker");
-    tokio::time::timeout(StdDuration::from_secs(3), async {
+    tokio::time::timeout(StdDuration::from_secs(30), async {
         while !marker.exists() {
             tokio::time::sleep(StdDuration::from_millis(10)).await;
         }

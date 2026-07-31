@@ -33,7 +33,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.2.1"
+version = "0.3.0"
 license = "MIT"
 authors = ["Sasan Sotoodehfar"]
 repository = "https://github.com/cavi-ai/bobby-browser"
@@ -44,6 +44,7 @@ async-trait = "0.1"
 axum = "0.8"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 chromiumoxide = { package = "bobby-chromiumoxide", version = "0.9.1", path = "vendor/chromiumoxide" }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

@@ -1,6 +1,6 @@
 {
   "name": "@bobby-browser/sdk",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Typed client for the authenticated Bobby Browser runtime interface",
   "license": "MIT",
   "author": "Sasan Sotoodehfar",

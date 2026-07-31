@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.2.1
+documentedVersion: 0.3.0
 ---
 
 # Rust SDK

@@ -27,11 +27,19 @@ pub use interface::AuthenticatedRuntime;
 /// fn requires_runtime_interface<T: RuntimeInterface>() {}
 /// requires_runtime_interface::<RuntimeService>();
 /// ```
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RuntimeService {
     pub sessions: SessionManager,
     pub pages: PageRuntime,
     recovery: Option<RecoveryCoordinator>,
+    started_at: std::time::Instant,
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Default for RuntimeService {
+    fn default() -> Self {
+        Self::new(SessionManager::default(), PageRuntime::default())
+    }
 }
 
 impl RuntimeService {
@@ -40,6 +48,8 @@ impl RuntimeService {
             sessions,
             pages,
             recovery: None,
+            started_at: std::time::Instant::now(),
+            in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -52,6 +62,8 @@ impl RuntimeService {
             sessions,
             pages,
             recovery: Some(recovery),
+            started_at: std::time::Instant::now(),
+            in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -150,8 +162,8 @@ impl RuntimeService {
             version: env!("CARGO_PKG_VERSION").to_string(),
             capabilities,
             active_sessions,
-            queued_jobs: 0,
-            uptime_ms: 0,
+            queued_jobs: self.in_flight.load(std::sync::atomic::Ordering::Acquire),
+            uptime_ms: self.started_at.elapsed().as_millis() as u64,
         }
     }
 
@@ -236,9 +248,15 @@ impl RuntimeService {
             }
             RuntimeCommand::Primitive(_) => VisionGate::default(),
         };
-        self.pages
+        self.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let outcome = self
+            .pages
             .execute_with_vision_gate(envelope, vision_gate)
-            .await
+            .await;
+        self.in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        outcome
     }
 
     pub async fn checkpoint(

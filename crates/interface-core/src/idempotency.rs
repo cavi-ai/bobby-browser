@@ -6,51 +6,98 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Mutex};
 use types::{
     CommandOutcome, CorrelationId, ErrorLayer, IdempotencyKey, InterfaceError, InterfaceErrorCode,
-    InterfaceOperation, PrincipalId,
+    InterfaceOperation, PrincipalId, SessionState, WorkflowCheckpoint,
 };
 
-struct Entry {
+/// Outcome types that an [`IdempotencyStore`] can retain and replay.
+pub trait RetainedOutcome: Clone + Send + Sync + 'static {
+    /// Whether finishing with this outcome releases the reservation instead of
+    /// retaining it (retryable outcomes must allow a real retry).
+    fn releases_reservation(&self) -> bool;
+    /// Whether this outcome must never expire or be evicted (uncertain outcomes
+    /// tombstone the key until explicitly resolved).
+    fn safety_relevant(&self) -> bool;
+}
+
+impl RetainedOutcome for CommandOutcome {
+    fn releases_reservation(&self) -> bool {
+        outcome_releases(self)
+    }
+
+    fn safety_relevant(&self) -> bool {
+        !matches!(self, CommandOutcome::Completed { .. })
+    }
+}
+
+/// Retained outcomes for session/checkpoint lifecycle operations. Successes replay
+/// with ordinary TTL semantics; failures are never retained (callers abandon the
+/// permit on error so a retry re-executes).
+#[derive(Debug, Clone)]
+pub enum SessionCheckpointOutcome {
+    Session(SessionState),
+    Checkpoint(WorkflowCheckpoint),
+}
+
+impl RetainedOutcome for SessionCheckpointOutcome {
+    fn releases_reservation(&self) -> bool {
+        false
+    }
+
+    fn safety_relevant(&self) -> bool {
+        false
+    }
+}
+
+struct Entry<O> {
     key: IdempotencyKey,
     operation: InterfaceOperation,
     canonical_sha256: [u8; 32],
-    state: EntryState,
+    state: EntryState<O>,
     expires_at: Option<DateTime<Utc>>,
     last_used: u64,
 }
 
-enum EntryState {
+enum EntryState<O> {
     Reserved {
         generation: u64,
-        changed: watch::Sender<ReservationUpdate>,
+        changed: watch::Sender<ReservationUpdate<O>>,
     },
     Retained {
-        outcome: CommandOutcome,
+        outcome: O,
         safety_relevant: bool,
     },
 }
 
 #[derive(Clone)]
-enum ReservationUpdate {
+enum ReservationUpdate<O> {
     Pending,
-    Replay(CommandOutcome),
+    Replay(O),
     Released,
 }
 
-#[derive(Default)]
-struct StoreState {
-    entries: HashMap<PrincipalId, Vec<Entry>>,
+struct StoreState<O> {
+    entries: HashMap<PrincipalId, Vec<Entry<O>>>,
     sequence: u64,
 }
 
+impl<O> Default for StoreState<O> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            sequence: 0,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct IdempotencyStore {
+pub struct IdempotencyStore<O = CommandOutcome> {
     per_principal_capacity: usize,
     global_capacity: usize,
     ttl: Duration,
-    state: Arc<Mutex<StoreState>>,
+    state: Arc<Mutex<StoreState<O>>>,
 }
 
-impl std::fmt::Debug for IdempotencyStore {
+impl<O> std::fmt::Debug for IdempotencyStore<O> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("IdempotencyStore")
@@ -61,13 +108,13 @@ impl std::fmt::Debug for IdempotencyStore {
     }
 }
 
-impl Default for IdempotencyStore {
+impl<O: RetainedOutcome> Default for IdempotencyStore<O> {
     fn default() -> Self {
         Self::with_global_capacity(256, 4096, Duration::minutes(15))
     }
 }
 
-impl IdempotencyStore {
+impl<O: RetainedOutcome> IdempotencyStore<O> {
     pub fn new(per_principal_capacity: usize, ttl: Duration) -> Self {
         Self::with_global_capacity(
             per_principal_capacity,
@@ -99,7 +146,7 @@ impl IdempotencyStore {
         mut now: DateTime<Utc>,
         deadline: DateTime<Utc>,
         correlation_id: CorrelationId,
-    ) -> Result<IdempotencyReservation, InterfaceError> {
+    ) -> Result<IdempotencyReservation<O>, InterfaceError> {
         loop {
             let wait = {
                 let mut state = self.state.lock().await;
@@ -209,7 +256,7 @@ impl IdempotencyStore {
     pub async fn finish(
         &self,
         permit: IdempotencyPermit,
-        outcome: CommandOutcome,
+        outcome: O,
         now: DateTime<Utc>,
     ) -> Result<(), InterfaceError> {
         let mut state = self.state.lock().await;
@@ -235,14 +282,14 @@ impl IdempotencyStore {
             EntryState::Retained { .. } => unreachable!(),
         };
 
-        let releases = outcome_releases(&outcome);
+        let releases = outcome.releases_reservation();
         let update = if releases {
             ReservationUpdate::Released
         } else {
             ReservationUpdate::Replay(outcome.clone())
         };
         if !releases {
-            let safety_relevant = !matches!(outcome, CommandOutcome::Completed { .. });
+            let safety_relevant = outcome.safety_relevant();
             state.sequence = state.sequence.wrapping_add(1);
             entry.last_used = state.sequence;
             entry.expires_at = (!safety_relevant).then_some(now + self.ttl);
@@ -288,7 +335,9 @@ impl IdempotencyStore {
             changed.send_replace(ReservationUpdate::Released);
         }
     }
+}
 
+impl IdempotencyStore<CommandOutcome> {
     pub async fn resolve_safety_tombstone(
         &self,
         principal_id: &PrincipalId,
@@ -329,12 +378,12 @@ impl IdempotencyStore {
     }
 }
 
-pub enum IdempotencyReservation {
+pub enum IdempotencyReservation<O = CommandOutcome> {
     Acquired(IdempotencyPermit),
-    Replay(CommandOutcome),
+    Replay(O),
 }
 
-impl std::fmt::Debug for IdempotencyReservation {
+impl<O: std::fmt::Debug> std::fmt::Debug for IdempotencyReservation<O> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Acquired(_) => formatter.write_str("Acquired([REDACTED])"),
@@ -373,14 +422,14 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<[u8; 32], InterfaceEr
     Ok(Sha256::digest(bytes).into())
 }
 
-fn cleanup_expired(state: &mut StoreState, now: DateTime<Utc>) {
+fn cleanup_expired<O>(state: &mut StoreState<O>, now: DateTime<Utc>) {
     for entries in state.entries.values_mut() {
         entries.retain(|entry| entry.expires_at.is_none_or(|expires_at| expires_at > now));
     }
     remove_empty_buckets(state);
 }
 
-fn make_principal_room(state: &mut StoreState, principal: &PrincipalId, capacity: usize) {
+fn make_principal_room<O>(state: &mut StoreState<O>, principal: &PrincipalId, capacity: usize) {
     let Some(entries) = state.entries.get_mut(principal) else {
         return;
     };
@@ -388,7 +437,7 @@ fn make_principal_room(state: &mut StoreState, principal: &PrincipalId, capacity
     remove_empty_buckets(state);
 }
 
-fn make_global_room(state: &mut StoreState, capacity: usize) {
+fn make_global_room<O>(state: &mut StoreState<O>, capacity: usize) {
     while entry_count(state) >= capacity {
         let candidate = state
             .entries
@@ -411,7 +460,7 @@ fn make_global_room(state: &mut StoreState, capacity: usize) {
     }
 }
 
-fn remove_oldest_evictable(entries: &mut Vec<Entry>) -> bool {
+fn remove_oldest_evictable<O>(entries: &mut Vec<Entry<O>>) -> bool {
     let candidate = entries
         .iter()
         .enumerate()
@@ -426,7 +475,7 @@ fn remove_oldest_evictable(entries: &mut Vec<Entry>) -> bool {
     }
 }
 
-fn entry_is_evictable(entry: &Entry) -> bool {
+fn entry_is_evictable<O>(entry: &Entry<O>) -> bool {
     matches!(
         &entry.state,
         EntryState::Retained {
@@ -436,11 +485,11 @@ fn entry_is_evictable(entry: &Entry) -> bool {
     )
 }
 
-fn entry_count(state: &StoreState) -> usize {
+fn entry_count<O>(state: &StoreState<O>) -> usize {
     state.entries.values().map(Vec::len).sum()
 }
 
-fn remove_empty_buckets(state: &mut StoreState) {
+fn remove_empty_buckets<O>(state: &mut StoreState<O>) {
     state.entries.retain(|_, entries| !entries.is_empty());
 }
 
