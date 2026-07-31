@@ -65,12 +65,22 @@ Wire command: `{ kind: "intent", input: { kind: "locate", input: { purpose, hint
 ```ts
 import { fillEnvelope } from "@bobby-browser/sdk";
 await client.submit(
-  fillEnvelope(meta, "email field", { kind: "text", text: "a@example.com", clearFirst: true }),
+  fillEnvelope(
+    meta,
+    "enter the applicant email",
+    { kind: "text", text: "a@example.com", clearFirst: true },
+    { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
+  ),
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
 
 `FillValue` kinds: `text`, `select`, `files` (files need `file:upload`).
+When `role` and exact `nearText` are supplied, `nearText` is the control's
+accessible name while `purpose` remains the agent's task description. This
+avoids requiring natural task phrasing to equal a page label. A fill completes
+only when the worker returns value/upload postcondition evidence; an action
+without verification evidence fails closed.
 
 ### SubmitAndVerify (Boundary)
 

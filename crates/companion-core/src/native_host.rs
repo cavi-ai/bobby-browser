@@ -28,6 +28,10 @@ use url::Url;
 pub const MAX_NATIVE_MESSAGE_BYTES: usize = 1024 * 1024;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// The companion server pings every 30s; a socket silent for longer is dead
+/// even when TCP still reports ESTABLISHED (a killed peer leaves the
+/// connection half-open).
+const SERVER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_SECRET_BYTES: usize = 512;
 
 #[derive(Debug, Clone)]
@@ -653,7 +657,11 @@ where
                         Some(Err(error)) => break Err(error),
                     }
                 }
-                message = socket_reader.next() => {
+                message = tokio::time::timeout(SERVER_LIVENESS_TIMEOUT, socket_reader.next()) => {
+                    let message = match message {
+                        Ok(message) => message,
+                        Err(_) => break Ok(ConnectionResult::Reconnect),
+                    };
                     match message {
                         Some(Ok(Message::Text(body))) => {
                             if body.len() > MAX_NATIVE_MESSAGE_BYTES {

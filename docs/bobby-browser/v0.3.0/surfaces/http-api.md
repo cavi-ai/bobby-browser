@@ -45,7 +45,10 @@ validators / Rust types.
   `command` where `command` is `{ kind: "primitive"|"intent", input: … }`)
 - **POST `/v1/checkpoints`** — checkpoint request with verified evidence (see SDK `CheckpointRequest`)
 - **POST `/v1/principals`** — `{ principalId, capabilities, expiresAt }` → `201` with one-time `bearer`
-- **GET `/v1/events`** — query `after` (cursor) and `limit` (bounded; SDK max 256)
+- **GET `/v1/events`** — query `after` (cursor) and `limit` (bounded; SDK max 256).
+  Pass `stream=1` for a server-sent-event stream instead of a batch: each event
+  arrives as an SSE frame whose `id` is its cursor, a cursor gap arrives as a
+  terminal `event.gap` frame.
 
 Nested command kinds include primitives (`navigate`, `click`, …) and
 `{ kind: "intent", input: … }`. Intents additionally need `intent:execute`.

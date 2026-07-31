@@ -160,16 +160,28 @@ pub(crate) async fn post_mcp(
     }
 }
 
-/// `GET /v1/mcp`: streamable-HTTP servers-sent-event streams are not supported, only
-/// one JSON-RPC message per POST.
-pub(crate) async fn method_not_allowed() -> Response {
-    (
-        StatusCode::METHOD_NOT_ALLOWED,
-        Json(serde_json::json!({
-            "error": "POST one JSON-RPC message per request; GET streams unsupported"
-        })),
-    )
-        .into_response()
+/// `GET /v1/mcp`: the streamable-HTTP SSE channel. No server-initiated
+/// JSON-RPC messages exist today, so the stream carries only periodic
+/// keep-alive comments — but it exists, which clients that require the GET
+/// transport need before they will POST. Bearer auth matches `post_mcp`.
+pub(crate) async fn get_mcp(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(bearer) = bearer_token(&headers) else {
+        return ProtocolError::authentication().into_response();
+    };
+    if let Err(error) = state.authority.authenticate(&bearer, Utc::now()).await {
+        return ProtocolError::from(error).into_response();
+    }
+    drop(bearer);
+    let stream = futures_util::stream::unfold((), |()| async move {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        Some((
+            Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default().comment("keep-alive"),
+            ),
+            (),
+        ))
+    });
+    axum::response::sse::Sse::new(stream).into_response()
 }
 
 /// Extracts the bearer token from a single `authorization` header. This is deliberately

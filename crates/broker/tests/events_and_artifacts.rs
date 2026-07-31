@@ -324,3 +324,58 @@ async fn artifact_route_is_bounded_range_free_and_principal_isolated() {
         StatusCode::UNPROCESSABLE_ENTITY
     );
 }
+
+#[tokio::test]
+async fn event_stream_emits_sse_frames_with_cursor_ids() {
+    use futures_util::StreamExt;
+
+    let authority = AuthorityStore::in_memory();
+    let owner_id = PrincipalId::from_uuid(Uuid::from_u128(1));
+    let owner_token = issue(&authority, 1, [Capability::SessionRead]).await;
+    let events = EventStore::new(8);
+    events
+        .append_for(owner_id.clone(), Event::new("first", json!({ "n": 1 })))
+        .await;
+    events
+        .append_for(owner_id, Event::new("second", json!({ "n": 2 })))
+        .await;
+    let app = app(
+        authority,
+        InterfaceConfig::default(),
+        events,
+        ArtifactCatalog::default(),
+    );
+
+    let response = app
+        .oneshot(authorized(
+            "GET",
+            "/v1/events?stream=1&after=0",
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let mut stream = response.into_body().into_data_stream();
+    let mut collected = String::new();
+    while !collected.contains("event: second") {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("stream frame arrived")
+            .expect("stream is open")
+            .unwrap();
+        collected.push_str(std::str::from_utf8(&frame).unwrap());
+    }
+    let text = collected;
+    assert!(text.contains("event: first"), "{text}");
+    assert!(text.contains("event: second"), "{text}");
+    assert!(text.contains("id: 1"), "{text}");
+    assert!(text.contains("id: 2"), "{text}");
+    assert!(text.contains(r#"data: {"n":2}"#), "{text}");
+}
