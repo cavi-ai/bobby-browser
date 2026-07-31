@@ -36,6 +36,99 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["profile"],
         ),
         "page_open" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        "navigate" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "url": string(1, MAX_URL_BYTES),
+                "waitUntil": {"type":"string","enum":["commit","domContentLoaded","interactive","networkIdle"]},
+                "timeoutMs": timeout_ms()
+            }),
+            vec!["sessionId", "pageId", "url"],
+        ),
+        "click" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "selector": string(1, MAX_STRING_BYTES),
+                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                "boundary": {"type":"boolean"},
+                "expectedUrl": nullable(string(1, MAX_URL_BYTES))
+            }),
+            vec!["sessionId", "pageId", "selector"],
+        ),
+        "type_text" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "selector": string(1, MAX_STRING_BYTES),
+                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                "value": string(0, MAX_STRING_BYTES),
+                "clearFirst": {"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId", "selector", "value"],
+        ),
+        "inspect" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "selector": nullable(string(1, MAX_STRING_BYTES)),
+                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                "includeHtml": {"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId"],
+        ),
+        "screenshot" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "mode": {"$ref":"#/$defs/ScreenshotMode"}
+            }),
+            vec!["sessionId", "pageId"],
+        ),
+        "wait_for" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "condition": {"$ref":"#/$defs/WaitCondition"},
+                "timeoutMs": timeout_ms()
+            }),
+            vec!["sessionId", "pageId", "condition", "timeoutMs"],
+        ),
+        "page_list" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        "page_close" => (
+            json!({"sessionId": id(), "pageId": id()}),
+            vec!["sessionId", "pageId"],
+        ),
+        "download_url" => (
+            json!({
+                "sessionId": id(),
+                "url": string(1, MAX_URL_BYTES),
+                "expectedContentType": nullable(string(1, 256)),
+                "maxBytes": {"type":"integer","minimum":1,"maximum":1099511627776_u64}
+            }),
+            vec!["sessionId", "url", "maxBytes"],
+        ),
+        "upload_files" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "selector": string(1, MAX_STRING_BYTES),
+                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                "paths": array(string(1, 4096), 16)
+            }),
+            vec!["sessionId", "pageId", "selector", "paths"],
+        ),
+        "evaluate_javascript" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "expression": string(1, MAX_HTML_BYTES),
+                "timeoutMs": timeout_ms(),
+                "awaitPromise": {"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId", "expression"],
+        ),
         // Intent surface: agents submit `{ kind: "intent", input: { kind: "locate"|… } }`
         // inside CommandEnvelope via this tool (no dedicated intent_* tools).
         "command_execute" => (
@@ -731,6 +824,10 @@ fn discriminated_object(tag: &str, discriminant: &str, fields: Value, required: 
 
 fn string(min: usize, max: usize) -> Value {
     json!({"type":"string","minLength":min,"maxLength":max})
+}
+
+fn timeout_ms() -> Value {
+    json!({"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS})
 }
 fn id() -> Value {
     json!({"type":"string","format":"uuid","minLength":36,"maxLength":36})

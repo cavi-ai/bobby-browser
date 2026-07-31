@@ -368,17 +368,32 @@ impl Server {
             .context(chrono::Utc::now() + chrono::Duration::minutes(1), None)
             .capabilities;
         let mut tools = Vec::new();
-        for (name, required) in [
-            ("checkpoint_save", types::Capability::RecoveryWrite),
-            ("command_execute", types::Capability::BrowserMutate),
-            ("events_read", types::Capability::SessionRead),
-            ("page_open", types::Capability::PageWrite),
-            ("runtime_info", types::Capability::SessionRead),
-            ("session_create", types::Capability::SessionWrite),
-            ("session_list", types::Capability::SessionRead),
-            ("workflow_recover", types::Capability::RecoveryWrite),
+        for name in [
+            "checkpoint_save",
+            "click",
+            "command_execute",
+            "download_url",
+            "evaluate_javascript",
+            "events_read",
+            "inspect",
+            "navigate",
+            "page_close",
+            "page_list",
+            "page_open",
+            "runtime_info",
+            "screenshot",
+            "session_create",
+            "session_list",
+            "type_text",
+            "upload_files",
+            "wait_for",
+            "workflow_recover",
         ] {
-            if capabilities.contains(required) {
+            let required = required_capabilities(name).expect("registered tool");
+            if required
+                .iter()
+                .all(|capability| capabilities.contains(*capability))
+            {
                 tools.push(json!({
                     "name": name,
                     "description": tool_description(name),
@@ -578,38 +593,186 @@ impl Server {
                     },
                     None => None,
                 };
-                let envelope = input.envelope;
-                let registration_context = context.clone();
-                match self.runtime.submit(context, envelope.clone()).await {
-                    Ok(outcome) => {
-                        let admission = self
-                            .resources
-                            .register_outcome(
-                                &self.handle,
-                                &registration_context,
-                                &envelope,
-                                &outcome,
-                            )
-                            .await;
-                        match to_json(outcome) {
-                            Ok(mut value) => {
-                                admission.apply_to_mcp_value(&mut value, &envelope.command_id);
-                                self.events
-                                    .append_for(
-                                        registration_context.principal_id.clone(),
-                                        interface_core::Event::new(
-                                            "command.outcome",
-                                            value.clone(),
-                                        ),
-                                    )
-                                    .await;
-                                Ok(value)
-                            }
-                            Err(error) => Err(error),
-                        }
-                    }
-                    Err(error) => Err(error),
-                }
+                self.submit_envelope(context, input.envelope).await
+            }
+            "navigate" => {
+                let input: NavigateArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::Navigate(types::NavigateCommand {
+                        url: input.url,
+                        wait_until: input.wait_until.unwrap_or(types::WaitUntil::Interactive),
+                        timeout_ms: input.timeout_ms.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "click" => {
+                let input: ClickArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::Click(types::ClickCommand {
+                        selector: input.selector,
+                        target: input.target,
+                        boundary: input.boundary.unwrap_or(false),
+                        expected_url: input.expected_url,
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "type_text" => {
+                let input: TypeTextArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::TypeText(types::TypeTextCommand {
+                        selector: input.selector,
+                        target: input.target,
+                        value: input.value,
+                        clear_first: input.clear_first.unwrap_or(false),
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "inspect" => {
+                let input: InspectArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::Inspect(types::InspectCommand {
+                        selector: input.selector,
+                        target: input.target,
+                        include_html: input.include_html.unwrap_or(false),
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "screenshot" => {
+                let input: ScreenshotArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::CaptureScreenshot(types::CaptureScreenshotCommand {
+                        mode: input.mode.unwrap_or(types::ScreenshotMode::Viewport),
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "wait_for" => {
+                let input: WaitForArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::WaitFor(types::WaitForCommand {
+                        condition: input.condition,
+                        timeout_ms: input.timeout_ms,
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "page_list" => {
+                let input: PageListArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    None,
+                    types::PrimitiveCommand::ListPages(types::ListPagesCommand),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "page_close" => {
+                let input: PageCloseArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let page_id = input.page_id;
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(page_id.clone()),
+                    types::PrimitiveCommand::ClosePage(types::ClosePageCommand { page_id }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "download_url" => {
+                let input: DownloadUrlArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    None,
+                    types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
+                        url: input.url,
+                        expected_content_type: input.expected_content_type,
+                        max_bytes: input.max_bytes,
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "upload_files" => {
+                let input: UploadFilesArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
+                        selector: input.selector,
+                        target: input.target,
+                        paths: input.paths,
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "evaluate_javascript" => {
+                let input: EvaluateJavaScriptArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::EvaluateJavaScript(types::EvaluateJavaScriptCommand {
+                        expression: input.expression,
+                        timeout_ms: input.timeout_ms.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
+                        await_promise: input.await_promise.unwrap_or(false),
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
             }
             "checkpoint_save" => {
                 let input: CheckpointSaveArgs = match bounded_parse(call.arguments) {
@@ -728,12 +891,46 @@ impl Server {
         )
     }
 
+    async fn submit_envelope(
+        &self,
+        context: types::RequestContext,
+        envelope: types::CommandEnvelope,
+    ) -> interface_core::InterfaceResult<Value> {
+        let registration_context = context.clone();
+        match self.runtime.submit(context, envelope.clone()).await {
+            Ok(outcome) => {
+                let admission = self
+                    .resources
+                    .register_outcome(&self.handle, &registration_context, &envelope, &outcome)
+                    .await;
+                match to_json(outcome) {
+                    Ok(mut value) => {
+                        admission.apply_to_mcp_value(&mut value, &envelope.command_id);
+                        self.events
+                            .append_for(
+                                registration_context.principal_id.clone(),
+                                interface_core::Event::new("command.outcome", value.clone()),
+                            )
+                            .await;
+                        Ok(value)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn tool_available(&self, name: &str) -> bool {
         let capabilities = self
             .handle
             .context(Utc::now() + Duration::minutes(1), None)
             .capabilities;
-        required_capability(name).is_some_and(|required| capabilities.contains(required))
+        required_capabilities(name).is_some_and(|required| {
+            required
+                .iter()
+                .all(|capability| capabilities.contains(*capability))
+        })
     }
 }
 
@@ -1044,6 +1241,88 @@ struct WorkflowRecoverArgs {
     workflow_id: types::WorkflowId,
 }
 
+macro_rules! page_scoped_args {
+    ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct $name {
+            session_id: types::SessionId,
+            page_id: types::PageId,
+            $($field : $ty,)*
+        }
+    };
+}
+
+page_scoped_args!(NavigateArgs {
+    url: String,
+    wait_until: Option<types::WaitUntil>,
+    timeout_ms: Option<u64>,
+});
+
+page_scoped_args!(ClickArgs {
+    selector: String,
+    target: Option<types::TargetSpec>,
+    boundary: Option<bool>,
+    expected_url: Option<String>,
+});
+
+page_scoped_args!(TypeTextArgs {
+    selector: String,
+    target: Option<types::TargetSpec>,
+    value: String,
+    clear_first: Option<bool>,
+});
+
+page_scoped_args!(InspectArgs {
+    selector: Option<String>,
+    target: Option<types::TargetSpec>,
+    include_html: Option<bool>,
+});
+
+page_scoped_args!(ScreenshotArgs {
+    mode: Option<types::ScreenshotMode>,
+});
+
+page_scoped_args!(WaitForArgs {
+    condition: types::WaitCondition,
+    timeout_ms: u64,
+});
+
+page_scoped_args!(UploadFilesArgs {
+    selector: String,
+    target: Option<types::TargetSpec>,
+    paths: Vec<String>,
+});
+
+page_scoped_args!(EvaluateJavaScriptArgs {
+    expression: String,
+    timeout_ms: Option<u64>,
+    await_promise: Option<bool>,
+});
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PageListArgs {
+    session_id: types::SessionId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PageCloseArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DownloadUrlArgs {
+    session_id: types::SessionId,
+    url: String,
+    #[serde(default)]
+    expected_content_type: Option<String>,
+    max_bytes: u64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EventsReadArgs {
@@ -1159,13 +1438,50 @@ fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
     }
 }
 
-fn required_capability(name: &str) -> Option<types::Capability> {
+const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
+
+fn command_envelope(
+    context: types::RequestContext,
+    session_id: types::SessionId,
+    page_id: Option<types::PageId>,
+    command: types::PrimitiveCommand,
+) -> (types::RequestContext, types::CommandEnvelope) {
+    let deadline = context.deadline;
+    (
+        context,
+        types::CommandEnvelope {
+            schema_version: types::CommandEnvelope::SCHEMA_VERSION,
+            command_id: types::CommandId::new(),
+            workflow_id: types::WorkflowId::new(),
+            attempt_id: types::AttemptId::new(),
+            session_id,
+            page_id,
+            deadline,
+            command: types::RuntimeCommand::Primitive(command),
+        },
+    )
+}
+
+fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
     match name {
-        "checkpoint_save" | "workflow_recover" => Some(types::Capability::RecoveryWrite),
-        "command_execute" => Some(types::Capability::BrowserMutate),
-        "events_read" | "runtime_info" | "session_list" => Some(types::Capability::SessionRead),
-        "page_open" => Some(types::Capability::PageWrite),
-        "session_create" => Some(types::Capability::SessionWrite),
+        "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
+        "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
+        | "wait_for" | "page_list" | "page_close" => Some(&[types::Capability::BrowserMutate]),
+        "download_url" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::FileDownload,
+        ]),
+        "upload_files" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::FileUpload,
+        ]),
+        "evaluate_javascript" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::JavascriptEvaluate,
+        ]),
+        "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
+        "page_open" => Some(&[types::Capability::PageWrite]),
+        "session_create" => Some(&[types::Capability::SessionWrite]),
         _ => None,
     }
 }
@@ -1173,7 +1489,18 @@ fn required_capability(name: &str) -> Option<types::Capability> {
 fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
     match name {
         "checkpoint_save" => Some(types::InterfaceOperation::CreateCheckpoint),
-        "command_execute" => Some(types::InterfaceOperation::SubmitCommand),
+        "command_execute"
+        | "navigate"
+        | "click"
+        | "type_text"
+        | "inspect"
+        | "screenshot"
+        | "wait_for"
+        | "page_list"
+        | "page_close"
+        | "download_url"
+        | "upload_files"
+        | "evaluate_javascript" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
@@ -1187,12 +1514,23 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
 fn tool_description(name: &str) -> &'static str {
     match name {
         "checkpoint_save" => "Persist a verified workflow checkpoint.",
+        "click" => "Click an element on a page.",
         "command_execute" => "Execute one bounded browser command envelope.",
+        "download_url" => "Download a URL into the session's downloads.",
+        "evaluate_javascript" => "Evaluate JavaScript on a page (session policy gated).",
         "events_read" => "Read retained runtime events after a cursor.",
+        "inspect" => "Read page state, optionally element-scoped.",
+        "navigate" => "Navigate a page to a URL.",
+        "page_close" => "Close a page in an owned session.",
+        "page_list" => "List pages in an owned session.",
         "page_open" => "Open a page in an owned session.",
         "runtime_info" => "Read runtime capability and health information.",
+        "screenshot" => "Capture a screenshot artifact of a page or element.",
         "session_create" => "Create a browser session.",
         "session_list" => "List browser sessions visible to the principal.",
+        "type_text" => "Type text into an element.",
+        "upload_files" => "Set files on a file input from upload roots.",
+        "wait_for" => "Wait for a page condition with a bounded timeout.",
         "workflow_recover" => "Recover a workflow from its verified checkpoint.",
         _ => "Runtime operation.",
     }
