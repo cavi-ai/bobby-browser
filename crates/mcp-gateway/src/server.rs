@@ -377,6 +377,7 @@ impl Server {
             "events_read",
             "inspect",
             "navigate",
+            "a11y_snapshot",
             "page_activate",
             "page_close",
             "page_list",
@@ -746,6 +747,23 @@ impl Server {
                     input.session_id,
                     Some(page_id.clone()),
                     types::PrimitiveCommand::ActivatePage(types::ActivatePageCommand { page_id }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "a11y_snapshot" => {
+                let input: A11ySnapshotArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::AccessibilitySnapshot(
+                        types::AccessibilitySnapshotCommand {
+                            max_nodes: input.max_nodes,
+                        },
+                    ),
                 );
                 self.submit_envelope(context, envelope).await
             }
@@ -1349,6 +1367,15 @@ struct PageCloseArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct A11ySnapshotArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    max_nodes: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DownloadUrlArgs {
     session_id: types::SessionId,
     url: String,
@@ -1500,7 +1527,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
     match name {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
         "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
-        | "wait_for" | "page_list" | "page_close" | "page_activate" => {
+        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" => {
             Some(&[types::Capability::BrowserMutate])
         }
         "download_url" => Some(&[
@@ -1535,6 +1562,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "page_list"
         | "page_close"
         | "page_activate"
+        | "a11y_snapshot"
         | "download_url"
         | "upload_files"
         | "evaluate_javascript" => Some(types::InterfaceOperation::SubmitCommand),
@@ -1559,6 +1587,7 @@ fn tool_description(name: &str) -> &'static str {
         "events_read" => "Read retained runtime events after a cursor.",
         "inspect" => "Read page state, optionally element-scoped.",
         "navigate" => "Navigate a page to a URL.",
+        "a11y_snapshot" => "Capture a compact accessibility tree of a page.",
         "page_activate" => "Bring a page to the front in an owned session.",
         "page_close" => "Close a page in an owned session.",
         "page_list" => "List pages in an owned session.",

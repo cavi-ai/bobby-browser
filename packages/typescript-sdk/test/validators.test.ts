@@ -171,6 +171,13 @@ test("deep validators accept every exact public response variant", () => {
     { status: "needsReconciliation", checkpointId: ID, attemptId: ID_2, reason: "inspect", evidence: [] },
     recoveryDecision(),
   ]) assert.equal(isRecoveryDecision(decision), true, JSON.stringify(decision));
+  assert.equal(isEvidence({
+    kind: "accessibilitySnapshot",
+    pageId: ID,
+    nodes: [{ role: "main", children: [{ role: "button", name: "Continue" }] }],
+    truncated: false,
+  }), true);
+  assert.equal(isEvidence({ kind: "accessibilitySnapshot", pageId: ID, nodes: [{ role: 3 }], truncated: false }), false);
   assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "command.outcome", payload: null }], latestAvailable: 1 }, 0, 100), true);
   assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 0 }), true);
 });
