@@ -133,6 +133,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
     };
     RuntimeService::build(&config).await.unwrap()
 }

@@ -149,6 +149,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
     };
 
     let runtime = RuntimeService::build(&config).await.unwrap();

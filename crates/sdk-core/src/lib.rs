@@ -136,6 +136,23 @@ impl RuntimeService {
             ),
             network,
         );
+        let vision_assist = match vision_assist {
+            Some(assist) => Some(assist),
+            None => config.vision.endpoint_url.as_ref().and_then(|endpoint| {
+                let bearer = config
+                    .vision
+                    .token_env
+                    .as_ref()
+                    .and_then(|name| std::env::var(name).ok());
+                intent_engine::HttpVisionAssist::new(
+                    endpoint.clone(),
+                    bearer,
+                    std::time::Duration::from_millis(config.vision.timeout_ms),
+                )
+                .ok()
+                .map(|provider| std::sync::Arc::new(provider) as std::sync::Arc<dyn VisionAssist>)
+            }),
+        };
         if let Some(assist) = vision_assist {
             adaptive = adaptive.with_vision_assist(assist);
         }

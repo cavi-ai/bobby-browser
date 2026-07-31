@@ -3037,6 +3037,49 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
+    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        let context = self.context(page_id).await?;
+        let response = self
+            .transport
+            .send(
+                "browsingContext.captureScreenshot",
+                json!({"context": context, "origin": "viewport"}),
+            )
+            .await?;
+        let encoded = response
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::ScreenshotCaptureFailed,
+                    "Firefox screenshot omitted PNG data",
+                    false,
+                )
+            })?;
+        if encoded.len() > MAX_SCREENSHOT_BYTES.saturating_mul(4) / 3 + 8 {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot exceeded its encoded bound",
+                false,
+            ));
+        }
+        let bytes = BASE64.decode(encoded).map_err(|_| {
+            driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot returned invalid base64",
+                false,
+            )
+        })?;
+        if bytes.len() > MAX_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot exceeded its byte bound",
+                false,
+            ));
+        }
+        Ok(bytes)
+    }
+
     async fn activate_page(
         &self,
         command: &types::ActivatePageCommand,

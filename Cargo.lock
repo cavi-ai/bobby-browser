@@ -1522,13 +1522,18 @@ name = "intent-engine"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.0",
  "dom-engine",
  "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror",
  "tokio",
  "tracing",
  "types",
+ "url",
 ]
 
 [[package]]
@@ -2702,6 +2707,7 @@ dependencies = [
  "checkpoint-store",
  "chrono",
  "config",
+ "intent-engine",
  "interface-core",
  "network-engine",
  "page-runtime",
