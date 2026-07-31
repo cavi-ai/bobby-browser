@@ -1737,6 +1737,66 @@ fn require_remote_true(response: &Value, message: &'static str) -> Result<(), Co
     ))
 }
 
+async fn form_control_validity_evidence(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    selector_json: &str,
+) -> Result<Vec<Evidence>, CommandError> {
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)throw new Error('target detached');const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    let encoded = response
+        .pointer("/result/value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox form validity probe returned an invalid result",
+                false,
+            )
+        })?;
+    let decoded: Value = serde_json::from_str(encoded).map_err(|_| {
+        driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "Firefox form validity probe returned malformed JSON",
+            false,
+        )
+    })?;
+    let valid = decoded
+        .get("valid")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox form validity probe omitted validity",
+                false,
+            )
+        })?;
+    let message = decoded
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Ok(vec![
+        Evidence::Configuration {
+            name: "formControlValid".into(),
+            value: valid.to_string(),
+        },
+        Evidence::Configuration {
+            name: "formControlValidationMessage".into(),
+            value: message,
+        },
+    ])
+}
+
 async fn record_opening_context(
     pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
     page_id: &PageId,
@@ -2537,13 +2597,18 @@ impl BrowserWorker for FirefoxCompanionWorker {
         })).await?;
         match selection.pointer("/result/value").and_then(Value::as_str) {
             Some("selected") => {
-                return Ok(vec![
+                let mut evidence = vec![
                     Evidence::Element {
                         selector: command.selector.clone(),
                         text: Some(command.value.clone()),
                     },
                     self.evidence(InteractionPath::ExtensionApi),
-                ])
+                ];
+                evidence.extend(
+                    form_control_validity_evidence(&self.transport, &context, &selector_json)
+                        .await?,
+                );
+                return Ok(evidence);
             }
             Some("missing") | Some("disabled") => {
                 return Err(driver_error(
@@ -2561,13 +2626,18 @@ impl BrowserWorker for FirefoxCompanionWorker {
             }
             Some("not-select") => {}
             Some(value @ ("checked:true" | "checked:false")) => {
-                return Ok(vec![
+                let mut evidence = vec![
                     Evidence::Element {
                         selector: command.selector.clone(),
                         text: Some(value.trim_start_matches("checked:").into()),
                     },
                     self.evidence(InteractionPath::ExtensionApi),
-                ])
+                ];
+                evidence.extend(
+                    form_control_validity_evidence(&self.transport, &context, &selector_json)
+                        .await?,
+                );
+                return Ok(evidence);
             }
             Some("invalid-checked") | Some("radio-uncheck") => {
                 return Err(driver_error(
@@ -2594,13 +2664,17 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 keyboard_actions(&context, &command.value, command.clear_first),
             )
             .await?;
-        Ok(vec![
+        let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: None,
             },
             self.evidence(InteractionPath::EngineNative),
-        ])
+        ];
+        evidence.extend(
+            form_control_validity_evidence(&self.transport, &context, &selector_json).await?,
+        );
+        Ok(evidence)
     }
 
     async fn wait_for(
