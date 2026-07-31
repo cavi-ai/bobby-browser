@@ -223,6 +223,15 @@ impl BidiTransport for FakeBidi {
         if method == "browsingContext.getTree" {
             return Ok(self.tree.lock().await.clone());
         }
+        if method == "script.evaluate"
+            && params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("JSON.stringify({valid:"))
+        {
+            return Ok(
+                json!({"result": {"type": "string", "value": "{\"valid\":true,\"message\":\"\"}"}}),
+            );
+        }
         if method == "script.callFunction" {
             if let Some(response) = self.preflight.lock().await.pop_front() {
                 return response;
