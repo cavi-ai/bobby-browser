@@ -7,6 +7,7 @@ use crate::InterfaceOperation;
 
 /// An authenticated caller. This identifier intentionally carries no credential material.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct PrincipalId(Uuid);
 
@@ -21,6 +22,7 @@ impl PrincipalId {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum Capability {
     #[serde(rename = "session:read")]
@@ -79,6 +81,7 @@ impl Capability {
 
 /// A verified, canonicalized capability set. It serializes in lexical wire order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CapabilitySet(BTreeSet<Capability>);
 
 impl CapabilitySet {

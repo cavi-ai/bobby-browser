@@ -12,6 +12,7 @@ pub const MAX_RECOVERY_RECEIPT_EVIDENCE: usize = 32;
 pub const MAX_RECOVERY_RECEIPT_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CheckpointInvariant {
     Url { value: String },
@@ -20,6 +21,7 @@ pub enum CheckpointInvariant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowCheckpoint {
     pub schema_version: u16,
@@ -45,6 +47,7 @@ pub struct WorkflowCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryCommandIdentity {
     pub command_id: CommandId,
@@ -86,6 +89,7 @@ impl RecoveryCommandIdentity {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum RecoveryReceiptState {
     PendingJournal,
@@ -94,6 +98,7 @@ pub enum RecoveryReceiptState {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryReceipt {
     pub idempotency_key: CommandId,
@@ -239,6 +244,7 @@ fn validate_sha256(value: &str, name: &str) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryRecord {
     pub recorded_at: DateTime<Utc>,
@@ -250,6 +256,7 @@ impl WorkflowCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryRequest {
     pub workflow_id: WorkflowId,
@@ -257,6 +264,7 @@ pub struct RecoveryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RestartLineage {
     pub workflow_id: WorkflowId,
@@ -266,6 +274,7 @@ pub struct RestartLineage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
