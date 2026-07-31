@@ -56,7 +56,7 @@ Pass `options.idempotencyKey` on mutating POSTs for replay-safe retries.
 | `listSessions(options?)` | `GET /v1/sessions` | |
 | `deleteSession(sessionId, options?)` | `DELETE /v1/sessions/{id}` | 204 on success |
 | `openPage(input, options?)` | `POST /v1/pages` | |
-| `submit(envelope, options?)` | `POST /v1/commands` | Validates outcome vs status |
+| `submit(envelope, options?)` | `POST /v1/commands` | Includes primitives such as `activatePage` |
 | `checkpoint(input, options?)` | `POST /v1/checkpoints` | |
 | `recover(workflowId, options?)` | `POST /v1/recovery/{id}` | |
 | `events(cursor, options?)` | `GET /v1/events` | Async iterable; handles `EventGap` |

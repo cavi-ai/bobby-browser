@@ -30,9 +30,10 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 |---|---|---|
 | RuntimeInfo | `GET /v1/runtime` / `runtime_info` | `session:read` |
 | CreateSession | `POST /v1/sessions` / `session_create` | `session:write` |
+| DeleteSession | `DELETE /v1/sessions/{id}` / `session_close` | `session:write` |
 | ReadSession | `GET /v1/sessions` / `session_list` | `session:read` |
 | OpenPage | `POST /v1/pages` / `page_open` | `page:write` |
-| SubmitCommand | `POST /v1/commands` / `command_execute` | `browser:mutate` |
+| SubmitCommand | `POST /v1/commands` / `command_execute` (+ flat MCP browser tools) | `browser:mutate` |
 | CreateCheckpoint | `POST /v1/checkpoints` / `checkpoint_save` | `recovery:write` |
 | RecoverWorkflow | `POST /v1/recovery/{id}` / `workflow_recover` | `recovery:write` |
 | SubscribeEvents | `GET /v1/events` / `events_read` | `session:read` |
@@ -40,9 +41,13 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 | IssuePrincipal | `POST /v1/principals` | `authority:admin` |
 | RevokePrincipal | `DELETE /v1/principals/{id}` | `authority:admin` |
 
-Some interface operations (`DeleteSession`, `ReadPage`, `ClosePage`, `ReadCheckpoint`,
-`CaptureArtifact`) exist in the type map for authority checks but are not separate
-public HTTP routes in the current broker.
+`activatePage` / MCP `page_activate` is a **primitive command** (via
+`command_execute` or the flat MCP tool), not a separate `/v1/pages/...` route.
+It still requires `browser:mutate`.
+
+Some interface operations (`ReadPage`, `ClosePage`, `ReadCheckpoint`,
+`CaptureArtifact`) exist in the type map for authority checks; prefer the
+documented HTTP/MCP surfaces above for public clients.
 
 ## Privileged primitives (beyond `browser:mutate`)
 
