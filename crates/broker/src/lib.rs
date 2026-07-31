@@ -288,7 +288,7 @@ pub fn router(state: AppState) -> Router {
     let mcp = Router::new()
         .route(
             "/v1/mcp",
-            axum::routing::post(mcp_http::post_mcp).get(mcp_http::method_not_allowed),
+            axum::routing::post(mcp_http::post_mcp).get(mcp_http::get_mcp),
         )
         .layer(DefaultBodyLimit::max(state.interface.max_request_bytes));
     Router::new()
