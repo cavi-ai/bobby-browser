@@ -1641,6 +1641,7 @@ fn compact_ax_tree(
         Some(types::AccessibilityNode {
             role,
             name,
+            target: None,
             value,
             description: text(&node.description),
             required: property_bool(node, "required"),
@@ -1680,6 +1681,7 @@ fn compact_ax_tree(
         }
     }
     let truncated = budget == 0 && raw.len() > max_nodes;
+    super::annotate_accessibility_targets(&mut roots_built);
     (roots_built, truncated)
 }
 
@@ -1703,7 +1705,7 @@ mod tests {
         let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> = serde_json::from_value(serde_json::json!([{
             "nodeId": "root",
             "ignored": true,
-            "childIds": ["1"]
+            "childIds": ["1", "2"]
         }, {
             "nodeId": "1",
             "ignored": false,
@@ -1718,6 +1720,13 @@ mod tests {
                 {"name": "readonly", "value": {"type": "boolean", "value": false}},
                 {"name": "autocomplete", "value": {"type": "token", "value": "current-password"}}
             ]
+        }, {
+            "nodeId": "2",
+            "ignored": false,
+            "parentId": "root",
+            "role": {"type": "role", "value": "textbox"},
+            "name": {"type": "computedString", "value": "Password"},
+            "value": {"type": "string", "value": "••••"}
         }])).expect("valid CDP AX fixture");
 
         let (nodes, truncated) = compact_ax_tree(&raw, 10);
@@ -1731,6 +1740,13 @@ mod tests {
         assert_eq!(nodes[0].invalid, Some(true));
         assert_eq!(nodes[0].read_only, Some(false));
         assert_eq!(nodes[0].autocomplete.as_deref(), Some("current-password"));
+        assert_eq!(nodes[0].target.as_ref().unwrap().role, "textbox");
+        assert_eq!(
+            nodes[0].target.as_ref().unwrap().accessible_name,
+            "Password"
+        );
+        assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
+        assert_eq!(nodes[1].target.as_ref().unwrap().ordinal, Some(1));
     }
 
     // The underlying reap/register/kill mechanics are engine-agnostic and

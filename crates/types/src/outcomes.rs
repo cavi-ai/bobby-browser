@@ -3,6 +3,18 @@ use thiserror::Error;
 
 use crate::{AttemptId, CommandId, PageId};
 
+/// A minimal semantic target that can be copied directly into a command's
+/// `TargetSpec` without exposing engine-specific DOM identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessibilityTarget {
+    pub role: String,
+    pub accessible_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<usize>,
+}
+
 /// One node of a compact accessibility tree as returned by the
 /// `accessibilitySnapshot` primitive on any engine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -13,6 +25,8 @@ pub struct AccessibilityNode {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<AccessibilityTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
