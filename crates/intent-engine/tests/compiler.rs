@@ -1,8 +1,8 @@
 use intent_engine::{compile_intent, CompileError, IntentPlan};
 use types::{
-    DismissObstructionIntent, ExtractField, ExtractIntent, ExtractValueKind, FillIntent, FillValue,
-    FollowIntent, IntentCommand, IntentHints, LocateIntent, TextMatch, WaitCondition,
-    WaitForCommand, WaitForStateIntent, WaitUntil,
+    CompleteFormField, CompleteFormIntent, DismissObstructionIntent, ExtractField, ExtractIntent,
+    ExtractValueKind, FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints,
+    LocateIntent, TextMatch, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
 };
 
 #[test]
@@ -89,6 +89,95 @@ fn compile_fill_uses_near_text_as_the_control_name_without_conflating_task_purpo
     assert_eq!(target.role.as_deref(), Some("textbox"));
     assert_eq!(target.accessible_name.as_deref(), Some("Email address"));
     assert_eq!(target.text, None);
+}
+
+#[test]
+fn compile_complete_form_preserves_ordered_field_targets_and_values() {
+    let plan = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+        fields: vec![
+            CompleteFormField {
+                name: "email".into(),
+                purpose: "enter email".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    near_text: Some(TextMatch::Exact("Email address".into())),
+                    ..IntentHints::default()
+                },
+                value: FillValue::Text {
+                    text: "ada@example.test".into(),
+                    clear_first: true,
+                },
+            },
+            CompleteFormField {
+                name: "terms".into(),
+                purpose: "accept terms".into(),
+                hints: IntentHints {
+                    role: Some("checkbox".into()),
+                    near_text: Some(TextMatch::Exact("Accept terms".into())),
+                    ..IntentHints::default()
+                },
+                value: FillValue::Checked { checked: true },
+            },
+        ],
+    }))
+    .expect("compile");
+    let IntentPlan::CompleteForm { fields } = plan else {
+        panic!("expected CompleteForm plan");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name, "email");
+    assert_eq!(
+        fields[0].target.accessible_name.as_deref(),
+        Some("Email address")
+    );
+    assert_eq!(fields[1].name, "terms");
+    assert!(matches!(
+        fields[1].value,
+        FillValue::Checked { checked: true }
+    ));
+}
+
+#[test]
+fn compile_complete_form_rejects_empty_and_duplicate_fields() {
+    assert_eq!(
+        compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+            fields: vec![]
+        }))
+        .unwrap_err(),
+        CompileError::NoCompleteFormFields
+    );
+    let field = CompleteFormField {
+        name: "email".into(),
+        purpose: "enter email".into(),
+        hints: IntentHints::default(),
+        value: FillValue::Text {
+            text: "a@b.co".into(),
+            clear_first: true,
+        },
+    };
+    assert_eq!(
+        compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+            fields: vec![field.clone(), field],
+        }))
+        .unwrap_err(),
+        CompileError::DuplicateCompleteFormFieldName("email".into())
+    );
+    let field = CompleteFormField {
+        name: "field".into(),
+        purpose: "fill field".into(),
+        hints: IntentHints::default(),
+        value: FillValue::Text {
+            text: "value".into(),
+            clear_first: true,
+        },
+    };
+    assert_eq!(
+        compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+            fields: vec![field; 129],
+        }))
+        .unwrap_err(),
+        CompileError::TooManyCompleteFormFields
+    );
 }
 
 #[test]

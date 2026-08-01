@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use dom_engine::{Candidate, CandidateState};
 use intent_engine::{compatible, IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, Evidence, FillIntent,
-    FillValue, IntentCommand, IntentHints, IntentResolutionPath, PageId, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandError, CompleteFormField, CompleteFormIntent,
+    ErrorCode, Evidence, FillIntent, FillValue, IntentCommand, IntentHints, IntentResolutionPath,
+    PageId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 
 #[derive(Default)]
@@ -326,6 +326,56 @@ async fn fill_fails_when_the_worker_returns_no_postcondition_evidence() {
             if error.code == ErrorCode::VerificationFailed
                 && error.message.contains("missing typed-value evidence")
     ));
+}
+
+#[tokio::test]
+async fn complete_form_stops_at_first_failed_field_and_preserves_prior_evidence() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Email address")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: vec![Evidence::Element {
+            selector: "#Email address".into(),
+            text: Some("ada@example.test".into()),
+        }],
+        upload_evidence: Vec::new(),
+    };
+    let intent = IntentCommand::CompleteForm(CompleteFormIntent {
+        fields: vec![
+            CompleteFormField {
+                name: "email".into(),
+                purpose: "enter email".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    near_text: Some(TextMatch::Exact("Email address".into())),
+                    ..IntentHints::default()
+                },
+                value: FillValue::Text {
+                    text: "ada@example.test".into(),
+                    clear_first: true,
+                },
+            },
+            CompleteFormField {
+                name: "terms".into(),
+                purpose: "accept terms".into(),
+                hints: IntentHints {
+                    role: Some("checkbox".into()),
+                    near_text: Some(TextMatch::Exact("Accept terms".into())),
+                    ..IntentHints::default()
+                },
+                value: FillValue::Checked { checked: true },
+            },
+        ],
+    });
+
+    let outcome =
+        IntentEngine::execute(&intent, &PageId::new(), &browser, &VisionContext::default()).await;
+    let IntentOutcome::Failed { evidence, .. } = outcome else {
+        panic!("second field must fail")
+    };
+    assert_eq!(calls.lock().unwrap().type_text.len(), 1);
+    assert!(evidence.iter().any(|item| matches!(item, Evidence::Element { text: Some(value), .. } if value == "ada@example.test")));
+    assert!(evidence.iter().any(|item| matches!(item, Evidence::IntentExecution { record } if record.intent_kind == "completeForm" && record.verification == "fieldFailed")));
 }
 
 #[tokio::test]

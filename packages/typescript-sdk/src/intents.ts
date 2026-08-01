@@ -9,6 +9,7 @@ import {
   DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS,
   MAX_INTENT_PURPOSE_BYTES,
   type CommandEnvelope,
+  type CompleteFormIntent,
   type DismissObstructionIntent,
   type ExtractField,
   type ExtractIntent,
@@ -88,6 +89,27 @@ export function fillRuntimeCommand(input: FillIntent): RuntimeCommand {
       },
     },
   };
+}
+
+export function completeFormRuntimeCommand(input: CompleteFormIntent): RuntimeCommand {
+  if (input.fields.length === 0 || input.fields.length > 128) {
+    throw new Error("complete form fields must contain between 1 and 128 items");
+  }
+  const names = new Set<string>();
+  const fields = input.fields.map((field) => {
+    if (field.name.length === 0 || names.has(field.name)) {
+      throw new Error("complete form field names must be non-empty and unique");
+    }
+    names.add(field.name);
+    assertIntentPurpose(field.purpose);
+    return {
+      name: field.name,
+      purpose: field.purpose,
+      hints: withHints(field.hints),
+      value: normalizeFillValue(field.value),
+    };
+  });
+  return { kind: "intent", input: { kind: "completeForm", input: { fields } } };
 }
 
 function normalizeFillValue(value: FillValue): FillValue {
@@ -213,6 +235,10 @@ export function locateEnvelope(meta: IntentEnvelopeMeta, purpose: string, hints?
 
 export function fillEnvelope(meta: IntentEnvelopeMeta, purpose: string, value: FillValue, hints?: IntentHints): CommandEnvelope {
   return intentEnvelope(meta, fillRuntimeCommand({ purpose, value, hints }));
+}
+
+export function completeFormEnvelope(meta: IntentEnvelopeMeta, fields: CompleteFormIntent["fields"]): CommandEnvelope {
+  return intentEnvelope(meta, completeFormRuntimeCommand({ fields }));
 }
 
 export function submitAndVerifyEnvelope(
