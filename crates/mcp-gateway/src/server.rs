@@ -395,6 +395,7 @@ impl Server {
             "page_close",
             "page_list",
             "page_open",
+            "pdf",
             "recovery_status",
             "runtime_info",
             "screenshot",
@@ -1055,6 +1056,27 @@ impl Server {
                     .form_snapshot(context, input.session_id, input.page_id)
                     .await
                     .and_then(to_json)
+            }
+            "pdf" => {
+                let input: PdfArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::PrintToPdf(
+                        types::PrintToPdfCommand {
+                            landscape: input.landscape,
+                            print_background: input.print_background.unwrap_or(true),
+                            scale: input.scale,
+                            page_ranges: input.page_ranges,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
             }
             "cookie_get" => {
                 let input: CookieGetArgs = match bounded_parse(call.arguments) {
@@ -1837,6 +1859,21 @@ struct A11ySnapshotArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PdfArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    landscape: bool,
+    #[serde(default)]
+    print_background: Option<bool>,
+    #[serde(default)]
+    scale: Option<f64>,
+    #[serde(default)]
+    page_ranges: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CookieGetArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
@@ -2112,7 +2149,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
         "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
-        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot"
+        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" | "pdf"
         | "cookie_get" | "cookie_set" | "cookie_delete" => {
             Some(&[types::Capability::BrowserMutate])
         }
@@ -2167,6 +2204,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "page_activate"
         | "a11y_snapshot"
         | "extract_structured"
+        | "pdf"
         | "cookie_get"
         | "cookie_set"
         | "cookie_delete"
@@ -2221,6 +2259,7 @@ fn tool_description(name: &str) -> &'static str {
         "page_close" => "Close a page in an owned session.",
         "page_list" => "List pages in an owned session.",
         "page_open" => "Open a page in an owned session.",
+        "pdf" => "Print a page to a PDF artifact.",
         "recovery_status" => "Read a workflow's checkpoint and recovery receipts.",
         "runtime_info" => "Read runtime capability and health information.",
         "screenshot" => "Capture a screenshot artifact of a page or element.",
