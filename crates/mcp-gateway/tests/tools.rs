@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use interface_core::{Authority, AuthorityStore, Event, EventStore};
 use mcp_gateway::{ArtifactResources, Server};
+use page_runtime::PageRuntime;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
+use session_manager::SessionManager;
 use types::{
     AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, CompleteFormField,
     CompleteFormIntent, DismissObstructionIntent, Evidence, FillIntent, FillValue, FollowIntent,
@@ -13,6 +16,8 @@ use types::{
 };
 use types::{Capability, PrincipalId};
 use uuid::uuid;
+use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
+use workflow_journal::{CommandJournal, JournalRecord, JsonlJournal};
 
 async fn fixture_server(capabilities: Vec<Capability>) -> Server {
     let authority = AuthorityStore::with_capacity(1);
@@ -423,41 +428,29 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             ["recoveryReceipts"]["maxItems"],
         0
     );
-
-    // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
-    // hand-listed schema that silently drops a variant (as `Configuration`,
-    // `BrowserExecution`, and `JavaScriptResult` previously were) makes
-    // `checkpoint_save` reject any evidence array containing that variant with
-    // `INVALID_PARAMS`, even though the type itself round-trips fine.
-    let evidence_variants = checkpoint_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
-        .as_array()
-        .unwrap();
-    assert_eq!(evidence_variants.len(), 25, "{evidence_variants:?}");
-    let evidence_kinds = evidence_variants
-        .iter()
-        .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert!(
-        evidence_kinds.contains(&"javaScriptResult"),
-        "{evidence_kinds:?}"
-    );
-    assert!(
-        evidence_kinds.contains(&"intentExecution"),
-        "{evidence_kinds:?}"
-    );
-    assert!(
-        evidence_kinds.contains(&"controlAction"),
-        "{evidence_kinds:?}"
-    );
-    assert!(evidence_kinds.contains(&"emulation"), "{evidence_kinds:?}");
-    assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
-
-    // The accessibility tree is self-referential now, so `children` must resolve
-    // through `$defs` rather than another inlined copy.
+    // `checkpoint_save` resolves evidence from `evidenceRefs` (command ids) against
+    // the journal server-side; the caller never authors `Evidence` directly. The
+    // checkpoint's own `evidence` and `recoveryHistory` fields — which
+    // `RecoveryCoordinator::save_verified` overwrites and the runtime's own
+    // recovery flow appends to, respectively, never the caller of a fresh
+    // checkpoint — are forced empty here too, same as `recoveryReceipts` above.
+    // Together this drops the `Evidence` union (and `RecoveryDecision`/
+    // `RecoveryRecord`) out of this tool's reachable `$defs` entirely; see
+    // `checkpoint_save_does_not_advertise_the_evidence_union` in `budget.rs`.
     assert_eq!(
-        checkpoint_schema["inputSchema"]["$defs"]["AccessibilityNode"]["properties"]["children"]
-            ["items"]["$ref"],
-        "#/$defs/AccessibilityNode"
+        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]["evidence"]
+            ["maxItems"],
+        0
+    );
+    assert_eq!(
+        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
+            ["recoveryHistory"]["maxItems"],
+        0
+    );
+    assert!(
+        checkpoint_schema["inputSchema"]["$defs"]["Evidence"].is_null(),
+        "{}",
+        checkpoint_schema["inputSchema"]["$defs"]
     );
 
     let envelope = CommandEnvelope {
@@ -531,19 +524,13 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         recovery_receipts: vec![],
         created_at: Utc::now(),
     };
-    let oversized = vec![
-        Evidence::Navigation {
-            url: "https://example.test/".to_owned(),
-            title: "fixture".to_owned()
-        };
-        129
-    ];
+    let oversized = vec![CommandId::new(); 129];
     let rejected = server
         .handle_message(request(
             52,
             "tools/call",
             json!({
-                "name":"checkpoint_save","arguments":{"checkpoint":checkpoint,"evidence":oversized}
+                "name":"checkpoint_save","arguments":{"checkpoint":checkpoint,"evidenceRefs":oversized}
             }),
         ))
         .await
@@ -602,13 +589,49 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
     );
 }
 
+/// A `WorkerFactory` that is never actually leased: `checkpoint_save` only
+/// touches the journal, never the browser worker pool, so this exists purely
+/// to satisfy `PageRuntime::new`'s signature.
+struct UnusedFactory;
+
+#[async_trait]
+impl WorkerFactory for UnusedFactory {
+    async fn launch(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Arc<dyn BrowserWorker>, types::CommandError> {
+        Err(types::CommandError {
+            code: types::ErrorCode::BrowserLaunchFailed,
+            message: "fixture worker factory never launches".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        })
+    }
+}
+
 // Regression: `evidence_variants()` previously hand-listed only 12 of `Evidence`'s 15
-// variants, so `checkpoint_save`'s `evidence` array (which schema-validates against
+// variants, so `checkpoint_save`'s `evidence` array (which schema-validated against
 // `$defs/Evidence`) rejected any workflow that ran `evaluateJavaScript` and then tried
 // to checkpoint the resulting `Evidence::JavaScriptResult` — pre-dispatch, with
 // `INVALID_PARAMS`, before `runtime.checkpoint` was ever called.
+//
+// `checkpoint_save` no longer accepts `Evidence` directly — it names a command via
+// `evidenceRefs` and the server resolves the real evidence from the journal — so the
+// regression this guards against has moved: it is now whether a real journaled
+// `javaScriptResult`/`accessibilitySnapshot` outcome resolves by id and reaches
+// dispatch, not whether a hand-maintained schema union enumerates every variant.
 #[tokio::test]
-async fn checkpoint_save_schema_accepts_javascript_and_actionable_accessibility_evidence() {
+async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_evidence_by_ref() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let workers = Arc::new(WorkerPool::new(1, Arc::new(UnusedFactory)));
+    let pages = PageRuntime::new(journal.clone(), workers);
+    let runtime_service = RuntimeService::new(SessionManager::default(), pages);
+
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
         .issue(
@@ -619,7 +642,7 @@ async fn checkpoint_save_schema_accepts_javascript_and_actionable_accessibility_
         .await
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
-    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+    let runtime = Arc::new(AuthenticatedRuntime::new(runtime_service, handle));
     let server = Server::new(runtime.clone());
     initialize(&server).await;
 
@@ -642,6 +665,8 @@ async fn checkpoint_save_schema_accepts_javascript_and_actionable_accessibility_
         recovery_receipts: vec![],
         created_at: Utc::now(),
     };
+
+    let command_id = CommandId::new();
     let evidence = vec![
         Evidence::JavaScriptResult {
             value: json!({"answer": 42}),
@@ -662,6 +687,21 @@ async fn checkpoint_save_schema_accepts_javascript_and_actionable_accessibility_
             truncated: false,
         },
     ];
+    journal
+        .append(JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: types::CommandPhase::Completed,
+            envelope: None,
+            outcome: Some(types::CommandOutcome::Completed {
+                command_id: command_id.clone(),
+                evidence,
+            }),
+            prepared_result: None,
+        })
+        .await
+        .unwrap();
 
     let response = server
         .handle_message(request(
@@ -669,22 +709,23 @@ async fn checkpoint_save_schema_accepts_javascript_and_actionable_accessibility_
             "tools/call",
             json!({
                 "name":"checkpoint_save",
-                "arguments":{"checkpoint":checkpoint,"evidence":evidence}
+                "arguments":{"checkpoint":checkpoint,"evidenceRefs":[command_id]}
             }),
         ))
         .await
         .unwrap();
 
-    // `RuntimeService::default()` has no `RecoveryCoordinator`, so the call still fails
-    // downstream (an interface error, not schema rejection) — the proof here is that
-    // validation let it through to dispatch at all: -32602 would mean the schema
-    // rejected the `javaScriptResult` evidence item before `runtime.checkpoint` ran.
+    // This `RuntimeService` has no `RecoveryCoordinator`, so the call still fails
+    // downstream (an interface error, not a resolution or schema rejection) — the
+    // proof here is that `evidenceRefs` resolved the journaled JavaScript and
+    // accessibility-snapshot evidence and reached dispatch: -32602 would mean it was
+    // rejected before `runtime.checkpoint` ever ran.
     assert_ne!(response["error"]["code"], -32602, "{response}");
     assert_eq!(
         runtime.checkpoint_dispatch_count(),
         1,
-        "schema validation must accept JavaScript and actionable accessibility evidence and reach \
-         dispatch: {response}"
+        "evidenceRefs must resolve JavaScript and actionable accessibility evidence from the \
+         journal and reach dispatch: {response}"
     );
 }
 

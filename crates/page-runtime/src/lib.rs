@@ -9,7 +9,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
 use tokio::sync::RwLock;
-use types::{CommandPhase, OpenPageRequest, PageId, PageMode, PageState, RuntimeError, SessionId};
+use types::{
+    CommandId, CommandOutcome, CommandPhase, Evidence, OpenPageRequest, PageId, PageMode,
+    PageState, RuntimeError, SessionId,
+};
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
@@ -102,6 +105,34 @@ impl PageRuntime {
 
     pub async fn open(&self, req: OpenPageRequest) -> PageState {
         self.register_page(req.session_id).await
+    }
+
+    /// Evidence the runtime itself recorded for a command.
+    ///
+    /// The journal is the only authority here: an agent naming a command it
+    /// never ran, or one that never reached a terminal outcome, gets an
+    /// error rather than an empty vector it could mistake for success.
+    pub async fn evidence_for_command(
+        &self,
+        command_id: CommandId,
+    ) -> Result<Vec<Evidence>, RecoveryError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        let scan = journal
+            .history(command_id.clone())
+            .await
+            .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        scan.records
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.outcome {
+                Some(CommandOutcome::Completed { evidence, .. })
+                | Some(CommandOutcome::NeedsReconciliation { evidence, .. }) => Some(evidence),
+                _ => None,
+            })
+            .ok_or(RecoveryError::CommandOutcomeMissing(command_id))
     }
 
     pub async fn open_browser(&self, session_id: SessionId) -> Result<PageState, RuntimeError> {

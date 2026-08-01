@@ -294,7 +294,11 @@ impl RuntimeService {
         outcome
     }
 
-    pub async fn checkpoint(
+    /// Save a checkpoint whose evidence has already been verified by the
+    /// caller (the HTTP surface's contract: it submits `Evidence` it
+    /// collected directly, unlike the MCP surface's `checkpoint`, which
+    /// names commands instead).
+    pub(crate) async fn checkpoint_with_evidence(
         &self,
         checkpoint: WorkflowCheckpoint,
         evidence: Vec<Evidence>,
@@ -304,6 +308,33 @@ impl RuntimeService {
             .ok_or(RecoveryError::WorkersUnavailable)?
             .save_verified(checkpoint, evidence)
             .await
+    }
+
+    /// Evidence for each named command, resolved from the journal the
+    /// runtime itself wrote rather than authored by the caller.
+    async fn resolve_evidence(
+        &self,
+        evidence_refs: Vec<CommandId>,
+    ) -> Result<Vec<Evidence>, RecoveryError> {
+        let mut evidence = Vec::new();
+        for command_id in evidence_refs {
+            evidence.extend(self.pages.evidence_for_command(command_id).await?);
+        }
+        Ok(evidence)
+    }
+
+    /// Save a checkpoint, resolving its evidence from the journal by command
+    /// id rather than accepting `Evidence` directly from the caller — an
+    /// agent naming a command it never ran, or one that never reached a
+    /// terminal outcome, fails the checkpoint instead of getting to author
+    /// evidence for work it never performed.
+    pub async fn checkpoint(
+        &self,
+        checkpoint: WorkflowCheckpoint,
+        evidence_refs: Vec<CommandId>,
+    ) -> Result<WorkflowCheckpoint, RecoveryError> {
+        let evidence = self.resolve_evidence(evidence_refs).await?;
+        self.checkpoint_with_evidence(checkpoint, evidence).await
     }
 
     pub async fn recover(

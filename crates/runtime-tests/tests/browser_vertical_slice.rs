@@ -96,7 +96,7 @@ async fn submit_boundary(
                 page_id: page_id.clone(),
                 restart_url: url.clone(),
                 current_url: url.clone(),
-                cursor: Some(inspect_id),
+                cursor: Some(inspect_id.clone()),
                 boundary_command_id: Some(command_id.clone()),
                 recovery_class: CommandClass::Boundary,
                 invariants: vec![
@@ -109,7 +109,7 @@ async fn submit_boundary(
                 recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
-            observed,
+            vec![inspect_id],
         )
         .await
         .unwrap();
@@ -360,7 +360,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
                 recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
-            observed,
+            vec![command_ids.last().unwrap().clone()],
         )
         .await
         .unwrap();

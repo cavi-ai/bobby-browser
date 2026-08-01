@@ -42,6 +42,13 @@ enum Lifecycle {
 
 pub struct Server {
     runtime: Arc<dyn RuntimeInterface>,
+    /// Present when `runtime` is backed by a concrete `AuthenticatedRuntime`
+    /// (every production path: `new`/`production`). Used only to resolve
+    /// `checkpoint_save`'s `evidenceRefs` against the journal — `evidence`
+    /// itself keeps flowing through `runtime` unchanged, so callers that
+    /// arrive via the generic `for_interface` constructor lose nothing but
+    /// that one narrow lookup.
+    authenticated: Option<Arc<AuthenticatedRuntime>>,
     handle: CapabilityHandle,
     authorization: AuthorizationGuard,
     events: EventStore,
@@ -67,7 +74,9 @@ impl Server {
         resources: ArtifactResources,
     ) -> Self {
         let handle = runtime.capability_handle();
-        Self::for_interface(runtime, handle, events, resources)
+        let mut server = Self::for_interface(runtime.clone(), handle, events, resources);
+        server.authenticated = Some(runtime);
+        server
     }
 
     pub fn for_interface(
@@ -78,6 +87,7 @@ impl Server {
     ) -> Self {
         Self {
             runtime,
+            authenticated: None,
             handle: handle.clone(),
             authorization: AuthorizationGuard::new(handle),
             events,
@@ -1275,8 +1285,23 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                // The caller names commands, not evidence: resolve each id
+                // against the journal the runtime itself wrote before the
+                // checkpoint is ever persisted. A name with no journal
+                // record, or one that never reached a terminal outcome, is
+                // rejected here rather than silently contributing nothing.
+                let Some(authenticated) = self.authenticated.as_ref() else {
+                    return invalid_params_reason(id, "evidenceRefsUnresolvable");
+                };
+                let evidence = match authenticated
+                    .resolve_command_evidence(input.evidence_refs)
+                    .await
+                {
+                    Ok(evidence) => evidence,
+                    Err(_) => return invalid_params_reason(id, "evidenceRefsUnresolvable"),
+                };
                 self.runtime
-                    .checkpoint(context, input.checkpoint, input.evidence)
+                    .checkpoint(context, input.checkpoint, evidence)
                     .await
                     .and_then(to_json)
             }
@@ -1753,7 +1778,7 @@ struct CommandExecuteArgs {
 struct CheckpointSaveArgs {
     checkpoint: types::WorkflowCheckpoint,
     #[serde(default)]
-    evidence: Vec<types::Evidence>,
+    evidence_refs: Vec<types::CommandId>,
 }
 
 #[derive(Deserialize)]

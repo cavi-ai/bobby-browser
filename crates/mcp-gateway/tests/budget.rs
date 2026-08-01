@@ -206,3 +206,25 @@ async fn narrowing_the_advertised_schema_did_not_narrow_validation() {
         .expect("a response");
     assert_eq!(response["error"]["code"], -32602, "{response}");
 }
+
+#[tokio::test]
+async fn checkpoint_save_does_not_advertise_the_evidence_union() {
+    let tools = list_tools(all_capabilities()).await;
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "checkpoint_save")
+        .expect("checkpoint_save is advertised");
+    assert!(
+        tool["inputSchema"]["$defs"].get("Evidence").is_none(),
+        "checkpoint_save still carries the Evidence union"
+    );
+    assert!(
+        tool["inputSchema"]["properties"]["evidenceRefs"].is_object(),
+        "checkpoint_save does not accept evidenceRefs"
+    );
+    let bytes = serde_json::to_string(tool).unwrap().len();
+    assert!(
+        bytes < 13_000,
+        "checkpoint_save is {bytes} bytes, expected under 13000"
+    );
+}
