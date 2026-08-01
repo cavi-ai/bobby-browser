@@ -107,9 +107,10 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
   bounds, and related flags. Password / masked values appear as
   `"[redacted]"`.
 - Actionable nodes expose `target: { role, accessibleName, ordinal? }`. Use
-  intents for unique names; when `ordinal` is set, disambiguate with a
-  primitive `TargetSpec` or MCP `click` / `type_text` with `target` and no
-  `selector` (IntentHints have no ordinal).
+  `intentHintsFromAccessibilityTarget` to preserve that identity through
+  intents, including duplicate controls with `ordinal`. Primitive `TargetSpec`
+  inputs and MCP `click` / `type_text` / `upload_files` accept the same target
+  without a selector.
 - Guide: [Accessibility snapshot](accessibility-snapshot.md).
 
 ## Vision assist

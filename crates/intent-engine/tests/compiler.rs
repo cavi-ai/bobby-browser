@@ -135,6 +135,30 @@ fn compile_fill_uses_near_text_as_the_control_name_without_conflating_task_purpo
 }
 
 #[test]
+fn compile_fill_preserves_snapshot_ordinal_for_duplicate_controls() {
+    let plan = compile_intent(&IntentCommand::Fill(FillIntent {
+        purpose: "enter the work phone".into(),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            near_text: Some(TextMatch::Exact("Phone".into())),
+            ordinal: Some(1),
+            ..IntentHints::default()
+        },
+        value: FillValue::Text {
+            text: "555-0102".into(),
+            clear_first: true,
+        },
+    }))
+    .expect("compile");
+    let IntentPlan::Fill { target, .. } = plan else {
+        panic!("expected Fill plan");
+    };
+    assert_eq!(target.role.as_deref(), Some("textbox"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Phone"));
+    assert_eq!(target.ordinal, Some(1));
+}
+
+#[test]
 fn compile_follow_carries_target_expected_destination_and_boundary_flag() {
     let plan = compile_intent(&IntentCommand::Follow(FollowIntent {
         purpose: "Details".into(),

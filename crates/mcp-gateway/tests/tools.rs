@@ -653,7 +653,7 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
 }
 
 #[tokio::test]
-async fn command_execute_schema_accepts_fill_intent_with_explicit_near_text() {
+async fn command_execute_schema_accepts_fill_intent_with_snapshot_ordinal() {
     let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
     initialize(&server).await;
     let envelope = CommandEnvelope {
@@ -677,7 +677,8 @@ async fn command_execute_schema_accepts_fill_intent_with_explicit_near_text() {
             },
         })),
     };
-    let envelope_value = serde_json::to_value(&envelope).unwrap();
+    let mut envelope_value = serde_json::to_value(&envelope).unwrap();
+    envelope_value["command"]["input"]["input"]["hints"]["ordinal"] = json!(1);
     let response = server
         .handle_message(request(
             71,

@@ -95,6 +95,7 @@ impl IntentCommand {
 pub struct IntentHints {
     pub role: Option<String>,
     pub near_text: Option<TextMatch>,
+    pub ordinal: Option<usize>,
     pub frame_path: Vec<TargetSpec>,
     pub shadow_path: Vec<TargetSpec>,
     pub allow_best_match: bool,

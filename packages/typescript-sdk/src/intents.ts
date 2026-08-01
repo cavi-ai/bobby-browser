@@ -10,6 +10,7 @@ import {
   MAX_INTENT_PURPOSE_BYTES,
   type CommandEnvelope,
   type CompleteFormIntent,
+  type AccessibilityTarget,
   type DismissObstructionIntent,
   type ExtractField,
   type ExtractIntent,
@@ -52,9 +53,18 @@ function defaultHints(): IntentHints {
   return {
     role: null,
     nearText: null,
+    ordinal: null,
     framePath: [],
     shadowPath: [],
     allowBestMatch: false,
+  };
+}
+
+export function intentHintsFromAccessibilityTarget(target: AccessibilityTarget): IntentHints {
+  return {
+    role: target.role,
+    nearText: { kind: "exact", value: target.accessibleName },
+    ...(target.ordinal === undefined ? {} : { ordinal: target.ordinal }),
   };
 }
 

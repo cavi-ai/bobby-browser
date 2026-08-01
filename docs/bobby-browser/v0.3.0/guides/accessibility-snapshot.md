@@ -91,66 +91,31 @@ with `sessionId` and `pageId`; omit `selector`. `upload_files` also requires
 `paths`. A selector is required only on the legacy raw-selector path. See
 [MCP tools](../surfaces/mcp-tools.md).
 
-**Unique name (no ordinal)** — intents map cleanly via hints:
+**Intent targeting** — convert the snapshot target into intent hints. The SDK
+helper preserves `role`, accessible name, and `ordinal`, so the same flow works
+for both unique and duplicate controls:
 
 ```ts
+import { fillEnvelope, intentHintsFromAccessibilityTarget } from "@bobby-browser/sdk";
+
 const node = /* AccessibilityNode with target */;
 await client.submit(
   fillEnvelope(
     meta,
     "enter phone",
     { kind: "text", text: "555-0100", clearFirst: true },
-    {
-      role: node.target!.role,
-      nearText: { kind: "exact", value: node.target!.accessibleName },
-    },
+    intentHintsFromAccessibilityTarget(node.target!),
   ),
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
 
-**Duplicate role/name (`ordinal` set)** — `IntentHints` have no ordinal field.
-Disambiguate with a primitive whose `TargetSpec` carries the ordinal (no CSS /
-backend id required), or pass that same `target` through MCP `type_text` /
-`click` without a selector:
+For primitive commands, `TargetSpec` fields are optional in the TypeScript SDK,
+matching the wire schema. A snapshot target can therefore be copied without
+fabricating CSS, attribute, frame, or matching fields:
 
 ```ts
-await client.submit(
-  {
-    schemaVersion: 2,
-    commandId: crypto.randomUUID(),
-    workflowId: crypto.randomUUID(),
-    attemptId: crypto.randomUUID(),
-    sessionId: session.id,
-    pageId: page.id,
-    deadline: new Date(Date.now() + 60_000).toISOString(),
-    command: {
-      kind: "primitive",
-      input: {
-        kind: "typeText",
-        input: {
-          selector: "",
-          target: {
-            css: null,
-            testId: null,
-            role: node.target!.role,
-            accessibleName: node.target!.accessibleName,
-            label: null,
-            text: null,
-            attributes: {},
-            framePath: [],
-            shadowPath: [],
-            ordinal: node.target!.ordinal ?? null,
-            allowBestMatch: false,
-          },
-          value: "555-0100",
-          clearFirst: true,
-        },
-      },
-    },
-  },
-  { idempotencyKey: crypto.randomUUID() },
-);
+const target: TargetSpec = node.target!;
 ```
 
 Always verify with command / intent evidence — do not treat the snapshot alone
