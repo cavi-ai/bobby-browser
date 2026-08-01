@@ -378,6 +378,7 @@ impl Server {
             "inspect",
             "navigate",
             "a11y_snapshot",
+            "extract_structured",
             "page_activate",
             "page_close",
             "page_list",
@@ -765,6 +766,22 @@ impl Server {
                             max_nodes: input.max_nodes,
                         },
                     ),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "extract_structured" => {
+                let input: ExtractStructuredArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    types::PrimitiveCommand::ExtractStructured(types::ExtractStructuredCommand {
+                        schema: input.schema,
+                        purpose: input.purpose,
+                    }),
                 );
                 self.submit_envelope(context, envelope).await
             }
@@ -1378,6 +1395,16 @@ struct A11ySnapshotArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExtractStructuredArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    schema: serde_json::Value,
+    #[serde(default)]
+    purpose: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DownloadUrlArgs {
     session_id: types::SessionId,
     url: String,
@@ -1532,6 +1559,10 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" => {
             Some(&[types::Capability::BrowserMutate])
         }
+        "extract_structured" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::VisionAssist,
+        ]),
         "download_url" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::FileDownload,
@@ -1565,6 +1596,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "page_close"
         | "page_activate"
         | "a11y_snapshot"
+        | "extract_structured"
         | "download_url"
         | "upload_files"
         | "evaluate_javascript" => Some(types::InterfaceOperation::SubmitCommand),
@@ -1590,6 +1622,7 @@ fn tool_description(name: &str) -> &'static str {
         "inspect" => "Read page state, optionally element-scoped.",
         "navigate" => "Navigate a page to a URL.",
         "a11y_snapshot" => "Capture a compact accessibility tree of a page.",
+        "extract_structured" => "Extract schema-shaped JSON from a page via the vision provider.",
         "page_activate" => "Bring a page to the front in an owned session.",
         "page_close" => "Close a page in an owned session.",
         "page_list" => "List pages in an owned session.",
