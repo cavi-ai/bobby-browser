@@ -22,14 +22,14 @@ Then open `http://127.0.0.1:7777/healthz`. CLI details:
 
 ## Use from TypeScript
 
-Package: `@bobby-browser/sdk` (publish via `sdk-v*` tag / Publish npm workflow).
+Package: `@cavi-ai/bobby-browser` (publish via `sdk-v*` tag / Publish npm workflow).
 
 ```bash
-npm install @bobby-browser/sdk
+npm install @cavi-ai/bobby-browser
 ```
 
 ```ts
-import { BrowserRuntimeClient } from "@bobby-browser/sdk";
+import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
 
 const client = new BrowserRuntimeClient({
   baseUrl: "http://127.0.0.1:7777",
@@ -41,7 +41,7 @@ Until the package is on the public registry, build from this repo:
 
 ```bash
 pnpm install
-pnpm --filter @bobby-browser/sdk test
+pnpm --filter @cavi-ai/bobby-browser test
 ```
 
 ## Use from Rust (HTTP)

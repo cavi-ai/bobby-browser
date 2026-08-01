@@ -1,5 +1,5 @@
 {
-  "name": "@bobby-browser/sdk",
+  "name": "@cavi-ai/bobby-browser",
   "version": "0.3.0",
   "description": "Typed client for the authenticated Bobby Browser runtime interface",
   "license": "MIT",
