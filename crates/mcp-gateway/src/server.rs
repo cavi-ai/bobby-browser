@@ -2285,13 +2285,8 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
         "command_execute" | "control_action" | "navigate" | "click" | "type_text" | "inspect"
         | "screenshot" | "wait_for" | "page_list" | "page_close" | "page_activate"
-        | "a11y_snapshot" | "pdf" | "dialog" | "emulate" | "cookie_get" | "cookie_set"
-        | "cookie_delete" => Some(&[types::Capability::BrowserMutate]),
-        "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
-        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" | "pdf"
-        | "dialog" | "emulate" | "network_log" | "cookie_get" | "cookie_set" | "cookie_delete" => {
-            Some(&[types::Capability::BrowserMutate])
-        }
+        | "a11y_snapshot" | "pdf" | "dialog" | "emulate" | "network_log" | "cookie_get"
+        | "cookie_set" | "cookie_delete" => Some(&[types::Capability::BrowserMutate]),
         "extract_structured" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::VisionAssist,
