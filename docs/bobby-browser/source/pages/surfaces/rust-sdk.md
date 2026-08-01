@@ -7,7 +7,7 @@ documentedVersion: {{PRODUCT_VERSION}}
 Two ways to use Rust with bobby-browser:
 
 1. **Remote HTTP** — [`bobby-browser-client`](../rust/bobby-browser-client.md)
-   (Supported tier), mirroring `@bobby-browser/sdk`
+   (Supported tier), mirroring `@cavi-ai/bobby-browser`
 2. **Embed** — workspace crates such as `interface-core` / `sdk-core` / `broker`
    (Embed tier) — see the [Rust crate book](../rust/index.md)
 

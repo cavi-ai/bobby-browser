@@ -99,7 +99,7 @@ helper preserves `role`, accessible name, and `ordinal`, so the same flow works
 for both unique and duplicate controls:
 
 ```ts
-import { fillEnvelope, intentHintsFromAccessibilityTarget } from "@bobby-browser/sdk";
+import { fillEnvelope, intentHintsFromAccessibilityTarget } from "@cavi-ai/bobby-browser";
 
 const node = /* AccessibilityNode with target */;
 await client.submit(

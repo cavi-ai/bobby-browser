@@ -15,7 +15,7 @@ Skills are **not** exposed on:
 
 - HTTP (`/v1/*`)
 - MCP tools (`command_execute` and friends)
-- `@bobby-browser/sdk`
+- `@cavi-ai/bobby-browser`
 
 Do not treat skill router aliases as public user commands for application
 integrations. Those aliases exist in the in-process skill router

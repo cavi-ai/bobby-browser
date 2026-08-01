@@ -4,27 +4,27 @@ documentedVersion: 0.3.0
 
 # TypeScript SDK
 
-Package: `@bobby-browser/sdk` (Node ≥ 22).
+Package: `@cavi-ai/bobby-browser` (Node ≥ 22).
 
 ## Install
 
 Published registry (when available):
 
 ```bash
-npm install @bobby-browser/sdk
+npm install @cavi-ai/bobby-browser
 ```
 
 From this monorepo after `pnpm install`:
 
 ```bash
-pnpm --filter @bobby-browser/sdk build
+pnpm --filter @cavi-ai/bobby-browser build
 # import from the workspace package name in local packages/apps
 ```
 
 ## Construct the client
 
 ```ts
-import { BrowserRuntimeClient } from "@bobby-browser/sdk";
+import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
 
 const client = new BrowserRuntimeClient({
   baseUrl: "http://127.0.0.1:7777",
