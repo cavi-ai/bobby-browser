@@ -48,7 +48,9 @@ await client.submit(
 );
 ```
 
-MCP: same envelope via `command_execute`.
+MCP: flat tool `evaluate_javascript` with
+`{ sessionId, pageId, expression, timeoutMs?, awaitPromise?, workflowId? }`,
+or the same primitive envelope via `command_execute`.
 
 ## Bounds
 

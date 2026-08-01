@@ -11,7 +11,8 @@ Both [MCP stdio](mcp-stdio.md) (`mcp-gateway`) and [MCP over HTTP](mcp-http.md)
 
 - MCP protocol version: `2025-11-25`
 - Call `initialize` before any tool listing or tool call
-- Streamable HTTP: one JSON-RPC message per `POST` (no `GET` transport)
+- Streamable HTTP: one JSON-RPC message per `POST`; `GET /v1/mcp` opens the
+  SSE keep-alive channel (see [MCP over HTTP](mcp-http.md))
 - Tool argument validation is bounded (stdio: ~1 MiB frames, 256 KiB tool input,
   event reads capped at 256 records)
 
@@ -39,6 +40,7 @@ Tools are advertised only when the principal holds the required capability.
 | `download_url` | `browser:mutate` + `file:download` | Download a URL with digest evidence |
 | `upload_files` | `browser:mutate` + `file:upload` | Set files on a file input |
 | `evaluate_javascript` | `browser:mutate` + `javascript:evaluate` | Evaluate JavaScript (also session-policy gated) |
+| `extract_structured` | `browser:mutate` + `vision:assist` | Schema-shaped JSON extraction via the configured vision provider (also session `executionPolicy.visionAssist` + `[vision]`) |
 | `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
 | `intent_locate` | `browser:mutate` + `intent:execute` | Locate an element by described purpose (Replayable) |
 | `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable) |
@@ -50,17 +52,19 @@ Tools are advertised only when the principal holds the required capability.
 | `intent_extract` | `browser:mutate` + `intent:execute` | Read named fields without mutating (Replayable) |
 | `events_read` | `session:read` | Read retained events after a cursor |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
+| `recovery_status` | `recovery:read` | Read a workflow checkpoint and recovery receipts |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
 
-The flat browser tools (`navigate` … `evaluate_javascript`, plus
-`page_activate` / `a11y_snapshot`) and the `intent_*` tools build the command
-envelope for you (ids and deadline are server-generated) and return the same
-`CommandOutcome` shape as `command_execute`, including artifact / accessibility
-evidence.
+The flat browser tools (`navigate` … `evaluate_javascript` /
+`extract_structured`, plus `page_activate` / `a11y_snapshot`) and the
+`intent_*` tools build the command envelope for you (ids and deadline are
+server-generated) and return the same `CommandOutcome` shape as
+`command_execute`, including artifact / accessibility evidence.
 
-`click` and `type_text` accept either a raw `selector` or a semantic `target`.
-Targets returned by `a11y_snapshot` can be passed through unchanged; a legacy
-selector is not required when `target` is present.
+`click`, `type_text`, and `upload_files` accept either a raw `selector` or a
+semantic `target`. Targets returned by `a11y_snapshot` can be passed through
+unchanged; a legacy selector is not required when `target` is present.
+`upload_files` still requires `paths`.
 
 `command_execute` still accepts nested intent envelopes
 (`{ kind: "intent", input: { kind: "locate" \| … } }`) and remains the escape
@@ -71,8 +75,8 @@ hatch for anything the named tools do not cover. Skills are **not** MCP tools.
 Every envelope-minting tool takes an optional `workflowId` and returns the
 `workflowId` it used alongside the outcome. Omit it and the server mints one;
 pass a returned value back to keep subsequent commands in the same workflow.
-This is what makes `checkpoint_save` and `workflow_recover` reachable without
-hand-building envelopes.
+This is what makes `checkpoint_save`, `recovery_status`, and
+`workflow_recover` reachable without hand-building envelopes.
 
 `intent_*` tools also accept an optional `idempotencyKey`.
 

@@ -35,6 +35,7 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 | OpenPage | `POST /v1/pages` / `page_open` | `page:write` |
 | SubmitCommand | `POST /v1/commands` / `command_execute` (+ flat MCP browser tools) | `browser:mutate` |
 | CreateCheckpoint | `POST /v1/checkpoints` / `checkpoint_save` | `recovery:write` |
+| ReadCheckpoint | `GET /v1/recovery/{id}` / `recovery_status` | `recovery:read` |
 | RecoverWorkflow | `POST /v1/recovery/{id}` / `workflow_recover` | `recovery:write` |
 | SubscribeEvents | `GET /v1/events` / `events_read` | `session:read` |
 | ReadArtifact | `GET /v1/artifacts/{id}` | `artifact:read` |
@@ -46,9 +47,9 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 MCP tools), not separate `/v1/pages/...` routes. Both still require
 `browser:mutate`. See [Accessibility snapshot](../guides/accessibility-snapshot.md).
 
-Some interface operations (`ReadPage`, `ClosePage`, `ReadCheckpoint`,
-`CaptureArtifact`) exist in the type map for authority checks; prefer the
-documented HTTP/MCP surfaces above for public clients.
+Some interface operations (`ReadPage`, `ClosePage`, `CaptureArtifact`) exist in
+the type map for authority checks; prefer the documented HTTP/MCP surfaces
+above for public clients.
 
 ## Privileged primitives (beyond `browser:mutate`)
 
@@ -62,5 +63,6 @@ Submitting a command still requires `browser:mutate`. Nested commands add:
 | Any intent | `intent:execute` |
 | Intent + file fill (`fill` / `completeForm` with `files`) | `intent:execute` and `file:upload` |
 | Vision escalation | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
+| Structured extraction (`extractStructured` / MCP `extract_structured`) | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
 
 Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` set when known.
