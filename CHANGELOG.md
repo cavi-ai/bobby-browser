@@ -1,42 +1,60 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-08-01
 
-- Allow MCP `click` and `type_text` to consume accessibility-snapshot targets without also requiring a legacy CSS selector.
-- Recover stale Firefox companion attachments: a cycled companion connection now re-grants and retries once instead of failing every later action with `ConnectionClosed`; lease renewal re-grants dead attachments.
-- Add `expectedUrl` to `typeText` (all surfaces): typing fails before mutation when the page URL does not match, so agents cannot type into the wrong page.
->>>>>> 40cc7eb (fix(firefox): recover stale companion attachments; add typeText expectedUrl guard)
-- Add command-ready semantic targets to actionable accessibility-snapshot nodes; duplicate role/name pairs receive deterministic tree-order ordinals without exposing DOM or browser IDs.
-- Plumb real screenshot bytes into vision escalation (`screenshot_bytes` on Chromium and Firefox workers); empty frames no longer reach providers.
-- Add an HTTP vision-assist provider (`[vision]` config: https or loopback endpoint, bearer via env var) with response validation and fail-closed escalation.
-- Fill / completeForm verification fails closed on native HTML constraint validity (`required`, `pattern`, length, range, …) and retains the browser validation message in evidence.
+### MCP surface
+
+- Emit only the `$defs` each tool's arguments can reach. A principal holding the default `bobby init` capability set previously produced a `tools/list` past the 1 MiB frame cap, so the gateway answered `resultTooLarge` and no client could enumerate the surface.
+- Expose one MCP tool per intent (`intent_locate`, `intent_fill`, `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`, `intent_follow`, `intent_dismiss_obstruction`, `intent_extract`), each building its own command envelope. `command_execute` still accepts nested intent envelopes.
+- Accept an optional `workflowId` on every envelope-minting tool and return it on the outcome, so `checkpoint_save` and `workflow_recover` are reachable without hand-built envelopes.
+- Report rejected arguments as `data.pointer` (JSON Pointer) plus `data.constraint`, or as `malformedArguments` / `deadlineOutOfRange` / `invalidIdempotencyKey`, instead of an indistinguishable `"Invalid params"`.
+- Add `credentialExpiresAt` to `runtime_info` and a `bootstrap-expiry` check to `bobby doctor` that warns under 7 days and fails once expired.
+- Allow MCP `click`, `type_text`, and `upload_files` to consume accessibility-snapshot targets without also requiring a legacy CSS selector.
 - Guard MCP schema parity with schemars: `JsonSchema` derives on the wire types and tests that fail when the hand-bounded MCP tool schemas drift from the Rust command/evidence variants.
+
+### Semantic automation
+
+- Add the `accessibilitySnapshot` primitive (MCP `a11y_snapshot`): a compact tree capped at 2048 nodes, from Chrome's full AX tree on Chromium and the companion extension's DOM walker on Firefox. Form controls include current value, description, required/disabled/read-only/invalid/checked state, autocomplete, and numeric bounds; sensitive values are redacted.
+- Add command-ready semantic targets to actionable accessibility-snapshot nodes; duplicate role/name pairs receive deterministic tree-order ordinals without exposing DOM or browser IDs.
+- Carry snapshot targets into intents via `IntentHints.ordinal` and `intentHintsFromAccessibilityTarget`.
 - Add verified `completeForm` intent (ordered uniquely named fill fields; no implicit submit).
 - Add `FillValue` kind `checked` for reliable checkbox/radio semantic fills on Chromium and Firefox.
-- Add the `accessibilitySnapshot` primitive (MCP `a11y_snapshot`): a compact tree capped at 2048 nodes, from Chrome's full AX tree on Chromium and the companion extension's DOM walker on Firefox. Form controls include current value, description, required/disabled/read-only/invalid/checked state, autocomplete, and numeric bounds; sensitive values are redacted.
+- Fill / completeForm verification fails closed on native HTML constraint validity (`required`, `pattern`, length, range, …) and retains the browser validation message in evidence.
+- Add `expectedUrl` to `typeText` (all surfaces): typing fails before mutation when the page URL does not match, so agents cannot type into the wrong page.
+
+### Extraction and vision
+
+- Add the `extractStructured` primitive (MCP `extract_structured`): bounded page text plus the caller's JSON schema go to the configured provider, and the result is schema-validated and size-bounded before becoming `structuredExtraction` evidence. Gated on `browser:mutate`, `vision:assist`, session policy, and a configured provider.
+- Plumb real screenshot bytes into vision escalation (`screenshot_bytes` on Chromium and Firefox workers); empty frames no longer reach providers.
+- Add an HTTP vision-assist provider (`[vision]` config: https or loopback endpoint, bearer via env var) with response validation and fail-closed escalation.
+
+### Sessions, pages, and events
+
 - Add `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` for session teardown.
 - Add the `activatePage` primitive (MCP `page_activate`) to bring a page to the front on Chromium and Firefox.
 - Add `GET /v1/events?stream=1` server-sent-event streaming with cursor frame ids and terminal gap frames.
 - `GET /v1/mcp` now opens the streamable-HTTP SSE channel (keep-alive) instead of 405.
-- The Firefox native host treats a companion server silent for 45s as dead and reconnects, recovering from half-open connections left by killed processes.
+- Honor idempotency keys on session creation and checkpoint save, replaying retained results.
+- Scope CDP-originated interface events to the authenticated principal.
+- Report real uptime and in-flight command counts in runtime info.
+- Add `listSessions` to the TypeScript SDK and stop rejecting checkpoints with recovery receipts.
 
+### Firefox companion
+
+- The Firefox native host treats a companion server silent for 45s as dead and reconnects, recovering from half-open connections left by killed processes.
+- Recover stale Firefox companion attachments: a cycled companion connection now re-grants and retries once instead of failing every later action with `ConnectionClosed`; lease renewal re-grants dead attachments.
 - Share one BiDi connection across runtime sessions on a Firefox profile (Firefox RemoteAgent accepts a single WebDriver session per browser).
 - Keep prior attachment grants when issuing new ones, and renew attachment leases before expiry so sessions outlive the attachment TTL.
 - Companion extension: merge attachment grants instead of replacing them, and retry terminal native-auth states after a bounded cooldown instead of stopping until a browser restart.
 - Recover native-host descriptor publication from descriptor files leaked by killed processes.
 - Log Firefox companion launch, pairing, and discovery failures as warnings.
-
-
-## 0.3.0 - 2026-07-30
-
-- Honor idempotency keys on session creation and checkpoint save, replaying retained results.
-- Scope CDP-originated interface events to the authenticated principal.
-- Report real uptime and in-flight command counts in runtime info.
-- Add `listSessions` to the TypeScript SDK and stop rejecting checkpoints with recovery receipts.
-- Fail startup when the configured engine preference has no satisfiable worker registration.
-- Add `bobby doctor` setup checks and clap-based CLI help.
 - Add `bobby enroll-firefox-profile` for one-time Firefox companion pairing and selection output.
 - Document Firefox companion setup and operations.
+
+### CLI and startup
+
+- Add `bobby doctor` setup checks and clap-based CLI help.
+- Fail startup when the configured engine preference has no satisfiable worker registration.
 
 ## 0.2.1 - 2026-07-30
 
