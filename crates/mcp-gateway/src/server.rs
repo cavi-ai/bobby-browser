@@ -375,6 +375,7 @@ impl Server {
             "cookie_get",
             "cookie_set",
             "command_execute",
+            "control_action",
             "intent_complete_form",
             "intent_dismiss_obstruction",
             "intent_extract",
@@ -1062,6 +1063,26 @@ impl Server {
                     .form_snapshot(context, input.session_id, input.page_id, input.max_controls)
                     .await
                     .and_then(to_json)
+            }
+            "control_action" => {
+                let input: ControlActionArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                if input.action.validate().is_err() {
+                    return invalid_params_reason(id, "malformedArguments");
+                }
+                let (context, envelope) = primitive_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    input.workflow_id,
+                    types::PrimitiveCommand::ControlAction(types::ControlActionCommand {
+                        target: input.target,
+                        action: input.action,
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
             }
             "dialog" => {
                 let input: DialogArgs = match bounded_parse(call.arguments) {
@@ -1882,6 +1903,11 @@ struct FormSnapshotArgs {
     workflow_id: Option<types::WorkflowId>,
 }
 
+page_scoped_args!(ControlActionArgs {
+    target: types::FormControlTarget,
+    action: types::ControlAction,
+});
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct A11ySnapshotArgs {
@@ -2194,9 +2220,9 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
     match name {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
-        "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
-        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" | "pdf"
-        | "dialog" | "cookie_get" | "cookie_set" | "cookie_delete" => {
+        "command_execute" | "control_action" | "navigate" | "click" | "type_text" | "inspect"
+        | "screenshot" | "wait_for" | "page_list" | "page_close" | "page_activate"
+        | "a11y_snapshot" | "pdf" | "dialog" | "cookie_get" | "cookie_set" | "cookie_delete" => {
             Some(&[types::Capability::BrowserMutate])
         }
         "extract_structured" => Some(&[
@@ -2239,6 +2265,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         "checkpoint_save" => Some(types::InterfaceOperation::CreateCheckpoint),
         "recovery_status" => Some(types::InterfaceOperation::ReadCheckpoint),
         "command_execute"
+        | "control_action"
         | "navigate"
         | "click"
         | "type_text"
@@ -2286,6 +2313,7 @@ fn tool_description(name: &str) -> &'static str {
         "cookie_set" => "Store cookies on a page's jar.",
         "click" => "Click an element on a page.",
         "command_execute" => "Execute one bounded browser command envelope.",
+        "control_action" => "Perform one typed native form-control action and return the reread control state.",
         "download_url" => "Download a URL into the session's downloads.",
         "evaluate_javascript" => "Evaluate JavaScript on a page (session policy gated).",
         "events_read" => "Read retained runtime events after a cursor.",

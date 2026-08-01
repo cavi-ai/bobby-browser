@@ -34,9 +34,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand,
-    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence,
-    PageId, ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand,
+    ClickCommand, ClosePageCommand, CommandError, ControlAction, ControlActionCommand, ErrorCode,
+    ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
+    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
+    ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
     TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 
@@ -232,6 +233,25 @@ struct HttpBridgeState {
 }
 
 impl ChromiumWorker {
+    fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
+        fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
+            Box::new(TargetSpec {
+                role: Some(segment.role.clone()),
+                accessible_name: Some(segment.accessible_name.clone()),
+                ordinal: segment.ordinal,
+                ..Default::default()
+            })
+        }
+        TargetSpec {
+            role: Some(target.role.clone()),
+            accessible_name: Some(target.accessible_name.clone()),
+            ordinal: target.ordinal,
+            frame_path: target.frame_path.iter().map(segment).collect(),
+            shadow_path: target.shadow_path.iter().map(segment).collect(),
+            ..Default::default()
+        }
+    }
+
     async fn resolve_target(
         &self,
         page_id: &PageId,
@@ -498,6 +518,94 @@ impl BrowserWorker for ChromiumWorker {
             },
             resolved.evidence,
         ])
+    }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        command
+            .action
+            .validate()
+            .map_err(|message| driver_error(ErrorCode::InvalidRequest, message))?;
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let read_snapshot = async || -> Result<types::FormSnapshot, CommandError> {
+            let value: serde_json::Value = page
+                .evaluate(crate::form_snapshot_expression(page_id))
+                .await
+                .map_err(command_failed)?
+                .into_value()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            let encoded = value.as_str().ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "form snapshot returned non-text JSON",
+                )
+            })?;
+            crate::decode_form_snapshot(page_id.clone(), encoded, 512)
+        };
+        let find_control = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
+            snapshot
+                .forms
+                .iter()
+                .flat_map(|form| form.controls.iter())
+                .chain(snapshot.unowned_controls.iter())
+                .find(|control| control.target.as_ref() == Some(&command.target))
+                .cloned()
+        };
+        let before = read_snapshot().await?;
+        let before_control = find_control(&before).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetNotFound,
+                "form control target was not found",
+            )
+        })?;
+        crate::validate_control_action(&before_control, &command.action)?;
+
+        let target = Self::control_target_spec(&command.target);
+        let resolved = self
+            .resolve_target(page_id, page, "", Some(&target))
+            .await?;
+        match &command.action {
+            ControlAction::SetText { value } => resolved.type_text(page, value, true).await?,
+            ControlAction::SetChecked { checked } => {
+                resolved.set_checked(page, *checked).await?;
+            }
+            ControlAction::SelectOne { value } => {
+                resolved.select_option(page, value).await?;
+            }
+            ControlAction::SelectMany { values } => {
+                resolved.select_options(page, values).await?;
+            }
+            ControlAction::SetFiles { paths } => {
+                let requested = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+                let paths = resolve_upload_paths(&self.upload_roots, &requested)?
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                resolved.set_files(page, paths).await?;
+            }
+            ControlAction::Clear => {
+                if before_control.control_kind == types::FormControlKind::File {
+                    resolved.set_files(page, Vec::new()).await?;
+                } else {
+                    resolved.clear_control(page).await?;
+                }
+            }
+            ControlAction::Activate => resolved.click(page).await?,
+        }
+
+        let after = read_snapshot().await?;
+        let after_control = find_control(&after).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetDetached,
+                "form control was replaced or detached after dispatch",
+            )
+        })?;
+        let evidence = crate::control_action_evidence(&after_control, &command.action, false)?;
+        Ok(vec![Evidence::ControlAction { action: evidence }])
     }
 
     async fn open_page_command(

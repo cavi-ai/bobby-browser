@@ -513,6 +513,12 @@ async fn browser_execute(
                 .type_text(page_id.expect("validated page id"), command)
                 .await?
         }
+        PrimitiveCommand::ControlAction(command) => {
+            lease
+                .worker()
+                .control_action(page_id.expect("validated page id"), command)
+                .await?
+        }
         PrimitiveCommand::UploadFiles(command) => {
             lease
                 .worker()

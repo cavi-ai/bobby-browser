@@ -110,6 +110,7 @@ export type Evidence =
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
   | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean }
   | { kind: "formSnapshot"; snapshot: FormSnapshot }
+  | { kind: "controlAction"; action: ControlActionEvidence }
   | { kind: "intentExecution"; record: ExecutionRecord }
   | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 
@@ -175,6 +176,16 @@ export interface FormGroup { id: string; label: string | null; description: stri
 export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
 export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
 export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; }
+export type ControlAction =
+  | { kind: "setText"; value: string }
+  | { kind: "setChecked"; checked: boolean }
+  | { kind: "selectOne"; value: string }
+  | { kind: "selectMany"; values: string[] }
+  | { kind: "setFiles"; paths: string[] }
+  | { kind: "clear" }
+  | { kind: "activate" };
+export interface ControlActionCommand { target: FormControlTarget; action: ControlAction; }
+export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; }
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
@@ -200,7 +211,8 @@ export type PrimitiveCommand =
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }
-  | { kind: "captureScreenshot"; input: CaptureScreenshotCommand };
+  | { kind: "captureScreenshot"; input: CaptureScreenshotCommand }
+  | { kind: "controlAction"; input: ControlActionCommand };
 
 export interface IntentHints {
   role?: string | null;

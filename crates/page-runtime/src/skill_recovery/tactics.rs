@@ -98,6 +98,7 @@ pub(super) fn expected_postcondition(command: &RuntimeCommand) -> &'static str {
             "requested page configuration is observed"
         }
         PrimitiveCommand::EvaluateJavaScript(_) => "JavaScript result is observed",
+        PrimitiveCommand::ControlAction(_) => "typed control state is observed",
     }
 }
 
