@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Align package version with the Bobby Browser 0.3.1 runtime / docs release.
+
 ## 0.3.0
 
 - Align package version with the Bobby Browser 0.3.0 runtime release.
