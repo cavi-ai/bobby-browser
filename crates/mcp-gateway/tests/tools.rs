@@ -331,7 +331,7 @@ async fn unrequested_methods_list_extension_is_not_exposed() {
 }
 
 #[tokio::test]
-async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_bounds() {
+async fn command_schema_validates_the_full_union_but_advertises_an_opaque_command() {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
         .issue(
@@ -353,33 +353,58 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     for tool in tools {
         assert_closed_typed_objects(&tool["inputSchema"]);
     }
-    let command_schema = tools
-        .iter()
-        .find(|tool| tool["name"] == "command_execute")
-        .unwrap();
+
+    // `tool_schema` (reached here through `schema_for_test`) is what
+    // `validate_tool_arguments` enforces at dispatch, so it must keep the
+    // full command union — a malformed nested command still has to fail
+    // closed, no matter what `tools/list` advertises.
+    let validation_schema = mcp_gateway::schema_for_test("command_execute");
     assert_eq!(
-        command_schema["inputSchema"]["$defs"]["PrimitiveCommand"]["oneOf"]
+        validation_schema["$defs"]["PrimitiveCommand"]["oneOf"]
             .as_array()
             .unwrap()
             .len(),
         26
     );
-    let runtime_command = &command_schema["inputSchema"]["$defs"]["RuntimeCommand"]["oneOf"];
+    let runtime_command = &validation_schema["$defs"]["RuntimeCommand"]["oneOf"];
     assert_eq!(
         runtime_command.as_array().unwrap().len(),
         2,
         "{runtime_command}"
     );
     assert_eq!(
-        command_schema["inputSchema"]["$defs"]["CommandEnvelope"]["properties"]["command"]["$ref"],
+        validation_schema["$defs"]["CommandEnvelope"]["properties"]["command"]["$ref"],
         "#/$defs/RuntimeCommand"
     );
     assert_eq!(
-        command_schema["inputSchema"]["$defs"]["IntentCommand"]["oneOf"]
+        validation_schema["$defs"]["IntentCommand"]["oneOf"]
             .as_array()
             .unwrap()
             .len(),
         8
+    );
+
+    // `tools/list` is what an agent actually downloads on connect. There,
+    // `command_execute` must advertise the envelope command as opaque, not
+    // the full union, or every principal pays for every primitive/intent
+    // variant on every connect.
+    let command_schema = tools
+        .iter()
+        .find(|tool| tool["name"] == "command_execute")
+        .unwrap();
+    assert!(
+        command_schema["inputSchema"]["$defs"]["PrimitiveCommand"].is_null(),
+        "{}",
+        command_schema["inputSchema"]["$defs"]
+    );
+    assert!(
+        command_schema["inputSchema"]["$defs"]["IntentCommand"].is_null(),
+        "{}",
+        command_schema["inputSchema"]["$defs"]
+    );
+    assert_eq!(
+        command_schema["inputSchema"]["$defs"]["CommandEnvelope"]["properties"]["command"]["type"],
+        "object"
     );
     // `CommandEnvelope` does not carry evidence, so the closure keeps `Evidence`
     // out of this tool entirely.

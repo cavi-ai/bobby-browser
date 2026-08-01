@@ -10,7 +10,10 @@ use interface_core::AuthorityStore;
 use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
-use types::{Capability, PrincipalId};
+use types::{
+    AttemptId, Capability, CommandEnvelope, CommandId, IntentCommand, IntentHints, LocateIntent,
+    PrincipalId, RuntimeCommand, SessionId, WorkflowId,
+};
 use uuid::uuid;
 
 /// The `tools/list` payload an agent downloads on connect, in bytes.
@@ -122,4 +125,84 @@ async fn every_advertised_tool_carries_a_name_and_input_schema() {
             tool["name"]
         );
     }
+}
+
+#[tokio::test]
+async fn command_execute_does_not_advertise_the_command_union() {
+    let tools = list_tools(all_capabilities()).await;
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "command_execute")
+        .expect("command_execute is advertised");
+    let defs = &tool["inputSchema"]["$defs"];
+    assert!(
+        defs.get("PrimitiveCommand").is_none(),
+        "command_execute still carries PrimitiveCommand"
+    );
+    assert!(
+        defs.get("IntentCommand").is_none(),
+        "command_execute still carries IntentCommand"
+    );
+    let bytes = serde_json::to_string(tool).unwrap().len();
+    assert!(
+        bytes < 2_000,
+        "command_execute is {bytes} bytes, expected under 2000"
+    );
+}
+
+#[tokio::test]
+async fn command_execute_points_agents_at_the_named_tools() {
+    let tools = list_tools(all_capabilities()).await;
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "command_execute")
+        .expect("command_execute is advertised");
+    let command = &tool["inputSchema"]["$defs"]["CommandEnvelope"]["properties"]["command"];
+    assert_eq!(command["type"], "object");
+    let description = command["description"]
+        .as_str()
+        .expect("the opaque command carries a description");
+    assert!(
+        description.contains("intent_") || description.contains("named tool"),
+        "description does not point at the named tools: {description}"
+    );
+}
+
+#[tokio::test]
+async fn narrowing_the_advertised_schema_did_not_narrow_validation() {
+    // `command_execute` advertises an opaque command, but still rejects
+    // malformed nested command content at the MCP edge rather than
+    // dispatching it into the runtime. Envelope shape and corruption copied
+    // from `command_execute_schema_rejects_locate_purpose_over_256` in
+    // `tests/tools.rs`, which proved this -32602 pre-dispatch rejection
+    // before the advertised schema was narrowed.
+    let server = fixture_server(all_capabilities()).await;
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
+            purpose: "Continue".to_owned(),
+            hints: IntentHints::default(),
+        })),
+    };
+    let mut envelope_value = serde_json::to_value(envelope).unwrap();
+    envelope_value["command"]["input"]["input"]["purpose"] = json!("a".repeat(257));
+
+    let response = server
+        .handle_message(request(
+            5,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":envelope_value}
+            }),
+        ))
+        .await
+        .expect("a response");
+    assert_eq!(response["error"]["code"], -32602, "{response}");
 }

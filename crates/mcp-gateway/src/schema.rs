@@ -345,6 +345,38 @@ pub(crate) fn tool_schema(name: &str) -> Value {
     schema
 }
 
+/// The schema advertised in `tools/list`, distinct from the schema
+/// `validate_tool_arguments` enforces at dispatch.
+///
+/// For every tool but `command_execute` these are identical. For
+/// `command_execute`, `envelope.command` advertises as an opaque object
+/// instead of the full `PrimitiveCommand`/`IntentCommand` union — that union
+/// is 13,783 bytes across both enums and is redundant, since every branch
+/// already has a named tool. Validation is untouched: `tool_schema` (and the
+/// `definitions()` table it reads) keeps the full union, so a malformed
+/// nested command still fails with `-32602` before it reaches the runtime.
+/// Only what this tool *advertises on connect* narrows.
+pub(crate) fn advertised_tool_schema(name: &str) -> Value {
+    if name != "command_execute" {
+        return tool_schema(name);
+    }
+    let mut schema = tool_schema(name);
+    let mut patched = definitions();
+    let patched = patched.as_object_mut().expect("definitions is an object");
+    if let Some(command_envelope) = patched.get_mut("CommandEnvelope") {
+        command_envelope["properties"]["command"] = json!({
+            "type": "object",
+            "description": "One command. Prefer the named tools — navigate, click, \
+        type_text, control_action, dialog, emulate, and the intent_* family — which \
+        build this envelope for you. Accepted here as {\"kind\":\"primitive\"|\"intent\", \
+        \"input\":{…}} for callers that need to mint their own envelope."
+        });
+    }
+    let seed = json!({"properties": schema["properties"], "required": schema["required"]});
+    schema["$defs"] = reachable_definitions_from(&seed, patched);
+    schema
+}
+
 /// Every intent tool is page-scoped, so the scope keys are always required.
 fn intent_required(extra: &[&'static str]) -> Vec<&'static str> {
     let mut required = vec!["sessionId", "pageId"];
@@ -398,6 +430,17 @@ fn merge_properties(properties: &mut Value, extra: Value) {
 fn reachable_definitions(schema: &Value) -> Value {
     let all = definitions();
     let all = all.as_object().expect("definitions is an object");
+    reachable_definitions_from(schema, all)
+}
+
+/// Same closure walk as [`reachable_definitions`], but sourced from an
+/// explicit definitions map rather than the shared [`definitions()`] table.
+///
+/// [`advertised_tool_schema`] uses this with a locally patched copy of the
+/// table so it can narrow what `command_execute` advertises without
+/// disturbing [`definitions()`] itself, which [`tool_schema`] still relies on
+/// unmodified for edge validation.
+fn reachable_definitions_from(schema: &Value, all: &Map<String, Value>) -> Value {
     let mut pending = BTreeSet::new();
     collect_refs(schema, &mut pending);
     let mut reachable = Map::new();
