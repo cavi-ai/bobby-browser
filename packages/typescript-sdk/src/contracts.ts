@@ -133,6 +133,7 @@ export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
 export interface AccessibilitySnapshotCommand { maxNodes?: number | null }
+export interface ExtractStructuredCommand { schema: unknown; purpose?: string | null }
 export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number }
 export interface AccessibilityNode {
   role?: string;
@@ -167,6 +168,7 @@ export type PrimitiveCommand =
   | { kind: "closePage"; input: ClosePageCommand }
   | { kind: "activatePage"; input: ActivatePageCommand }
   | { kind: "accessibilitySnapshot"; input: AccessibilitySnapshotCommand }
+  | { kind: "extractStructured"; input: ExtractStructuredCommand }
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }

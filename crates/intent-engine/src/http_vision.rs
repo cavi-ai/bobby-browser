@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use types::{CommandError, ErrorCode, ErrorLayer};
 
 use crate::{StuckKind, VisionAction, VisionAssist, VisionProposal, VisionProposeRequest};
@@ -72,6 +73,79 @@ impl HttpVisionAssist {
             bearer,
             timeout,
         })
+    }
+}
+
+/// Structured extraction over the same provider endpoint: the page's
+/// bounded text content plus the caller's JSON schema go out; the provider
+/// returns one JSON value that is then validated against the schema by the
+/// runtime before it becomes evidence.
+#[async_trait]
+pub trait StructuredExtractor: Send + Sync {
+    async fn extract_structured(
+        &self,
+        request: StructuredExtractRequest,
+    ) -> Result<Value, CommandError>;
+}
+
+pub struct StructuredExtractRequest {
+    pub schema: Value,
+    pub content: String,
+    pub purpose: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtractBody<'a> {
+    schema: &'a Value,
+    content: &'a str,
+    purpose: &'a Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExtractResultBody {
+    value: Value,
+}
+
+#[async_trait]
+impl StructuredExtractor for HttpVisionAssist {
+    async fn extract_structured(
+        &self,
+        request: StructuredExtractRequest,
+    ) -> Result<Value, CommandError> {
+        let body = ExtractBody {
+            schema: &request.schema,
+            content: &request.content,
+            purpose: &request.purpose,
+        };
+        let mut call = self
+            .client
+            .post(&self.endpoint)
+            .timeout(self.timeout)
+            .json(&body);
+        if let Some(bearer) = &self.bearer {
+            call = call.bearer_auth(bearer);
+        }
+        let response = call
+            .send()
+            .await
+            .map_err(|_| provider_error("extract endpoint request failed"))?;
+        if !response.status().is_success() {
+            return Err(provider_error("extract endpoint rejected the request"));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| provider_error("extract endpoint response could not be read"))?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(provider_error(
+                "extract endpoint response exceeded its bound",
+            ));
+        }
+        let result: ExtractResultBody = serde_json::from_slice(&bytes)
+            .map_err(|_| provider_error("extract endpoint returned an invalid result"))?;
+        Ok(result.value)
     }
 }
 
@@ -163,6 +237,7 @@ fn provider_error(message: impl Into<String>) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StructuredExtractor;
 
     #[test]
     fn endpoint_must_be_https_or_loopback() {
@@ -188,6 +263,41 @@ mod tests {
             HttpVisionAssist::new("not-a-url".into(), None, std::time::Duration::from_secs(1))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn extract_round_trip_returns_the_provider_value() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0_u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = br#"{"value":{"title":"Example Domain","count":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body),
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let assist = HttpVisionAssist::new(
+            format!("http://{address}/extract"),
+            None,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        let value = assist
+            .extract_structured(StructuredExtractRequest {
+                schema: serde_json::json!({"type":"object"}),
+                content: "Example Domain".into(),
+                purpose: Some("page fields".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(value["title"], serde_json::json!("Example Domain"));
+        assert_eq!(value["count"], serde_json::json!(2));
     }
 
     #[tokio::test]
