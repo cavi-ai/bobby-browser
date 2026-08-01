@@ -7,9 +7,10 @@ use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ErrorCode, ErrorLayer,
-    Evidence, ExecutionPath, ExecutionReason, PageId, PageState, PrimitiveCommand, RuntimeCommand,
-    TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ControlActionCommand,
+    ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason, PageId, PageState,
+    PrimitiveCommand, RuntimeCommand, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand,
 };
 use worker_pool::WorkerLease;
 
@@ -69,6 +70,14 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.lease.worker().upload_files(page_id, command).await
+    }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.lease.worker().control_action(page_id, command).await
     }
 
     async fn wait_for(
