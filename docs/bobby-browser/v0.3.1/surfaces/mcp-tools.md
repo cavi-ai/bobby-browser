@@ -58,6 +58,7 @@ Tools are advertised only when the principal holds the required capability.
 | `cookie_get` | `browser:mutate` | Read cookies (all origins or filtered) |
 | `pdf` | `browser:mutate` | Print the page to a PDF artifact |
 | `dialog` | `browser:mutate` | Accept or dismiss the next JS dialog |
+| `emulate` | `browser:mutate` | Viewport + geolocation overrides |
 | `cookie_set` | `browser:mutate` | Store cookies |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |

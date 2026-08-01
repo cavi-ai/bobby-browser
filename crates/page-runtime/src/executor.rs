@@ -534,6 +534,16 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::Emulate(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Emulation { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("emulate command returned no emulation evidence"))
+                }
+            }
             PrimitiveCommand::HandleDialog(_) => {
                 if evidence
                     .iter()

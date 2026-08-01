@@ -291,6 +291,7 @@ pub enum PrimitiveCommand {
     GetCookies(GetCookiesCommand),
     PrintToPdf(PrintToPdfCommand),
     HandleDialog(HandleDialogCommand),
+    Emulate(EmulateCommand),
     SetCookies(SetCookiesCommand),
     DeleteCookies(DeleteCookiesCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
@@ -353,6 +354,7 @@ impl PrimitiveCommand {
             | Self::ListPages(_)
             | Self::WaitFor(_)
             | Self::ActivatePage(_)
+            | Self::Emulate(_)
             | Self::AccessibilitySnapshot(_)
             | Self::ExtractStructured(_)
             | Self::GetCookies(_)
@@ -611,6 +613,37 @@ pub struct SetCookieParam {
     pub same_site: Option<String>,
     #[serde(default)]
     pub expires_unix: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ViewportSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeolocationCoordinates {
+    pub latitude: f64,
+    pub longitude: f64,
+    #[serde(default)]
+    pub accuracy: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EmulateCommand {
+    #[serde(default)]
+    pub viewport: Option<ViewportSize>,
+    #[serde(default)]
+    pub geolocation: Option<GeolocationCoordinates>,
+    /// Mobile device-metrics flag (Chromium); harmless elsewhere.
+    #[serde(default)]
+    pub mobile: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
