@@ -89,9 +89,13 @@ impl IntentCommand {
     }
 }
 
+/// Every field is optional, and `#[serde(default)]` is what makes that true on
+/// the wire. Without it a caller sending `{"role":"textbox"}` — exactly what
+/// the published schema says is valid, since no hint is required — fails
+/// deserialization on the missing collection and boolean fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct IntentHints {
     pub role: Option<String>,
     pub near_text: Option<TextMatch>,

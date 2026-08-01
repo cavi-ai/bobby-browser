@@ -39,15 +39,16 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "page_open" => (json!({"sessionId": id()}), vec!["sessionId"]),
         "page_close" => (
-            json!({"sessionId": id(), "pageId": id()}),
+            json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
             vec!["sessionId", "pageId"],
         ),
         "page_activate" => (
-            json!({"sessionId": id(), "pageId": id()}),
+            json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
             vec!["sessionId", "pageId"],
         ),
         "a11y_snapshot" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "maxNodes": {"type":"integer","minimum":1,"maximum":2048}
@@ -57,6 +58,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "session_close" => (json!({"sessionId": id()}), vec!["sessionId"]),
         "navigate" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "url": string(1, MAX_URL_BYTES),
@@ -67,6 +69,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "click" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
@@ -78,6 +81,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "type_text" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
@@ -90,6 +94,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "inspect" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": nullable(string(1, MAX_STRING_BYTES)),
@@ -100,6 +105,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "screenshot" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "mode": {"$ref":"#/$defs/ScreenshotMode"}
@@ -108,6 +114,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "wait_for" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "condition": {"$ref":"#/$defs/WaitCondition"},
@@ -115,9 +122,13 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId", "condition", "timeoutMs"],
         ),
-        "page_list" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        "page_list" => (
+            json!({"sessionId": id(), "workflowId": id()}),
+            vec!["sessionId"],
+        ),
         "download_url" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "url": string(1, MAX_URL_BYTES),
                 "expectedContentType": nullable(string(1, 256)),
@@ -127,6 +138,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "upload_files" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
@@ -137,6 +149,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "evaluate_javascript" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "expression": string(1, MAX_HTML_BYTES),
@@ -145,8 +158,48 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId", "expression"],
         ),
-        // Intent surface: agents submit `{ kind: "intent", input: { kind: "locate"|… } }`
-        // inside CommandEnvelope via this tool (no dedicated intent_* tools).
+        // Intent surface. `command_execute` still accepts the nested
+        // `{ kind: "intent", input: … }` form; these build the envelope for you.
+        "intent_locate" => (intent_properties(json!({})), intent_required(&["purpose"])),
+        "intent_fill" => (
+            intent_properties(json!({"value":{"$ref":"#/$defs/FillValue"}})),
+            intent_required(&["purpose", "value"]),
+        ),
+        "intent_complete_form" => (
+            intent_properties(json!({
+                "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS)
+            })),
+            intent_required(&["purpose", "fields"]),
+        ),
+        "intent_submit_and_verify" => (
+            intent_properties(json!({"expectedState":{"$ref":"#/$defs/WaitForCommand"}})),
+            intent_required(&["purpose", "expectedState"]),
+        ),
+        // The only intent with no purpose/hints of its own.
+        "intent_wait_for_state" => (
+            intent_scope(json!({
+                "condition":{"$ref":"#/$defs/WaitCondition"},
+                "timeoutMs":timeout_ms()
+            })),
+            intent_required(&["condition", "timeoutMs"]),
+        ),
+        "intent_follow" => (
+            intent_properties(json!({
+                "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
+                "boundary":{"type":"boolean"}
+            })),
+            intent_required(&["purpose", "expectedDestination"]),
+        ),
+        "intent_dismiss_obstruction" => (
+            intent_properties(json!({"timeoutMs":timeout_ms()})),
+            intent_required(&["purpose"]),
+        ),
+        "intent_extract" => (
+            intent_properties(json!({
+                "fields":nonempty_array(json!({"$ref":"#/$defs/ExtractField"}), MAX_COLLECTION_ITEMS)
+            })),
+            intent_required(&["purpose", "fields"]),
+        ),
         "command_execute" => (
             json!({
                 "envelope":{"$ref":"#/$defs/CommandEnvelope"},
@@ -175,6 +228,47 @@ pub(crate) fn tool_schema(name: &str) -> Value {
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
     schema["$defs"] = reachable_definitions(&schema);
     schema
+}
+
+/// Every intent tool is page-scoped, so the scope keys are always required.
+fn intent_required(extra: &[&'static str]) -> Vec<&'static str> {
+    let mut required = vec!["sessionId", "pageId"];
+    required.extend_from_slice(extra);
+    required
+}
+
+/// Page scope shared by every intent tool.
+///
+/// `workflowId` is optional on the way in so an agent can keep a multi-step
+/// intent sequence inside one workflow and then checkpoint it.
+fn intent_scope(extra: Value) -> Value {
+    let mut properties = json!({
+        "sessionId": id(),
+        "pageId": id(),
+        "workflowId": id(),
+        "idempotencyKey": string(1, 128)
+    });
+    merge_properties(&mut properties, extra);
+    properties
+}
+
+fn intent_properties(extra: Value) -> Value {
+    let mut properties = intent_scope(json!({
+        "purpose": string(1, 256),
+        "hints": {"$ref":"#/$defs/IntentHints"}
+    }));
+    merge_properties(&mut properties, extra);
+    properties
+}
+
+fn merge_properties(properties: &mut Value, extra: Value) {
+    let Some(target) = properties.as_object_mut() else {
+        return;
+    };
+    let Value::Object(extra) = extra else {
+        return;
+    };
+    target.extend(extra);
 }
 
 /// Emits only the definitions a tool can actually reach.

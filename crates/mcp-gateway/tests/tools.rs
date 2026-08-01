@@ -1429,8 +1429,208 @@ async fn tools_list_fits_the_frame_budget_for_a_full_capability_principal() {
     }
 }
 
-/// Well under the 1 MiB frame cap, and small enough that an agent can hold the
-/// whole catalog in context.
-const TOOLS_LIST_BYTE_BUDGET: usize = 64 * 1024;
-/// Only `checkpoint_save` legitimately carries deep evidence types.
+/// An eighth of the 1 MiB frame cap. Each tool schema has to be self-contained
+/// — MCP gives clients no way to resolve a `$ref` across tools — so a catalog
+/// this size is genuine cost, not duplication. The budget leaves room to grow
+/// while still catching a reintroduction of the shared-`$defs` regression,
+/// which ran an order of magnitude past this.
+const TOOLS_LIST_BYTE_BUDGET: usize = 128 * 1024;
+/// No tool should approach the whole type system on its own.
 const PER_TOOL_BYTE_BUDGET: usize = 32 * 1024;
+
+async fn authenticated_with_intents() -> AuthenticatedRuntime {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000031")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    AuthenticatedRuntime::new(RuntimeService::default(), handle)
+}
+
+const INTENT_TOOLS: [&str; 8] = [
+    "intent_complete_form",
+    "intent_dismiss_obstruction",
+    "intent_extract",
+    "intent_fill",
+    "intent_follow",
+    "intent_locate",
+    "intent_submit_and_verify",
+    "intent_wait_for_state",
+];
+
+#[tokio::test]
+async fn intent_tools_require_intent_execute_alongside_browser_mutate() {
+    // `browser:mutate` alone reaches the primitives but not the semantic layer.
+    let server = Server::new(Arc::new(authenticated_with_browser_mutate().await));
+    initialize(&server).await;
+    let listed = server
+        .handle_message(request(70, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for tool in INTENT_TOOLS {
+        assert!(
+            !names.contains(&tool),
+            "{tool} advertised without intent:execute"
+        );
+    }
+
+    // An unadvertised tool is not merely hidden — calling it fails without dispatch.
+    let runtime = Arc::new(authenticated_with_browser_mutate().await);
+    let server = Server::new(runtime.clone());
+    initialize(&server).await;
+    let denied = server
+        .handle_message(request(
+            71,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "purpose":"the search box"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied["error"]["code"], -32601, "{denied}");
+    assert_eq!(runtime.submit_dispatch_count(), 0);
+
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+    let listed = server
+        .handle_message(request(72, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for tool in INTENT_TOOLS {
+        assert!(names.contains(&tool), "{tool} missing: {names:?}");
+    }
+}
+
+#[tokio::test]
+async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+
+    let session_id = SessionId::new().0.to_string();
+    let page_id = types::PageId::new().0.to_string();
+
+    // No commandId/workflowId/attemptId/deadline from the caller: the whole
+    // point of these tools over hand-built `command_execute` envelopes.
+    let located = server
+        .handle_message(request(
+            73,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{"sessionId":session_id,"pageId":page_id,"purpose":"the search box"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(located["error"].is_null(), "{located}");
+    assert!(
+        located["result"]["structuredContent"]["commandId"].is_string(),
+        "{located}"
+    );
+    let minted = located["result"]["structuredContent"]["workflowId"]
+        .as_str()
+        .expect("outcome names its workflow");
+
+    // Passing that workflow back keeps the next intent in the same workflow,
+    // which is what makes `checkpoint_save` reachable from these tools.
+    let filled = server
+        .handle_message(request(
+            74,
+            "tools/call",
+            json!({
+                "name":"intent_fill",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "workflowId":minted,
+                    "purpose":"enter the applicant email",
+                    "hints":{"role":"textbox"},
+                    "value":{"kind":"text","text":"a@example.test","clearFirst":true}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(filled["error"].is_null(), "{filled}");
+    assert_eq!(
+        filled["result"]["structuredContent"]["workflowId"],
+        json!(minted),
+        "{filled}"
+    );
+
+    // Omitting it mints a fresh workflow instead of reusing the last one.
+    let separate = server
+        .handle_message(request(
+            75,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{"sessionId":session_id,"pageId":page_id,"purpose":"the login link"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        separate["result"]["structuredContent"]["workflowId"],
+        json!(minted),
+        "{separate}"
+    );
+
+    // Arguments stay closed.
+    let unknown = server
+        .handle_message(request(
+            76,
+            "tools/call",
+            json!({
+                "name":"intent_extract",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"product fields",
+                    "fields":[{"name":"title","purpose":"product title","value":{"kind":"text"}}],
+                    "surprise":true
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+
+    // `intent_wait_for_state` carries no purpose of its own.
+    let waited = server
+        .handle_message(request(77, "tools/call", json!({
+            "name":"intent_wait_for_state",
+            "arguments":{
+                "sessionId":session_id,
+                "pageId":page_id,
+                "condition":{"kind":"url","matcher":{"kind":"exact","value":"https://example.test/done"}},
+                "timeoutMs":5000
+            }
+        })))
+        .await
+        .unwrap();
+    assert!(waited["error"].is_null(), "{waited}");
+}
