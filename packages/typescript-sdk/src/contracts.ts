@@ -38,7 +38,7 @@ export const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS = 5_000 as const;
 
 export type ExecutionPath = "directHttp" | "chromium" | "chromiumFallback";
 export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownload" | "ineligibleCommand" | "semanticTargetRequired" | "javascriptRequired" | "unsupportedContentType" | "stateConflict" | "policyRequired";
-export interface TargetSpec { css: string | null; testId: string | null; role: string | null; accessibleName: string | null; label: string | null; text: TextMatch | null; attributes: Record<string, string>; framePath: TargetSpec[]; shadowPath: TargetSpec[]; ordinal: number | null; allowBestMatch: boolean; }
+export interface TargetSpec { css?: string | null; testId?: string | null; role?: string | null; accessibleName?: string | null; label?: string | null; text?: TextMatch | null; attributes?: Record<string, string>; framePath?: TargetSpec[]; shadowPath?: TargetSpec[]; ordinal?: number | null; allowBestMatch?: boolean; }
 export type TextMatch = { kind: "exact" | "contains" | "regex"; value: string };
 export interface TargetFingerprint { pageId: Id; frame: string | null; role: string | null; name: string | null; stableAttributes: Record<string, string>; }
 export interface CandidateEvidence { role: string | null; name: string | null; score: number; reasons: string[]; }
@@ -175,6 +175,7 @@ export type PrimitiveCommand =
 export interface IntentHints {
   role?: string | null;
   nearText?: TextMatch | null;
+  ordinal?: number | null;
   framePath?: TargetSpec[];
   shadowPath?: TargetSpec[];
   allowBestMatch?: boolean;

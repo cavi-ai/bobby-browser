@@ -382,6 +382,7 @@ fn intent_hints() -> Value {
         json!({
             "role":nullable(string(0, 256)),
             "nearText":nullable(json!({"$ref":"#/$defs/TextMatch"})),
+            "ordinal":nullable(json!({"type":"integer","minimum":0,"maximum":1000000})),
             "framePath":array(json!({"$ref":"#/$defs/TargetSpec"}), 16),
             "shadowPath":array(json!({"$ref":"#/$defs/TargetSpec"}), 16),
             "allowBestMatch":{"type":"boolean"}

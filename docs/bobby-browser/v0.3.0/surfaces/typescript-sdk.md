@@ -72,6 +72,10 @@ Build envelopes with helpers from the package (`locateEnvelope`,
 `followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
 them to `submit`. Multi-field verified forms use `completeFormRuntimeCommand`
 plus `intentEnvelope`. `FillValue` kinds: `text`, `select`, `checked`, `files`.
+Use `intentHintsFromAccessibilityTarget(node.target)` to carry snapshot role,
+accessible name, and duplicate-control ordinal into any intent. `TargetSpec`
+fields are optional, so primitive commands can also accept the minimal
+`{ role, accessibleName, ordinal? }` snapshot target without fabricated CSS.
 `AccessibilityNode` fields (form state + command-ready `target`):
 [Accessibility snapshot](../guides/accessibility-snapshot.md).
 Intent / vision details: [Intent commands](../guides/intents.md).
