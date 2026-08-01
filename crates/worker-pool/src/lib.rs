@@ -211,6 +211,14 @@ pub trait BrowserWorker: Send + Sync {
     }
     /// In-memory viewport PNG for machine consumers (vision assist). Unlike
     /// `capture_screenshot`, no artifact is persisted and no evidence emitted.
+    async fn emulate(
+        &self,
+        _page_id: &PageId,
+        _command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
     async fn handle_dialog(
         &self,
         _page_id: &PageId,
