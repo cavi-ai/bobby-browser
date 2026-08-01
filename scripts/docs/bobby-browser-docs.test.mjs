@@ -6,7 +6,13 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { buildBobbyBrowserDocs } from "./build-bobby-browser.mjs";
 import { verifyBobbyBrowserDocs } from "./verify-bobby-browser.mjs";
-import { DOCUMENTED_VERSION, OUTPUT_REL, SOURCE_REL } from "./lib.mjs";
+import {
+  DOCUMENTED_VERSION,
+  OUTPUT_REL,
+  SOURCE_REL,
+  findStaleVersionReferences,
+  stampVersionReferences,
+} from "./lib.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -215,4 +221,45 @@ test("committed docs artifact matches a rebuild from source tokens", async () =>
   const rebuilt = await buildBobbyBrowserDocs(REPO_ROOT, release);
   assert.equal(rebuilt.manifest.contentSha256, committed.contentSha256);
   await verifyBobbyBrowserDocs(REPO_ROOT, release);
+});
+
+test("repo-root version references are rewritten to the package version", () => {
+  const stale = [
+    "[`docs/bobby-browser/v0.2.1`](docs/bobby-browser/v0.2.1) for documentation hosts.",
+    "source: GitHub Release asset bobby-browser-docs-v0.2.1.tar.gz",
+    "documentation artifact built for bobby-browser `0.2.1`.",
+    "The manifest version must equal the documented version, `0.2.1`.",
+  ].join("\n");
+
+  assert.equal(findStaleVersionReferences(stale).length, 5);
+
+  const stamped = stampVersionReferences(stale);
+  assert.equal(findStaleVersionReferences(stamped).length, 0);
+  assert.ok(!stamped.includes("0.2.1"), stamped);
+  assert.ok(
+    stamped.includes(`docs/bobby-browser/v${DOCUMENTED_VERSION}`),
+    stamped,
+  );
+  assert.ok(
+    stamped.includes(`bobby-browser-docs-v${DOCUMENTED_VERSION}.tar.gz`),
+    stamped,
+  );
+  // A single-capture pattern must not splice the match offset in after the version.
+  assert.ok(
+    stamped.includes(`docs/bobby-browser/v${DOCUMENTED_VERSION}\`]`),
+    stamped,
+  );
+});
+
+test("unrelated versions are left alone", () => {
+  const other = "node-version: 22\nSee semver 1.2.3 and `1.2.3` elsewhere.";
+  assert.equal(stampVersionReferences(other), other);
+  assert.deepEqual(findStaleVersionReferences(other), []);
+});
+
+test("the committed repo docs name the current version", async () => {
+  for (const relativePath of ["README.md", "docs/bobby-browser/CONSUMER.md"]) {
+    const text = await readFile(path.join(REPO_ROOT, relativePath), "utf8");
+    assert.deepEqual(findStaleVersionReferences(text), [], relativePath);
+  }
 });

@@ -9,7 +9,10 @@ import {
   SOURCE_REL,
   computeContentSha256,
   listFilesRecursive,
+  VERSIONED_REPO_DOCS,
+  readRepoDoc,
   resolveReleaseIdentity,
+  stampVersionReferences,
   stampVersionTokens,
 } from "./lib.mjs";
 
@@ -28,8 +31,24 @@ async function stampTree(root) {
   }
 }
 
+/**
+ * Repo-root documents are not built from the source tree, so their version
+ * references are rewritten in place from the package sources of truth.
+ */
+async function stampRepoDocs(root) {
+  for (const relativePath of VERSIONED_REPO_DOCS) {
+    const original = await readRepoDoc(root, relativePath);
+    if (original === null) continue;
+    const stamped = stampVersionReferences(original);
+    if (stamped !== original) {
+      await writeFile(path.join(root, relativePath), stamped, "utf8");
+    }
+  }
+}
+
 export async function buildBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
   const release = resolveReleaseIdentity(releaseInput);
+  await stampRepoDocs(root);
   const sourceRoot = path.join(root, SOURCE_REL);
   const pagesRoot = path.join(sourceRoot, "pages");
   const outputRoot = path.join(root, OUTPUT_REL);
