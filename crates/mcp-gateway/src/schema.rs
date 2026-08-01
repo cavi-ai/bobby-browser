@@ -94,6 +94,14 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId", "target", "action"],
         ),
+        "network_log" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "clear": {"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "emulate" => (
             json!({
                 "sessionId": id(),
@@ -865,6 +873,10 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input(
+            "networkLog",
+            object(json!({"clear":{"type":"boolean"}}), &[]),
+        ),
+        tagged_input(
             "emulate",
             object(
                 json!({
@@ -1218,6 +1230,17 @@ fn evidence_variants() -> Vec<Value> {
                 "action":{"type":"string","enum":["accept","dismiss"]}
             }),
             &["dialogType", "message", "action"],
+        ),
+        tagged_fields(
+            "harArtifact",
+            json!({
+                "artifactId":string(1, 128),
+                "mediaType":string(1, 256),
+                "bytes":{"type":"integer","minimum":1,"maximum":16777216},
+                "sha256":sha256(),
+                "entries":{"type":"integer","minimum":0,"maximum":512}
+            }),
+            &["artifactId", "mediaType", "bytes", "sha256", "entries"],
         ),
         tagged_fields(
             "pdfArtifact",

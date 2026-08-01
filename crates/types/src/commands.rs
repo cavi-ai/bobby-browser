@@ -292,6 +292,7 @@ pub enum PrimitiveCommand {
     PrintToPdf(PrintToPdfCommand),
     HandleDialog(HandleDialogCommand),
     Emulate(EmulateCommand),
+    NetworkLog(NetworkLogCommand),
     SetCookies(SetCookiesCommand),
     DeleteCookies(DeleteCookiesCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
@@ -355,6 +356,7 @@ impl PrimitiveCommand {
             | Self::WaitFor(_)
             | Self::ActivatePage(_)
             | Self::Emulate(_)
+            | Self::NetworkLog(_)
             | Self::AccessibilitySnapshot(_)
             | Self::ExtractStructured(_)
             | Self::GetCookies(_)
@@ -613,6 +615,19 @@ pub struct SetCookieParam {
     pub same_site: Option<String>,
     #[serde(default)]
     pub expires_unix: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkLogCommand {
+    /// Clear the recorded log after producing the artifact (default true).
+    #[serde(default = "default_true")]
+    pub clear: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
