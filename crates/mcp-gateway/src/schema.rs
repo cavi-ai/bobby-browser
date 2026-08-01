@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde_json::{json, Map, Value};
 
 use crate::protocol::MAX_EVENT_LIMIT;
@@ -13,7 +15,10 @@ const MAX_NETWORK_IGNORE_SUBSTRING_BYTES: usize = 512;
 const MAX_NETWORK_IGNORE_RESOURCE_TYPES: usize = 32;
 const MAX_EXCLUDED_CLASSES: usize = 64;
 
-pub(crate) fn validate_tool_arguments(name: &str, arguments: &Value) -> bool {
+pub(crate) fn validate_tool_arguments(
+    name: &str,
+    arguments: &Value,
+) -> Result<(), SchemaViolation> {
     let schema = tool_schema(name);
     validate(&schema, &schema, arguments)
 }
@@ -37,15 +42,16 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "page_open" => (json!({"sessionId": id()}), vec!["sessionId"]),
         "page_close" => (
-            json!({"sessionId": id(), "pageId": id()}),
+            json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
             vec!["sessionId", "pageId"],
         ),
         "page_activate" => (
-            json!({"sessionId": id(), "pageId": id()}),
+            json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
             vec!["sessionId", "pageId"],
         ),
         "a11y_snapshot" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "maxNodes": {"type":"integer","minimum":1,"maximum":2048}
@@ -54,6 +60,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "extract_structured" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "schema": any_value(),
@@ -64,6 +71,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "session_close" => (json!({"sessionId": id()}), vec!["sessionId"]),
         "navigate" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "url": string(1, MAX_URL_BYTES),
@@ -74,6 +82,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "click" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
@@ -85,6 +94,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "type_text" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
@@ -97,6 +107,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "inspect" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": nullable(string(1, MAX_STRING_BYTES)),
@@ -107,6 +118,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "screenshot" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "mode": {"$ref":"#/$defs/ScreenshotMode"}
@@ -115,6 +127,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "wait_for" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "condition": {"$ref":"#/$defs/WaitCondition"},
@@ -122,9 +135,13 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId", "condition", "timeoutMs"],
         ),
-        "page_list" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        "page_list" => (
+            json!({"sessionId": id(), "workflowId": id()}),
+            vec!["sessionId"],
+        ),
         "download_url" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "url": string(1, MAX_URL_BYTES),
                 "expectedContentType": nullable(string(1, 256)),
@@ -134,6 +151,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "upload_files" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
@@ -144,6 +162,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "evaluate_javascript" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "expression": string(1, MAX_HTML_BYTES),
@@ -152,8 +171,48 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId", "expression"],
         ),
-        // Intent surface: agents submit `{ kind: "intent", input: { kind: "locate"|… } }`
-        // inside CommandEnvelope via this tool (no dedicated intent_* tools).
+        // Intent surface. `command_execute` still accepts the nested
+        // `{ kind: "intent", input: … }` form; these build the envelope for you.
+        "intent_locate" => (intent_properties(json!({})), intent_required(&["purpose"])),
+        "intent_fill" => (
+            intent_properties(json!({"value":{"$ref":"#/$defs/FillValue"}})),
+            intent_required(&["purpose", "value"]),
+        ),
+        "intent_complete_form" => (
+            intent_properties(json!({
+                "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS)
+            })),
+            intent_required(&["purpose", "fields"]),
+        ),
+        "intent_submit_and_verify" => (
+            intent_properties(json!({"expectedState":{"$ref":"#/$defs/WaitForCommand"}})),
+            intent_required(&["purpose", "expectedState"]),
+        ),
+        // The only intent with no purpose/hints of its own.
+        "intent_wait_for_state" => (
+            intent_scope(json!({
+                "condition":{"$ref":"#/$defs/WaitCondition"},
+                "timeoutMs":timeout_ms()
+            })),
+            intent_required(&["condition", "timeoutMs"]),
+        ),
+        "intent_follow" => (
+            intent_properties(json!({
+                "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
+                "boundary":{"type":"boolean"}
+            })),
+            intent_required(&["purpose", "expectedDestination"]),
+        ),
+        "intent_dismiss_obstruction" => (
+            intent_properties(json!({"timeoutMs":timeout_ms()})),
+            intent_required(&["purpose"]),
+        ),
+        "intent_extract" => (
+            intent_properties(json!({
+                "fields":nonempty_array(json!({"$ref":"#/$defs/ExtractField"}), MAX_COLLECTION_ITEMS)
+            })),
+            intent_required(&["purpose", "fields"]),
+        ),
         "command_execute" => (
             json!({
                 "envelope":{"$ref":"#/$defs/CommandEnvelope"},
@@ -180,8 +239,100 @@ pub(crate) fn tool_schema(name: &str) -> Value {
     };
     let mut schema = object(properties, &required);
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
-    schema["$defs"] = definitions();
+    schema["$defs"] = reachable_definitions(&schema);
     schema
+}
+
+/// Every intent tool is page-scoped, so the scope keys are always required.
+fn intent_required(extra: &[&'static str]) -> Vec<&'static str> {
+    let mut required = vec!["sessionId", "pageId"];
+    required.extend_from_slice(extra);
+    required
+}
+
+/// Page scope shared by every intent tool.
+///
+/// `workflowId` is optional on the way in so an agent can keep a multi-step
+/// intent sequence inside one workflow and then checkpoint it.
+fn intent_scope(extra: Value) -> Value {
+    let mut properties = json!({
+        "sessionId": id(),
+        "pageId": id(),
+        "workflowId": id(),
+        "idempotencyKey": string(1, 128)
+    });
+    merge_properties(&mut properties, extra);
+    properties
+}
+
+fn intent_properties(extra: Value) -> Value {
+    let mut properties = intent_scope(json!({
+        "purpose": string(1, 256),
+        "hints": {"$ref":"#/$defs/IntentHints"}
+    }));
+    merge_properties(&mut properties, extra);
+    properties
+}
+
+fn merge_properties(properties: &mut Value, extra: Value) {
+    let Some(target) = properties.as_object_mut() else {
+        return;
+    };
+    let Value::Object(extra) = extra else {
+        return;
+    };
+    target.extend(extra);
+}
+
+/// Emits only the definitions a tool can actually reach.
+///
+/// Every schema used to carry the complete `$defs` block, so zero-argument
+/// tools like `runtime_info` paid for `AccessibilityNode` (32 inlined depth
+/// levels) and the full command union. Across a full-capability catalog that
+/// pushed `tools/list` past the frame cap. `validate` resolves `$ref` against
+/// `root.$defs` and fails closed on a missing target, so the closure must be
+/// transitive — a partial one would reject valid arguments rather than
+/// silently accept invalid ones.
+fn reachable_definitions(schema: &Value) -> Value {
+    let all = definitions();
+    let all = all.as_object().expect("definitions is an object");
+    let mut pending = BTreeSet::new();
+    collect_refs(schema, &mut pending);
+    let mut reachable = Map::new();
+    while let Some(name) = pending.pop_first() {
+        if reachable.contains_key(&name) {
+            continue;
+        }
+        let Some(definition) = all.get(&name) else {
+            continue;
+        };
+        collect_refs(definition, &mut pending);
+        reachable.insert(name, definition.clone());
+    }
+    Value::Object(reachable)
+}
+
+fn collect_refs(value: &Value, found: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(name) = fields
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            {
+                found.insert(name.to_owned());
+            }
+            for field in fields.values() {
+                collect_refs(field, found);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_refs(item, found);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn definitions() -> Value {
@@ -202,7 +353,7 @@ fn definitions() -> Value {
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
         "AccessibilityTarget": accessibility_target(),
-        "AccessibilityNode": accessibility_node(0),
+        "AccessibilityNode": accessibility_node(),
         "WaitForCommand": wait_for_command(),
         "TargetSpec": target_spec(),
         "TextMatch": {"oneOf":[
@@ -961,29 +1112,100 @@ fn positive_number() -> Value {
     json!({"type":"number","exclusiveMinimum":0.0,"maximum":1000000000.0})
 }
 
-fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
+/// Why a tool argument was rejected, and where.
+///
+/// Callers used to get a bare `"Invalid params"` with no `data`, which gives an
+/// agent nothing to repair: the schemas are large and every failure looked
+/// identical. `pointer` is a JSON Pointer into the arguments; `constraint`
+/// names the keyword that failed. Neither ever carries the offending value, so
+/// this leaks no more than the published schema already does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SchemaViolation {
+    pub(crate) pointer: String,
+    pub(crate) constraint: &'static str,
+}
+
+impl SchemaViolation {
+    fn at(pointer: &str, constraint: &'static str) -> Self {
+        Self {
+            pointer: if pointer.is_empty() {
+                "/".to_owned()
+            } else {
+                pointer.to_owned()
+            },
+            constraint,
+        }
+    }
+}
+
+type Validated = Result<(), SchemaViolation>;
+
+/// Escapes a JSON Pointer token per RFC 6901.
+fn push_pointer(pointer: &str, token: &str) -> String {
+    format!("{pointer}/{}", token.replace('~', "~0").replace('/', "~1"))
+}
+
+fn validate(root: &Value, schema: &Value, value: &Value) -> Validated {
+    validate_at(root, schema, value, 0, "")
+}
+
+/// Bounds validator recursion independently of schema shape.
+///
+/// Schemas used to bound themselves: `AccessibilityNode` inlined 32 depth
+/// levels, so recursion stopped when the schema ran out. That cost ~40 KiB in
+/// every tool carrying `Evidence`. The definition is now self-referential, so
+/// the guard has to live here — without it a deeply nested argument within the
+/// 256 KiB input cap would exhaust the stack.
+///
+/// Generous enough for the deepest legitimate argument (a `checkpoint_save`
+/// accessibility tree, which spends two levels per node) and far below any
+/// stack concern.
+const MAX_VALIDATION_DEPTH: usize = 128;
+
+fn validate_at(
+    root: &Value,
+    schema: &Value,
+    value: &Value,
+    depth: usize,
+    pointer: &str,
+) -> Validated {
+    if depth > MAX_VALIDATION_DEPTH {
+        return Err(SchemaViolation::at(pointer, "maxDepth"));
+    }
+    let depth = depth + 1;
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(name) = reference.strip_prefix("#/$defs/") else {
-            return false;
+            return Err(SchemaViolation::at(pointer, "$ref"));
         };
         let Some(target) = root.get("$defs").and_then(|defs| defs.get(name)) else {
-            return false;
+            return Err(SchemaViolation::at(pointer, "$ref"));
         };
-        return validate(root, target, value);
+        return validate_at(root, target, value, depth, pointer);
     }
     if let Some(choices) = schema.get("oneOf").and_then(Value::as_array) {
-        return choices
+        // Report the branch point rather than one arbitrary branch's failure:
+        // with a discriminated union the useful signal is "this value matched
+        // no variant", not why the last variant disagreed.
+        let matches = choices
             .iter()
-            .filter(|choice| validate(root, choice, value))
-            .count()
-            == 1;
+            .filter(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
+            .count();
+        return if matches == 1 {
+            Ok(())
+        } else {
+            Err(SchemaViolation::at(pointer, "oneOf"))
+        };
     }
     if let Some(expected) = schema.get("const") {
-        return value == expected;
+        return if value == expected {
+            Ok(())
+        } else {
+            Err(SchemaViolation::at(pointer, "const"))
+        };
     }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
         if !values.contains(value) {
-            return false;
+            return Err(SchemaViolation::at(pointer, "enum"));
         }
     }
     if let Some(value_type) = schema.get("type") {
@@ -996,36 +1218,46 @@ fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
             _ => false,
         };
         if !matches {
-            return false;
+            return Err(SchemaViolation::at(pointer, "type"));
         }
         if value.is_null() {
-            return true;
+            return Ok(());
         }
     }
     match value {
-        Value::Object(values) => validate_object(root, schema, values),
+        Value::Object(values) => validate_object(root, schema, values, depth, pointer),
         Value::Array(values) => {
             if schema
                 .get("maxItems")
                 .and_then(Value::as_u64)
                 .is_some_and(|max| values.len() as u64 > max)
             {
-                return false;
+                return Err(SchemaViolation::at(pointer, "maxItems"));
             }
             if schema
                 .get("minItems")
                 .and_then(Value::as_u64)
                 .is_some_and(|min| (values.len() as u64) < min)
             {
-                return false;
+                return Err(SchemaViolation::at(pointer, "minItems"));
             }
-            schema
-                .get("items")
-                .is_none_or(|items| values.iter().all(|value| validate(root, items, value)))
+            let Some(items) = schema.get("items") else {
+                return Ok(());
+            };
+            for (index, value) in values.iter().enumerate() {
+                validate_at(
+                    root,
+                    items,
+                    value,
+                    depth,
+                    &push_pointer(pointer, &index.to_string()),
+                )?;
+            }
+            Ok(())
         }
-        Value::String(value) => validate_string(schema, value),
-        Value::Number(number) => validate_number(schema, number.as_f64()),
-        _ => true,
+        Value::String(value) => validate_string(schema, value, pointer),
+        Value::Number(number) => validate_number(schema, number.as_f64(), pointer),
+        _ => Ok(()),
     }
 }
 
@@ -1042,116 +1274,125 @@ fn matches_type(kind: &str, value: &Value) -> bool {
     }
 }
 
-fn validate_object(root: &Value, schema: &Value, values: &Map<String, Value>) -> bool {
+fn validate_object(
+    root: &Value,
+    schema: &Value,
+    values: &Map<String, Value>,
+    depth: usize,
+    pointer: &str,
+) -> Validated {
     if schema
         .get("maxProperties")
         .and_then(Value::as_u64)
         .is_some_and(|max| values.len() as u64 > max)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "maxProperties"));
     }
     let properties = schema.get("properties").and_then(Value::as_object);
-    if schema.get("propertyNames").is_some_and(|property_names| {
-        values
-            .keys()
-            .any(|key| !validate(root, property_names, &Value::String(key.clone())))
-    }) {
-        return false;
+    if let Some(property_names) = schema.get("propertyNames") {
+        for key in values.keys() {
+            let name = Value::String(key.clone());
+            if validate_at(root, property_names, &name, depth, pointer).is_err() {
+                return Err(SchemaViolation::at(
+                    &push_pointer(pointer, key),
+                    "propertyNames",
+                ));
+            }
+        }
     }
-    if schema
-        .get("required")
-        .and_then(Value::as_array)
-        .is_some_and(|required| {
-            required
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|key| !values.contains_key(key))
-        })
-    {
-        return false;
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !values.contains_key(key) {
+                return Err(SchemaViolation::at(&push_pointer(pointer, key), "required"));
+            }
+        }
     }
     for (key, value) in values {
+        let child = push_pointer(pointer, key);
         if let Some(property) = properties.and_then(|properties| properties.get(key)) {
-            if !validate(root, property, value) {
-                return false;
-            }
+            validate_at(root, property, value, depth, &child)?;
         } else {
             match schema.get("additionalProperties") {
-                Some(Value::Bool(false)) => return false,
-                Some(additional)
-                    if additional.is_object() && !validate(root, additional, value) =>
-                {
-                    return false
+                Some(Value::Bool(false)) => {
+                    return Err(SchemaViolation::at(&child, "additionalProperties"))
+                }
+                Some(additional) if additional.is_object() => {
+                    validate_at(root, additional, value, depth, &child)?;
                 }
                 _ => {}
             }
         }
     }
-    true
+    Ok(())
 }
 
-fn validate_string(schema: &Value, value: &str) -> bool {
+fn validate_string(schema: &Value, value: &str, pointer: &str) -> Validated {
     if schema
         .get("minLength")
         .and_then(Value::as_u64)
         .is_some_and(|min| (value.len() as u64) < min)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "minLength"));
     }
     if schema
         .get("maxLength")
         .and_then(Value::as_u64)
         .is_some_and(|max| value.len() as u64 > max)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "maxLength"));
     }
     if schema.get("format") == Some(&json!("uuid")) && uuid::Uuid::parse_str(value).is_err() {
-        return false;
+        return Err(SchemaViolation::at(pointer, "format"));
     }
     if schema.get("format") == Some(&json!("date-time"))
         && chrono::DateTime::parse_from_rfc3339(value).is_err()
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "format"));
     }
     if schema.get("pattern").is_some()
         && !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "pattern"));
     }
-    true
+    Ok(())
 }
 
-fn validate_number(schema: &Value, number: Option<f64>) -> bool {
+fn validate_number(schema: &Value, number: Option<f64>, pointer: &str) -> Validated {
     let Some(number) = number.filter(|number| number.is_finite()) else {
-        return false;
+        return Err(SchemaViolation::at(pointer, "type"));
     };
     if schema
         .get("minimum")
         .and_then(Value::as_f64)
         .is_some_and(|min| number < min)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "minimum"));
     }
     if schema
         .get("exclusiveMinimum")
         .and_then(Value::as_f64)
         .is_some_and(|min| number <= min)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "exclusiveMinimum"));
     }
     if schema
         .get("maximum")
         .and_then(Value::as_f64)
         .is_some_and(|max| number > max)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "maximum"));
     }
-    true
+    Ok(())
 }
 
-fn accessibility_node(depth: usize) -> Value {
+/// Self-referential rather than depth-inlined.
+///
+/// Inlining 32 levels made this definition ~40 KiB, which every tool carrying
+/// `Evidence` paid for. Recursion is now bounded by `MAX_VALIDATION_DEPTH` in
+/// the validator instead of by the shape of the schema.
+fn accessibility_node() -> Value {
     let mut schema = object(
         json!({
             "role":string(1, 256),
@@ -1170,9 +1411,7 @@ fn accessibility_node(depth: usize) -> Value {
         }),
         &[],
     );
-    if depth < 32 {
-        schema["properties"]["children"] = array(accessibility_node(depth + 1), 256);
-    }
+    schema["properties"]["children"] = array(json!({"$ref":"#/$defs/AccessibilityNode"}), 256);
     schema
 }
 

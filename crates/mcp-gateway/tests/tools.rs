@@ -346,12 +346,30 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .len(),
         8
     );
+    // `CommandEnvelope` does not carry evidence, so the closure keeps `Evidence`
+    // out of this tool entirely.
+    assert!(
+        command_schema["inputSchema"]["$defs"]["Evidence"].is_null(),
+        "{}",
+        command_schema["inputSchema"]["$defs"]
+    );
+
+    let checkpoint_schema = tools
+        .iter()
+        .find(|tool| tool["name"] == "checkpoint_save")
+        .unwrap();
+    assert_eq!(
+        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
+            ["recoveryReceipts"]["maxItems"],
+        0
+    );
+
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,
     // `BrowserExecution`, and `JavaScriptResult` previously were) makes
     // `checkpoint_save` reject any evidence array containing that variant with
     // `INVALID_PARAMS`, even though the type itself round-trips fine.
-    let evidence_variants = command_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
+    let evidence_variants = checkpoint_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
     assert_eq!(evidence_variants.len(), 19, "{evidence_variants:?}");
@@ -369,14 +387,12 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     );
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
 
-    let checkpoint_schema = tools
-        .iter()
-        .find(|tool| tool["name"] == "checkpoint_save")
-        .unwrap();
+    // The accessibility tree is self-referential now, so `children` must resolve
+    // through `$defs` rather than another inlined copy.
     assert_eq!(
-        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
-            ["recoveryReceipts"]["maxItems"],
-        0
+        checkpoint_schema["inputSchema"]["$defs"]["AccessibilityNode"]["properties"]["children"]
+            ["items"]["$ref"],
+        "#/$defs/AccessibilityNode"
     );
 
     let envelope = CommandEnvelope {
@@ -1348,4 +1364,389 @@ async fn session_close_deletes_an_owned_session() {
         .await
         .unwrap();
     assert_eq!(missing["error"]["code"], -32000, "{missing}");
+}
+
+#[tokio::test]
+async fn tools_list_fits_the_frame_budget_for_a_full_capability_principal() {
+    // Regression guard. Every tool schema used to carry the complete `$defs`
+    // block, so a principal holding the `bobby init` default capability set
+    // produced a `tools/list` result past MAX_FRAME_BYTES and the gateway
+    // answered `resultTooLarge` — no client could enumerate the surface.
+    let server = fixture_server(vec![
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageRead,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::FileUpload,
+        Capability::FileDownload,
+        Capability::JavascriptEvaluate,
+        Capability::IntentExecute,
+        Capability::VisionAssist,
+        Capability::ArtifactRead,
+        Capability::ArtifactCapture,
+        Capability::RecoveryRead,
+        Capability::RecoveryWrite,
+        Capability::AuthorityAdmin,
+    ])
+    .await;
+
+    let list = server
+        .handle_message(request(90, "tools/list", json!({})))
+        .await
+        .expect("tools/list returns a response");
+    assert!(
+        list.get("error").is_none(),
+        "tools/list must not exceed the frame budget: {list}"
+    );
+
+    let mut sizes = list["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|tool| {
+            (
+                serde_json::to_vec(tool).expect("serializable").len(),
+                tool["name"].as_str().expect("tool name").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    sizes.sort_unstable();
+    sizes.reverse();
+    let breakdown = sizes
+        .iter()
+        .map(|(size, name)| format!("{name}={size}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let bytes = serde_json::to_vec(&list).expect("serializable").len();
+    assert!(
+        bytes <= TOOLS_LIST_BYTE_BUDGET,
+        "tools/list is {bytes} bytes, budget is {TOOLS_LIST_BYTE_BUDGET}: {breakdown}"
+    );
+
+    // No single tool may reintroduce the shared type system either.
+    for (size, name) in &sizes {
+        assert!(
+            *size <= PER_TOOL_BYTE_BUDGET,
+            "tool {name} schema is {size} bytes, budget is {PER_TOOL_BYTE_BUDGET}"
+        );
+    }
+}
+
+/// An eighth of the 1 MiB frame cap. Each tool schema has to be self-contained
+/// — MCP gives clients no way to resolve a `$ref` across tools — so a catalog
+/// this size is genuine cost, not duplication. The budget leaves room to grow
+/// while still catching a reintroduction of the shared-`$defs` regression,
+/// which ran an order of magnitude past this.
+const TOOLS_LIST_BYTE_BUDGET: usize = 128 * 1024;
+/// No tool should approach the whole type system on its own.
+const PER_TOOL_BYTE_BUDGET: usize = 32 * 1024;
+
+async fn authenticated_with_intents() -> AuthenticatedRuntime {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000031")),
+            [Capability::BrowserMutate, Capability::IntentExecute],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    AuthenticatedRuntime::new(RuntimeService::default(), handle)
+}
+
+const INTENT_TOOLS: [&str; 8] = [
+    "intent_complete_form",
+    "intent_dismiss_obstruction",
+    "intent_extract",
+    "intent_fill",
+    "intent_follow",
+    "intent_locate",
+    "intent_submit_and_verify",
+    "intent_wait_for_state",
+];
+
+#[tokio::test]
+async fn intent_tools_require_intent_execute_alongside_browser_mutate() {
+    // `browser:mutate` alone reaches the primitives but not the semantic layer.
+    let server = Server::new(Arc::new(authenticated_with_browser_mutate().await));
+    initialize(&server).await;
+    let listed = server
+        .handle_message(request(70, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for tool in INTENT_TOOLS {
+        assert!(
+            !names.contains(&tool),
+            "{tool} advertised without intent:execute"
+        );
+    }
+
+    // An unadvertised tool is not merely hidden — calling it fails without dispatch.
+    let runtime = Arc::new(authenticated_with_browser_mutate().await);
+    let server = Server::new(runtime.clone());
+    initialize(&server).await;
+    let denied = server
+        .handle_message(request(
+            71,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "purpose":"the search box"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied["error"]["code"], -32601, "{denied}");
+    assert_eq!(runtime.submit_dispatch_count(), 0);
+
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+    let listed = server
+        .handle_message(request(72, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for tool in INTENT_TOOLS {
+        assert!(names.contains(&tool), "{tool} missing: {names:?}");
+    }
+}
+
+#[tokio::test]
+async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+
+    let session_id = SessionId::new().0.to_string();
+    let page_id = types::PageId::new().0.to_string();
+
+    // No commandId/workflowId/attemptId/deadline from the caller: the whole
+    // point of these tools over hand-built `command_execute` envelopes.
+    let located = server
+        .handle_message(request(
+            73,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{"sessionId":session_id,"pageId":page_id,"purpose":"the search box"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(located["error"].is_null(), "{located}");
+    assert!(
+        located["result"]["structuredContent"]["commandId"].is_string(),
+        "{located}"
+    );
+    let minted = located["result"]["structuredContent"]["workflowId"]
+        .as_str()
+        .expect("outcome names its workflow");
+
+    // Passing that workflow back keeps the next intent in the same workflow,
+    // which is what makes `checkpoint_save` reachable from these tools.
+    let filled = server
+        .handle_message(request(
+            74,
+            "tools/call",
+            json!({
+                "name":"intent_fill",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "workflowId":minted,
+                    "purpose":"enter the applicant email",
+                    "hints":{"role":"textbox"},
+                    "value":{"kind":"text","text":"a@example.test","clearFirst":true}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(filled["error"].is_null(), "{filled}");
+    assert_eq!(
+        filled["result"]["structuredContent"]["workflowId"],
+        json!(minted),
+        "{filled}"
+    );
+
+    // Omitting it mints a fresh workflow instead of reusing the last one.
+    let separate = server
+        .handle_message(request(
+            75,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{"sessionId":session_id,"pageId":page_id,"purpose":"the login link"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        separate["result"]["structuredContent"]["workflowId"],
+        json!(minted),
+        "{separate}"
+    );
+
+    // Arguments stay closed.
+    let unknown = server
+        .handle_message(request(
+            76,
+            "tools/call",
+            json!({
+                "name":"intent_extract",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"product fields",
+                    "fields":[{"name":"title","purpose":"product title","value":{"kind":"text"}}],
+                    "surprise":true
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+
+    // `intent_wait_for_state` carries no purpose of its own.
+    let waited = server
+        .handle_message(request(77, "tools/call", json!({
+            "name":"intent_wait_for_state",
+            "arguments":{
+                "sessionId":session_id,
+                "pageId":page_id,
+                "condition":{"kind":"url","matcher":{"kind":"exact","value":"https://example.test/done"}},
+                "timeoutMs":5000
+            }
+        })))
+        .await
+        .unwrap();
+    assert!(waited["error"].is_null(), "{waited}");
+}
+
+#[tokio::test]
+async fn rejected_arguments_name_the_offending_field_and_constraint() {
+    // Every rejection used to be a bare `"Invalid params"` with no `data`, so a
+    // caller had no way to tell which field it got wrong — the one signal that
+    // lets an agent repair a call instead of guessing against a large schema.
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+
+    let missing = server
+        .handle_message(request(
+            60,
+            "tools/call",
+            json!({"name":"session_create","arguments":{}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing["error"]["code"], -32602, "{missing}");
+    assert_eq!(missing["error"]["data"]["reason"], json!("schemaViolation"));
+    assert_eq!(missing["error"]["data"]["pointer"], json!("/profile"));
+    assert_eq!(missing["error"]["data"]["constraint"], json!("required"));
+
+    let unknown = server
+        .handle_message(request(
+            61,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"p","bearer":"nope"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        unknown["error"]["data"]["pointer"],
+        json!("/bearer"),
+        "{unknown}"
+    );
+    assert_eq!(
+        unknown["error"]["data"]["constraint"],
+        json!("additionalProperties")
+    );
+
+    let too_long = server
+        .handle_message(request(
+            62,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"p".repeat(129)}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        too_long["error"]["data"]["pointer"],
+        json!("/profile"),
+        "{too_long}"
+    );
+    assert_eq!(too_long["error"]["data"]["constraint"], json!("maxLength"));
+
+    // The pointer walks into arrays and nested objects, not just top-level keys.
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
+    let nested = server
+        .handle_message(request(
+            63,
+            "tools/call",
+            json!({
+                "name":"intent_extract",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "purpose":"product fields",
+                    "fields":[
+                        {"name":"title","purpose":"product title","value":{"kind":"text"}},
+                        {"name":"link","purpose":"product link"}
+                    ]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        nested["error"]["data"]["pointer"],
+        json!("/fields/1/value"),
+        "{nested}"
+    );
+    assert_eq!(nested["error"]["data"]["constraint"], json!("required"));
+
+    // A body that clears the schema but fails to deserialize is reported as its
+    // own reason rather than a field-level violation.
+    let server = fixture_server(vec![Capability::BrowserMutate]).await;
+    let stale_deadline = server
+        .handle_message(request(
+            64,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":{
+                    "schemaVersion":2,
+                    "commandId":CommandId::new().0.to_string(),
+                    "workflowId":WorkflowId::new().0.to_string(),
+                    "attemptId":AttemptId::new().0.to_string(),
+                    "sessionId":SessionId::new().0.to_string(),
+                    "deadline":"2020-01-01T00:00:00Z",
+                    "command":{"kind":"primitive","input":{"kind":"listPages","input":null}}
+                }}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_deadline["error"]["code"], -32602, "{stale_deadline}");
+    assert_eq!(
+        stale_deadline["error"]["data"]["reason"],
+        json!("deadlineOutOfRange"),
+        "{stale_deadline}"
+    );
 }
