@@ -1634,3 +1634,114 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
         .unwrap();
     assert!(waited["error"].is_null(), "{waited}");
 }
+
+#[tokio::test]
+async fn rejected_arguments_name_the_offending_field_and_constraint() {
+    // Every rejection used to be a bare `"Invalid params"` with no `data`, so a
+    // caller had no way to tell which field it got wrong — the one signal that
+    // lets an agent repair a call instead of guessing against a large schema.
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+
+    let missing = server
+        .handle_message(request(
+            60,
+            "tools/call",
+            json!({"name":"session_create","arguments":{}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing["error"]["code"], -32602, "{missing}");
+    assert_eq!(missing["error"]["data"]["reason"], json!("schemaViolation"));
+    assert_eq!(missing["error"]["data"]["pointer"], json!("/profile"));
+    assert_eq!(missing["error"]["data"]["constraint"], json!("required"));
+
+    let unknown = server
+        .handle_message(request(
+            61,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"p","bearer":"nope"}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        unknown["error"]["data"]["pointer"],
+        json!("/bearer"),
+        "{unknown}"
+    );
+    assert_eq!(
+        unknown["error"]["data"]["constraint"],
+        json!("additionalProperties")
+    );
+
+    let too_long = server
+        .handle_message(request(
+            62,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"p".repeat(129)}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        too_long["error"]["data"]["pointer"],
+        json!("/profile"),
+        "{too_long}"
+    );
+    assert_eq!(too_long["error"]["data"]["constraint"], json!("maxLength"));
+
+    // The pointer walks into arrays and nested objects, not just top-level keys.
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
+    let nested = server
+        .handle_message(request(
+            63,
+            "tools/call",
+            json!({
+                "name":"intent_extract",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "purpose":"product fields",
+                    "fields":[
+                        {"name":"title","purpose":"product title","value":{"kind":"text"}},
+                        {"name":"link","purpose":"product link"}
+                    ]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        nested["error"]["data"]["pointer"],
+        json!("/fields/1/value"),
+        "{nested}"
+    );
+    assert_eq!(nested["error"]["data"]["constraint"], json!("required"));
+
+    // A body that clears the schema but fails to deserialize is reported as its
+    // own reason rather than a field-level violation.
+    let server = fixture_server(vec![Capability::BrowserMutate]).await;
+    let stale_deadline = server
+        .handle_message(request(
+            64,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":{
+                    "schemaVersion":2,
+                    "commandId":CommandId::new().0.to_string(),
+                    "workflowId":WorkflowId::new().0.to_string(),
+                    "attemptId":AttemptId::new().0.to_string(),
+                    "sessionId":SessionId::new().0.to_string(),
+                    "deadline":"2020-01-01T00:00:00Z",
+                    "command":{"kind":"primitive","input":{"kind":"listPages","input":null}}
+                }}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale_deadline["error"]["code"], -32602, "{stale_deadline}");
+    assert_eq!(
+        stale_deadline["error"]["data"]["reason"],
+        json!("deadlineOutOfRange"),
+        "{stale_deadline}"
+    );
+}

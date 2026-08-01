@@ -15,7 +15,10 @@ const MAX_NETWORK_IGNORE_SUBSTRING_BYTES: usize = 512;
 const MAX_NETWORK_IGNORE_RESOURCE_TYPES: usize = 32;
 const MAX_EXCLUDED_CLASSES: usize = 64;
 
-pub(crate) fn validate_tool_arguments(name: &str, arguments: &Value) -> bool {
+pub(crate) fn validate_tool_arguments(
+    name: &str,
+    arguments: &Value,
+) -> Result<(), SchemaViolation> {
     let schema = tool_schema(name);
     validate(&schema, &schema, arguments)
 }
@@ -1087,8 +1090,41 @@ fn positive_number() -> Value {
     json!({"type":"number","exclusiveMinimum":0.0,"maximum":1000000000.0})
 }
 
-fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
-    validate_at(root, schema, value, 0)
+/// Why a tool argument was rejected, and where.
+///
+/// Callers used to get a bare `"Invalid params"` with no `data`, which gives an
+/// agent nothing to repair: the schemas are large and every failure looked
+/// identical. `pointer` is a JSON Pointer into the arguments; `constraint`
+/// names the keyword that failed. Neither ever carries the offending value, so
+/// this leaks no more than the published schema already does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SchemaViolation {
+    pub(crate) pointer: String,
+    pub(crate) constraint: &'static str,
+}
+
+impl SchemaViolation {
+    fn at(pointer: &str, constraint: &'static str) -> Self {
+        Self {
+            pointer: if pointer.is_empty() {
+                "/".to_owned()
+            } else {
+                pointer.to_owned()
+            },
+            constraint,
+        }
+    }
+}
+
+type Validated = Result<(), SchemaViolation>;
+
+/// Escapes a JSON Pointer token per RFC 6901.
+fn push_pointer(pointer: &str, token: &str) -> String {
+    format!("{pointer}/{}", token.replace('~', "~0").replace('/', "~1"))
+}
+
+fn validate(root: &Value, schema: &Value, value: &Value) -> Validated {
+    validate_at(root, schema, value, 0, "")
 }
 
 /// Bounds validator recursion independently of schema shape.
@@ -1104,33 +1140,50 @@ fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
 /// stack concern.
 const MAX_VALIDATION_DEPTH: usize = 128;
 
-fn validate_at(root: &Value, schema: &Value, value: &Value, depth: usize) -> bool {
+fn validate_at(
+    root: &Value,
+    schema: &Value,
+    value: &Value,
+    depth: usize,
+    pointer: &str,
+) -> Validated {
     if depth > MAX_VALIDATION_DEPTH {
-        return false;
+        return Err(SchemaViolation::at(pointer, "maxDepth"));
     }
     let depth = depth + 1;
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(name) = reference.strip_prefix("#/$defs/") else {
-            return false;
+            return Err(SchemaViolation::at(pointer, "$ref"));
         };
         let Some(target) = root.get("$defs").and_then(|defs| defs.get(name)) else {
-            return false;
+            return Err(SchemaViolation::at(pointer, "$ref"));
         };
-        return validate_at(root, target, value, depth);
+        return validate_at(root, target, value, depth, pointer);
     }
     if let Some(choices) = schema.get("oneOf").and_then(Value::as_array) {
-        return choices
+        // Report the branch point rather than one arbitrary branch's failure:
+        // with a discriminated union the useful signal is "this value matched
+        // no variant", not why the last variant disagreed.
+        let matches = choices
             .iter()
-            .filter(|choice| validate_at(root, choice, value, depth))
-            .count()
-            == 1;
+            .filter(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
+            .count();
+        return if matches == 1 {
+            Ok(())
+        } else {
+            Err(SchemaViolation::at(pointer, "oneOf"))
+        };
     }
     if let Some(expected) = schema.get("const") {
-        return value == expected;
+        return if value == expected {
+            Ok(())
+        } else {
+            Err(SchemaViolation::at(pointer, "const"))
+        };
     }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
         if !values.contains(value) {
-            return false;
+            return Err(SchemaViolation::at(pointer, "enum"));
         }
     }
     if let Some(value_type) = schema.get("type") {
@@ -1143,38 +1196,46 @@ fn validate_at(root: &Value, schema: &Value, value: &Value, depth: usize) -> boo
             _ => false,
         };
         if !matches {
-            return false;
+            return Err(SchemaViolation::at(pointer, "type"));
         }
         if value.is_null() {
-            return true;
+            return Ok(());
         }
     }
     match value {
-        Value::Object(values) => validate_object(root, schema, values, depth),
+        Value::Object(values) => validate_object(root, schema, values, depth, pointer),
         Value::Array(values) => {
             if schema
                 .get("maxItems")
                 .and_then(Value::as_u64)
                 .is_some_and(|max| values.len() as u64 > max)
             {
-                return false;
+                return Err(SchemaViolation::at(pointer, "maxItems"));
             }
             if schema
                 .get("minItems")
                 .and_then(Value::as_u64)
                 .is_some_and(|min| (values.len() as u64) < min)
             {
-                return false;
+                return Err(SchemaViolation::at(pointer, "minItems"));
             }
-            schema.get("items").is_none_or(|items| {
-                values
-                    .iter()
-                    .all(|value| validate_at(root, items, value, depth))
-            })
+            let Some(items) = schema.get("items") else {
+                return Ok(());
+            };
+            for (index, value) in values.iter().enumerate() {
+                validate_at(
+                    root,
+                    items,
+                    value,
+                    depth,
+                    &push_pointer(pointer, &index.to_string()),
+                )?;
+            }
+            Ok(())
         }
-        Value::String(value) => validate_string(schema, value),
-        Value::Number(number) => validate_number(schema, number.as_f64()),
-        _ => true,
+        Value::String(value) => validate_string(schema, value, pointer),
+        Value::Number(number) => validate_number(schema, number.as_f64(), pointer),
+        _ => Ok(()),
     }
 }
 
@@ -1196,113 +1257,112 @@ fn validate_object(
     schema: &Value,
     values: &Map<String, Value>,
     depth: usize,
-) -> bool {
+    pointer: &str,
+) -> Validated {
     if schema
         .get("maxProperties")
         .and_then(Value::as_u64)
         .is_some_and(|max| values.len() as u64 > max)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "maxProperties"));
     }
     let properties = schema.get("properties").and_then(Value::as_object);
-    if schema.get("propertyNames").is_some_and(|property_names| {
-        values
-            .keys()
-            .any(|key| !validate_at(root, property_names, &Value::String(key.clone()), depth))
-    }) {
-        return false;
+    if let Some(property_names) = schema.get("propertyNames") {
+        for key in values.keys() {
+            let name = Value::String(key.clone());
+            if validate_at(root, property_names, &name, depth, pointer).is_err() {
+                return Err(SchemaViolation::at(
+                    &push_pointer(pointer, key),
+                    "propertyNames",
+                ));
+            }
+        }
     }
-    if schema
-        .get("required")
-        .and_then(Value::as_array)
-        .is_some_and(|required| {
-            required
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|key| !values.contains_key(key))
-        })
-    {
-        return false;
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !values.contains_key(key) {
+                return Err(SchemaViolation::at(&push_pointer(pointer, key), "required"));
+            }
+        }
     }
     for (key, value) in values {
+        let child = push_pointer(pointer, key);
         if let Some(property) = properties.and_then(|properties| properties.get(key)) {
-            if !validate_at(root, property, value, depth) {
-                return false;
-            }
+            validate_at(root, property, value, depth, &child)?;
         } else {
             match schema.get("additionalProperties") {
-                Some(Value::Bool(false)) => return false,
-                Some(additional)
-                    if additional.is_object() && !validate_at(root, additional, value, depth) =>
-                {
-                    return false
+                Some(Value::Bool(false)) => {
+                    return Err(SchemaViolation::at(&child, "additionalProperties"))
+                }
+                Some(additional) if additional.is_object() => {
+                    validate_at(root, additional, value, depth, &child)?;
                 }
                 _ => {}
             }
         }
     }
-    true
+    Ok(())
 }
 
-fn validate_string(schema: &Value, value: &str) -> bool {
+fn validate_string(schema: &Value, value: &str, pointer: &str) -> Validated {
     if schema
         .get("minLength")
         .and_then(Value::as_u64)
         .is_some_and(|min| (value.len() as u64) < min)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "minLength"));
     }
     if schema
         .get("maxLength")
         .and_then(Value::as_u64)
         .is_some_and(|max| value.len() as u64 > max)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "maxLength"));
     }
     if schema.get("format") == Some(&json!("uuid")) && uuid::Uuid::parse_str(value).is_err() {
-        return false;
+        return Err(SchemaViolation::at(pointer, "format"));
     }
     if schema.get("format") == Some(&json!("date-time"))
         && chrono::DateTime::parse_from_rfc3339(value).is_err()
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "format"));
     }
     if schema.get("pattern").is_some()
         && !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "pattern"));
     }
-    true
+    Ok(())
 }
 
-fn validate_number(schema: &Value, number: Option<f64>) -> bool {
+fn validate_number(schema: &Value, number: Option<f64>, pointer: &str) -> Validated {
     let Some(number) = number.filter(|number| number.is_finite()) else {
-        return false;
+        return Err(SchemaViolation::at(pointer, "type"));
     };
     if schema
         .get("minimum")
         .and_then(Value::as_f64)
         .is_some_and(|min| number < min)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "minimum"));
     }
     if schema
         .get("exclusiveMinimum")
         .and_then(Value::as_f64)
         .is_some_and(|min| number <= min)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "exclusiveMinimum"));
     }
     if schema
         .get("maximum")
         .and_then(Value::as_f64)
         .is_some_and(|max| number > max)
     {
-        return false;
+        return Err(SchemaViolation::at(pointer, "maximum"));
     }
-    true
+    Ok(())
 }
 
 /// Self-referential rather than depth-inlined.

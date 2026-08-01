@@ -523,7 +523,7 @@ impl Server {
         }
         let call: ToolCall = match bounded_parse(params) {
             Ok(call) => call,
-            Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+            Err(()) => return invalid_params_reason(id, "malformedArguments"),
         };
         if call.name.len() > 64 || !self.tool_available(&call.name) {
             return error(id, METHOD_NOT_FOUND, "Method not found", None);
@@ -533,32 +533,49 @@ impl Server {
         if let Err(interface_error) = self.authorization.authorize(&context, operation) {
             return interface_error_response(id, interface_error);
         }
-        if !validate_tool_arguments(&call.name, &call.arguments) {
-            return error(id, INVALID_PARAMS, "Invalid params", None);
+        if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
+            return invalid_params(id, Some(violation));
         }
         let result = match call.name.as_str() {
             "runtime_info" => {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
-                self.runtime.runtime_info(context).await.and_then(to_json)
+                // Principal-scoped, so it belongs here rather than on the
+                // runtime-wide `RuntimeInfo` the inner runtime produces. Without
+                // it a caller cannot see the credential lapse coming — the stdio
+                // gateway simply refuses to start afterwards.
+                let credential_expires_at = self.handle.expires_at();
+                self.runtime
+                    .runtime_info(context)
+                    .await
+                    .and_then(to_json)
+                    .map(|mut value| {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert(
+                                "credentialExpiresAt".to_owned(),
+                                json!(credential_expires_at.to_rfc3339()),
+                            );
+                        }
+                        value
+                    })
             }
             "session_list" => {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
                 self.runtime.list_sessions(context).await.and_then(to_json)
             }
             "session_create" => {
                 let input: SessionCreateArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 if input.profile.is_empty()
                     || input.profile.len() > 128
                     || input.proxy.as_ref().is_some_and(|proxy| proxy.len() > 2048)
                 {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
                 self.runtime
                     .create_session(
@@ -575,7 +592,7 @@ impl Server {
             "session_close" => {
                 let input: SessionCloseArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .delete_session(context, input.session_id)
@@ -585,7 +602,7 @@ impl Server {
             "page_open" => {
                 let input: PageOpenArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .open_page(
@@ -600,17 +617,17 @@ impl Server {
             "command_execute" => {
                 let input: CommandExecuteArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 if input.envelope.deadline <= Utc::now()
                     || input.envelope.deadline > context.deadline
                 {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "deadlineOutOfRange");
                 }
                 context.idempotency_key = match input.idempotency_key {
                     Some(key) => match types::IdempotencyKey::try_from(key) {
                         Ok(key) => Some(key),
-                        Err(_) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                        Err(_) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                     },
                     None => None,
                 };
@@ -619,7 +636,7 @@ impl Server {
             "navigate" => {
                 let input: NavigateArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -637,7 +654,7 @@ impl Server {
             "click" => {
                 let input: ClickArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -656,7 +673,7 @@ impl Server {
             "type_text" => {
                 let input: TypeTextArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -676,7 +693,7 @@ impl Server {
             "inspect" => {
                 let input: InspectArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -694,7 +711,7 @@ impl Server {
             "screenshot" => {
                 let input: ScreenshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -710,7 +727,7 @@ impl Server {
             "wait_for" => {
                 let input: WaitForArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -727,7 +744,7 @@ impl Server {
             "intent_locate" => {
                 let input: IntentLocateArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent = types::IntentCommand::Locate(types::LocateIntent {
                     purpose: input.purpose,
@@ -735,7 +752,7 @@ impl Server {
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -749,7 +766,7 @@ impl Server {
             "intent_fill" => {
                 let input: IntentFillArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent = types::IntentCommand::Fill(types::FillIntent {
                     purpose: input.purpose,
@@ -758,7 +775,7 @@ impl Server {
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -772,7 +789,7 @@ impl Server {
             "intent_complete_form" => {
                 let input: IntentCompleteFormArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent = types::IntentCommand::CompleteForm(types::CompleteFormIntent {
                     purpose: input.purpose,
@@ -780,7 +797,7 @@ impl Server {
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -794,7 +811,7 @@ impl Server {
             "intent_submit_and_verify" => {
                 let input: IntentSubmitAndVerifyArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent = types::IntentCommand::SubmitAndVerify(types::SubmitAndVerifyIntent {
                     purpose: input.purpose,
@@ -803,7 +820,7 @@ impl Server {
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -817,7 +834,7 @@ impl Server {
             "intent_wait_for_state" => {
                 let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent = types::IntentCommand::WaitForState(types::WaitForStateIntent {
                     condition: input.condition,
@@ -825,7 +842,7 @@ impl Server {
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -839,7 +856,7 @@ impl Server {
             "intent_follow" => {
                 let input: IntentFollowArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent = types::IntentCommand::Follow(types::FollowIntent {
                     purpose: input.purpose,
@@ -849,7 +866,7 @@ impl Server {
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -863,7 +880,7 @@ impl Server {
             "intent_dismiss_obstruction" => {
                 let input: IntentDismissObstructionArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent =
                     types::IntentCommand::DismissObstruction(types::DismissObstructionIntent {
@@ -875,7 +892,7 @@ impl Server {
                     });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -889,7 +906,7 @@ impl Server {
             "intent_extract" => {
                 let input: IntentExtractArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let intent = types::IntentCommand::Extract(types::ExtractIntent {
                     purpose: input.purpose,
@@ -897,7 +914,7 @@ impl Server {
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
                 let (context, envelope) = intent_envelope(
                     context,
@@ -911,7 +928,7 @@ impl Server {
             "page_list" => {
                 let input: PageListArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -925,7 +942,7 @@ impl Server {
             "page_close" => {
                 let input: PageCloseArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let page_id = input.page_id;
                 let (context, envelope) = primitive_envelope(
@@ -940,7 +957,7 @@ impl Server {
             "page_activate" => {
                 let input: PageCloseArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let page_id = input.page_id;
                 let (context, envelope) = primitive_envelope(
@@ -955,7 +972,7 @@ impl Server {
             "a11y_snapshot" => {
                 let input: A11ySnapshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -973,7 +990,7 @@ impl Server {
             "download_url" => {
                 let input: DownloadUrlArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -991,7 +1008,7 @@ impl Server {
             "upload_files" => {
                 let input: UploadFilesArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -1009,7 +1026,7 @@ impl Server {
             "evaluate_javascript" => {
                 let input: EvaluateJavaScriptArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let (context, envelope) = primitive_envelope(
                     context,
@@ -1027,7 +1044,7 @@ impl Server {
             "checkpoint_save" => {
                 let input: CheckpointSaveArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .checkpoint(context, input.checkpoint, input.evidence)
@@ -1037,7 +1054,7 @@ impl Server {
             "workflow_recover" => {
                 let input: WorkflowRecoverArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .recover(context, input.workflow_id)
@@ -1047,10 +1064,10 @@ impl Server {
             "events_read" => {
                 let input: EventsReadArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 if input.limit == 0 || input.limit > MAX_EVENT_LIMIT {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
                 if let Err(interface_error) = self
                     .authorization
@@ -1060,7 +1077,7 @@ impl Server {
                 }
                 let remaining = match (context.deadline - Utc::now()).to_std() {
                     Ok(remaining) => remaining,
-                    Err(_) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(_) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 match tokio::time::timeout(
                     remaining,
@@ -1756,6 +1773,35 @@ fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Val
         reconciliation_required: false,
         required_capability: None,
     })
+}
+
+/// `-32602` with the schema keyword and JSON Pointer that rejected the call.
+///
+/// Every rejection used to be an indistinguishable `"Invalid params"` with no
+/// `data`, so a caller could not tell a missing field from an out-of-range one,
+/// let alone find which field. `pointer` and `constraint` describe the schema,
+/// never the submitted value, so they disclose nothing `tools/list` does not.
+fn invalid_params(id: Value, violation: Option<crate::schema::SchemaViolation>) -> Value {
+    let data = violation.map(|violation| {
+        json!({
+            "reason":"schemaViolation",
+            "pointer":violation.pointer,
+            "constraint":violation.constraint
+        })
+    });
+    error(id, INVALID_PARAMS, "Invalid params", data)
+}
+
+/// `-32602` for a rejection with no single offending field: a body that passed
+/// the schema but failed to deserialize, an expired deadline, a malformed
+/// idempotency key.
+fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
+    error(
+        id,
+        INVALID_PARAMS,
+        "Invalid params",
+        Some(json!({"reason":reason})),
+    )
 }
 
 fn interface_error_response(id: Value, mut interface_error: types::InterfaceError) -> Value {

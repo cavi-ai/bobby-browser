@@ -257,6 +257,18 @@ impl CapabilityHandle {
         !self.is_invalid_at(now)
     }
 
+    /// When this handle stops authorizing, so a caller can say so before it
+    /// happens.
+    ///
+    /// The MCP stdio gateway pins its bootstrap expiry into client config and
+    /// refuses to start once it passes, which an agent host surfaces only as a
+    /// dead server. Reporting the instant is the difference between "renew the
+    /// credential" and an unexplained disconnect. Expiry is not a secret — it
+    /// carries no bearer material.
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
+
     pub(crate) fn is_invalid_at(&self, now: DateTime<Utc>) -> bool {
         self.expires_at <= now || self.revoked.load(Ordering::Acquire)
     }
