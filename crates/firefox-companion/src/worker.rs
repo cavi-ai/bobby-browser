@@ -3179,6 +3179,76 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
+    async fn emulate(
+        &self,
+        page_id: &PageId,
+        command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if let Some(viewport) = command.viewport {
+            if viewport.width == 0
+                || viewport.height == 0
+                || viewport.width > 16384
+                || viewport.height > 16384
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "viewport dimensions must be within 1..=16384",
+                    false,
+                ));
+            }
+            self.transport
+                .send(
+                    "browsingContext.setViewport",
+                    json!({
+                        "context": context,
+                        "viewport": {"width": viewport.width, "height": viewport.height},
+                    }),
+                )
+                .await?;
+        }
+        if let Some(coordinates) = command.geolocation {
+            if !coordinates.latitude.is_finite()
+                || !coordinates.longitude.is_finite()
+                || !(-90.0..=90.0).contains(&coordinates.latitude)
+                || !(-180.0..=180.0).contains(&coordinates.longitude)
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "geolocation coordinates are out of range",
+                    false,
+                ));
+            }
+            let mut params = json!({
+                "context": context,
+                "coordinates": {
+                    "latitude": coordinates.latitude,
+                    "longitude": coordinates.longitude,
+                },
+            });
+            if let Some(accuracy) = coordinates.accuracy {
+                params["coordinates"]["accuracy"] = json!(accuracy);
+            }
+            self.transport
+                .send("session.setGeolocationOverride", params)
+                .await
+                .map_err(|error| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        format!(
+                            "geolocation override is not supported by this browser: {}",
+                            error.message
+                        ),
+                        false,
+                    )
+                })?;
+        }
+        Ok(vec![Evidence::Emulation {
+            viewport: command.viewport,
+            geolocation: command.geolocation,
+        }])
+    }
+
     async fn handle_dialog(
         &self,
         page_id: &PageId,
