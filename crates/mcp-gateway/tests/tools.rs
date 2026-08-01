@@ -362,7 +362,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        25
+        26
     );
     let runtime_command = &command_schema["inputSchema"]["$defs"]["RuntimeCommand"]["oneOf"];
     assert_eq!(
@@ -407,7 +407,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     let evidence_variants = checkpoint_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 24, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 25, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
@@ -424,6 +424,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         evidence_kinds.contains(&"controlAction"),
         "{evidence_kinds:?}"
     );
+    assert!(evidence_kinds.contains(&"emulation"), "{evidence_kinds:?}");
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
 
     // The accessibility tree is self-referential now, so `children` must resolve

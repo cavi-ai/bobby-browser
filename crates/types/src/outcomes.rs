@@ -237,6 +237,10 @@ pub enum Evidence {
         message: String,
         action: String,
     },
+    Emulation {
+        viewport: Option<crate::ViewportSize>,
+        geolocation: Option<crate::GeolocationCoordinates>,
+    },
     IntentExecution {
         record: ExecutionRecord,
     },
