@@ -61,6 +61,10 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId"],
         ),
+        "form_snapshot" => (
+            json!({"workflowId": id(), "sessionId": id(), "pageId": id()}),
+            vec!["sessionId", "pageId"],
+        ),
         "extract_structured" => (
             json!({
                 "workflowId": id(),
@@ -985,6 +989,11 @@ fn evidence_variants() -> Vec<Value> {
                 "truncated":{"type":"boolean"}
             }),
             &["pageId", "nodes", "truncated"],
+        ),
+        tagged_fields(
+            "formSnapshot",
+            json!({"snapshot":any_value()}),
+            &["snapshot"],
         ),
         tagged_fields(
             "structuredExtraction",

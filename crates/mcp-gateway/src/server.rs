@@ -387,6 +387,7 @@ impl Server {
             "navigate",
             "a11y_snapshot",
             "extract_structured",
+            "form_snapshot",
             "page_activate",
             "page_close",
             "page_list",
@@ -1041,6 +1042,16 @@ impl Server {
                     ),
                 );
                 self.submit_envelope(context, envelope).await
+            }
+            "form_snapshot" => {
+                let input: PageCloseArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                self.runtime
+                    .form_snapshot(context, input.session_id, input.page_id)
+                    .await
+                    .and_then(to_json)
             }
             "extract_structured" => {
                 let input: ExtractStructuredArgs = match bounded_parse(call.arguments) {
@@ -2048,6 +2059,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
             types::Capability::IntentExecute,
         ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
+        "form_snapshot" => Some(&[types::Capability::PageRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),
         "session_close" | "session_create" => Some(&[types::Capability::SessionWrite]),
         _ => None,
@@ -2082,6 +2094,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "intent_submit_and_verify"
         | "intent_wait_for_state" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
+        "form_snapshot" => Some(types::InterfaceOperation::ReadPage),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
         "session_close" => Some(types::InterfaceOperation::DeleteSession),
@@ -2112,6 +2125,7 @@ fn tool_description(name: &str) -> &'static str {
         "navigate" => "Navigate a page to a URL.",
         "a11y_snapshot" => "Capture a compact accessibility tree of a page.",
         "extract_structured" => "Extract schema-shaped JSON from a page via the vision provider.",
+        "form_snapshot" => "Read a bounded, engine-neutral form inventory without exposing selectors or sensitive values.",
         "page_activate" => "Bring a page to the front in an owned session.",
         "page_close" => "Close a page in an owned session.",
         "page_list" => "List pages in an owned session.",

@@ -855,6 +855,46 @@ async fn open_page_uses_a_transient_binding_title_and_restores_the_exact_origina
     );
 }
 
+#[tokio::test]
+async fn form_snapshot_deserializes_the_shared_projection_over_bidi() {
+    let page_id = PageId::new();
+    let encoded = serde_json::to_string(&json!({
+        "schemaVersion": 1,
+        "pageId": page_id,
+        "forms": [],
+        "unownedControls": [],
+        "truncated": false
+    }))
+    .unwrap();
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-form-snapshot"})),
+        Ok(json!({"result": {"type": "string", "value": encoded}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let evidence = worker.form_snapshot(&page_id).await.unwrap();
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::FormSnapshot { snapshot }
+            if snapshot.page_id == page_id && snapshot.forms.is_empty()
+    )));
+    let calls = bidi.calls().await;
+    let snapshot_call = calls
+        .iter()
+        .find(|call| {
+            call.method == "script.evaluate"
+                && call.params["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains("schemaVersion:1"))
+        })
+        .expect("shared form projection evaluated through Firefox BiDi");
+    assert_eq!(
+        snapshot_call.params["target"]["context"],
+        "context-form-snapshot"
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 enum AbortStage {
     Create,

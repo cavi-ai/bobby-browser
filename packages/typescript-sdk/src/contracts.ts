@@ -109,6 +109,7 @@ export type Evidence =
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
   | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean }
+  | { kind: "formSnapshot"; snapshot: FormSnapshot }
   | { kind: "intentExecution"; record: ExecutionRecord }
   | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 

@@ -528,13 +528,73 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select><label for=phone-home>Phone</label><input id=phone-home><label for=phone-work>Phone</label><input id=phone-work><label for=password>Password</label><input id=password type=password autocomplete=current-password value=vault-secret-92 required>".into(),
+                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><optgroup label=Blocked disabled><option value=ca>Canada</option></optgroup></select><label for=phone-home>Phone</label><input id=phone-home><label for=phone-work>Phone</label><input id=phone-work><label for=password>Password</label><input id=password type=password autocomplete=current-password value=vault-secret-92 required><form aria-label=Application><button aria-label=Apply>Apply</button><input type=button aria-label=Preview><input role=combobox aria-label=City value=Boston></form>".into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
         )
         .await
         .unwrap();
+
+    worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "password.setCustomValidity(password.value); const input=document.createElement('input'); input.setAttribute('aria-label','😀'.repeat(700)+'\\n'); document.body.append(input); true".into(),
+                await_promise: false,
+                timeout_ms: 5_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let form_snapshot = worker.form_snapshot(&page_id).await.unwrap();
+    let snapshot = form_snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("form snapshot evidence");
+    assert_eq!(snapshot.page_id, page_id);
+    assert_eq!(snapshot.unowned_controls.len(), 8);
+    let email = snapshot
+        .unowned_controls
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("Email address"))
+        .expect("aria-labelledby control");
+    assert!(email.constraints.required);
+    let region = snapshot
+        .unowned_controls
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("Region"))
+        .expect("select control");
+    assert_eq!(region.options.len(), 2);
+    assert!(region.options[1].disabled, "disabled optgroup is effective");
+    let application = snapshot.forms.first().expect("owned application form");
+    assert_eq!(application.submit_control_ids.len(), 1);
+    let preview = application
+        .controls
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("Preview"))
+        .unwrap();
+    assert_eq!(
+        preview.supported_operations,
+        vec![types::FormControlOperation::Activate]
+    );
+    let city = application
+        .controls
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("City"))
+        .unwrap();
+    assert!(matches!(city.state, types::FormControlState::Text { ref value } if value == "Boston"));
+    assert!(city
+        .supported_operations
+        .contains(&types::FormControlOperation::SetText));
+    let encoded = serde_json::to_string(snapshot).unwrap();
+    assert!(!encoded.contains("vault-secret-92"));
+    assert!(!encoded.contains("cssPath"));
+    assert!(!encoded.contains("selector"));
 
     let candidates = worker
         .collect_candidates(&page_id, &TargetSpec::default())

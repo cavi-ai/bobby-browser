@@ -48,6 +48,24 @@ pub trait RuntimeInterface: Send + Sync {
         ctx: RequestContext,
         req: OpenPageRequest,
     ) -> InterfaceResult<PageState>;
+    async fn form_snapshot(
+        &self,
+        _ctx: RequestContext,
+        _session: SessionId,
+        _page: types::PageId,
+    ) -> InterfaceResult<types::FormSnapshot> {
+        Err(InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: "form snapshots are not supported".into(),
+            correlation_id: types::CorrelationId::new(),
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
     async fn submit(
         &self,
         ctx: RequestContext,

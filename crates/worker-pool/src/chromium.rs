@@ -593,6 +593,26 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn form_snapshot(&self, page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let value: serde_json::Value = page
+            .evaluate(crate::form_snapshot_expression(page_id))
+            .await
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let encoded = value.as_str().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "form snapshot returned non-text JSON",
+            )
+        })?;
+        let snapshot: types::FormSnapshot = serde_json::from_str(encoded)
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(vec![Evidence::FormSnapshot { snapshot }])
+    }
+
     async fn activate_page(
         &self,
         command: &types::ActivatePageCommand,
