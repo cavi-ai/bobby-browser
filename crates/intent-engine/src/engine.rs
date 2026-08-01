@@ -3,9 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
-    ExecutionRecord, ExtractValueKind, FillValue, IntentCommand, IntentResolutionPath, PageId,
-    ScreenshotMode, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
+    ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FillValue,
+    FormControlTarget, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
+    SemanticTargetSegment, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
     WaitForCommand,
 };
 
@@ -69,6 +70,19 @@ pub trait IntentBrowser: Send + Sync {
         page_id: &PageId,
         command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
+
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        _command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(CommandError {
+            code: ErrorCode::IntentActionMismatch,
+            message: "typed control actions are unavailable".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        })
+    }
 
     async fn wait_for(
         &self,
@@ -423,7 +437,7 @@ async fn execute_fill(
         best_match_authorized,
     };
 
-    let mut act_evidence = match act_fill(page_id, browser, &candidate, &value).await {
+    let mut act_evidence = match act_fill(page_id, browser, &candidate, &target, &value).await {
         Ok(evidence) => evidence,
         Err(error) => {
             return IntentOutcome::Failed {
@@ -484,6 +498,7 @@ async fn act_fill(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     candidate: &Candidate,
+    intent_target: &TargetSpec,
     value: &FillValue,
 ) -> Result<Vec<Evidence>, CommandError> {
     let (selector, target) = action_target(candidate);
@@ -505,28 +520,24 @@ async fn act_fill(
         }
         FillValue::Select { option } => {
             browser
-                .type_text(
+                .control_action(
                     page_id,
-                    &TypeTextCommand {
-                        selector,
-                        target: Some(target),
-                        value: option.clone(),
-                        clear_first: true,
-                        expected_url: None,
+                    &ControlActionCommand {
+                        target: form_control_target(candidate, intent_target)?,
+                        action: ControlAction::SelectOne {
+                            value: option.clone(),
+                        },
                     },
                 )
                 .await
         }
         FillValue::Checked { checked } => {
             browser
-                .type_text(
+                .control_action(
                     page_id,
-                    &TypeTextCommand {
-                        selector,
-                        target: Some(target),
-                        value: checked.to_string(),
-                        clear_first: true,
-                        expected_url: None,
+                    &ControlActionCommand {
+                        target: form_control_target(candidate, intent_target)?,
+                        action: ControlAction::SetChecked { checked: *checked },
                     },
                 )
                 .await
@@ -544,6 +555,56 @@ async fn act_fill(
                 .await
         }
     }
+}
+
+fn form_control_target(
+    candidate: &Candidate,
+    intent_target: &TargetSpec,
+) -> Result<FormControlTarget, CommandError> {
+    let segment = |target: &TargetSpec| -> Result<SemanticTargetSegment, CommandError> {
+        let role = target.role.clone().ok_or_else(|| CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "form control path segment requires a semantic role".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        })?;
+        let accessible_name = target.accessible_name.clone().ok_or_else(|| CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "form control path segment requires an accessible name".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        })?;
+        Ok(SemanticTargetSegment {
+            role,
+            accessible_name,
+            ordinal: target.ordinal,
+        })
+    };
+    Ok(FormControlTarget {
+        role: candidate.role.clone().ok_or_else(|| CommandError {
+            code: ErrorCode::IntentActionMismatch,
+            message: "resolved form control has no semantic role".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        })?,
+        accessible_name: candidate.name.clone().ok_or_else(|| CommandError {
+            code: ErrorCode::IntentActionMismatch,
+            message: "resolved form control has no accessible name".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        })?,
+        ordinal: intent_target.ordinal,
+        frame_path: intent_target
+            .frame_path
+            .iter()
+            .map(|target| segment(target))
+            .collect::<Result<Vec<_>, _>>()?,
+        shadow_path: intent_target
+            .shadow_path
+            .iter()
+            .map(|target| segment(target))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
 }
 
 fn action_target(candidate: &Candidate) -> (String, TargetSpec) {
