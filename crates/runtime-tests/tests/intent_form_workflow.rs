@@ -222,7 +222,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
         IntentCommand::Fill(FillIntent {
             purpose: "Resume".into(),
             hints: IntentHints {
-                role: Some("textbox".into()),
+                role: Some("button".into()),
                 ..IntentHints::default()
             },
             value: FillValue::Files {
