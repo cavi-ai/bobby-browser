@@ -285,6 +285,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "javaScriptResult": return hasExactKeys(value, ["kind", "value", "truncated"]) && isJsonValue(value.value) && typeof value.truncated === "boolean";
     case "intentExecution": return hasExactKeys(value, ["kind", "record"]) && isExecutionRecord(value.record);
     case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
+    case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
     default: return false;
   }
 }

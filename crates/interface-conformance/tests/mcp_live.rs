@@ -163,6 +163,24 @@ async fn prove_snapshot_target_round_trip(
     )
     .await;
     let before: CommandOutcome = serde_json::from_value(before).unwrap();
+
+    let form_snapshot = tool(
+        server,
+        &mut id,
+        "form_snapshot",
+        json!({"sessionId":session_id,"pageId":page_id}),
+    )
+    .await;
+    let form_snapshot: types::FormSnapshot = serde_json::from_value(form_snapshot).unwrap();
+    assert_eq!(form_snapshot.unowned_controls.len(), 4);
+    assert!(form_snapshot
+        .unowned_controls
+        .iter()
+        .any(|control| control.accessible_name.as_deref() == Some("Resume")));
+    let encoded_snapshot = serde_json::to_string(&form_snapshot).unwrap();
+    assert!(!encoded_snapshot.contains("selector"));
+    assert!(!encoded_snapshot.contains("cssPath"));
+
     let before_nodes = completed(&before)
         .iter()
         .find_map(|evidence| match evidence {
