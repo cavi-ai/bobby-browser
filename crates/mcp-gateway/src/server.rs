@@ -391,6 +391,7 @@ impl Server {
             "page_close",
             "page_list",
             "page_open",
+            "recovery_status",
             "runtime_info",
             "screenshot",
             "session_close",
@@ -1076,6 +1077,16 @@ impl Server {
                 };
                 self.runtime
                     .recover(context, input.workflow_id)
+                    .await
+                    .and_then(to_json)
+            }
+            "recovery_status" => {
+                let input: WorkflowRecoverArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                self.runtime
+                    .recovery_status(context, input.workflow_id)
                     .await
                     .and_then(to_json)
             }
@@ -1948,6 +1959,7 @@ fn intent_envelope(
 fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
     match name {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
+        "recovery_status" => Some(&[types::Capability::RecoveryRead]),
         "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
         | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" => {
             Some(&[types::Capability::BrowserMutate])
@@ -1989,6 +2001,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
 fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
     match name {
         "checkpoint_save" => Some(types::InterfaceOperation::CreateCheckpoint),
+        "recovery_status" => Some(types::InterfaceOperation::ReadCheckpoint),
         "command_execute"
         | "navigate"
         | "click"
@@ -2047,6 +2060,7 @@ fn tool_description(name: &str) -> &'static str {
         "page_close" => "Close a page in an owned session.",
         "page_list" => "List pages in an owned session.",
         "page_open" => "Open a page in an owned session.",
+        "recovery_status" => "Read a workflow's checkpoint and recovery receipts.",
         "runtime_info" => "Read runtime capability and health information.",
         "screenshot" => "Capture a screenshot artifact of a page or element.",
         "session_close" => "Close a browser session and release its worker.",

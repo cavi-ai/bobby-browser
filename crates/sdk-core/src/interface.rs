@@ -374,6 +374,32 @@ impl RuntimeInterface for AuthenticatedRuntime {
         }
     }
 
+    async fn recovery_status(
+        &self,
+        ctx: RequestContext,
+        workflow: WorkflowId,
+    ) -> InterfaceResult<types::RecoveryStatus> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::ReadCheckpoint)?;
+        let session_id = self
+            .inner
+            .recovery_session(&workflow)
+            .await
+            .map_err(|_| internal_error(&ctx))?;
+        self.require_owned_session(&ctx, &session_id)?;
+        self.inner
+            .recovery_status(&workflow)
+            .await
+            .map_err(|error| match error {
+                page_runtime::RecoveryError::SessionMismatch => error_with(
+                    &ctx,
+                    InterfaceErrorCode::NotFound,
+                    "runtime resource was not found",
+                ),
+                _ => internal_error(&ctx),
+            })
+    }
+
     async fn recover(
         &self,
         ctx: RequestContext,

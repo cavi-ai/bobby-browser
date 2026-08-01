@@ -115,6 +115,27 @@ test("listSessions returns the broker session array", async () => {
   });
 });
 
+test("recoveryStatus returns the checkpoint status", async () => {
+  const time = new Date().toISOString();
+  const checkpoint = {
+    schemaVersion: 1, checkpointId: CHECKPOINT_ID, workflowId: WORKFLOW_ID, attemptId: ATTEMPT_ID,
+    sessionId: SESSION_ID, pageId: "00000000-0000-4000-8000-000000000009",
+    restartUrl: "https://example.test", currentUrl: "https://example.test",
+    cursor: null, boundaryCommandId: null, recoveryClass: "replayable",
+    invariants: [], replayableInputs: [], evidence: [], recoveryHistory: [], recoveryReceipts: [], createdAt: time,
+  };
+  await withServer((request, response) => {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, `/v1/recovery/${WORKFLOW_ID}`);
+    writeJson(response, 200, { workflowId: WORKFLOW_ID, checkpoint, receipts: [] });
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    const status = await client.recoveryStatus(WORKFLOW_ID);
+    assert.equal(status.checkpoint.workflowId, WORKFLOW_ID);
+    await assert.rejects(client.recoveryStatus("not-a-uuid"), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  });
+});
+
 test("deleteSession sends DELETE and accepts 204", async () => {
   await withServer((request, response) => {
     assert.equal(request.method, "DELETE");
