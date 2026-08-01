@@ -657,6 +657,7 @@ impl Server {
                         target: input.target,
                         value: input.value,
                         clear_first: input.clear_first.unwrap_or(false),
+                        expected_url: input.expected_url,
                     }),
                 );
                 self.submit_envelope(context, envelope).await
@@ -1317,6 +1318,7 @@ page_scoped_args!(TypeTextArgs {
     target: Option<types::TargetSpec>,
     value: String,
     clear_first: Option<bool>,
+    expected_url: Option<String>,
 });
 
 page_scoped_args!(InspectArgs {

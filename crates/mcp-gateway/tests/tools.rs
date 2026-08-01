@@ -407,6 +407,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
         page_id: None,
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::TypeText(types::TypeTextCommand {
+            expected_url: None,
             selector: "#name".to_owned(),
             target: Some(types::TargetSpec {
                 attributes: [(long_attribute, "value".to_owned())].into_iter().collect(),

@@ -381,6 +381,7 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
                 target: None,
                 value: "Bobby".into(),
                 clear_first: true,
+                expected_url: None,
             },
         )
         .await

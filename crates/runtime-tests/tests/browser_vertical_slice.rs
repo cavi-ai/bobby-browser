@@ -242,6 +242,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             target: None,
             value: "Ada".into(),
             clear_first: true,
+            expected_url: None,
         }),
     )
     .await;
@@ -299,6 +300,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             target: None,
             value: "Analytical Engines".into(),
             clear_first: true,
+            expected_url: None,
         }),
     )
     .await;

@@ -1090,7 +1090,7 @@ impl CdpConnection {
                             self.runtime.submit(ctx, CommandEnvelope {
                                 schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                                 session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                                command:RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true })),
+                                command:RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true, expected_url: None })),
                             }).await
                         }
                         ("click", "role:button:Continue" | "role:button:Submit") => {
@@ -1289,7 +1289,7 @@ impl CdpConnection {
                     let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                         command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                         session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                        command:RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true })) };
+                        command:RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand { selector:String::new(), target:Some(TargetSpec { label:Some(label.to_owned()), ..TargetSpec::default() }), value:value.to_owned(), clear_first:true, expected_url: None })) };
                     return match self.runtime.submit(ctx, envelope).await {
                         Ok(CommandOutcome::Completed { .. }) => CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}})),
                         Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime fill did not complete")),

@@ -28,6 +28,7 @@ use tokio::{
     sync::{watch, Mutex as AsyncMutex, RwLock},
     task::JoinHandle,
 };
+use types::ProfileId;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, CommandId, ErrorCode, ErrorLayer, Evidence,
@@ -191,11 +192,68 @@ impl ExtensionPageBinding for CompanionPageBinding {
 pub struct CompanionExtensionObserver {
     server: Arc<CompanionServerHandle>,
     timeout: Duration,
+    refreshed_leases: Arc<AsyncMutex<std::collections::HashMap<ProfileId, AttachmentLease>>>,
 }
 
 impl CompanionExtensionObserver {
     pub fn new(server: Arc<CompanionServerHandle>, timeout: Duration) -> Self {
-        Self { server, timeout }
+        Self {
+            server,
+            timeout,
+            refreshed_leases: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// The freshest attachment for this profile. After a companion re-pair
+    /// the original attachment is dead; `refresh_lease` replaces it and all
+    /// later dispatches use the replacement.
+    async fn effective_lease(&self, lease: &AttachmentLease) -> AttachmentLease {
+        self.refreshed_leases
+            .lock()
+            .await
+            .get(&lease.profile_id)
+            .cloned()
+            .unwrap_or_else(|| lease.clone())
+    }
+
+    async fn refresh_lease(
+        &self,
+        lease: &AttachmentLease,
+    ) -> Result<AttachmentLease, CompanionSessionError> {
+        let grant = self
+            .server
+            .grant_discovered_targets(&lease.profile_id)
+            .await?;
+        let fresh = self
+            .server
+            .registry()
+            .resolve_attachment(&grant.attachment_id)
+            .await
+            .map_err(|_| CompanionSessionError::GrantUnavailable)?;
+        self.refreshed_leases
+            .lock()
+            .await
+            .insert(lease.profile_id.clone(), fresh.clone());
+        Ok(fresh)
+    }
+
+    /// Dispatch an action, recovering once from a stale attachment when the
+    /// companion connection has cycled since the lease was issued.
+    async fn dispatch_with_refresh(
+        &self,
+        mut action: ActionRequest,
+        lease: &AttachmentLease,
+    ) -> Result<CompanionEvent, CompanionSessionError> {
+        let lease = self.effective_lease(lease).await;
+        action.attachment_id = lease.attachment_id.clone();
+        match self.server.dispatch_action(action.clone()).await {
+            Err(CompanionSessionError::ConnectionClosed) => {
+                let refreshed = self.refresh_lease(&lease).await?;
+                action.attachment_id = refreshed.attachment_id;
+                self.server.dispatch_action(action).await
+            }
+            result => result,
+        }
     }
 }
 
@@ -206,16 +264,20 @@ impl ExtensionObserver for CompanionExtensionObserver {
     }
 
     async fn renew_lease(&self, lease: &AttachmentLease) -> Result<AttachmentLease, CommandError> {
-        let grant = self
-            .server
-            .renew_grant(&lease.attachment_id)
-            .await
-            .map_err(session_error)?;
-        self.server
-            .registry()
-            .resolve_attachment(&grant.attachment_id)
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true))
+        let lease = self.effective_lease(lease).await;
+        match self.server.renew_grant(&lease.attachment_id).await {
+            Ok(grant) => self
+                .server
+                .registry()
+                .resolve_attachment(&grant.attachment_id)
+                .await
+                .map_err(|error| {
+                    driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true)
+                }),
+            Err(_) => self.refresh_lease(&lease).await.map_err(|error| {
+                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true)
+            }),
+        }
     }
 
     async fn begin_page_binding(
@@ -262,8 +324,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
-            .server
-            .dispatch_action(action)
+            .dispatch_with_refresh(action, lease)
             .await
             .map_err(session_error)?
         {
@@ -325,8 +386,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
-            .server
-            .dispatch_action(action)
+            .dispatch_with_refresh(action, lease)
             .await
             .map_err(session_error)?
         {
@@ -2648,6 +2708,26 @@ impl BrowserWorker for FirefoxCompanionWorker {
             ));
         }
         let context = self.context(page_id).await?;
+        if let Some(expected) = &command.expected_url {
+            let tree = self
+                .transport
+                .send(
+                    "browsingContext.getTree",
+                    json!({"root": context, "maxDepth": 0}),
+                )
+                .await?;
+            let current = tree
+                .pointer("/contexts/0/url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if current != expected {
+                return Err(driver_error(
+                    ErrorCode::VerificationFailed,
+                    format!("page URL is {current}, not the expected {expected}"),
+                    false,
+                ));
+            }
+        }
         let (context, selector) = self
             .resolve_input_target(
                 page_id,

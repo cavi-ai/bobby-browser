@@ -353,6 +353,7 @@ async fn drives_a_real_chromium_page() {
                 target: None,
                 value: "Ada".into(),
                 clear_first: true,
+                expected_url: None,
             },
         )
         .await
@@ -445,6 +446,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     label: Some("Email address".into()),
@@ -570,6 +572,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     role: Some("textbox".into()),
@@ -651,6 +654,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     role: Some(work_phone.role.clone()),
@@ -687,6 +691,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     role: Some("combobox".into()),
@@ -718,6 +723,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
             .type_text(
                 &page_id,
                 &TypeTextCommand {
+                    expected_url: None,
                     selector: String::new(),
                     target: Some(TargetSpec {
                         role: Some(role.into()),
@@ -1071,6 +1077,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     label: Some("Name".into()),

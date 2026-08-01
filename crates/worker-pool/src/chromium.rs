@@ -424,6 +424,19 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
+        if let Some(expected) = &command.expected_url {
+            let current = page
+                .url()
+                .await
+                .map_err(command_failed)?
+                .unwrap_or_default();
+            if &current != expected {
+                return Err(driver_error(
+                    ErrorCode::VerificationFailed,
+                    format!("page URL is {current}, not the expected {expected}"),
+                ));
+            }
+        }
         let resolved = self
             .resolve_target(page_id, page, &command.selector, command.target.as_ref())
             .await?;
