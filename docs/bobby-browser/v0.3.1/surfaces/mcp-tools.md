@@ -54,6 +54,10 @@ Tools are advertised only when the principal holds the required capability.
 | `events_read` | `session:read` | Read retained events after a cursor |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
 | `recovery_status` | `recovery:read` | Read a workflow checkpoint and recovery receipts |
+| `cookie_get` | `browser:mutate` | Read cookies (all origins or filtered) |
+| `cookie_set` | `browser:mutate` | Store cookies |
+| `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
+>>>>>> 27941c6 (feat(cookies): cookie primitives on Chromium and Firefox)
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
 
 The flat browser tools (`navigate` … `evaluate_javascript` /

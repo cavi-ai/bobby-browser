@@ -209,6 +209,30 @@ pub trait BrowserWorker: Send + Sync {
     }
     /// In-memory viewport PNG for machine consumers (vision assist). Unlike
     /// `capture_screenshot`, no artifact is persisted and no evidence emitted.
+    async fn get_cookies(
+        &self,
+        _page_id: &PageId,
+        _command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn set_cookies(
+        &self,
+        _page_id: &PageId,
+        _command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn delete_cookies(
+        &self,
+        _page_id: &PageId,
+        _command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
     async fn screenshot_bytes(&self, _page_id: &PageId) -> Result<Vec<u8>, CommandError> {
         Err(unsupported_error())
     }

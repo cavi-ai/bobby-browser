@@ -285,6 +285,9 @@ pub enum PrimitiveCommand {
     ActivatePage(ActivatePageCommand),
     AccessibilitySnapshot(AccessibilitySnapshotCommand),
     ExtractStructured(ExtractStructuredCommand),
+    GetCookies(GetCookiesCommand),
+    SetCookies(SetCookiesCommand),
+    DeleteCookies(DeleteCookiesCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
     ClickAndWaitForDownload(ClickAndWaitForDownloadCommand),
     WaitFor(WaitForCommand),
@@ -339,7 +342,9 @@ impl PrimitiveCommand {
             | Self::ActivatePage(_)
             | Self::AccessibilitySnapshot(_)
             | Self::ExtractStructured(_)
+            | Self::GetCookies(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
+            Self::SetCookies(_) | Self::DeleteCookies(_) => CommandClass::Reconciliable,
             Self::DownloadUrl(_)
             | Self::TypeText(_)
             | Self::UploadFiles(_)
@@ -476,6 +481,72 @@ pub struct AccessibilitySnapshotCommand {
 pub struct ExtractStructuredCommand {
     pub schema: serde_json::Value,
     pub purpose: Option<String>,
+}
+
+/// One cookie as returned by a cookie read on any engine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CookieRecord {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_unix: Option<f64>,
+}
+
+/// One cookie to store. `url` anchors the cookie's origin; `path`, flags, and
+/// expiry are optional per the driver defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCookieParam {
+    pub name: String,
+    pub value: String,
+    pub url: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub http_only: bool,
+    #[serde(default)]
+    pub same_site: Option<String>,
+    #[serde(default)]
+    pub expires_unix: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetCookiesCommand {
+    /// Restrict to these origin URLs; empty returns all cookies for the page's jar.
+    #[serde(default)]
+    pub urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCookiesCommand {
+    pub cookies: Vec<SetCookieParam>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteCookiesCommand {
+    /// Restrict deletion to these origin URLs; empty means every origin.
+    #[serde(default)]
+    pub urls: Vec<String>,
+    /// Restrict deletion to these cookie names; empty means every cookie.
+    #[serde(default)]
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

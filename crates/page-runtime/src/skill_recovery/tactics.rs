@@ -82,6 +82,10 @@ pub(super) fn expected_postcondition(command: &RuntimeCommand) -> &'static str {
         PrimitiveCommand::ActivatePage(_) => "activated page evidence is observed",
         PrimitiveCommand::AccessibilitySnapshot(_) => "accessibility snapshot evidence is observed",
         PrimitiveCommand::ExtractStructured(_) => "structured extraction evidence is observed",
+        PrimitiveCommand::GetCookies(_) => "cookie state is observed",
+        PrimitiveCommand::SetCookies(_) | PrimitiveCommand::DeleteCookies(_) => {
+            "cookie mutation is observed"
+        }
         PrimitiveCommand::ClickAndWaitForPopup(_) => "popup evidence is observed",
         PrimitiveCommand::ClickAndWaitForDownload(_) | PrimitiveCommand::DownloadUrl(_) => {
             "download evidence is observed"

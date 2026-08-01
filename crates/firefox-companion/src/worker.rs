@@ -3155,6 +3155,163 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
+    async fn get_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.context(page_id).await?;
+        let response = self.transport.send("storage.getCookies", json!({})).await?;
+        let cookies = response
+            .get("cookies")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox cookie read returned no cookie list",
+                    false,
+                )
+            })?;
+        let urls: Vec<&str> = command.urls.iter().map(String::as_str).collect();
+        let mut records = Vec::new();
+        for cookie in cookies.iter().take(2048) {
+            let domain = cookie
+                .get("domain")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let path = cookie.get("path").and_then(Value::as_str).unwrap_or("/");
+            if !urls.is_empty()
+                && !urls
+                    .iter()
+                    .any(|url| url.contains(domain.trim_start_matches('.')) && url.contains(path))
+            {
+                continue;
+            }
+            records.push(types::CookieRecord {
+                name: cookie
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                value: cookie
+                    .pointer("/value/value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                domain: domain.to_owned(),
+                path: path.to_owned(),
+                secure: cookie
+                    .get("secure")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                http_only: cookie
+                    .get("httpOnly")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                same_site: cookie
+                    .get("sameSite")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                expires_unix: cookie.get("expiry").and_then(Value::as_f64),
+            });
+        }
+        Ok(vec![Evidence::CookieState {
+            page_id: Some(page_id.clone()),
+            cookies: records,
+        }])
+    }
+
+    async fn set_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if command.cookies.len() > 128 {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "cookie set exceeds the 128-cookie bound",
+                false,
+            ));
+        }
+        if command.cookies.iter().any(|cookie| cookie.http_only) {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "httpOnly cookies cannot be honored on this Firefox build (storage.setCookies is unsupported); refused rather than downgraded",
+                false,
+            ));
+        }
+        for cookie in &command.cookies {
+            let mut assignment = format!("{}={}", cookie.name, cookie.value);
+            assignment.push_str(&format!("; path={}", cookie.path.as_deref().unwrap_or("/")));
+            if cookie.secure {
+                assignment.push_str("; secure");
+            }
+            if let Some(same_site) = &cookie.same_site {
+                assignment.push_str(&format!("; samesite={same_site}"));
+            }
+            if let Some(expires) = cookie.expires_unix {
+                let max_age = (expires - now_unix_seconds()).max(0.0) as u64;
+                assignment.push_str(&format!("; max-age={max_age}"));
+            }
+            let statement = format!("document.cookie = {}", js_string(&assignment));
+            self.evaluate_page_script(&context, &statement).await?;
+        }
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command
+                    .cookies
+                    .iter()
+                    .map(|cookie| cookie.url.clone())
+                    .collect(),
+            },
+        )
+        .await
+    }
+
+    async fn delete_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        let current = self
+            .get_cookies(
+                page_id,
+                &types::GetCookiesCommand {
+                    urls: command.urls.clone(),
+                },
+            )
+            .await?;
+        let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
+            return Ok(current);
+        };
+        for cookie in cookies {
+            if !command.names.is_empty() && !command.names.contains(&cookie.name) {
+                continue;
+            }
+            self.evaluate_page_script(
+                &context,
+                &format!(
+                    "document.cookie = {}",
+                    js_string(&format!(
+                        "{}=; path={}; expires=Thu, 01 Jan 1970 00:00:00 GMT",
+                        cookie.name, cookie.path,
+                    )),
+                ),
+            )
+            .await?;
+        }
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command.urls.clone(),
+            },
+        )
+        .await
+    }
+
     async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
         let context = self.context(page_id).await?;
         let response = self
@@ -3821,6 +3978,49 @@ fn interaction_path_name(path: InteractionPath) -> &'static str {
         InteractionPath::ExtensionApi => "extensionApi",
         InteractionPath::HostNative => "hostNative",
     }
+}
+
+impl FirefoxCompanionWorker {
+    /// Bounded, server-generated statement execution for operations Firefox
+    /// BiDi does not cover on this build (cookie mutation). Statements are
+    /// constructed from validated parameters only — never from caller strings.
+    async fn evaluate_page_script(
+        &self,
+        context: &str,
+        expression: &str,
+    ) -> Result<(), CommandError> {
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": expression,
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        if let Some(exception) = response.get("exceptionDetails") {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox cookie statement failed: {exception}"),
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn js_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn now_unix_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 #[cfg(test)]
