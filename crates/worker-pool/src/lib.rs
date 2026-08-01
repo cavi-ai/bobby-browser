@@ -1,5 +1,6 @@
 mod chromium;
 mod form_snapshot;
+mod har;
 mod network_quiet;
 pub mod process_registry;
 mod selection;
@@ -27,6 +28,7 @@ pub use form_snapshot::{
     control_action_evidence, decode_form_snapshot, form_snapshot_expression,
     form_snapshot_expression_with_limit, validate_control_action,
 };
+pub use har::{har_document, HarEntry, HarRecorder};
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
@@ -219,6 +221,14 @@ pub trait BrowserWorker: Send + Sync {
     }
     /// In-memory viewport PNG for machine consumers (vision assist). Unlike
     /// `capture_screenshot`, no artifact is persisted and no evidence emitted.
+    async fn network_log(
+        &self,
+        _page_id: &PageId,
+        _command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
     async fn emulate(
         &self,
         _page_id: &PageId,

@@ -687,7 +687,7 @@ async fn worker_subscribes_to_context_destruction_before_exposure_and_propagates
         bidi.calls().await,
         vec![BidiCall {
             method: "session.subscribe".into(),
-            params: json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened"]}),
+            params: json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened", "network.beforeRequestSent", "network.responseCompleted", "network.fetchError"]}),
         }]
     );
 }
