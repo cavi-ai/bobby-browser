@@ -1,7 +1,7 @@
-import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
+import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
-import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
+import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -98,6 +98,10 @@ export class BrowserRuntimeClient {
   }
 
   async checkpoint(input: CheckpointRequest, options?: RequestOptions): Promise<WorkflowCheckpoint> { return this.#json("POST", "/v1/checkpoints", input, options, isWorkflowCheckpoint); }
+  async recoveryStatus(workflowId: string, options?: RequestOptions): Promise<RecoveryStatus> {
+    if (!isUuid(workflowId)) throw this.#protocol("workflow id must be a UUID");
+    return this.#json("GET", `/v1/recovery/${encodeURIComponent(workflowId)}`, undefined, options, isRecoveryStatus);
+  }
   async recover(workflowId: string, options?: RequestOptions): Promise<RecoveryDecision> {
     return this.#consumeJson("POST", `/v1/recovery/${encodeURIComponent(workflowId)}`, undefined, options, (response, payload) => {
       if (!isRecoveryDecision(payload)) throw this.#responseError(response.status, payload);

@@ -11,6 +11,17 @@ pub const MAX_RECOVERY_RECEIPTS: usize = 64;
 pub const MAX_RECOVERY_RECEIPT_EVIDENCE: usize = 32;
 pub const MAX_RECOVERY_RECEIPT_BYTES: usize = 256 * 1024;
 
+/// Read-model for recovery status: what the runtime durably knows about a
+/// workflow's checkpoint and recorded recovery receipts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryStatus {
+    pub workflow_id: WorkflowId,
+    pub checkpoint: WorkflowCheckpoint,
+    pub receipts: Vec<RecoveryReceipt>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]

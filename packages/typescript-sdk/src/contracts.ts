@@ -231,6 +231,7 @@ export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };
 export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory: RecoveryRecord[]; recoveryReceipts: unknown[]; createdAt: string; }
 export interface RecoveryRecord { recordedAt: string; decision: RecoveryDecision; }
+export interface RecoveryStatus { workflowId: Id; checkpoint: WorkflowCheckpoint; receipts: unknown[]; }
 export type RecoveryDecision =
   | { status: "resumed"; checkpointId: Id; attemptId: Id; evidence: Evidence[] }
   | { status: "needsReconciliation"; checkpointId: Id; attemptId: Id; reason: string; evidence: Evidence[] }

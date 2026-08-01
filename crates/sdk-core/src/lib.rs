@@ -305,6 +305,23 @@ impl RuntimeService {
             .await
     }
 
+    pub async fn recovery_status(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<types::RecoveryStatus, RecoveryError> {
+        let checkpoint = self
+            .recovery
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?
+            .load_checkpoint(workflow_id)
+            .await?;
+        Ok(types::RecoveryStatus {
+            workflow_id: workflow_id.clone(),
+            receipts: checkpoint.recovery_receipts.clone(),
+            checkpoint,
+        })
+    }
+
     pub async fn recovery_session(
         &self,
         workflow_id: &WorkflowId,
