@@ -40,7 +40,10 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["profile"],
         ),
-        "page_open" => (json!({"sessionId": id()}), vec!["sessionId"]),
+        "page_open" => (
+            json!({"sessionId": id(), "url": string(1, MAX_URL_BYTES)}),
+            vec!["sessionId"],
+        ),
         "page_close" => (
             json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
             vec!["sessionId", "pageId"],

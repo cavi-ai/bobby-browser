@@ -204,7 +204,7 @@ impl AdaptivePageEngine {
         &self,
         envelope: &CommandEnvelope,
         lease: &WorkerLease,
-        page: PageState,
+        page: Option<PageState>,
         vision_gate: VisionGate,
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
         if let RuntimeCommand::Intent(intent) = &envelope.command {
@@ -250,7 +250,10 @@ impl AdaptivePageEngine {
             )
             .await;
         };
-        let page_url = page.url.as_deref().unwrap_or_default();
+        let page_url = page
+            .as_ref()
+            .and_then(|page| page.url.as_deref())
+            .unwrap_or_default();
         match direct.eligibility.classify(command, page_url) {
             EligibilityDecision::Denied(error) => Err(error.into()),
             EligibilityDecision::Chromium(reason) => {
@@ -481,52 +484,95 @@ async fn browser_execute(
     reason: ExecutionReason,
     state_version: u64,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
-    let page_id = envelope.page_id.as_ref().expect("validated page id");
+    let page_id = envelope.page_id.as_ref();
     let RuntimeCommand::Primitive(command) = &envelope.command else {
         unreachable!("intent commands use execute_intent");
     };
     let mut evidence = match command {
-        PrimitiveCommand::Navigate(command) => lease.worker().navigate(page_id, command).await?,
-        PrimitiveCommand::Inspect(command) => lease.worker().inspect(page_id, command).await?,
-        PrimitiveCommand::Click(command) => lease.worker().click(page_id, command).await?,
-        PrimitiveCommand::TypeText(command) => lease.worker().type_text(page_id, command).await?,
+        PrimitiveCommand::Navigate(command) => {
+            lease
+                .worker()
+                .navigate(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::Inspect(command) => {
+            lease
+                .worker()
+                .inspect(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::Click(command) => {
+            lease
+                .worker()
+                .click(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::TypeText(command) => {
+            lease
+                .worker()
+                .type_text(page_id.expect("validated page id"), command)
+                .await?
+        }
         PrimitiveCommand::UploadFiles(command) => {
-            lease.worker().upload_files(page_id, command).await?
+            lease
+                .worker()
+                .upload_files(page_id.expect("validated page id"), command)
+                .await?
         }
         PrimitiveCommand::OpenPage(command) => lease.worker().open_page_command(command).await?,
         PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await?,
         PrimitiveCommand::ClosePage(command) => lease.worker().close_page_command(command).await?,
         PrimitiveCommand::ActivatePage(command) => lease.worker().activate_page(command).await?,
         PrimitiveCommand::AccessibilitySnapshot(command) => {
-            lease.worker().a11y_snapshot(page_id, command).await?
+            lease
+                .worker()
+                .a11y_snapshot(page_id.expect("validated page id"), command)
+                .await?
         }
         PrimitiveCommand::ClickAndWaitForPopup(command) => {
             lease
                 .worker()
-                .click_and_wait_for_popup(page_id, command)
+                .click_and_wait_for_popup(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::ClickAndWaitForDownload(command) => {
             lease
                 .worker()
-                .click_and_wait_for_download(page_id, command)
+                .click_and_wait_for_download(page_id.expect("validated page id"), command)
                 .await?
         }
-        PrimitiveCommand::WaitFor(command) => lease.worker().wait_for(page_id, command).await?,
+        PrimitiveCommand::WaitFor(command) => {
+            lease
+                .worker()
+                .wait_for(page_id.expect("validated page id"), command)
+                .await?
+        }
         PrimitiveCommand::CaptureScreenshot(command) => {
-            lease.worker().capture_screenshot(page_id, command).await?
+            lease
+                .worker()
+                .capture_screenshot(page_id.expect("validated page id"), command)
+                .await?
         }
         PrimitiveCommand::SetFocusEmulation(command) => {
-            lease.worker().set_focus_emulation(page_id, command).await?
+            lease
+                .worker()
+                .set_focus_emulation(page_id.expect("validated page id"), command)
+                .await?
         }
         PrimitiveCommand::SetEmulatedMedia(command) => {
-            lease.worker().set_emulated_media(page_id, command).await?
+            lease
+                .worker()
+                .set_emulated_media(page_id.expect("validated page id"), command)
+                .await?
         }
         // ChromiumWorker::evaluate_javascript (F3) executes the JS; non-Chromium
         // workers keep the default unsupported CommandError. The two policy gates
         // (token capability, session ExecutionPolicy) land in F4.
         PrimitiveCommand::EvaluateJavaScript(command) => {
-            lease.worker().evaluate_javascript(page_id, command).await?
+            lease
+                .worker()
+                .evaluate_javascript(page_id.expect("validated page id"), command)
+                .await?
         }
         PrimitiveCommand::ExtractStructured(_) => {
             unreachable!("structured extraction is intercepted in execute")
