@@ -3,14 +3,15 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 use crate::job::{Job, JobConfig, JobId, JobStatus};
-use crate::queue::JobQueue;
+use crate::queue::{JobQueue, RetryConfig};
 use crate::{JobResult, SchedulerConfig, SchedulerStats};
 
 /// Trait for job execution handlers.
@@ -23,76 +24,157 @@ pub trait JobHandler: Send + Sync {
 /// Job scheduler with concurrency control.
 pub struct JobScheduler {
     config: SchedulerConfig,
-    queue: Mutex<JobQueue>,
+    queue: Arc<Mutex<JobQueue>>,
     semaphore: Arc<Semaphore>,
-    handlers: HashMap<String, Arc<dyn JobHandler>>,
-    job_registry: Mutex<HashMap<JobId, Job>>,
+    handlers: Arc<HashMap<String, Arc<dyn JobHandler>>>,
+    job_registry: Arc<Mutex<HashMap<JobId, Job>>>,
+    shutdown: Arc<AtomicBool>,
+    wake: Arc<Notify>,
+    total_submitted: Arc<AtomicU64>,
+    total_completed: Arc<AtomicU64>,
+    total_failed: Arc<AtomicU64>,
+    total_retried: Arc<AtomicU64>,
+    active_jobs: Arc<AtomicU64>,
 }
 
 impl JobScheduler {
     pub fn new(config: SchedulerConfig) -> Self {
+        let retry_config = RetryConfig {
+            max_retries: config.max_retries,
+            backoff_base_ms: config.retry_backoff_base_ms,
+            backoff_max_ms: config.retry_backoff_max_ms,
+        };
+        let queue = JobQueue::new(config.max_queue_size).with_retry_config(retry_config);
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_jobs));
         Self {
-            config: config.clone(),
-            queue: Mutex::new(JobQueue::new(config.max_queue_size)),
+            config,
+            queue: Arc::new(Mutex::new(queue)),
             semaphore,
-            handlers: HashMap::new(),
-            job_registry: Mutex::new(HashMap::new()),
+            handlers: Arc::new(HashMap::new()),
+            job_registry: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            wake: Arc::new(Notify::new()),
+            total_submitted: Arc::new(AtomicU64::new(0)),
+            total_completed: Arc::new(AtomicU64::new(0)),
+            total_failed: Arc::new(AtomicU64::new(0)),
+            total_retried: Arc::new(AtomicU64::new(0)),
+            active_jobs: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    /// Register a job handler by name.
+    /// Register a job handler by name. Call before `run`.
     pub fn register_handler(&mut self, name: String, handler: Arc<dyn JobHandler>) {
-        self.handlers.insert(name, handler);
+        let mut map = (*self.handlers).clone();
+        map.insert(name, handler);
+        self.handlers = Arc::new(map);
     }
 
     /// Submit a job to the scheduler.
     pub async fn submit(&self, config: JobConfig) -> Result<JobId, crate::JobError> {
+        // Lock order: queue then registry
         let mut queue = self.queue.lock().await;
-        let id = queue.submit(config)?;
+        let job = queue.submit(config)?;
+        let id = job.id.clone();
+        {
+            let mut registry = self.job_registry.lock().await;
+            registry.insert(id.clone(), job);
+        }
+        self.total_submitted.fetch_add(1, Ordering::Relaxed);
+        self.wake.notify_one();
         Ok(id)
     }
 
-    /// Start processing jobs from the queue.
-    pub async fn run(&self) -> Result<(), crate::JobError> {
-        loop {
-            let mut queue = self.queue.lock().await;
+    /// Request the run loop to stop after in-flight work drains.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.wake.notify_waiters();
+    }
 
-            // Get next job
-            let job = match queue.next_job() {
-                Some(job) => job,
-                None => {
-                    drop(queue);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+    /// Start processing jobs from the queue until shutdown is requested.
+    pub async fn run(&self) -> Result<(), crate::JobError> {
+        let mut in_flight: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+        loop {
+            // Reap finished tasks
+            while let Some(res) = in_flight.try_join_next() {
+                if let Err(e) = res {
+                    error!("job task join error: {e}");
+                }
+            }
+
+            if self.shutdown.load(Ordering::SeqCst) && in_flight.is_empty() {
+                let pending = self.queue.lock().await.pending_count();
+                if pending == 0 {
+                    break;
+                }
+                // Shutting down with pending work: stop accepting new starts.
+                break;
+            }
+
+            if self.shutdown.load(Ordering::SeqCst) {
+                // Wait for in-flight to finish; do not start new jobs.
+                if let Some(res) = in_flight.join_next().await {
+                    if let Err(e) = res {
+                        error!("job task join error: {e}");
+                    }
+                }
+                continue;
+            }
+
+            // Acquire concurrency slot before dequeuing so jobs stay cancelable in-queue.
+            let permit = match self.semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tokio::select! {
+                        _ = self.wake.notified() => {}
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
                     continue;
                 }
+            };
+
+            let job = {
+                let mut queue = self.queue.lock().await;
+                queue.next_job()
+            };
+
+            let Some(job) = job else {
+                drop(permit);
+                if self.shutdown.load(Ordering::SeqCst) {
+                    continue;
+                }
+                tokio::select! {
+                    _ = self.wake.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+                continue;
             };
 
             let job_id = job.id.clone();
-            let _job_name = job.name.clone();
 
-            // Release queue lock before acquiring semaphore
-            drop(queue);
+            // Mirror Running into the registry
+            {
+                let mut registry = self.job_registry.lock().await;
+                if let Some(registered) = registry.get_mut(&job_id) {
+                    if registered.status == JobStatus::Cancelled {
+                        // Cancelled while queued; skip execution
+                        drop(permit);
+                        continue;
+                    }
+                    registered.start();
+                }
+            }
 
+            self.active_jobs.fetch_add(1, Ordering::Relaxed);
             info!("Processing job: {} (priority: {:?})", job_id, job.priority);
 
-            // Acquire semaphore slot
-            let permit = match self.semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(e) => {
-                    warn!("Failed to acquire semaphore slot: {}", e);
-                    continue;
-                }
-            };
-
-            // Spawn job execution
             let scheduler = self.clone();
             let job_clone = job.clone();
 
-            tokio::spawn(async move {
+            in_flight.spawn(async move {
                 let result = match timeout(
                     Duration::from_millis(scheduler.config.job_timeout_ms),
-                    scheduler.execute_job(job_clone),
+                    scheduler.execute_job(&job_clone),
                 )
                 .await
                 {
@@ -109,61 +191,101 @@ impl JobScheduler {
                     }
                 };
 
-                // Update job registry and queue
-                let mut queue = scheduler.queue.lock().await;
-                let mut registry = scheduler.job_registry.lock().await;
-
-                if let Some(job) = registry.get_mut(&job_id) {
-                    job.status = if result.success { JobStatus::Completed } else { JobStatus::Failed };
-                    job.completed_at = Some(Utc::now());
-                    job.result = Some(result.clone());
-
-                    if !result.success {
-                        // Attempt retry if configured
-                        if job.can_retry() {
-                            info!("Retrying job {} (attempt {}/{})", job_id, job.retry_count, job.retry_count + 1);
-                            let backoff = match queue.retry_job(&job_id) {
-                                Ok(backoff) => backoff,
-                                Err(_) => {
-                                    let _failed = job.clone().fail("max retries exceeded".to_string());
-                                    drop(queue);
-                                    drop(registry);
-                                    return;
-                                }
-                            };
-
-                            // Wait for backoff period
-                            drop(queue);
-                            tokio::time::sleep(backoff).await;
-
-                            // Re-queue the job
-                            let mut queue = scheduler.queue.lock().await;
-                            if let Some(requeued_job) = registry.get(&job_id) {
-                                let reconfig = JobConfig::new(
-                                    requeued_job.name.clone(),
-                                    requeued_job.payload.clone(),
-                                )
-                                .with_max_retries(requeued_job.max_retries)
-                                .with_priority(requeued_job.priority.clone());
-
-                                let _ = queue.submit(reconfig);
-                            }
-                            drop(queue);
-                        } else {
-                            let _failed = job.clone().fail("max retries exceeded".to_string());
-                        }
-                    }
-                }
-
+                scheduler.finish_job(job_id, result).await;
+                scheduler.active_jobs.fetch_sub(1, Ordering::Relaxed);
                 drop(permit);
+                scheduler.wake.notify_one();
             });
+        }
+
+        while let Some(res) = in_flight.join_next().await {
+            if let Err(e) = res {
+                error!("job task join error: {e}");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn finish_job(&self, job_id: JobId, result: JobResult) {
+        // Phase 1: update registry (no queue lock held)
+        let retry_plan = {
+            let mut registry = self.job_registry.lock().await;
+            let Some(job) = registry.get_mut(&job_id) else {
+                warn!("finished unknown job {}", job_id);
+                return;
+            };
+
+            // Honour cancel that landed while running
+            if job.status == JobStatus::Cancelled {
+                return;
+            }
+
+            if result.success {
+                job.complete(result);
+                self.total_completed.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+
+            job.fail(
+                result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "job failed".to_string()),
+            );
+            job.result = Some(result);
+
+            if !job.can_retry() {
+                self.total_failed.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+
+            let retry_count_after = job.retry_count + 1;
+            let max_retries = job.max_retries;
+            job.prepare_retry();
+            self.total_retried.fetch_add(1, Ordering::Relaxed);
+            Some((retry_count_after, max_retries, job.clone()))
+        };
+
+        let Some((retry_count_after, max_retries, requeue_job)) = retry_plan else {
+            return;
+        };
+
+        let backoff = {
+            let queue = self.queue.lock().await;
+            queue.retry_config().calculate_backoff(retry_count_after)
+        };
+
+        info!(
+            "Retrying job {} (attempt {}/{})",
+            job_id, retry_count_after, max_retries
+        );
+
+        tokio::time::sleep(backoff).await;
+
+        // Phase 2: requeue — lock order queue then registry
+        let mut queue = self.queue.lock().await;
+        let mut registry = self.job_registry.lock().await;
+        let Some(job) = registry.get_mut(&job_id) else {
+            return;
+        };
+        if job.status == JobStatus::Cancelled {
+            return;
+        }
+        if let Err(e) = queue.requeue(requeue_job) {
+            warn!("failed to requeue job {}: {e}", job_id);
+            job.fail(format!("requeue failed: {e}"));
+            self.total_failed.fetch_add(1, Ordering::Relaxed);
+        } else {
+            drop(registry);
+            drop(queue);
+            self.wake.notify_one();
         }
     }
 
-    async fn execute_job(&self, job: Job) -> JobResult {
+    async fn execute_job(&self, job: &Job) -> JobResult {
         let job_id = job.id.clone();
 
-        // Find handler
         let handler = match self.handlers.get(&job.name) {
             Some(h) => h.clone(),
             None => {
@@ -177,8 +299,7 @@ impl JobScheduler {
             }
         };
 
-        // Execute with handler
-        match handler.execute(&job).await {
+        match handler.execute(job).await {
             Ok(output) => {
                 info!("Job {} completed successfully", job_id);
                 JobResult {
@@ -202,31 +323,53 @@ impl JobScheduler {
         }
     }
 
+    /// Get a snapshot of a job from the registry.
+    pub async fn get_job(&self, job_id: &JobId) -> Option<Job> {
+        let registry = self.job_registry.lock().await;
+        registry.get(job_id).cloned()
+    }
+
     /// Get scheduler statistics.
     pub async fn stats(&self) -> SchedulerStats {
         let queue = self.queue.lock().await;
-        let registry = self.job_registry.lock().await;
         let queue_stats = queue.stats();
 
-        let mut total_retried = 0u64;
-        for job in registry.values() {
-            total_retried += job.retry_count as u64;
-        }
-
         SchedulerStats {
-            total_submitted: queue_stats.total as u64 + registry.len() as u64,
-            total_completed: queue_stats.completed as u64 + registry.values().filter(|j| j.status == JobStatus::Completed).count() as u64,
-            total_failed: queue_stats.failed as u64 + registry.values().filter(|j| j.status == JobStatus::Failed).count() as u64,
-            total_retried,
-            active_jobs: queue_stats.running,
+            total_submitted: self.total_submitted.load(Ordering::Relaxed),
+            total_completed: self.total_completed.load(Ordering::Relaxed),
+            total_failed: self.total_failed.load(Ordering::Relaxed),
+            total_retried: self.total_retried.load(Ordering::Relaxed),
+            active_jobs: self.active_jobs.load(Ordering::Relaxed) as usize,
             queued_jobs: queue_stats.pending,
         }
     }
 
     /// Cancel a job by ID.
     pub async fn cancel_job(&self, job_id: &JobId) -> Result<(), crate::JobError> {
+        // Lock order: queue then registry
         let mut queue = self.queue.lock().await;
-        queue.cancel_job(job_id)
+        let mut registry = self.job_registry.lock().await;
+        let Some(job) = registry.get_mut(job_id) else {
+            return Err(crate::JobError::NotFound(job_id.clone()));
+        };
+
+        match job.status {
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled => {
+                Err(crate::JobError::Execution(format!(
+                    "job {} already finished with status {}",
+                    job_id, job.status
+                )))
+            }
+            JobStatus::Pending => {
+                let _ = queue.cancel_job(job_id);
+                job.cancel();
+                Ok(())
+            }
+            JobStatus::Running => {
+                job.cancel();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -234,10 +377,17 @@ impl Clone for JobScheduler {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            queue: Mutex::new(JobQueue::new(self.config.max_queue_size)),
-            semaphore: self.semaphore.clone(),
-            handlers: self.handlers.clone(),
-            job_registry: Mutex::new(HashMap::new()),
+            queue: Arc::clone(&self.queue),
+            semaphore: Arc::clone(&self.semaphore),
+            handlers: Arc::clone(&self.handlers),
+            job_registry: Arc::clone(&self.job_registry),
+            shutdown: Arc::clone(&self.shutdown),
+            wake: Arc::clone(&self.wake),
+            total_submitted: Arc::clone(&self.total_submitted),
+            total_completed: Arc::clone(&self.total_completed),
+            total_failed: Arc::clone(&self.total_failed),
+            total_retried: Arc::clone(&self.total_retried),
+            active_jobs: Arc::clone(&self.active_jobs),
         }
     }
 }

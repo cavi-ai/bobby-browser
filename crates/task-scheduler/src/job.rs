@@ -14,12 +14,7 @@ pub struct JobId(pub String);
 
 impl JobId {
     pub fn new() -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before epoch")
-            .as_nanos();
-        JobId(format!("job_{nanos}"))
+        JobId(format!("job_{}", uuid::Uuid::new_v4()))
     }
 }
 
@@ -123,24 +118,22 @@ impl Job {
         self.started_at = Some(Utc::now());
     }
 
-    pub fn complete(mut self, result: JobResult) -> Self {
+    pub fn complete(&mut self, result: JobResult) {
         self.status = JobStatus::Completed;
         self.completed_at = Some(Utc::now());
         self.result = Some(result);
-        self
+        self.error = None;
     }
 
-    pub fn fail(mut self, error: String) -> Self {
+    pub fn fail(&mut self, error: String) {
         self.status = JobStatus::Failed;
         self.completed_at = Some(Utc::now());
         self.error = Some(error);
-        self
     }
 
-    pub fn cancel(mut self) -> Self {
+    pub fn cancel(&mut self) {
         self.status = JobStatus::Cancelled;
         self.completed_at = Some(Utc::now());
-        self
     }
 
     pub fn can_retry(&self) -> bool {
@@ -150,6 +143,16 @@ impl Job {
 
     pub fn increment_retry(&mut self) {
         self.retry_count += 1;
+    }
+
+    /// Reset a failed job to pending for another attempt.
+    pub fn prepare_retry(&mut self) {
+        self.retry_count += 1;
+        self.status = JobStatus::Pending;
+        self.started_at = None;
+        self.completed_at = None;
+        self.error = None;
+        self.result = None;
     }
 }
 
@@ -218,4 +221,7 @@ pub enum JobError {
 
     #[error("concurrency limit reached")]
     ConcurrencyExceeded,
+
+    #[error("job not found: {0}")]
+    NotFound(JobId),
 }
