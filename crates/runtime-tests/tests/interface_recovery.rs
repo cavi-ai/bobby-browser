@@ -425,7 +425,7 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
         .env("CONFORMANCE_MCP_LOSS_ROOT", root.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -452,13 +452,29 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
     let envelope = serde_json::json!({"schemaVersion":2,"commandId":command_id,"workflowId":workflow,"attemptId":AttemptId::new(),"sessionId":session,"pageId":page,"deadline":(Utc::now()+Duration::seconds(20)),"command":{"kind":"primitive","input":{"kind":"click","input":{"selector":"#mutate","target":null,"boundary":false,"expectedUrl":null}}}});
     mcp_send(&mut stdin,serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"command_execute","arguments":{"envelope":envelope}}})).await;
     let marker = root.path().join("executing.marker");
-    tokio::time::timeout(StdDuration::from_secs(120), async {
+    let marker_wait = tokio::time::timeout(StdDuration::from_secs(120), async {
         while !marker.exists() {
             tokio::time::sleep(StdDuration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("MCP child did not reach durable executing");
+    .await;
+    if marker_wait.is_err() {
+        let child_stderr = tokio::time::timeout(StdDuration::from_secs(2), async {
+            let mut collected = Vec::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                use tokio::io::AsyncReadExt;
+                let _ = stderr.read_to_end(&mut collected).await;
+            }
+            collected
+        })
+        .await
+        .unwrap_or_default();
+        let child_status = child.try_wait();
+        panic!(
+            "MCP child did not reach durable executing (status: {child_status:?}, stderr: {})",
+            String::from_utf8_lossy(&child_stderr)
+        );
+    }
     child.kill().await.unwrap();
     let status = child.wait().await.unwrap();
     assert!(!status.success(), "MCP child was not terminated");
