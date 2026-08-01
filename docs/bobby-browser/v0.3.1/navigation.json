@@ -16,6 +16,7 @@
       "pages": [
         { "title": "Multi-principal runtime", "path": "concepts/multi-principal.md" },
         { "title": "Capabilities", "path": "concepts/capabilities.md" },
+        { "title": "Canonical form contract", "path": "concepts/form-contract.md" },
         { "title": "Evidence and checkpoints", "path": "concepts/evidence-checkpoints.md" }
       ]
     },

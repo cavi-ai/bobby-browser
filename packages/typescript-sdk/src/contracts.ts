@@ -151,6 +151,23 @@ export interface AccessibilityNode {
   valueMax?: string;
   children?: AccessibilityNode[];
 }
+
+/** Canonical, engine-neutral form observation contract. */
+export const FORM_SNAPSHOT_SCHEMA_VERSION = 1 as const;
+export type FormControlKind = "text" | "email" | "password" | "search" | "number" | "checkbox" | "radio" | "switch" | "selectOne" | "selectMultiple" | "date" | "time" | "dateTimeLocal" | "range" | "file" | "contentEditable" | "combobox" | "listbox" | "submit" | "reset" | "other";
+export type FormControlOperation = "setText" | "setChecked" | "selectOne" | "selectMany" | "setFiles" | "clear" | "activate";
+export type FormValidityFlag = "valueMissing" | "typeMismatch" | "patternMismatch" | "tooLong" | "tooShort" | "rangeUnderflow" | "rangeOverflow" | "stepMismatch" | "badInput" | "customError";
+export interface SemanticTargetSegment { role: string; accessibleName: string; ordinal: number | null; }
+export interface FormControlTarget { role: string; accessibleName: string; ordinal: number | null; framePath: SemanticTargetSegment[]; shadowPath: SemanticTargetSegment[]; }
+export type FormControlState = { kind: "empty" } | { kind: "text"; value: string } | { kind: "redacted"; present: boolean } | { kind: "checked"; checked: boolean } | { kind: "selection"; values: string[] } | { kind: "files"; count: number };
+export interface FormControlConstraints { required: boolean; readOnly: boolean; disabled: boolean; pattern: string | null; minLength: number | null; maxLength: number | null; min: string | null; max: string | null; step: string | null; multiple: boolean; accept: string[]; }
+export interface FormControlValidity { willValidate: boolean; valid: boolean; flags: FormValidityFlag[]; message: string | null; describedBy: string[]; }
+export interface FormOption { value: string; label: string; disabled: boolean; selected: boolean; groupLabel: string | null; }
+export interface FormControl { id: string; formId: string | null; groupId: string | null; target: FormControlTarget | null; controlKind: FormControlKind; accessibleName: string | null; label: string | null; description: string | null; placeholder: string | null; autocomplete: string | null; state: FormControlState; constraints: FormControlConstraints; validity: FormControlValidity; options: FormOption[]; supportedOperations: FormControlOperation[]; }
+export interface FormGroup { id: string; label: string | null; description: string | null; controlIds: string[]; }
+export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
+export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
+export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; }
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
