@@ -200,6 +200,11 @@ pub enum Evidence {
         nodes: Vec<AccessibilityNode>,
         truncated: bool,
     },
+    StructuredExtraction {
+        page_id: PageId,
+        value: serde_json::Value,
+        truncated: bool,
+    },
     IntentExecution {
         record: ExecutionRecord,
     },
