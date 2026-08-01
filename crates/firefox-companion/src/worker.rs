@@ -35,8 +35,9 @@ use tokio::{
 use types::ProfileId;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, CommandId, ErrorCode, ErrorLayer, Evidence,
-    InspectCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TextMatch,
+    ClickCommand, ClosePageCommand, CommandError, CommandId, ControlAction, ControlActionCommand,
+    ErrorCode, ErrorLayer, Evidence, FormControl, FormControlTarget, InspectCommand,
+    NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch,
     TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 use url::Url;
@@ -61,6 +62,25 @@ const PAGE_BINDING_TITLE_PREFIX: &str = "automation-runtime-binding:";
 pub const MAX_TRACKED_PAGES: usize = 256;
 const PAGE_BINDING_RELEASE_ATTEMPTS: usize = 3;
 const MAX_FRAME_PATH_DEPTH: usize = 8;
+
+fn form_control_target_spec(target: &FormControlTarget) -> TargetSpec {
+    fn segment(value: &types::SemanticTargetSegment) -> Box<TargetSpec> {
+        Box::new(TargetSpec {
+            role: Some(value.role.clone()),
+            accessible_name: Some(value.accessible_name.clone()),
+            ordinal: value.ordinal,
+            ..Default::default()
+        })
+    }
+    TargetSpec {
+        role: Some(target.role.clone()),
+        accessible_name: Some(target.accessible_name.clone()),
+        ordinal: target.ordinal,
+        frame_path: target.frame_path.iter().map(segment).collect(),
+        shadow_path: target.shadow_path.iter().map(segment).collect(),
+        ..Default::default()
+    }
+}
 const MAX_UPLOAD_FILES: usize = 32;
 const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -1469,6 +1489,34 @@ impl FirefoxCompanionWorker {
         }
     }
 
+    async fn evaluate_control_script(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+        body: &str,
+    ) -> Result<(), CommandError> {
+        let context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &context, "", Some(target))
+            .await?;
+        let selector = serde_json::to_string(&selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let response = self.transport.send("script.evaluate", json!({
+            "expression": format!("(()=>{{const el=document.querySelector({selector});if(!el)return false;{body}el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()"),
+            "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+            "awaitPromise": false,
+            "resultOwnership": "none",
+        })).await?;
+        if response.pointer("/result/value").and_then(Value::as_bool) != Some(true) {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox control action was rejected",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     async fn descend_frame_context(
         &self,
         context: &str,
@@ -2183,6 +2231,135 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let snapshot = worker_pool::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
         Ok(vec![
             Evidence::FormSnapshot { snapshot },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        command
+            .action
+            .validate()
+            .map_err(|message| driver_error(ErrorCode::InvalidRequest, message, false))?;
+        let target = form_control_target_spec(&command.target);
+        let snapshot = self
+            .form_snapshot(page_id, None)
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "missing form snapshot",
+                    false,
+                )
+            })?;
+        let find = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
+            snapshot
+                .forms
+                .iter()
+                .flat_map(|form| form.controls.iter())
+                .chain(snapshot.unowned_controls.iter())
+                .find(|control| control.target.as_ref() == Some(&command.target))
+                .cloned()
+        };
+        let control = find(&snapshot).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetNotFound,
+                "form control target was not found",
+                false,
+            )
+        })?;
+        worker_pool::validate_control_action(&control, &command.action)?;
+        match &command.action {
+            ControlAction::SetText { value } | ControlAction::SelectOne { value } => {
+                self.type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        value: value.clone(),
+                        clear_first: true,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SetChecked { checked } => {
+                self.type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        value: checked.to_string(),
+                        clear_first: false,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SetFiles { paths } => {
+                self.upload_files(
+                    page_id,
+                    &UploadFilesCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        paths: paths.clone(),
+                    },
+                )
+                .await?;
+            }
+            ControlAction::Activate => {
+                self.click(
+                    page_id,
+                    &ClickCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        boundary: false,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SelectMany { values } => {
+                self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;for(const value of requested)if([...el.options].filter(option=>option.value===value&&!option.disabled).length!==1)return false;for(const option of el.options)option.selected=requested.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
+            }
+            ControlAction::Clear => {
+                self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if('checked'in el)el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
+            }
+        }
+        let after = self
+            .form_snapshot(page_id, None)
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "missing post-action form snapshot",
+                    true,
+                )
+            })?;
+        let control = find(&after).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetDetached,
+                "form control was replaced after dispatch",
+                true,
+            )
+        })?;
+        Ok(vec![
+            Evidence::ControlAction {
+                action: worker_pool::control_action_evidence(&control, &command.action, false)?,
+            },
             self.evidence(InteractionPath::EngineNative),
         ])
     }
@@ -3276,6 +3453,76 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ])
+    }
+
+    async fn emulate(
+        &self,
+        page_id: &PageId,
+        command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if let Some(viewport) = command.viewport {
+            if viewport.width == 0
+                || viewport.height == 0
+                || viewport.width > 16384
+                || viewport.height > 16384
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "viewport dimensions must be within 1..=16384",
+                    false,
+                ));
+            }
+            self.transport
+                .send(
+                    "browsingContext.setViewport",
+                    json!({
+                        "context": context,
+                        "viewport": {"width": viewport.width, "height": viewport.height},
+                    }),
+                )
+                .await?;
+        }
+        if let Some(coordinates) = command.geolocation {
+            if !coordinates.latitude.is_finite()
+                || !coordinates.longitude.is_finite()
+                || !(-90.0..=90.0).contains(&coordinates.latitude)
+                || !(-180.0..=180.0).contains(&coordinates.longitude)
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "geolocation coordinates are out of range",
+                    false,
+                ));
+            }
+            let mut params = json!({
+                "context": context,
+                "coordinates": {
+                    "latitude": coordinates.latitude,
+                    "longitude": coordinates.longitude,
+                },
+            });
+            if let Some(accuracy) = coordinates.accuracy {
+                params["coordinates"]["accuracy"] = json!(accuracy);
+            }
+            self.transport
+                .send("session.setGeolocationOverride", params)
+                .await
+                .map_err(|error| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        format!(
+                            "geolocation override is not supported by this browser: {}",
+                            error.message
+                        ),
+                        false,
+                    )
+                })?;
+        }
+        Ok(vec![Evidence::Emulation {
+            viewport: command.viewport,
+            geolocation: command.geolocation,
+        }])
     }
 
     async fn handle_dialog(

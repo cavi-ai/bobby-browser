@@ -473,6 +473,18 @@ impl PageRuntime {
                     Err(verification_error("typed value did not match page state"))
                 }
             }
+            PrimitiveCommand::ControlAction(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::ControlAction { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "control action returned no typed post-action evidence",
+                    ))
+                }
+            }
             PrimitiveCommand::Click(command) => {
                 if let Some(expected_url) = &command.expected_url {
                     let verification = lease
@@ -520,6 +532,16 @@ impl PageRuntime {
                     Err(verification_error(
                         "accessibility snapshot returned no snapshot evidence",
                     ))
+                }
+            }
+            PrimitiveCommand::Emulate(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Emulation { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("emulate command returned no emulation evidence"))
                 }
             }
             PrimitiveCommand::HandleDialog(_) => {

@@ -85,6 +85,7 @@ pub(super) fn expected_postcondition(command: &RuntimeCommand) -> &'static str {
         PrimitiveCommand::GetCookies(_) => "cookie state is observed",
         PrimitiveCommand::PrintToPdf(_) => "PDF artifact is observed",
         PrimitiveCommand::HandleDialog(_) => "dialog handling is observed",
+        PrimitiveCommand::Emulate(_) => "emulation is observed",
         PrimitiveCommand::SetCookies(_) | PrimitiveCommand::DeleteCookies(_) => {
             "cookie mutation is observed"
         }
@@ -98,6 +99,7 @@ pub(super) fn expected_postcondition(command: &RuntimeCommand) -> &'static str {
             "requested page configuration is observed"
         }
         PrimitiveCommand::EvaluateJavaScript(_) => "JavaScript result is observed",
+        PrimitiveCommand::ControlAction(_) => "typed control state is observed",
     }
 }
 
