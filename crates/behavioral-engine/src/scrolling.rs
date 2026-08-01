@@ -144,6 +144,10 @@ impl ScrollSimulator {
         delta_y: i64,
         page_height: f64,
     ) -> Vec<ScrollAction> {
+        if delta_y == 0 {
+            return Vec::new();
+        }
+
         let mut actions = Vec::new();
         // Decide scroll speed
         let is_fast_scroll = random.rng.random_range(0.0..1.0) < self.config.fast_scroll_probability;

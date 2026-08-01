@@ -35,6 +35,18 @@ fn default_canvas_id() -> String {
     "automation-canvas".to_string()
 }
 
+impl CanvasConfig {
+    pub fn with_hash_seed(mut self, seed: u64) -> Self {
+        self.hash_seed = seed;
+        self
+    }
+
+    pub fn with_canvas_id(mut self, id: String) -> Self {
+        self.canvas_id = id;
+        self
+    }
+}
+
 /// Canvas masker that generates consistent hashes.
 pub struct CanvasMasker {
     config: CanvasConfig,
