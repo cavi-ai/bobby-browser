@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use task_scheduler::{
     Job, JobConfig, JobError, JobHandler, JobId, JobPriority, JobQueue, JobResult, JobScheduler,
-    JobStatus, RetryConfig, SchedulerConfig,
+    JobStatus, JobStore, JournalJobStore, RetryConfig, SchedulerConfig,
 };
 use tokio::sync::Mutex;
 
@@ -652,6 +652,8 @@ fn scheduler_config_default_values() {
     assert_eq!(config.retry_backoff_base_ms, 1000);
     assert_eq!(config.retry_backoff_max_ms, 60000);
     assert_eq!(config.job_timeout_ms, 300000);
+    assert_eq!(config.drain_timeout_ms, 30000);
+    assert!(config.journal_path.is_none());
 }
 
 #[test]
@@ -661,7 +663,9 @@ fn scheduler_config_chain() {
         .with_queue_size(200)
         .with_max_retries(5)
         .with_backoff_range(500, 30000)
-        .with_job_timeout(60000);
+        .with_job_timeout(60000)
+        .with_drain_timeout(1000)
+        .with_journal_path("/tmp/jobs.jsonl");
 
     assert_eq!(config.max_concurrent_jobs, 5);
     assert_eq!(config.max_queue_size, 200);
@@ -669,6 +673,11 @@ fn scheduler_config_chain() {
     assert_eq!(config.retry_backoff_base_ms, 500);
     assert_eq!(config.retry_backoff_max_ms, 30000);
     assert_eq!(config.job_timeout_ms, 60000);
+    assert_eq!(config.drain_timeout_ms, 1000);
+    assert_eq!(
+        config.journal_path.as_deref(),
+        Some(std::path::Path::new("/tmp/jobs.jsonl"))
+    );
 }
 
 #[test]
@@ -690,3 +699,278 @@ fn job_config_chain() {
     assert_eq!(config.max_retries, 10);
     assert_eq!(config.timeout, Some(std::time::Duration::from_secs(60)));
 }
+
+// ===== Production: journal / cancel / drain / concurrency =====
+
+async fn wait_status(
+    scheduler: &JobScheduler,
+    id: &JobId,
+    want: JobStatus,
+    attempts: usize,
+) -> Job {
+    for _ in 0..attempts {
+        if let Some(job) = scheduler.get_job(id).await {
+            if job.status == want {
+                return job;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    scheduler
+        .get_job(id)
+        .await
+        .unwrap_or_else(|| panic!("job {id} missing while waiting for {want}"))
+}
+
+#[test]
+fn journal_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jobs.jsonl");
+    let rt = runtime();
+
+    let id = rt.block_on(async {
+        let scheduler = JobScheduler::open_journal(
+            SchedulerConfig::default().with_backoff_range(1, 5),
+            &path,
+        )
+        .await
+        .unwrap();
+        scheduler
+            .submit(JobConfig::new("test".to_string(), serde_json::json!({})))
+            .await
+            .unwrap()
+    });
+
+    // Process "crash": drop first scheduler without running.
+    rt.block_on(async {
+        let mut scheduler = JobScheduler::open_journal(
+            SchedulerConfig::default()
+                .with_job_timeout(5_000)
+                .with_backoff_range(1, 5)
+                .with_drain_timeout(2_000),
+            &path,
+        )
+        .await
+        .unwrap();
+        scheduler.register_handler("test".to_string(), Arc::new(OkHandler));
+        let scheduler = Arc::new(scheduler);
+
+        let pending = scheduler.get_job(&id).await.unwrap();
+        assert_eq!(pending.status, JobStatus::Pending);
+
+        let runner = {
+            let s = Arc::clone(&scheduler);
+            tokio::spawn(async move { s.run().await })
+        };
+
+        let job = wait_status(&scheduler, &id, JobStatus::Completed, 100).await;
+        assert!(job.result.as_ref().unwrap().success);
+
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn journal_torn_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jobs.jsonl");
+    let rt = runtime();
+
+    let id = rt.block_on(async {
+        let scheduler = JobScheduler::open_journal(SchedulerConfig::default(), &path)
+            .await
+            .unwrap();
+        scheduler
+            .submit(JobConfig::new("keep".to_string(), serde_json::json!({})))
+            .await
+            .unwrap()
+    });
+
+    // Append a torn (incomplete) JSON line
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(f, "{{\"schemaVersion\":1,\"sequence\":99,\"recordedAt\":").unwrap();
+        f.flush().unwrap();
+    }
+
+    rt.block_on(async {
+        let store = JournalJobStore::open(&path).await.unwrap();
+        assert!(store.recovered_torn_tail());
+        let job = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(job.status, JobStatus::Pending);
+        assert_eq!(job.name, "keep");
+    });
+}
+
+#[test]
+fn cancel_aborts_running() {
+    let mut scheduler = JobScheduler::new(
+        SchedulerConfig::default()
+            .with_job_timeout(30_000)
+            .with_backoff_range(1, 5)
+            .with_drain_timeout(2_000),
+    );
+    scheduler.register_handler("hang".to_string(), Arc::new(HangHandler));
+    let scheduler = Arc::new(scheduler);
+    let rt = runtime();
+
+    rt.block_on(async {
+        let id = scheduler
+            .submit(JobConfig::new("hang".to_string(), serde_json::json!({})))
+            .await
+            .unwrap();
+
+        let runner = {
+            let s = Arc::clone(&scheduler);
+            tokio::spawn(async move { s.run().await })
+        };
+
+        wait_status(&scheduler, &id, JobStatus::Running, 50).await;
+        scheduler.cancel_job(&id).await.unwrap();
+
+        let job = wait_status(&scheduler, &id, JobStatus::Cancelled, 50).await;
+        assert_eq!(job.status, JobStatus::Cancelled);
+
+        for _ in 0..50 {
+            if scheduler.stats().await.active_jobs == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(scheduler.stats().await.active_jobs, 0);
+
+        scheduler.request_shutdown();
+        let _ = runner.await.unwrap();
+    });
+}
+
+#[test]
+fn retry_does_not_hold_permit() {
+    let mut scheduler = JobScheduler::new(
+        SchedulerConfig::default()
+            .with_max_concurrent(1)
+            .with_job_timeout(5_000)
+            .with_backoff_range(200, 200)
+            .with_drain_timeout(5_000),
+    );
+    scheduler.register_handler(
+        "flaky".to_string(),
+        Arc::new(FailNTimes {
+            failures_remaining: AtomicU32::new(1),
+        }),
+    );
+    scheduler.register_handler("fast".to_string(), Arc::new(OkHandler));
+    let scheduler = Arc::new(scheduler);
+    let rt = runtime();
+
+    rt.block_on(async {
+        let flaky_id = scheduler
+            .submit(
+                JobConfig::new("flaky".to_string(), serde_json::json!({}))
+                    .with_max_retries(3),
+            )
+            .await
+            .unwrap();
+        let fast_id = scheduler
+            .submit(JobConfig::new("fast".to_string(), serde_json::json!({})))
+            .await
+            .unwrap();
+
+        let runner = {
+            let s = Arc::clone(&scheduler);
+            tokio::spawn(async move { s.run().await })
+        };
+
+        // Fast job must complete while flaky is in backoff (permit released).
+        let fast = wait_status(&scheduler, &fast_id, JobStatus::Completed, 100).await;
+        assert!(fast.result.as_ref().unwrap().success);
+
+        let flaky = wait_status(&scheduler, &flaky_id, JobStatus::Completed, 150).await;
+        assert_eq!(flaky.retry_count, 1);
+
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn drain_deadline_aborts() {
+    let mut scheduler = JobScheduler::new(
+        SchedulerConfig::default()
+            .with_job_timeout(60_000)
+            .with_backoff_range(1, 5)
+            .with_drain_timeout(80),
+    );
+    scheduler.register_handler("hang".to_string(), Arc::new(HangHandler));
+    let scheduler = Arc::new(scheduler);
+    let rt = runtime();
+
+    rt.block_on(async {
+        scheduler
+            .submit(JobConfig::new("hang".to_string(), serde_json::json!({})))
+            .await
+            .unwrap();
+
+        let runner = {
+            let s = Arc::clone(&scheduler);
+            tokio::spawn(async move { s.run_with_drain(Duration::from_millis(80)).await })
+        };
+
+        // Let the hanging job start
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        scheduler.request_shutdown();
+
+        let result = tokio::time::timeout(Duration::from_secs(3), runner)
+            .await
+            .expect("run returns within drain window")
+            .unwrap();
+        assert_eq!(result, Err(JobError::DrainTimeout));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn multi_thread_smoke() {
+    let mut scheduler = JobScheduler::new(
+        SchedulerConfig::default()
+            .with_max_concurrent(4)
+            .with_job_timeout(5_000)
+            .with_backoff_range(1, 5)
+            .with_drain_timeout(5_000),
+    );
+    scheduler.register_handler("test".to_string(), Arc::new(OkHandler));
+    let scheduler = Arc::new(scheduler);
+
+    let mut ids = Vec::new();
+    for i in 0..20 {
+        let id = scheduler
+            .submit(JobConfig::new(
+                "test".to_string(),
+                serde_json::json!({"i": i}),
+            ))
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+
+    let runner = {
+        let s = Arc::clone(&scheduler);
+        tokio::spawn(async move { s.run().await })
+    };
+
+    for id in &ids {
+        wait_status(&scheduler, id, JobStatus::Completed, 200).await;
+    }
+
+    let stats = scheduler.stats().await;
+    assert_eq!(stats.total_completed, 20);
+    assert_eq!(stats.total_submitted, 20);
+
+    scheduler.request_shutdown();
+    runner.await.unwrap().unwrap();
+}
+

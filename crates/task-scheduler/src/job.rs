@@ -83,6 +83,9 @@ pub struct Job {
     pub max_retries: u32,
     pub result: Option<JobResult>,
     pub error: Option<String>,
+    /// Per-job timeout in milliseconds; when set, overrides scheduler default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 impl Job {
@@ -100,6 +103,7 @@ impl Job {
             max_retries: 3,
             result: None,
             error: None,
+            timeout_ms: None,
         }
     }
 
@@ -110,6 +114,11 @@ impl Job {
 
     pub fn with_priority(mut self, priority: JobPriority) -> Self {
         self.priority = priority;
+        self
+    }
+
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
         self
     }
 
@@ -224,4 +233,10 @@ pub enum JobError {
 
     #[error("job not found: {0}")]
     NotFound(JobId),
+
+    #[error("job store error: {0}")]
+    Store(String),
+
+    #[error("scheduler drain timed out")]
+    DrainTimeout,
 }

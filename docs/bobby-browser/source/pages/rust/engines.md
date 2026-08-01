@@ -15,7 +15,7 @@ refactors without a curated changelog.
 | Browsers / workers | `worker-pool`, `firefox-companion`, `companion-*` |
 | Page / session / intents | `page-runtime`, `session-manager`, `intent-engine` |
 | DOM / JS / network | `dom-engine`, `js-engine`, `network-engine` |
-| Persistence | `artifact-store`, `checkpoint-store`, `workflow-journal` |
+| Persistence | `artifact-store`, `checkpoint-store`, `workflow-journal`, `task-scheduler` (in-process queue + optional JSONL journal; not a public API) |
 | Gateways | `mcp-gateway`, `cdp-gateway` |
 | Other | `skill-runtime`, `observability`, `config` (config is shared but still alpha) |
 

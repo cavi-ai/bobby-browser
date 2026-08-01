@@ -1,13 +1,12 @@
 use behavioral_engine::{
-    BezierMouseSimulator, BehavioralConfig, MouseConfig, ScrollConfig, ScrollSimulator,
-    SessionRandom, TextConfig, TypingSimulator, generate_session_seed,
+    compose_typed_text, generate_session_seed, BezierMouseSimulator, BehavioralConfig, MouseConfig,
+    ScrollConfig, ScrollSimulator, SessionRandom, TextConfig, TypingSimulator,
 };
 
 #[test]
 fn generate_session_seed_produces_values() {
     let seed = generate_session_seed();
-    // Should produce a valid non-zero seed
-    assert!(seed > 0);
+    assert_ne!(seed, 0);
 }
 
 #[test]
@@ -15,7 +14,6 @@ fn session_random_deterministic_by_seed() {
     let mut r1 = SessionRandom::new(42);
     let mut r2 = SessionRandom::new(42);
 
-    // Same seed produces same sequence
     for _ in 0..100 {
         assert_eq!(r1.next_u64(), r2.next_u64());
         assert!((r1.next_f64(0.0, 1.0) - r2.next_f64(0.0, 1.0)).abs() < 1e-10);
@@ -35,7 +33,7 @@ fn session_random_f64_range() {
     let mut r = SessionRandom::new(99);
     for _ in 0..50 {
         let val = r.next_f64(10.0, 20.0);
-        assert!(val >= 10.0 && val <= 20.0, "value {val} out of range [10, 20]");
+        assert!((10.0..20.0).contains(&val), "value {val} out of range [10, 20)");
     }
 }
 
@@ -46,7 +44,7 @@ fn session_random_duration() {
         std::time::Duration::from_millis(50),
         std::time::Duration::from_millis(200),
     );
-    assert!(dur.as_millis() >= 50 && dur.as_millis() <= 200);
+    assert!(dur.as_millis() >= 50 && dur.as_millis() < 200);
 }
 
 #[test]
@@ -54,7 +52,6 @@ fn session_random_jitter() {
     let mut r = SessionRandom::new(33);
     let base = std::time::Duration::from_millis(100);
     let jittered = r.jitter(base);
-    // Jitter should be >= base
     assert!(jittered.as_millis() >= base.as_millis());
 }
 
@@ -62,6 +59,19 @@ fn session_random_jitter() {
 fn session_random_seed_preserved() {
     let r = SessionRandom::new(12345);
     assert_eq!(r.seed(), 12345);
+}
+
+#[test]
+fn session_random_inverted_range_is_safe() {
+    let mut r = SessionRandom::new(1);
+    assert_eq!(r.next_f64(5.0, 5.0), 5.0);
+    assert_eq!(
+        r.next_duration(
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(10)
+        ),
+        std::time::Duration::from_millis(10)
+    );
 }
 
 #[test]
@@ -74,14 +84,13 @@ fn bezier_mouse_path_basic() {
     assert!(path.points.len() >= 5);
     assert!(path.duration_ms > 0);
 
-    // First point should be near origin
-    assert!(path.points.first().unwrap().x < 50.0);
-    assert!(path.points.first().unwrap().y < 50.0);
+    let first = path.points.first().unwrap();
+    assert!((first.x - 0.0).abs() < 1e-9);
+    assert!((first.y - 0.0).abs() < 1e-9);
 
-    // Last point should be near target
     let last = path.points.last().unwrap();
-    assert!((last.x - 500.0).abs() < 100.0);
-    assert!((last.y - 300.0).abs() < 100.0);
+    assert!((last.x - 500.0).abs() < 1e-9);
+    assert!((last.y - 300.0).abs() < 1e-9);
 }
 
 #[test]
@@ -106,7 +115,6 @@ fn bezier_mouse_path_short_distance() {
 
     let path = sim.generate_path(&mut random, 0.0, 0.0, 10.0, 10.0);
 
-    // Should still generate points
     assert!(path.points.len() >= 3);
 }
 
@@ -125,14 +133,24 @@ fn bezier_mouse_config_min_max_duration() {
 }
 
 #[test]
+fn bezier_approach_path_ends_at_origin() {
+    let sim = BezierMouseSimulator::new(MouseConfig::default());
+    let mut random = SessionRandom::new(401);
+    let path = sim.generate_approach_path(&mut random);
+    let last = path.points.last().unwrap();
+    assert!((last.x - 0.0).abs() < 1e-9);
+    assert!((last.y - 0.0).abs() < 1e-9);
+}
+
+#[test]
 fn typing_simulator_basic() {
     let sim = TypingSimulator::new(TextConfig::default());
     let mut random = SessionRandom::new(500);
 
     let actions = sim.generate_actions(&mut random, "hello");
 
-    // Should have key down/up pairs plus pauses
     assert!(actions.len() >= 2);
+    assert_eq!(compose_typed_text(&actions), "hello");
 }
 
 #[test]
@@ -140,10 +158,28 @@ fn typing_simulator_longer_text() {
     let sim = TypingSimulator::new(TextConfig::default());
     let mut random = SessionRandom::new(600);
 
-    let actions = sim.generate_actions(&mut random, "this is a longer piece of text for testing");
+    let text = "this is a longer piece of text for testing";
+    let actions = sim.generate_actions(&mut random, text);
 
-    // Longer text should have more actions
     assert!(actions.len() > 10);
+    assert_eq!(compose_typed_text(&actions), text);
+}
+
+#[test]
+fn typing_corrections_preserve_final_text() {
+    let sim = TypingSimulator::new(
+        TextConfig::default()
+            .with_correction_probability(1.0)
+            .with_copy_paste_probability(0.0),
+    );
+    let mut random = SessionRandom::new(601);
+    let text = "correctness";
+    let actions = sim.generate_actions(&mut random, text);
+    assert_eq!(compose_typed_text(&actions), text);
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        behavioral_engine::TypingAction::Backspace { .. }
+    )));
 }
 
 #[test]
@@ -153,8 +189,12 @@ fn typing_simulator_clear_first() {
 
     let actions = sim.generate_with_clear(&mut random, "value", true);
 
-    // Should have initial pause/clear actions before typing
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        behavioral_engine::TypingAction::SelectAll { .. }
+    )));
     assert!(actions.len() > 5);
+    assert_eq!(compose_typed_text(&actions), "value");
 }
 
 #[test]
@@ -168,11 +208,16 @@ fn typing_simulator_empty_string() {
 
 #[test]
 fn typing_simulator_unicode() {
-    let sim = TypingSimulator::new(TextConfig::default());
+    let sim = TypingSimulator::new(
+        TextConfig::default()
+            .with_correction_probability(0.0)
+            .with_copy_paste_probability(0.0),
+    );
     let mut random = SessionRandom::new(900);
 
-    let actions = sim.generate_actions(&mut random, "héllo 世界");
-    assert!(!actions.is_empty());
+    let text = "héllo 世界";
+    let actions = sim.generate_actions(&mut random, text);
+    assert_eq!(compose_typed_text(&actions), text);
 }
 
 #[test]
@@ -202,7 +247,6 @@ fn scroll_simulator_zero_delta() {
 
     let actions = sim.generate_actions(&mut random, 0, 1080.0);
 
-    // Zero delta should produce no actions
     assert!(actions.is_empty());
 }
 
@@ -244,4 +288,16 @@ fn behavioral_config_chain() {
     assert_eq!(config.mouse.min_duration_ms, 100);
     assert_eq!(config.typing.min_delay_ms, 50);
     assert_eq!(config.scroll.min_scroll_duration_ms, 300);
+}
+
+#[test]
+fn behavioral_config_sanitize_orders_ranges() {
+    let config = BehavioralConfig::default()
+        .with_mouse(
+            MouseConfig::default()
+                .with_min_duration(500)
+                .with_max_duration(100),
+        )
+        .sanitize();
+    assert!(config.mouse.min_duration_ms <= config.mouse.max_duration_ms);
 }

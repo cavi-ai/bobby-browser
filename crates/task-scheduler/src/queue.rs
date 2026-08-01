@@ -75,12 +75,7 @@ impl JobQueue {
             .with_max_retries(config.max_retries);
 
         if let Some(timeout) = config.timeout {
-            if let Some(obj) = job.payload.as_object_mut() {
-                obj.insert(
-                    "timeout_ms".to_string(),
-                    serde_json::json!(timeout.as_millis()),
-                );
-            }
+            job.timeout_ms = Some(timeout.as_millis() as u64);
         }
 
         self.jobs.push_back(job.clone());
