@@ -372,6 +372,14 @@ impl Server {
             "checkpoint_save",
             "click",
             "command_execute",
+            "intent_complete_form",
+            "intent_dismiss_obstruction",
+            "intent_extract",
+            "intent_fill",
+            "intent_follow",
+            "intent_locate",
+            "intent_submit_and_verify",
+            "intent_wait_for_state",
             "download_url",
             "evaluate_javascript",
             "events_read",
@@ -516,7 +524,7 @@ impl Server {
         }
         let call: ToolCall = match bounded_parse(params) {
             Ok(call) => call,
-            Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+            Err(()) => return invalid_params_reason(id, "malformedArguments"),
         };
         if call.name.len() > 64 || !self.tool_available(&call.name) {
             return error(id, METHOD_NOT_FOUND, "Method not found", None);
@@ -526,32 +534,49 @@ impl Server {
         if let Err(interface_error) = self.authorization.authorize(&context, operation) {
             return interface_error_response(id, interface_error);
         }
-        if !validate_tool_arguments(&call.name, &call.arguments) {
-            return error(id, INVALID_PARAMS, "Invalid params", None);
+        if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
+            return invalid_params(id, Some(violation));
         }
         let result = match call.name.as_str() {
             "runtime_info" => {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
-                self.runtime.runtime_info(context).await.and_then(to_json)
+                // Principal-scoped, so it belongs here rather than on the
+                // runtime-wide `RuntimeInfo` the inner runtime produces. Without
+                // it a caller cannot see the credential lapse coming — the stdio
+                // gateway simply refuses to start afterwards.
+                let credential_expires_at = self.handle.expires_at();
+                self.runtime
+                    .runtime_info(context)
+                    .await
+                    .and_then(to_json)
+                    .map(|mut value| {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert(
+                                "credentialExpiresAt".to_owned(),
+                                json!(credential_expires_at.to_rfc3339()),
+                            );
+                        }
+                        value
+                    })
             }
             "session_list" => {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
                 self.runtime.list_sessions(context).await.and_then(to_json)
             }
             "session_create" => {
                 let input: SessionCreateArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 if input.profile.is_empty()
                     || input.profile.len() > 128
                     || input.proxy.as_ref().is_some_and(|proxy| proxy.len() > 2048)
                 {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
                 self.runtime
                     .create_session(
@@ -568,7 +593,7 @@ impl Server {
             "session_close" => {
                 let input: SessionCloseArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .delete_session(context, input.session_id)
@@ -578,7 +603,7 @@ impl Server {
             "page_open" => {
                 let input: PageOpenArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .open_page(
@@ -593,17 +618,17 @@ impl Server {
             "command_execute" => {
                 let input: CommandExecuteArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 if input.envelope.deadline <= Utc::now()
                     || input.envelope.deadline > context.deadline
                 {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "deadlineOutOfRange");
                 }
                 context.idempotency_key = match input.idempotency_key {
                     Some(key) => match types::IdempotencyKey::try_from(key) {
                         Ok(key) => Some(key),
-                        Err(_) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                        Err(_) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                     },
                     None => None,
                 };
@@ -612,12 +637,13 @@ impl Server {
             "navigate" => {
                 let input: NavigateArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::Navigate(types::NavigateCommand {
                         url: input.url,
                         wait_until: input.wait_until.unwrap_or(types::WaitUntil::Interactive),
@@ -629,12 +655,13 @@ impl Server {
             "click" => {
                 let input: ClickArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::Click(types::ClickCommand {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
@@ -647,12 +674,13 @@ impl Server {
             "type_text" => {
                 let input: TypeTextArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::TypeText(types::TypeTextCommand {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
@@ -666,12 +694,13 @@ impl Server {
             "inspect" => {
                 let input: InspectArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::Inspect(types::InspectCommand {
                         selector: input.selector,
                         target: input.target,
@@ -683,12 +712,13 @@ impl Server {
             "screenshot" => {
                 let input: ScreenshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::CaptureScreenshot(types::CaptureScreenshotCommand {
                         mode: input.mode.unwrap_or(types::ScreenshotMode::Viewport),
                     }),
@@ -698,12 +728,13 @@ impl Server {
             "wait_for" => {
                 let input: WaitForArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::WaitFor(types::WaitForCommand {
                         condition: input.condition,
                         timeout_ms: input.timeout_ms,
@@ -711,15 +742,200 @@ impl Server {
                 );
                 self.submit_envelope(context, envelope).await
             }
+            "intent_locate" => {
+                let input: IntentLocateArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::Locate(types::LocateIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_fill" => {
+                let input: IntentFillArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::Fill(types::FillIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                    value: input.value,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_complete_form" => {
+                let input: IntentCompleteFormArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::CompleteForm(types::CompleteFormIntent {
+                    purpose: input.purpose,
+                    fields: input.fields,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_submit_and_verify" => {
+                let input: IntentSubmitAndVerifyArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::SubmitAndVerify(types::SubmitAndVerifyIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                    expected_state: input.expected_state,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_wait_for_state" => {
+                let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::WaitForState(types::WaitForStateIntent {
+                    condition: input.condition,
+                    timeout_ms: input.timeout_ms,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_follow" => {
+                let input: IntentFollowArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::Follow(types::FollowIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                    expected_destination: input.expected_destination,
+                    boundary: input.boundary.unwrap_or(false),
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_dismiss_obstruction" => {
+                let input: IntentDismissObstructionArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent =
+                    types::IntentCommand::DismissObstruction(types::DismissObstructionIntent {
+                        purpose: input.purpose,
+                        hints: input.hints.unwrap_or_default(),
+                        timeout_ms: input
+                            .timeout_ms
+                            .unwrap_or(types::DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS),
+                    });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_extract" => {
+                let input: IntentExtractArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::Extract(types::ExtractIntent {
+                    purpose: input.purpose,
+                    fields: input.fields,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
             "page_list" => {
                 let input: PageListArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     None,
+                    input.workflow_id,
                     types::PrimitiveCommand::ListPages(types::ListPagesCommand),
                 );
                 self.submit_envelope(context, envelope).await
@@ -727,13 +943,14 @@ impl Server {
             "page_close" => {
                 let input: PageCloseArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let page_id = input.page_id;
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(page_id.clone()),
+                    input.workflow_id,
                     types::PrimitiveCommand::ClosePage(types::ClosePageCommand { page_id }),
                 );
                 self.submit_envelope(context, envelope).await
@@ -741,13 +958,14 @@ impl Server {
             "page_activate" => {
                 let input: PageCloseArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 let page_id = input.page_id;
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(page_id.clone()),
+                    input.workflow_id,
                     types::PrimitiveCommand::ActivatePage(types::ActivatePageCommand { page_id }),
                 );
                 self.submit_envelope(context, envelope).await
@@ -755,12 +973,13 @@ impl Server {
             "a11y_snapshot" => {
                 let input: A11ySnapshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::AccessibilitySnapshot(
                         types::AccessibilitySnapshotCommand {
                             max_nodes: input.max_nodes,
@@ -772,12 +991,13 @@ impl Server {
             "extract_structured" => {
                 let input: ExtractStructuredArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::ExtractStructured(types::ExtractStructuredCommand {
                         schema: input.schema,
                         purpose: input.purpose,
@@ -788,12 +1008,13 @@ impl Server {
             "download_url" => {
                 let input: DownloadUrlArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     None,
+                    input.workflow_id,
                     types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
                         url: input.url,
                         expected_content_type: input.expected_content_type,
@@ -805,12 +1026,13 @@ impl Server {
             "upload_files" => {
                 let input: UploadFilesArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
@@ -822,12 +1044,13 @@ impl Server {
             "evaluate_javascript" => {
                 let input: EvaluateJavaScriptArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::EvaluateJavaScript(types::EvaluateJavaScriptCommand {
                         expression: input.expression,
                         timeout_ms: input.timeout_ms.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
@@ -839,7 +1062,7 @@ impl Server {
             "checkpoint_save" => {
                 let input: CheckpointSaveArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .checkpoint(context, input.checkpoint, input.evidence)
@@ -849,7 +1072,7 @@ impl Server {
             "workflow_recover" => {
                 let input: WorkflowRecoverArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 self.runtime
                     .recover(context, input.workflow_id)
@@ -859,10 +1082,10 @@ impl Server {
             "events_read" => {
                 let input: EventsReadArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
-                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 if input.limit == 0 || input.limit > MAX_EVENT_LIMIT {
-                    return error(id, INVALID_PARAMS, "Invalid params", None);
+                    return invalid_params_reason(id, "malformedArguments");
                 }
                 if let Err(interface_error) = self
                     .authorization
@@ -872,7 +1095,7 @@ impl Server {
                 }
                 let remaining = match (context.deadline - Utc::now()).to_std() {
                     Ok(remaining) => remaining,
-                    Err(_) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                    Err(_) => return invalid_params_reason(id, "malformedArguments"),
                 };
                 match tokio::time::timeout(
                     remaining,
@@ -968,6 +1191,17 @@ impl Server {
                 match to_json(outcome) {
                     Ok(mut value) => {
                         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
+                        // `CommandOutcome` carries only `commandId`, so without
+                        // this an agent cannot name the workflow it just ran in
+                        // and `checkpoint_save` / `workflow_recover` stay out of
+                        // reach. Pass it back into any tool's `workflowId` to
+                        // keep subsequent commands in the same workflow.
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert(
+                                "workflowId".to_owned(),
+                                json!(envelope.workflow_id.clone()),
+                            );
+                        }
                         self.events
                             .append_for(
                                 registration_context.principal_id.clone(),
@@ -1312,10 +1546,79 @@ macro_rules! page_scoped_args {
         struct $name {
             session_id: types::SessionId,
             page_id: types::PageId,
+            #[serde(default)]
+            workflow_id: Option<types::WorkflowId>,
             $($field : $ty,)*
         }
     };
 }
+
+/// Intent tools take the same page scope plus the intent's own payload.
+///
+/// Intents were reachable only by hand-building a `CommandEnvelope` for
+/// `command_execute`, which meant minting three UUIDs and an RFC3339 deadline
+/// per call. These mirror the flat primitive tools instead: the server builds
+/// the envelope.
+macro_rules! intent_args {
+    ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct $name {
+            session_id: types::SessionId,
+            page_id: types::PageId,
+            #[serde(default)]
+            workflow_id: Option<types::WorkflowId>,
+            #[serde(default)]
+            idempotency_key: Option<String>,
+            $($field : $ty,)*
+        }
+    };
+}
+
+intent_args!(IntentLocateArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+});
+
+intent_args!(IntentFillArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    value: types::FillValue,
+});
+
+intent_args!(IntentCompleteFormArgs {
+    purpose: String,
+    fields: Vec<types::CompleteFormField>,
+});
+
+intent_args!(IntentSubmitAndVerifyArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    expected_state: types::WaitForCommand,
+});
+
+intent_args!(IntentWaitForStateArgs {
+    condition: types::WaitCondition,
+    timeout_ms: u64,
+});
+
+intent_args!(IntentFollowArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    expected_destination: types::WaitForCommand,
+    boundary: Option<bool>,
+});
+
+intent_args!(IntentDismissObstructionArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    timeout_ms: Option<u64>,
+});
+
+intent_args!(IntentExtractArgs {
+    purpose: String,
+    fields: Vec<types::ExtractField>,
+});
 
 page_scoped_args!(NavigateArgs {
     url: String,
@@ -1369,6 +1672,8 @@ page_scoped_args!(EvaluateJavaScriptArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PageListArgs {
     session_id: types::SessionId,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1382,6 +1687,8 @@ struct SessionCloseArgs {
 struct PageCloseArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1391,6 +1698,8 @@ struct A11ySnapshotArgs {
     page_id: types::PageId,
     #[serde(default)]
     max_nodes: Option<u32>,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1398,6 +1707,8 @@ struct A11ySnapshotArgs {
 struct ExtractStructuredArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
     schema: serde_json::Value,
     #[serde(default)]
     purpose: Option<String>,
@@ -1411,6 +1722,8 @@ struct DownloadUrlArgs {
     #[serde(default)]
     expected_content_type: Option<String>,
     max_bytes: u64,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1492,6 +1805,35 @@ fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Val
     })
 }
 
+/// `-32602` with the schema keyword and JSON Pointer that rejected the call.
+///
+/// Every rejection used to be an indistinguishable `"Invalid params"` with no
+/// `data`, so a caller could not tell a missing field from an out-of-range one,
+/// let alone find which field. `pointer` and `constraint` describe the schema,
+/// never the submitted value, so they disclose nothing `tools/list` does not.
+fn invalid_params(id: Value, violation: Option<crate::schema::SchemaViolation>) -> Value {
+    let data = violation.map(|violation| {
+        json!({
+            "reason":"schemaViolation",
+            "pointer":violation.pointer,
+            "constraint":violation.constraint
+        })
+    });
+    error(id, INVALID_PARAMS, "Invalid params", data)
+}
+
+/// `-32602` for a rejection with no single offending field: a body that passed
+/// the schema but failed to deserialize, an expired deadline, a malformed
+/// idempotency key.
+fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
+    error(
+        id,
+        INVALID_PARAMS,
+        "Invalid params",
+        Some(json!({"reason":reason})),
+    )
+}
+
 fn interface_error_response(id: Value, mut interface_error: types::InterfaceError) -> Value {
     interface_error.message = "runtime interface request failed".to_owned();
     error(
@@ -1530,11 +1872,19 @@ fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
 
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 
+/// Builds the envelope a flat tool submits.
+///
+/// `workflow_id` is the caller's when supplied. Every call used to mint a fresh
+/// one and the outcome never echoed it back, so an agent on the flat tools
+/// could not name the workflow it had just run in — which made
+/// `checkpoint_save` and `workflow_recover` reachable only by hand-building
+/// envelopes through `command_execute`.
 fn command_envelope(
     context: types::RequestContext,
     session_id: types::SessionId,
     page_id: Option<types::PageId>,
-    command: types::PrimitiveCommand,
+    workflow_id: Option<types::WorkflowId>,
+    command: types::RuntimeCommand,
 ) -> (types::RequestContext, types::CommandEnvelope) {
     let deadline = context.deadline;
     (
@@ -1542,13 +1892,56 @@ fn command_envelope(
         types::CommandEnvelope {
             schema_version: types::CommandEnvelope::SCHEMA_VERSION,
             command_id: types::CommandId::new(),
-            workflow_id: types::WorkflowId::new(),
+            workflow_id: workflow_id.unwrap_or_default(),
             attempt_id: types::AttemptId::new(),
             session_id,
             page_id,
             deadline,
-            command: types::RuntimeCommand::Primitive(command),
+            command,
         },
+    )
+}
+
+fn apply_idempotency_key(
+    context: &mut types::RequestContext,
+    key: Option<String>,
+) -> Result<(), ()> {
+    context.idempotency_key = match key {
+        Some(key) => Some(types::IdempotencyKey::try_from(key).map_err(|_| ())?),
+        None => None,
+    };
+    Ok(())
+}
+
+fn primitive_envelope(
+    context: types::RequestContext,
+    session_id: types::SessionId,
+    page_id: Option<types::PageId>,
+    workflow_id: Option<types::WorkflowId>,
+    command: types::PrimitiveCommand,
+) -> (types::RequestContext, types::CommandEnvelope) {
+    command_envelope(
+        context,
+        session_id,
+        page_id,
+        workflow_id,
+        types::RuntimeCommand::Primitive(command),
+    )
+}
+
+fn intent_envelope(
+    context: types::RequestContext,
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    workflow_id: Option<types::WorkflowId>,
+    command: types::IntentCommand,
+) -> (types::RequestContext, types::CommandEnvelope) {
+    command_envelope(
+        context,
+        session_id,
+        Some(page_id),
+        workflow_id,
+        types::RuntimeCommand::Intent(command),
     )
 }
 
@@ -1575,6 +1968,17 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
             types::Capability::BrowserMutate,
             types::Capability::JavascriptEvaluate,
         ]),
+        "intent_complete_form"
+        | "intent_dismiss_obstruction"
+        | "intent_extract"
+        | "intent_fill"
+        | "intent_follow"
+        | "intent_locate"
+        | "intent_submit_and_verify"
+        | "intent_wait_for_state" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::IntentExecute,
+        ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),
         "session_close" | "session_create" => Some(&[types::Capability::SessionWrite]),
@@ -1599,7 +2003,15 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "extract_structured"
         | "download_url"
         | "upload_files"
-        | "evaluate_javascript" => Some(types::InterfaceOperation::SubmitCommand),
+        | "evaluate_javascript"
+        | "intent_complete_form"
+        | "intent_dismiss_obstruction"
+        | "intent_extract"
+        | "intent_fill"
+        | "intent_follow"
+        | "intent_locate"
+        | "intent_submit_and_verify"
+        | "intent_wait_for_state" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
@@ -1619,6 +2031,14 @@ fn tool_description(name: &str) -> &'static str {
         "download_url" => "Download a URL into the session's downloads.",
         "evaluate_javascript" => "Evaluate JavaScript on a page (session policy gated).",
         "events_read" => "Read retained runtime events after a cursor.",
+        "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable).",
+        "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner (Reconciliable).",
+        "intent_extract" => "Read named fields off the page without mutating it (Replayable).",
+        "intent_fill" => "Fill one described form control and verify the value (Reconciliable).",
+        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable).",
+        "intent_locate" => "Locate an element by described purpose (Replayable).",
+        "intent_submit_and_verify" => "Submit a form and verify the expected resulting state (Boundary; needs a matching checkpoint).",
+        "intent_wait_for_state" => "Wait for a described page state (Replayable).",
         "inspect" => "Read page state, optionally element-scoped.",
         "navigate" => "Navigate a page to a URL.",
         "a11y_snapshot" => "Capture a compact accessibility tree of a page.",

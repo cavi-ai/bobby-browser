@@ -753,6 +753,7 @@ fn dismiss_obstruction_intent_timeout_ms_defaults_when_omitted() {
         "hints": {
             "role": null,
             "nearText": null,
+            "ordinal": null,
             "framePath": [],
             "shadowPath": [],
             "allowBestMatch": false

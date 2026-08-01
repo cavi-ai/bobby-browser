@@ -925,6 +925,10 @@ async fn run_firefox_profile_enroll(
     Ok(())
 }
 
+/// `bobby init` issues a 30-day credential, so a week is enough runway to
+/// renew before the gateway starts failing closed.
+const BOOTSTRAP_EXPIRY_WARN_DAYS: i64 = 7;
+
 fn run_doctor(
     config_cli: Option<PathBuf>,
     bootstrap_cli: Option<PathBuf>,
@@ -1060,15 +1064,60 @@ fn run_doctor(
         }
     }
 
-    if broker::StartupCredential::from_env().is_ok() {
+    // The bootstrap expiry is pinned into MCP client config and the stdio
+    // gateway refuses to start once it passes, which a host reports only as a
+    // dead server. Warn while there is still time to run `bobby init`.
+    let mut report_expiry = |expires_at: chrono::DateTime<chrono::Utc>| {
+        let remaining = expires_at - chrono::Utc::now();
+        if remaining <= chrono::Duration::zero() {
+            failures += 1;
+            report(
+                "fail",
+                "bootstrap-expiry",
+                format!(
+                    "credential expired at {}; run `bobby init --force`",
+                    expires_at.to_rfc3339()
+                ),
+            );
+        } else if remaining < chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS) {
+            warnings += 1;
+            report(
+                "warn",
+                "bootstrap-expiry",
+                format!(
+                    "credential expires in {} day(s) at {}; run `bobby init --force` before then",
+                    remaining.num_days(),
+                    expires_at.to_rfc3339()
+                ),
+            );
+        } else {
+            report(
+                "ok",
+                "bootstrap-expiry",
+                format!("credential valid for {} more day(s)", remaining.num_days()),
+            );
+        }
+    };
+
+    if let Ok(credential) = broker::StartupCredential::from_env() {
         report("ok", "bootstrap", "credential from environment".to_string());
+        report_expiry(credential.expires_at());
     } else {
         match resolve_bootstrap_path(bootstrap_cli) {
-            Ok(path) if path.exists() => report(
-                "ok",
-                "bootstrap",
-                format!("credential file at {}", path.display()),
-            ),
+            Ok(path) if path.exists() => {
+                report(
+                    "ok",
+                    "bootstrap",
+                    format!("credential file at {}", path.display()),
+                );
+                match bootstrap_local::load_startup_from_env_file(&path) {
+                    Ok(credential) => report_expiry(credential.expires_at()),
+                    Err(error) => {
+                        failures += 1;
+                        report("fail", "bootstrap-expiry", format!("{error:#}"));
+                    }
+                }
+            }
             Ok(path) => {
                 warnings += 1;
                 report(
