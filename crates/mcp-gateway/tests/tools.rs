@@ -407,7 +407,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     let evidence_variants = checkpoint_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 19, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 20, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
@@ -1308,6 +1308,47 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .await
         .unwrap();
     assert_eq!(denied["error"]["code"], -32601, "{denied}");
+}
+
+#[tokio::test]
+async fn form_snapshot_is_a_read_only_page_tool() {
+    let page_reader = fixture_server(vec![Capability::PageRead]).await;
+    let listed = page_reader
+        .handle_message(request(73, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let snapshot = tools
+        .iter()
+        .find(|tool| tool["name"] == "form_snapshot")
+        .expect("page readers can discover form_snapshot");
+    assert_eq!(
+        snapshot["inputSchema"]["required"],
+        json!(["sessionId", "pageId"])
+    );
+    assert_eq!(
+        snapshot["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["pageId", "sessionId", "workflowId"]
+    );
+
+    let mutate_only = fixture_server(vec![Capability::BrowserMutate]).await;
+    let listed = mutate_only
+        .handle_message(request(74, "tools/list", json!({})))
+        .await
+        .unwrap();
+    assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool["name"] != "form_snapshot"),
+        "browser mutation authority must not imply page read authority"
+    );
 }
 
 #[tokio::test]

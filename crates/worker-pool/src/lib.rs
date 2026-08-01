@@ -1,4 +1,5 @@
 mod chromium;
+mod form_snapshot;
 mod network_quiet;
 pub mod process_registry;
 mod selection;
@@ -22,6 +23,7 @@ use types::{
 };
 
 pub use chromium::ChromiumWorkerFactory;
+pub use form_snapshot::form_snapshot_expression;
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
@@ -216,6 +218,10 @@ pub trait BrowserWorker: Send + Sync {
         _page_id: &PageId,
         _command: &types::AccessibilitySnapshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn form_snapshot(&self, _page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
 
