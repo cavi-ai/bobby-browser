@@ -11,6 +11,10 @@ use std::{
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use behavioral_engine::{
+    BezierMouseSimulator, BehavioralConfig, MouseConfig, ScrollConfig, ScrollSimulator, SessionRandom,
+    TextConfig, TypingSimulator,
+};
 use companion_core::{
     AttachmentLease, CompanionServerHandle, CompanionSessionError, PageBindingTicket,
 };
@@ -39,6 +43,7 @@ use url::Url;
 use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
 
 use crate::bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
+use crate::generate_session_seed;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -555,6 +560,10 @@ pub struct FirefoxCompanionWorker {
     artifacts: Option<ArtifactStore>,
     upload_roots: Vec<PathBuf>,
     downloads_dir: Option<PathBuf>,
+    session_random: SessionRandom,
+    mouse_simulator: BezierMouseSimulator,
+    typing_simulator: TypingSimulator,
+    scroll_simulator: ScrollSimulator,
 }
 
 struct WorkerShutdown {
@@ -985,6 +994,17 @@ impl FirefoxCompanionWorker {
         self
     }
 
+    pub fn with_behavioral_config(mut self, config: BehavioralConfig) -> Self {
+        self.mouse_simulator = BezierMouseSimulator::new(config.mouse);
+        self.typing_simulator = TypingSimulator::new(config.typing);
+        self.scroll_simulator = ScrollSimulator::new(config.scroll);
+        self
+    }
+
+    pub fn session_seed(&self) -> u64 {
+        self.session_random.seed()
+    }
+
     pub async fn new(
         id: WorkerId,
         profile_dir: PathBuf,
@@ -1073,6 +1093,25 @@ impl FirefoxCompanionWorker {
             Arc::clone(&lease),
             Arc::clone(&observer),
         )))));
+        let session_seed = generate_session_seed();
+        let session_random = SessionRandom::new(session_seed);
+        let _behavioral_config = BehavioralConfig::default();
+        let mouse_simulator =
+            BezierMouseSimulator::new(MouseConfig::default());
+        let typing_simulator = TypingSimulator::new(TextConfig::default());
+        let scroll_simulator = ScrollSimulator::new(ScrollConfig::default());
+
+        // Configure WebRTC leak prevention via Firefox preferences
+        let _webrtc_preference = transport.send(
+            "script.evaluate",
+            json!({
+                "expression": "Object.defineProperty(navigator, 'webrtc', { get: () => ({ iceServers: [], iceCandidatePoolSize: 0 }) });",
+                "target": {"context": "top", "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        ).await.ok();
+
         Ok(Self {
             id,
             profile_dir,
@@ -1096,6 +1135,10 @@ impl FirefoxCompanionWorker {
             artifacts: None,
             upload_roots: Vec::new(),
             downloads_dir: None,
+            session_random,
+            mouse_simulator,
+            typing_simulator,
+            scroll_simulator,
         })
     }
 
@@ -1570,12 +1613,48 @@ impl FirefoxCompanionWorker {
         &self,
         context: &str,
         shared_id: &str,
+        mouse_path: Option<&behavioral_engine::MousePath>,
     ) -> Result<(), CommandError> {
         let shared_id = self.preflight_pointer_target(context, shared_id).await?;
+        let actions = match mouse_path {
+            Some(path) if !path.points.is_empty() => {
+                let pointer_moves = self.pointer_moves_for_path(&path.points);
+                let mut actions_array = Vec::new();
+                actions_array.extend(pointer_moves);
+                actions_array.push(serde_json::json!({"type": "pointerDown", "button": 0}));
+                actions_array.push(serde_json::json!({"type": "pointerUp", "button": 0}));
+                serde_json::json!({
+                    "context": context,
+                    "actions": [{
+                        "type": "pointer",
+                        "id": "automation-runtime-pointer",
+                        "parameters": {"pointerType": "mouse"},
+                        "actions": actions_array
+                    }]
+                })
+            }
+            _ => pointer_actions(context, &shared_id),
+        };
         self.transport
-            .send("input.performActions", pointer_actions(context, &shared_id))
+            .send("input.performActions", actions)
             .await?;
         Ok(())
+    }
+
+    fn pointer_moves_for_path(&self, points: &[behavioral_engine::MousePoint]) -> Vec<serde_json::Value> {
+        points
+            .iter()
+            .filter(|p| p.timestamp_ms > 0)
+            .map(|p| {
+                serde_json::json!({
+                    "type": "pointerMove",
+                    "x": p.x,
+                    "y": p.y,
+                    "duration": 0,
+                    "origin": {"type": "element", "element": {"sharedId": p.timestamp_ms.to_string()}}
+                })
+            })
+            .collect()
     }
 
     async fn preflight_pointer_target(
@@ -2253,7 +2332,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     .await?
             }
         };
-        self.perform_pointer_click(&context, &shared_id).await?;
+
+        // Generate behavioral mouse path for natural movement
+        let path = self.mouse_simulator.generate_path(
+            &mut self.session_random.clone(),
+            0.0, 0.0,
+            500.0, 300.0,
+        );
+
+        self.perform_pointer_click(&context, &shared_id, Some(&path)).await?;
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -2870,11 +2957,23 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let shared_id = self
             .resolve_element(&context, &selector, command.target.is_some())
             .await?;
-        self.perform_pointer_click(&context, &shared_id).await?;
+        self.perform_pointer_click(&context, &shared_id, None).await?;
+
+        // Generate behavioral typing actions for human-like typing
+        let mut typing_random = self.session_random.clone();
+        let typing_actions = self.typing_simulator.generate_with_clear(
+            &mut typing_random,
+            &command.value,
+            command.clear_first,
+        );
+
+        // Convert behavioral actions to BiDi keyboard actions
+        let bidi_actions = self.behavioral_typing_to_bidi(&context, &typing_actions);
+
         self.transport
             .send(
                 "input.performActions",
-                keyboard_actions(&context, &command.value, command.clear_first),
+                bidi_actions,
             )
             .await?;
         let mut evidence = vec![
@@ -4149,6 +4248,108 @@ fn interaction_path_name(path: InteractionPath) -> &'static str {
 }
 
 impl FirefoxCompanionWorker {
+    /// Convert behavioral typing actions to BiDi keyboard actions.
+    fn behavioral_typing_to_bidi(
+        &self,
+        context: &str,
+        actions: &[behavioral_engine::TypingAction],
+    ) -> Value {
+        let mut bidi_actions: Vec<Value> = Vec::new();
+
+        for action in actions {
+            match action {
+                behavioral_engine::TypingAction::KeyDown { character, delay_ms } => {
+                    bidi_actions.push(json!({
+                        "type": "keyDown",
+                        "value": character.chars().next().unwrap_or(' '),
+                    }));
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "sleep",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::KeyUp { character, delay_ms } => {
+                    bidi_actions.push(json!({
+                        "type": "keyUp",
+                        "value": character.chars().next().unwrap_or(' '),
+                    }));
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "sleep",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::Backspace { count, delay_ms } => {
+                    for _ in 0..*count {
+                        bidi_actions.push(json!({
+                            "type": "keyDown",
+                            "value": "\u{e003}",
+                        }));
+                        bidi_actions.push(json!({
+                            "type": "keyUp",
+                            "value": "\u{e003}",
+                        }));
+                    }
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "sleep",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::CopyPaste { text: _, delay_ms } => {
+                    // Simulate copy-paste with Ctrl+V
+                    let modifier = if cfg!(target_os = "macos") {
+                        "\u{e03d}"
+                    } else {
+                        "\u{e009}"
+                    };
+                    bidi_actions.push(json!({
+                        "type": "keyDown",
+                        "value": modifier,
+                    }));
+                    bidi_actions.push(json!({
+                        "type": "keyDown",
+                        "value": "v",
+                    }));
+                    bidi_actions.push(json!({
+                        "type": "keyUp",
+                        "value": "v",
+                    }));
+                    bidi_actions.push(json!({
+                        "type": "keyUp",
+                        "value": modifier,
+                    }));
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "sleep",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::Pause { duration_ms } => {
+                    bidi_actions.push(json!({
+                        "type": "sleep",
+                        "duration": *duration_ms,
+                    }));
+                }
+            }
+        }
+
+        json!({
+            "context": context,
+            "actions": [{
+                "type": "key",
+                "id": "automation-runtime-keyboard-behavioral",
+                "actions": bidi_actions,
+            }]
+        })
+    }
+
+    /// Bounded, server-generated statement execution for operations Firefox
     /// Bounded, server-generated statement execution for operations Firefox
     /// BiDi does not cover on this build (cookie mutation). Statements are
     /// constructed from validated parameters only — never from caller strings.

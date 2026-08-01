@@ -1,0 +1,16 @@
+[package]
+name = "behavioral-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+getrandom = { version = "0.3", features = ["std"] }
+rand = { version = "0.9", features = ["std", "std_rng"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+types = { path = "../types", version = "0.3.1" }
