@@ -276,6 +276,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
 
 [[package]]
+name = "behavioral-engine"
+version = "0.3.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tokio",
+ "types",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1041,12 +1053,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "fingerprinting"
+version = "0.3.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "hex",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "types",
+]
+
+[[package]]
 name = "firefox-companion"
 version = "0.3.1"
 dependencies = [
  "artifact-store",
  "async-trait",
  "base64 0.23.0",
+ "behavioral-engine",
  "companion-core",
  "companion-protocol",
  "dom-engine",
@@ -3371,6 +3398,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "task-scheduler"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "types",
 ]
 
 [[package]]
