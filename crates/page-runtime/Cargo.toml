@@ -12,6 +12,7 @@ default = []
 test-support = ["skill-runtime/test-support"]
 
 [dependencies]
+jsonschema.workspace = true
 artifact-store = { path = "../artifact-store", version = "0.3.0" }
 async-trait.workspace = true
 checkpoint-store = { path = "../checkpoint-store", version = "0.3.0" }

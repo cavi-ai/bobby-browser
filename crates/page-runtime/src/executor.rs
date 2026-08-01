@@ -505,6 +505,18 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::ExtractStructured(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::StructuredExtraction { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "structured extraction returned no extraction evidence",
+                    ))
+                }
+            }
             PrimitiveCommand::ActivatePage(_) => {
                 if evidence.iter().any(|item| {
                     matches!(

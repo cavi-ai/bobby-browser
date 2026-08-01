@@ -69,7 +69,7 @@ impl RuntimeService {
 
     pub async fn build(config: &AppConfig) -> Result<Self, RuntimeError> {
         let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
-        Self::build_inner(config, factory, None, None).await
+        Self::build_inner(config, factory, None, None, None).await
     }
 
     /// Build with an injected [`VisionAssist`] provider (test/harness use).
@@ -78,14 +78,14 @@ impl RuntimeService {
         assist: Arc<dyn VisionAssist>,
     ) -> Result<Self, RuntimeError> {
         let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
-        Self::build_inner(config, factory, None, Some(assist)).await
+        Self::build_inner(config, factory, None, Some(assist), None).await
     }
 
     pub async fn build_with_worker_factory(
         config: &AppConfig,
         factory: Arc<dyn WorkerFactory>,
     ) -> Result<Self, RuntimeError> {
-        Self::build_inner(config, factory, None, None).await
+        Self::build_inner(config, factory, None, None, None).await
     }
 
     #[doc(hidden)]
@@ -94,7 +94,7 @@ impl RuntimeService {
         observer: Arc<dyn ExecutionPhaseObserver>,
     ) -> Result<Self, RuntimeError> {
         let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
-        Self::build_inner(config, factory, Some(observer), None).await
+        Self::build_inner(config, factory, Some(observer), None, None).await
     }
 
     async fn build_inner(
@@ -102,6 +102,7 @@ impl RuntimeService {
         factory: Arc<dyn WorkerFactory>,
         observer: Option<Arc<dyn ExecutionPhaseObserver>>,
         vision_assist: Option<Arc<dyn VisionAssist>>,
+        structured_extractor: Option<Arc<dyn intent_engine::StructuredExtractor>>,
     ) -> Result<Self, RuntimeError> {
         let journal = Arc::new(
             JsonlJournal::open(&config.storage.journal_path)
@@ -136,25 +137,30 @@ impl RuntimeService {
             ),
             network,
         );
-        let vision_assist = match vision_assist {
-            Some(assist) => Some(assist),
-            None => config.vision.endpoint_url.as_ref().and_then(|endpoint| {
-                let bearer = config
-                    .vision
-                    .token_env
-                    .as_ref()
-                    .and_then(|name| std::env::var(name).ok());
-                intent_engine::HttpVisionAssist::new(
-                    endpoint.clone(),
-                    bearer,
-                    std::time::Duration::from_millis(config.vision.timeout_ms),
-                )
-                .ok()
-                .map(|provider| std::sync::Arc::new(provider) as std::sync::Arc<dyn VisionAssist>)
-            }),
-        };
+        let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> = structured_extractor
+            .or_else(|| {
+                config.vision.endpoint_url.as_ref().and_then(|endpoint| {
+                    let bearer = config
+                        .vision
+                        .token_env
+                        .as_ref()
+                        .and_then(|name| std::env::var(name).ok());
+                    intent_engine::HttpVisionAssist::new(
+                        endpoint.clone(),
+                        bearer,
+                        std::time::Duration::from_millis(config.vision.timeout_ms),
+                    )
+                    .ok()
+                    .map(|provider| {
+                        std::sync::Arc::new(provider) as Arc<dyn intent_engine::StructuredExtractor>
+                    })
+                })
+            });
         if let Some(assist) = vision_assist {
             adaptive = adaptive.with_vision_assist(assist);
+        }
+        if let Some(extractor) = provider {
+            adaptive = adaptive.with_structured_extractor(extractor);
         }
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);

@@ -52,6 +52,15 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId"],
         ),
+        "extract_structured" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "schema": any_value(),
+                "purpose": nullable(string(1, 256))
+            }),
+            vec!["sessionId", "pageId", "schema"],
+        ),
         "session_close" => (json!({"sessionId": id()}), vec!["sessionId"]),
         "navigate" => (
             json!({
@@ -551,6 +560,13 @@ fn primitive_commands() -> Vec<Value> {
                 &[],
             ),
         ),
+        tagged_input(
+            "extractStructured",
+            object(
+                json!({"schema":any_value(),"purpose":nullable(string(1, 256))}),
+                &["schema"],
+            ),
+        ),
         tagged_input("clickAndWaitForPopup", click_wait_input()),
         tagged_input("clickAndWaitForDownload", click_wait_input()),
         tagged_input(
@@ -814,6 +830,11 @@ fn evidence_variants() -> Vec<Value> {
                 "truncated":{"type":"boolean"}
             }),
             &["pageId", "nodes", "truncated"],
+        ),
+        tagged_fields(
+            "structuredExtraction",
+            json!({"pageId":id(),"value":any_value(),"truncated":{"type":"boolean"}}),
+            &["pageId", "value", "truncated"],
         ),
         tagged_fields(
             "intentExecution",
