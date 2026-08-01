@@ -65,6 +65,26 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({"workflowId": id(), "sessionId": id(), "pageId": id(), "maxControls":{"type":"integer","minimum":1,"maximum":512}}),
             vec!["sessionId", "pageId"],
         ),
+        "emulate" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "viewport": nullable(object(
+                    json!({"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384}}),
+                    &["width", "height"]
+                )),
+                "geolocation": nullable(object(
+                    json!({
+                        "latitude":{"type":"number","minimum":-90,"maximum":90},
+                        "longitude":{"type":"number","minimum":-180,"maximum":180},
+                        "accuracy":nullable(json!({"type":"number","minimum":0}))
+                    }),
+                    &["latitude", "longitude"]
+                )),
+                "mobile": {"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "dialog" => (
             json!({
                 "sessionId": id(),
@@ -406,6 +426,15 @@ fn definitions() -> Value {
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
         "AccessibilityTarget": accessibility_target(),
+        "ViewportSize": object(json!({
+            "width":{"type":"integer","minimum":1,"maximum":16384},
+            "height":{"type":"integer","minimum":1,"maximum":16384}
+        }), &["width", "height"]),
+        "GeolocationCoordinates": object(json!({
+            "latitude":{"type":"number","minimum":-90,"maximum":90},
+            "longitude":{"type":"number","minimum":-180,"maximum":180},
+            "accuracy":nullable(json!({"type":"number","minimum":0}))
+        }), &["latitude", "longitude"]),
         "CookieRecord": object(json!({
             "name":string(0, 1024),
             "value":string(0, 4096),
@@ -778,6 +807,17 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input(
+            "emulate",
+            object(
+                json!({
+                    "viewport":nullable(json!({"$ref":"#/$defs/ViewportSize"})),
+                    "geolocation":nullable(json!({"$ref":"#/$defs/GeolocationCoordinates"})),
+                    "mobile":{"type":"boolean"}
+                }),
+                &[],
+            ),
+        ),
+        tagged_input(
             "handleDialog",
             object(
                 json!({
@@ -1102,6 +1142,14 @@ fn evidence_variants() -> Vec<Value> {
             "formSnapshot",
             json!({"snapshot":any_value()}),
             &["snapshot"],
+        ),
+        tagged_fields(
+            "emulation",
+            json!({
+                "viewport":nullable(json!({"$ref":"#/$defs/ViewportSize"})),
+                "geolocation":nullable(json!({"$ref":"#/$defs/GeolocationCoordinates"}))
+            }),
+            &[],
         ),
         tagged_fields(
             "dialog",
