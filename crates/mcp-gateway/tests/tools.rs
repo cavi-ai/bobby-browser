@@ -1333,7 +1333,11 @@ async fn form_snapshot_is_a_read_only_page_tool() {
             .keys()
             .cloned()
             .collect::<Vec<_>>(),
-        vec!["pageId", "sessionId", "workflowId"]
+        vec!["maxControls", "pageId", "sessionId", "workflowId"]
+    );
+    assert_eq!(
+        snapshot["inputSchema"]["properties"]["maxControls"],
+        json!({"type":"integer","minimum":1,"maximum":512})
     );
 
     let mutate_only = fixture_server(vec![Capability::BrowserMutate]).await;

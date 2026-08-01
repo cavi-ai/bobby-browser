@@ -275,6 +275,7 @@ export interface EventGapEnvelope { error: InterfaceError; gap: EventGap; }
 
 export interface ArtifactReference { referenceId: Id; artifactId: string; sha256: string; bytes: number; mediaType: string; }
 export interface RequestOptions { signal?: AbortSignal; deadline?: Date | string; timeoutMs?: number; correlationId?: Id; idempotencyKey?: string; }
+export interface FormSnapshotOptions extends RequestOptions { maxControls?: number; }
 export interface EventOptions extends RequestOptions {
   /** Broker batch bound: a safe integer from 1 through 256. */
   limit?: number;

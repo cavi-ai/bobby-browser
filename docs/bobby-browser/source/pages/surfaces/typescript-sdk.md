@@ -32,6 +32,11 @@ const client = new BrowserRuntimeClient({
 });
 ```
 
+Use `client.formSnapshot(sessionId, pageId, { maxControls })` for a read-only,
+validated `FormSnapshot`. `maxControls` is optional and bounded from 1 through
+512. The client calls the PageRead HTTP surface directly; it does not create a
+mutating command envelope.
+
 `baseUrl` should be the broker origin without a trailing `/v1` (the client
 strips a trailing `/v1` if present). Bearer is the plaintext from `bobby init`
 / bootstrap (conventional env name `AUTOMATION_RUNTIME_TOKEN`).
