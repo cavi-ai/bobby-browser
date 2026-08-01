@@ -4,6 +4,7 @@ import test from "node:test";
 import { DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS, MAX_INTENT_PURPOSE_BYTES } from "../src/contracts.js";
 import {
   assertIntentPurpose,
+  completeFormRuntimeCommand,
   dismissObstructionEnvelope,
   dismissObstructionRuntimeCommand,
   extractEnvelope,
@@ -107,6 +108,31 @@ test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
       },
     },
   });
+});
+
+test("completeFormRuntimeCommand preserves ordered fields and normalizes nested hints", () => {
+  const command = completeFormRuntimeCommand({
+    purpose: "complete application form",
+    fields: [
+      { name: "email", purpose: "enter email", hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } }, value: { kind: "text", text: "ada@example.test" } },
+      { name: "terms", purpose: "accept terms", hints: { role: "checkbox", nearText: { kind: "exact", value: "Accept terms" } }, value: { kind: "checked", checked: true } },
+    ],
+  });
+  assert.equal(command.kind, "intent");
+  if (command.kind !== "intent") throw new Error("expected intent");
+  assert.equal(command.input.kind, "completeForm");
+  if (command.input.kind !== "completeForm") throw new Error("expected completeForm");
+  assert.deepEqual(command.input.input.fields.map((field) => field.name), ["email", "terms"]);
+  assert.deepEqual(command.input.input.fields[0]?.value, { kind: "text", text: "ada@example.test", clearFirst: false });
+});
+
+test("completeFormRuntimeCommand rejects empty and duplicate fields", () => {
+  assert.throws(() => completeFormRuntimeCommand({ purpose: "complete form", fields: [] }), /must not be empty/);
+  const field = { name: "email", purpose: "enter email", value: { kind: "text", text: "a@b.co" } } as const;
+  assert.throws(
+    () => completeFormRuntimeCommand({ purpose: "complete form", fields: [field, field] }),
+    /duplicate completeForm field name/,
+  );
 });
 
 test("followRuntimeCommand matches Rust golden nested wire shape", () => {

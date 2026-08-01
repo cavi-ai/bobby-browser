@@ -3,14 +3,15 @@ use serde_json::json;
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandError, CommandId, CommandOutcome, CreateSessionRequest, DismissObstructionIntent,
-    DownloadUrlCommand, ElementState, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
-    ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent,
-    ExtractValueKind, FillIntent, FillValue, FollowIntent, InspectCommand, IntentCommand,
-    IntentHints, IntentResolutionPath, ListPagesCommand, LocateIntent, NetworkResourceType,
-    OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId,
-    SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
+    CommandError, CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent,
+    CreateSessionRequest, DismissObstructionIntent, DownloadUrlCommand, ElementState, ErrorCode,
+    ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy,
+    ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent, ExtractValueKind, FillIntent,
+    FillValue, FollowIntent, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
+    ListPagesCommand, LocateIntent, NetworkResourceType, OpenPageCommand, PageId, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
+    WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -586,6 +587,24 @@ fn intent_commands_round_trip_and_classes() {
         },
     });
     assert_eq!(fill.class(), CommandClass::Reconciliable);
+
+    let complete_form = IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "Complete application form".into(),
+        fields: vec![CompleteFormField {
+            name: "email".into(),
+            purpose: "Enter email".into(),
+            hints: IntentHints::default(),
+            value: FillValue::Text {
+                text: "a@b.co".into(),
+                clear_first: true,
+            },
+        }],
+    });
+    assert_eq!(complete_form.class(), CommandClass::Reconciliable);
+    let value = serde_json::to_value(&complete_form).unwrap();
+    assert_eq!(value["kind"], "completeForm");
+    assert_eq!(value["input"]["fields"][0]["name"], "email");
+    let _: IntentCommand = serde_json::from_value(value).unwrap();
 
     let files = IntentCommand::Fill(FillIntent {
         purpose: "Resume".into(),
