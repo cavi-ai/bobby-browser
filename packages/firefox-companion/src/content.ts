@@ -749,6 +749,208 @@ function target(document: Document, input: Record<string, unknown>): Element {
   return element;
 }
 
+const A11Y_MAX_DEPTH = 32;
+const A11Y_MAX_NODES = 2048;
+const A11Y_STRUCTURAL_ROLES = new Set([
+  "banner",
+  "navigation",
+  "main",
+  "contentinfo",
+  "complementary",
+  "form",
+  "search",
+  "region",
+  "heading",
+  "list",
+  "listitem",
+  "table",
+  "row",
+  "cell",
+  "columnheader",
+  "rowheader",
+  "img",
+  "figure",
+  "dialog",
+  "alert",
+  "status",
+  "progressbar",
+  "separator",
+]);
+
+type A11yNode = {
+  role?: string;
+  name?: string;
+  target?: { role: string; accessibleName: string; ordinal?: number };
+  value?: string;
+  description?: string;
+  required?: boolean;
+  disabled?: boolean;
+  readOnly?: boolean;
+  invalid?: boolean;
+  checked?: boolean;
+  autocomplete?: string;
+  valueMin?: string;
+  valueMax?: string;
+  children?: A11yNode[];
+};
+
+const A11Y_ACTIONABLE_ROLES = new Set([
+  "button",
+  "checkbox",
+  "combobox",
+  "link",
+  "listbox",
+  "radio",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "switch",
+  "textbox",
+]);
+
+function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode[]; truncated: boolean } {
+  let maxNodes = 256;
+  if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
+    maxNodes = Math.min(Math.max(1, maxNodesInput), A11Y_MAX_NODES);
+  }
+  const root = document.documentElement;
+  const state = { remaining: maxNodes, truncated: false };
+  if (!root) return { nodes: [], truncated: false };
+  const labelsByControlId = new Map<string, Element>();
+  for (const label of Array.from(document.querySelectorAll("label[for]")).slice(0, 4_096)) {
+    const controlId = label.getAttribute("for");
+    if (controlId && byteLength(controlId) <= MAX_SELECTOR_LENGTH && !labelsByControlId.has(controlId)) {
+      labelsByControlId.set(controlId, label);
+    }
+  }
+
+  const structuralRole = (element: Element): string | undefined => {
+    const tag = element.tagName.toLowerCase();
+    const landmark: Record<string, string> = {
+      header: "banner",
+      nav: "navigation",
+      main: "main",
+      footer: "contentinfo",
+      aside: "complementary",
+      form: "form",
+      section: "region",
+      ul: "list",
+      ol: "list",
+      li: "listitem",
+      table: "table",
+      tr: "row",
+      td: "cell",
+      th: "columnheader",
+      img: "img",
+      figure: "figure",
+      dialog: "dialog",
+      hr: "separator",
+    };
+    if (landmark[tag]) return landmark[tag];
+    if (/^h[1-6]$/.test(tag)) return "heading";
+    return undefined;
+  };
+
+  const semantics = (element: Element): { role?: string; name?: string; sensitive: boolean } => {
+    const budget: WorkBudget = { remaining: 64 };
+    const sensitive = isSensitiveControl(element, budget);
+    const role = implicitRole(element, !sensitive) ?? structuralRole(element);
+    const name = sensitive
+      ? REDACTED
+      : accessibleName(element, labelText(element, labelsByControlId, budget), budget, sensitive);
+    return { role, name, sensitive };
+  };
+
+  const targetTotals = new Map<string, number>();
+  const targetKey = (role: string, name: string): string => `${role}\u0000${name}`;
+  const countTargets = (element: Element, depth: number): void => {
+    if (isElementHidden(element)) return;
+    const { role, name } = semantics(element);
+    if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
+      const key = targetKey(role, name);
+      targetTotals.set(key, (targetTotals.get(key) ?? 0) + 1);
+    }
+    if (depth < A11Y_MAX_DEPTH) {
+      for (const child of Array.from(element.children).slice(0, 256)) {
+        countTargets(child, depth + 1);
+      }
+    }
+  };
+  countTargets(root, 0);
+
+  const build = (element: Element, depth: number): A11yNode | undefined => {
+    const { role, name, sensitive } = semantics(element);
+    const children: A11yNode[] = [];
+    if (depth < A11Y_MAX_DEPTH) {
+      for (const child of Array.from(element.children).slice(0, 256)) {
+        if (state.remaining <= 0) break;
+        const built = build(child, depth + 1);
+        if (built) children.push(built);
+      }
+    }
+    if (isElementHidden(element)) return undefined;
+    if (!role) return children.length ? { children } : undefined;
+    if (state.remaining <= 0) {
+      state.truncated = true;
+      return undefined;
+    }
+    state.remaining -= 1;
+    const node: A11yNode = { role };
+    if (name) node.name = name;
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) {
+      const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+      node.value = controlValue(element, sensitive) ?? "";
+      node.required = control.required;
+      node.disabled = control.disabled;
+      node.invalid = !control.validity.valid;
+      if (element.tagName !== "SELECT") {
+        node.readOnly = (control as HTMLInputElement | HTMLTextAreaElement).readOnly;
+      }
+      if (element.tagName === "INPUT") {
+        const input = control as HTMLInputElement;
+        if (["checkbox", "radio"].includes(input.type)) node.checked = input.checked;
+        const autocomplete = observationString(input.autocomplete);
+        if (autocomplete) node.autocomplete = autocomplete;
+        const valueMin = observationString(input.min);
+        const valueMax = observationString(input.max);
+        if (valueMin) node.valueMin = valueMin;
+        if (valueMax) node.valueMax = valueMax;
+      }
+      const description = observationString(element.getAttribute("aria-description"));
+      if (description) node.description = description;
+    }
+    if (children.length) node.children = children;
+    return node;
+  };
+
+  const tree = build(root, 0);
+  let nodes = tree ? [tree] : [];
+  while (nodes.length === 1) {
+    const onlyNode = nodes[0];
+    if (!onlyNode || onlyNode.role || onlyNode.name || !onlyNode.children) break;
+    nodes = onlyNode.children;
+  }
+  const targetSeen = new Map<string, number>();
+  const annotateTargets = (candidates: A11yNode[]): void => {
+    for (const node of candidates) {
+      if (node.role && node.name && node.name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(node.role)) {
+        const key = targetKey(node.role, node.name);
+        const ordinal = targetSeen.get(key) ?? 0;
+        node.target = {
+          role: node.role,
+          accessibleName: node.name,
+          ...(targetTotals.get(key)! > 1 ? { ordinal } : {}),
+        };
+        targetSeen.set(key, ordinal + 1);
+      }
+      annotateTargets(node.children ?? []);
+    }
+  };
+  annotateTargets(nodes);
+  if (state.remaining <= 0) state.truncated = true;
+  return { nodes, truncated: state.truncated };
+}
+
 export function executeContentAction(
   document: Document,
   operation: string,
@@ -757,6 +959,9 @@ export function executeContentAction(
   const parsed = actionInput(input);
   if (operation === "observe") {
     return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
+  }
+  if (operation === "a11yTree") {
+    return a11yTree(document, parsed.maxNodes);
   }
   const element = target(document, parsed);
   switch (operation) {

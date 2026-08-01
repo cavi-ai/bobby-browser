@@ -38,7 +38,7 @@ export const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS = 5_000 as const;
 
 export type ExecutionPath = "directHttp" | "chromium" | "chromiumFallback";
 export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownload" | "ineligibleCommand" | "semanticTargetRequired" | "javascriptRequired" | "unsupportedContentType" | "stateConflict" | "policyRequired";
-export interface TargetSpec { css: string | null; testId: string | null; role: string | null; accessibleName: string | null; label: string | null; text: TextMatch | null; attributes: Record<string, string>; framePath: TargetSpec[]; shadowPath: TargetSpec[]; ordinal: number | null; allowBestMatch: boolean; }
+export interface TargetSpec { css?: string | null; testId?: string | null; role?: string | null; accessibleName?: string | null; label?: string | null; text?: TextMatch | null; attributes?: Record<string, string>; framePath?: TargetSpec[]; shadowPath?: TargetSpec[]; ordinal?: number | null; allowBestMatch?: boolean; }
 export type TextMatch = { kind: "exact" | "contains" | "regex"; value: string };
 export interface TargetFingerprint { pageId: Id; frame: string | null; role: string | null; name: string | null; stableAttributes: Record<string, string>; }
 export interface CandidateEvidence { role: string | null; name: string | null; score: number; reasons: string[]; }
@@ -108,6 +108,7 @@ export type Evidence =
   | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string }
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
+  | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean }
   | { kind: "intentExecution"; record: ExecutionRecord }
   | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 
@@ -126,11 +127,30 @@ export interface NavigateCommand { url: string; waitUntil: WaitUntil; timeoutMs:
 export interface DownloadUrlCommand { url: string; expectedContentType: string | null; maxBytes: number; }
 export interface InspectCommand { selector: string | null; target: TargetSpec | null; includeHtml: boolean; }
 export interface ClickCommand { selector: string; target: TargetSpec | null; boundary: boolean; expectedUrl: string | null; }
-export interface TypeTextCommand { selector: string; target: TargetSpec | null; value: string; clearFirst: boolean; }
+export interface TypeTextCommand { selector: string; target: TargetSpec | null; value: string; clearFirst: boolean; expectedUrl?: string | null; }
 export interface UploadFilesCommand { selector: string; target: TargetSpec | null; paths: string[]; }
 export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
+export interface AccessibilitySnapshotCommand { maxNodes?: number | null }
+export interface ExtractStructuredCommand { schema: unknown; purpose?: string | null }
+export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number }
+export interface AccessibilityNode {
+  role?: string;
+  name?: string;
+  target?: AccessibilityTarget;
+  value?: string;
+  description?: string;
+  required?: boolean;
+  disabled?: boolean;
+  readOnly?: boolean;
+  invalid?: boolean;
+  checked?: boolean;
+  autocomplete?: string;
+  valueMin?: string;
+  valueMax?: string;
+  children?: AccessibilityNode[];
+}
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
@@ -147,6 +167,8 @@ export type PrimitiveCommand =
   | { kind: "listPages"; input: null }
   | { kind: "closePage"; input: ClosePageCommand }
   | { kind: "activatePage"; input: ActivatePageCommand }
+  | { kind: "accessibilitySnapshot"; input: AccessibilitySnapshotCommand }
+  | { kind: "extractStructured"; input: ExtractStructuredCommand }
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }
@@ -155,6 +177,7 @@ export type PrimitiveCommand =
 export interface IntentHints {
   role?: string | null;
   nearText?: TextMatch | null;
+  ordinal?: number | null;
   framePath?: TargetSpec[];
   shadowPath?: TargetSpec[];
   allowBestMatch?: boolean;
@@ -167,7 +190,7 @@ export type FillValue =
   | { kind: "files"; paths: string[] };
 export interface FillIntent { purpose: string; hints?: IntentHints; value: FillValue; }
 export interface CompleteFormField { name: string; purpose: string; hints?: IntentHints; value: FillValue; }
-export interface CompleteFormIntent { fields: CompleteFormField[]; }
+export interface CompleteFormIntent { purpose: string; fields: CompleteFormField[]; }
 export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
 /** boundary mirrors ClickCommand.boundary: set true when activating the control may perform a mutating/side-effecting action. */
@@ -208,6 +231,7 @@ export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };
 export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory: RecoveryRecord[]; recoveryReceipts: unknown[]; createdAt: string; }
 export interface RecoveryRecord { recordedAt: string; decision: RecoveryDecision; }
+export interface RecoveryStatus { workflowId: Id; checkpoint: WorkflowCheckpoint; receipts: unknown[]; }
 export type RecoveryDecision =
   | { status: "resumed"; checkpointId: Id; attemptId: Id; evidence: Evidence[] }
   | { status: "needsReconciliation"; checkpointId: Id; attemptId: Id; reason: string; evidence: Evidence[] }

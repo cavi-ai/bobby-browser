@@ -19,5 +19,5 @@ println!("{info:?}");
 # Ok(()) }
 ```
 
-Requires the same auth headers contract as `@bobby-browser/sdk`: bearer token,
+Requires the same auth headers contract as `@cavi-ai/bobby-browser`: bearer token,
 `x-interface-version`, `x-correlation-id`, and `x-deadline`.

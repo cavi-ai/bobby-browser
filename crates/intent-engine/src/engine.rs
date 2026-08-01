@@ -161,52 +161,31 @@ async fn execute_complete_form(
     vision: &VisionContext,
     fields: Vec<CompleteFormFieldPlan>,
 ) -> IntentOutcome {
-    let mut accumulated = Vec::new();
+    let mut evidence = Vec::new();
     for field in fields {
-        let field_intent = IntentCommand::Fill(types::FillIntent {
+        evidence.push(Evidence::Configuration {
+            name: "completeFormField".into(),
+            value: field.name.clone(),
+        });
+        let intent = IntentCommand::Fill(types::FillIntent {
             purpose: field.purpose,
             hints: types::IntentHints::default(),
             value: field.value.clone(),
         });
-        match execute_fill(
-            &field_intent,
-            page_id,
-            browser,
-            vision,
-            field.target,
-            field.value,
-        )
-        .await
-        {
-            IntentOutcome::Completed { evidence } => accumulated.extend(evidence),
-            IntentOutcome::Failed { error, evidence } => {
-                accumulated.extend(evidence);
-                accumulated.push(intent_evidence(execution_record(
-                    "completeForm",
-                    Some(field.name),
-                    "ordered fail-fast field execution",
-                    Vec::new(),
-                    None,
-                    "fieldFailed",
-                )));
-                return IntentOutcome::Failed {
-                    error,
-                    evidence: accumulated,
-                };
+        match execute_fill(&intent, page_id, browser, vision, field.target, field.value).await {
+            IntentOutcome::Completed {
+                evidence: mut field_evidence,
+            } => evidence.append(&mut field_evidence),
+            IntentOutcome::Failed {
+                error,
+                evidence: mut field_evidence,
+            } => {
+                evidence.append(&mut field_evidence);
+                return IntentOutcome::Failed { error, evidence };
             }
         }
     }
-    accumulated.push(intent_evidence(execution_record(
-        "completeForm",
-        None,
-        "ordered fail-fast field execution",
-        Vec::new(),
-        None,
-        "completed",
-    )));
-    IntentOutcome::Completed {
-        evidence: accumulated,
-    }
+    IntentOutcome::Completed { evidence }
 }
 
 async fn execute_locate(
@@ -519,6 +498,7 @@ async fn act_fill(
                         target: Some(target),
                         value: text.clone(),
                         clear_first: *clear_first,
+                        expected_url: None,
                     },
                 )
                 .await
@@ -532,6 +512,7 @@ async fn act_fill(
                         target: Some(target),
                         value: option.clone(),
                         clear_first: true,
+                        expected_url: None,
                     },
                 )
                 .await
@@ -545,6 +526,7 @@ async fn act_fill(
                         target: Some(target),
                         value: checked.to_string(),
                         clear_first: true,
+                        expected_url: None,
                     },
                 )
                 .await
@@ -1737,6 +1719,7 @@ async fn execute_vision_action(
                         target: None,
                         value: text.clone(),
                         clear_first: false,
+                        expected_url: None,
                     },
                 )
                 .await

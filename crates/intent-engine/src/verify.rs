@@ -116,6 +116,26 @@ pub fn verify_fill(value: &FillValue, evidence: &[Evidence]) -> Result<(), Strin
 }
 
 fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), String> {
+    let control_valid = evidence.iter().find_map(|item| match item {
+        Evidence::Configuration { name, value } if name == "formControlValid" => {
+            Some(value == "true")
+        }
+        _ => None,
+    });
+    if control_valid == Some(false) {
+        let message = evidence.iter().find_map(|item| match item {
+            Evidence::Configuration { name, value }
+                if name == "formControlValidationMessage" && !value.is_empty() =>
+            {
+                Some(value.as_str())
+            }
+            _ => None,
+        });
+        return Err(match message {
+            Some(message) => format!("browser rejected the form control: {message}"),
+            None => "browser rejected the form control".into(),
+        });
+    }
     let observed = evidence
         .iter()
         .filter_map(|item| match item {

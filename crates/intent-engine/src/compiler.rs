@@ -6,7 +6,7 @@ use types::{
     WaitForCommand, MAX_INTENT_PURPOSE_BYTES,
 };
 
-const MAX_COMPLETE_FORM_FIELDS: usize = 128;
+const MAX_FORM_FIELDS: usize = 128;
 
 #[derive(Debug, Clone)]
 pub enum IntentPlan {
@@ -43,14 +43,6 @@ pub enum IntentPlan {
 }
 
 #[derive(Debug, Clone)]
-pub struct CompleteFormFieldPlan {
-    pub name: String,
-    pub purpose: String,
-    pub target: TargetSpec,
-    pub value: FillValue,
-}
-
-#[derive(Debug, Clone)]
 pub struct ExtractFieldPlan {
     pub name: String,
     /// Retained alongside `target` (which folds this into an accessible-name
@@ -62,6 +54,14 @@ pub struct ExtractFieldPlan {
     pub value: ExtractValueKind,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompleteFormFieldPlan {
+    pub name: String,
+    pub purpose: String,
+    pub target: TargetSpec,
+    pub value: FillValue,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CompileError {
     #[error("intent purpose must not be empty")]
@@ -70,18 +70,14 @@ pub enum CompileError {
     PurposeTooLong,
     #[error("extract intent must include at least one field")]
     NoExtractFields,
+    #[error("complete form intent must include at least one field")]
+    NoFormFields,
+    #[error("complete form intent exceeds {MAX_FORM_FIELDS} fields")]
+    TooManyFormFields,
     #[error("extract field name must not be empty")]
     EmptyFieldName,
     #[error("duplicate extract field name: {0}")]
     DuplicateFieldName(String),
-    #[error("complete form intent must include at least one field")]
-    NoCompleteFormFields,
-    #[error("complete form intent exceeds {MAX_COMPLETE_FORM_FIELDS} fields")]
-    TooManyCompleteFormFields,
-    #[error("complete form field name must not be empty")]
-    EmptyCompleteFormFieldName,
-    #[error("duplicate complete form field name: {0}")]
-    DuplicateCompleteFormFieldName(String),
 }
 
 pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileError> {
@@ -100,28 +96,26 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
             })
         }
         IntentCommand::CompleteForm(intent) => {
+            validate_purpose(&intent.purpose)?;
             if intent.fields.is_empty() {
-                return Err(CompileError::NoCompleteFormFields);
+                return Err(CompileError::NoFormFields);
             }
-            if intent.fields.len() > MAX_COMPLETE_FORM_FIELDS {
-                return Err(CompileError::TooManyCompleteFormFields);
+            if intent.fields.len() > MAX_FORM_FIELDS {
+                return Err(CompileError::TooManyFormFields);
             }
             let mut names = HashSet::new();
             let mut fields = Vec::with_capacity(intent.fields.len());
             for field in &intent.fields {
-                let name = field.name.trim();
-                if name.is_empty() {
-                    return Err(CompileError::EmptyCompleteFormFieldName);
+                if field.name.trim().is_empty() {
+                    return Err(CompileError::EmptyFieldName);
                 }
-                if !names.insert(name.to_owned()) {
-                    return Err(CompileError::DuplicateCompleteFormFieldName(
-                        name.to_owned(),
-                    ));
+                if !names.insert(field.name.clone()) {
+                    return Err(CompileError::DuplicateFieldName(field.name.clone()));
                 }
                 let purpose = validate_purpose(&field.purpose)?;
                 fields.push(CompleteFormFieldPlan {
-                    name: name.to_owned(),
-                    purpose: purpose.to_owned(),
+                    name: field.name.clone(),
+                    purpose: purpose.into(),
                     target: compile_target(purpose, &field.hints),
                     value: field.value.clone(),
                 });
@@ -196,6 +190,7 @@ fn validate_purpose(purpose: &str) -> Result<&str, CompileError> {
 fn compile_target(purpose: &str, hints: &IntentHints) -> TargetSpec {
     let mut target = TargetSpec {
         role: hints.role.clone(),
+        ordinal: hints.ordinal,
         frame_path: hints.frame_path.iter().cloned().map(Box::new).collect(),
         shadow_path: hints.shadow_path.iter().cloned().map(Box::new).collect(),
         allow_best_match: hints.allow_best_match,

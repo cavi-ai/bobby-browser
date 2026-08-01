@@ -317,6 +317,7 @@ fn commands_expose_recovery_class() {
             target: None,
             value: "Ada".into(),
             clear_first: true,
+            expected_url: None,
         })
         .class(),
         CommandClass::Reconciliable
@@ -723,6 +724,7 @@ fn follow_runtime_command_envelope_golden_json() {
                         "hints": {
                             "role": null,
                             "nearText": null,
+                            "ordinal": null,
                             "framePath": [],
                             "shadowPath": [],
                             "allowBestMatch": false
@@ -769,6 +771,7 @@ fn dismiss_obstruction_intent_timeout_ms_defaults_when_omitted() {
         "hints": {
             "role": null,
             "nearText": null,
+            "ordinal": null,
             "framePath": [],
             "shadowPath": [],
             "allowBestMatch": false
@@ -821,6 +824,7 @@ fn dismiss_obstruction_runtime_command_envelope_golden_json() {
                         "hints": {
                             "role": null,
                             "nearText": null,
+                            "ordinal": null,
                             "framePath": [],
                             "shadowPath": [],
                             "allowBestMatch": false
@@ -929,6 +933,7 @@ fn extract_runtime_command_envelope_golden_json() {
                             "hints": {
                                 "role": null,
                                 "nearText": null,
+                                "ordinal": null,
                                 "framePath": [],
                                 "shadowPath": [],
                                 "allowBestMatch": false
@@ -1040,6 +1045,7 @@ fn locate_runtime_command_envelope_golden_json() {
                         "hints": {
                             "role": null,
                             "nearText": null,
+                            "ordinal": null,
                             "framePath": [],
                             "shadowPath": [],
                             "allowBestMatch": false
@@ -1217,4 +1223,26 @@ fn wait_evidence_includes_excluded_classes_when_present() {
     };
     let value = serde_json::to_value(&without).unwrap();
     assert!(value.get("excludedClasses").is_none());
+}
+
+#[test]
+fn accessibility_snapshot_action_target_round_trips_without_dom_identifiers() {
+    let page_id = PageId::new();
+    let value = json!({
+        "kind": "accessibilitySnapshot",
+        "pageId": page_id,
+        "nodes": [{
+            "role": "textbox",
+            "name": "Email address",
+            "target": {
+                "role": "textbox",
+                "accessibleName": "Email address",
+                "ordinal": 1
+            }
+        }],
+        "truncated": false
+    });
+
+    let evidence: Evidence = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(evidence).unwrap(), value);
 }

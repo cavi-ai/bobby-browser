@@ -8,23 +8,24 @@ repository.workspace = true
 publish = true
 
 [dependencies]
-artifact-store = { path = "../artifact-store", version = "0.3.0" }
+artifact-store = { path = "../artifact-store", version = "0.3.1" }
 async-trait.workspace = true
 chrono.workspace = true
-checkpoint-store = { path = "../checkpoint-store", version = "0.3.0" }
-config = { path = "../config", version = "0.3.0" }
-interface-core = { path = "../interface-core", version = "0.3.0" }
+checkpoint-store = { path = "../checkpoint-store", version = "0.3.1" }
+config = { path = "../config", version = "0.3.1" }
+interface-core = { path = "../interface-core", version = "0.3.1" }
 serde_json.workspace = true
-types = { path = "../types", version = "0.3.0" }
-session-manager = { path = "../session-manager", version = "0.3.0" }
-page-runtime = { path = "../page-runtime", version = "0.3.0" }
-network-engine = { path = "../network-engine", version = "0.3.0" }
-worker-pool = { path = "../worker-pool", version = "0.3.0" }
-workflow-journal = { path = "../workflow-journal", version = "0.3.0" }
+types = { path = "../types", version = "0.3.1" }
+session-manager = { path = "../session-manager", version = "0.3.1" }
+page-runtime = { path = "../page-runtime", version = "0.3.1" }
+intent-engine = { path = "../intent-engine", version = "0.3.1" }
+network-engine = { path = "../network-engine", version = "0.3.1" }
+worker-pool = { path = "../worker-pool", version = "0.3.1" }
+workflow-journal = { path = "../workflow-journal", version = "0.3.1" }
 tracing.workspace = true
 
 [dev-dependencies]
-checkpoint-store = { path = "../checkpoint-store", version = "0.3.0" }
+checkpoint-store = { path = "../checkpoint-store", version = "0.3.1" }
 tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true

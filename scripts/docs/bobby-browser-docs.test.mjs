@@ -6,7 +6,13 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { buildBobbyBrowserDocs } from "./build-bobby-browser.mjs";
 import { verifyBobbyBrowserDocs } from "./verify-bobby-browser.mjs";
-import { DOCUMENTED_VERSION, OUTPUT_REL, SOURCE_REL } from "./lib.mjs";
+import {
+  DOCUMENTED_VERSION,
+  OUTPUT_REL,
+  SOURCE_REL,
+  findStaleVersionReferences,
+  stampVersionReferences,
+} from "./lib.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -59,9 +65,36 @@ test("build rejects incomplete or inconsistent release identity", async () => {
     /commit/i,
   );
   await assert.rejects(
-    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, sourceDateEpoch: undefined }),
+    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, sourceDateEpoch: -1 }),
     /source date epoch/i,
   );
+  await assert.rejects(
+    () => buildBobbyBrowserDocs(REPO_ROOT, { ...RELEASE, version: "9.9.9" }),
+    /release version must be/,
+  );
+});
+
+test("build defaults release identity from git when args are omitted", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    const built = await buildBobbyBrowserDocs(fixtureRoot);
+    assert.equal(built.manifest.version, DOCUMENTED_VERSION);
+    assert.equal(built.manifest.release.tag, `v${DOCUMENTED_VERSION}`);
+    assert.match(built.manifest.release.commit, /^[a-f0-9]{40}$/);
+  });
+});
+
+test("stamped docs substitute product and interface version tokens", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    const page = await readFile(
+      path.join(fixtureRoot, OUTPUT_REL, "release/version-and-support.md"),
+      "utf8",
+    );
+    assert.match(page, new RegExp(`documentedVersion: ${DOCUMENTED_VERSION}`));
+    assert.doesNotMatch(page, /\{\{PRODUCT_VERSION\}\}/);
+    assert.doesNotMatch(page, /\{\{INTERFACE_VERSION\}\}/);
+    assert.match(page, new RegExp(DOCUMENTED_VERSION));
+  });
 });
 
 test("verify fails when a page is tampered", async () => {
@@ -142,4 +175,91 @@ test("generated docs publish the Bobby skill and gauntlet operator guides", asyn
     assert.match(gauntlet, /BOBBY_CHAMPIONSHIP_ENGINE/);
     assert.match(gauntlet, /target\/bobby-championship/);
   });
+});
+
+test("docs source pins versions only through tokens", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const { INTERFACE_VERSION } = await import("./lib.mjs");
+  async function collect(directory) {
+    /** @type {string[]} */
+    const files = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) files.push(...(await collect(absolute)));
+      else if (entry.isFile() && /\.(md|json)$/u.test(entry.name)) files.push(absolute);
+    }
+    return files;
+  }
+  const productLiteral = new RegExp(`\\b${DOCUMENTED_VERSION.replaceAll(".", "\\.")}\\b`, "u");
+  const interfaceLiteral = new RegExp(`\\b${INTERFACE_VERSION.replaceAll(".", "\\.")}\\b`, "u");
+  const sourceRoot = path.join(REPO_ROOT, SOURCE_REL);
+  for (const file of await collect(sourceRoot)) {
+    const text = await readFile(file, "utf8");
+    assert.equal(
+      productLiteral.test(text),
+      false,
+      `${file} hardcodes product version ${DOCUMENTED_VERSION}; use {{PRODUCT_VERSION}}`,
+    );
+    assert.equal(
+      interfaceLiteral.test(text),
+      false,
+      `${file} hardcodes interface version ${INTERFACE_VERSION}; use {{INTERFACE_VERSION}}`,
+    );
+  }
+});
+
+test("committed docs artifact matches a rebuild from source tokens", async () => {
+  const committed = JSON.parse(
+    await readFile(path.join(REPO_ROOT, OUTPUT_REL, "manifest.json"), "utf8"),
+  );
+  const release = {
+    version: committed.version,
+    tag: committed.release.tag,
+    commit: committed.release.commit,
+    sourceDateEpoch: Math.floor(Date.parse(committed.generatedAt) / 1000),
+  };
+  const rebuilt = await buildBobbyBrowserDocs(REPO_ROOT, release);
+  assert.equal(rebuilt.manifest.contentSha256, committed.contentSha256);
+  await verifyBobbyBrowserDocs(REPO_ROOT, release);
+});
+
+test("repo-root version references are rewritten to the package version", () => {
+  const stale = [
+    "[`docs/bobby-browser/v0.2.1`](docs/bobby-browser/v0.2.1) for documentation hosts.",
+    "source: GitHub Release asset bobby-browser-docs-v0.2.1.tar.gz",
+    "documentation artifact built for bobby-browser `0.2.1`.",
+    "The manifest version must equal the documented version, `0.2.1`.",
+  ].join("\n");
+
+  assert.equal(findStaleVersionReferences(stale).length, 5);
+
+  const stamped = stampVersionReferences(stale);
+  assert.equal(findStaleVersionReferences(stamped).length, 0);
+  assert.ok(!stamped.includes("0.2.1"), stamped);
+  assert.ok(
+    stamped.includes(`docs/bobby-browser/v${DOCUMENTED_VERSION}`),
+    stamped,
+  );
+  assert.ok(
+    stamped.includes(`bobby-browser-docs-v${DOCUMENTED_VERSION}.tar.gz`),
+    stamped,
+  );
+  // A single-capture pattern must not splice the match offset in after the version.
+  assert.ok(
+    stamped.includes(`docs/bobby-browser/v${DOCUMENTED_VERSION}\`]`),
+    stamped,
+  );
+});
+
+test("unrelated versions are left alone", () => {
+  const other = "node-version: 22\nSee semver 1.2.3 and `1.2.3` elsewhere.";
+  assert.equal(stampVersionReferences(other), other);
+  assert.deepEqual(findStaleVersionReferences(other), []);
+});
+
+test("the committed repo docs name the current version", async () => {
+  for (const relativePath of ["README.md", "docs/bobby-browser/CONSUMER.md"]) {
+    const text = await readFile(path.join(REPO_ROOT, relativePath), "utf8");
+    assert.deepEqual(findStaleVersionReferences(text), [], relativePath);
+  }
 });

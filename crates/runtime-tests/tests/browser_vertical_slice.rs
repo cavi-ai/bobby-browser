@@ -174,6 +174,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
     let first_session = runtime
@@ -241,6 +242,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             target: None,
             value: "Ada".into(),
             clear_first: true,
+            expected_url: None,
         }),
     )
     .await;
@@ -298,6 +300,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             target: None,
             value: "Analytical Engines".into(),
             clear_first: true,
+            expected_url: None,
         }),
     )
     .await;

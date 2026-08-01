@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import test from "node:test";
 import { inspect } from "node:util";
 
-import { BrowserRuntimeClient, RuntimeClientError, type Capability, type CommandEnvelope, type EventOptions, type InterfaceErrorCode } from "../src/index.js";
+import { BrowserRuntimeClient, INTERFACE_VERSION, RuntimeClientError, type Capability, type CommandEnvelope, type EventOptions, type InterfaceErrorCode } from "../src/index.js";
 
 const TOKEN = "test-bearer-token";
 const COMMAND_ID = "00000000-0000-4000-8000-000000000001";
@@ -31,7 +31,7 @@ async function withServer(
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { "content-type": "application/json", "x-interface-version": "2026-07-23" });
+  response.writeHead(status, { "content-type": "application/json", "x-interface-version": INTERFACE_VERSION });
   response.end(JSON.stringify(body));
 }
 
@@ -112,6 +112,27 @@ test("listSessions returns the broker session array", async () => {
     const sessions = await client.listSessions();
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0]?.id, SESSION_ID);
+  });
+});
+
+test("recoveryStatus returns the checkpoint status", async () => {
+  const time = new Date().toISOString();
+  const checkpoint = {
+    schemaVersion: 1, checkpointId: CHECKPOINT_ID, workflowId: WORKFLOW_ID, attemptId: ATTEMPT_ID,
+    sessionId: SESSION_ID, pageId: "00000000-0000-4000-8000-000000000009",
+    restartUrl: "https://example.test", currentUrl: "https://example.test",
+    cursor: null, boundaryCommandId: null, recoveryClass: "replayable",
+    invariants: [], replayableInputs: [], evidence: [], recoveryHistory: [], recoveryReceipts: [], createdAt: time,
+  };
+  await withServer((request, response) => {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, `/v1/recovery/${WORKFLOW_ID}`);
+    writeJson(response, 200, { workflowId: WORKFLOW_ID, checkpoint, receipts: [] });
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    const status = await client.recoveryStatus(WORKFLOW_ID);
+    assert.equal(status.checkpoint.workflowId, WORKFLOW_ID);
+    await assert.rejects(client.recoveryStatus("not-a-uuid"), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
   });
 });
 

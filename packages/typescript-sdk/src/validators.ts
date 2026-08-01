@@ -1,4 +1,6 @@
 import type {
+  AccessibilityTarget,
+  RecoveryStatus,
   CandidateEvidence,
   CommandError,
   CommandOutcome,
@@ -231,8 +233,43 @@ export function isEvidence(value: unknown): value is Evidence {
     case "browserExecution": return hasExactKeys(value, ["kind", "engine", "browserVersion", "profileId", "interactionPath"]) && isString(value.engine) && isString(value.browserVersion) && isString(value.profileId) && isString(value.interactionPath);
     case "javaScriptResult": return hasExactKeys(value, ["kind", "value", "truncated"]) && isJsonValue(value.value) && typeof value.truncated === "boolean";
     case "intentExecution": return hasExactKeys(value, ["kind", "record"]) && isExecutionRecord(value.record);
+    case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     default: return false;
   }
+}
+
+export function isRecoveryStatus(value: unknown): value is RecoveryStatus {
+  return hasExactKeys(value, ["workflowId", "checkpoint", "receipts"])
+    && isUuid(value.workflowId)
+    && isWorkflowCheckpoint(value.checkpoint)
+    && Array.isArray(value.receipts);
+}
+
+function isAccessibilityNode(value: unknown, depth = 0): boolean {
+  return isRecord(value)
+    && depth <= 32
+    && (value.role === undefined || isString(value.role))
+    && (value.name === undefined || isString(value.name))
+    && optional(value, "target", isAccessibilityTarget)
+    && optional(value, "value", isString)
+    && optional(value, "description", isString)
+    && optional(value, "required", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "disabled", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "readOnly", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "invalid", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "checked", (item): item is boolean => typeof item === "boolean")
+    && optional(value, "autocomplete", isString)
+    && optional(value, "valueMin", isString)
+    && optional(value, "valueMax", isString)
+    && (value.children === undefined || (Array.isArray(value.children) && value.children.every((child) => isAccessibilityNode(child, depth + 1))))
+    && Object.keys(value).every((key) => ["role", "name", "target", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "valueMin", "valueMax", "children"].includes(key));
+}
+
+function isAccessibilityTarget(value: unknown): value is AccessibilityTarget {
+  return hasExactKeys(value, ["role", "accessibleName"], ["ordinal"])
+    && isString(value.role)
+    && isString(value.accessibleName)
+    && optional(value, "ordinal", (item): item is number => isSafeUnsigned(item, 2047));
 }
 
 function isExecutionRecord(value: unknown): value is ExecutionRecord {

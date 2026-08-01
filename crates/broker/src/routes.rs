@@ -35,7 +35,10 @@ pub(crate) fn protected_router() -> Router<AppState> {
         .route("/v1/pages", post(open_page))
         .route("/v1/commands", post(submit_command))
         .route("/v1/checkpoints", post(checkpoint))
-        .route("/v1/recovery/{workflow}", post(recover))
+        .route(
+            "/v1/recovery/{workflow}",
+            post(recover).get(recovery_status),
+        )
         .route("/v1/events", get(events))
         .route("/v1/artifacts/{id}", get(artifact))
         .route("/v1/principals", post(issue_principal))
@@ -441,6 +444,24 @@ async fn issue_principal(
         })),
     )
         .into_response())
+}
+
+async fn recovery_status(
+    Path(workflow): Path<String>,
+    Extension(request): Extension<AuthenticatedRequest>,
+) -> Result<Json<types::RecoveryStatus>, ProtocolError> {
+    let workflow = WorkflowId(Uuid::parse_str(&workflow).map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?);
+    request
+        .runtime
+        .recovery_status(request.context, workflow)
+        .await
+        .map(Json)
+        .map_err(ProtocolError::from)
 }
 
 async fn delete_session(

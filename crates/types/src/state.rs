@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::{ExecutionPolicy, PageId, SessionId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum PageMode {
     Document,
     Interactive,
@@ -11,6 +12,7 @@ pub enum PageMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeInfo {
     pub version: String,
     pub capabilities: Vec<String>,
@@ -20,6 +22,7 @@ pub struct RuntimeInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionState {
     pub id: SessionId,
     pub profile: String,
@@ -31,6 +34,7 @@ pub struct SessionState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageState {
     pub id: PageId,
     pub session_id: SessionId,
@@ -41,6 +45,7 @@ pub struct PageState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NavigationResult {
     pub page_id: PageId,
     pub url: String,
@@ -48,6 +53,7 @@ pub struct NavigationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExtractResult {
     pub page_id: PageId,
     pub data: serde_json::Value,

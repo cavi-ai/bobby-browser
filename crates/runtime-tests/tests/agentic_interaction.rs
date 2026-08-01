@@ -78,6 +78,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
     let session = runtime
@@ -131,6 +132,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             }),
             value: "Ada".into(),
             clear_first: true,
+            expected_url: None,
         }),
     )
     .await;

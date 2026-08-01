@@ -7,8 +7,47 @@ use intent_engine::{compatible, IntentBrowser, IntentEngine, IntentOutcome, Visi
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, CompleteFormField, CompleteFormIntent,
     ErrorCode, Evidence, FillIntent, FillValue, IntentCommand, IntentHints, IntentResolutionPath,
-    PageId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    PageId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
+
+#[tokio::test]
+async fn complete_form_fills_fields_in_order_without_submitting() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Full name"), textbox("Email address")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: vec![Evidence::Element {
+            selector: String::new(),
+            text: Some("Ada".into()),
+        }],
+        upload_evidence: vec![],
+    };
+    let field = |name: &str, label: &str| CompleteFormField {
+        name: name.into(),
+        purpose: format!("fill {label}"),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            near_text: Some(types::TextMatch::Exact(label.into())),
+            ..Default::default()
+        },
+        value: FillValue::Text {
+            text: "Ada".into(),
+            clear_first: true,
+        },
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete application".into(),
+            fields: vec![field("name", "Full name"), field("email", "Email address")],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert_eq!(calls.lock().unwrap().type_text.len(), 2);
+}
 
 #[derive(Default)]
 struct CallLog {
@@ -329,53 +368,53 @@ async fn fill_fails_when_the_worker_returns_no_postcondition_evidence() {
 }
 
 #[tokio::test]
-async fn complete_form_stops_at_first_failed_field_and_preserves_prior_evidence() {
-    let calls = Arc::new(Mutex::new(CallLog::default()));
+async fn fill_rejects_browser_invalid_control_even_when_value_matches() {
     let browser = FakeBrowser {
-        candidates: Arc::new(vec![textbox("Email address")]),
-        calls: Arc::clone(&calls),
-        type_text_evidence: vec![Evidence::Element {
-            selector: "#Email address".into(),
-            text: Some("ada@example.test".into()),
-        }],
-        upload_evidence: Vec::new(),
-    };
-    let intent = IntentCommand::CompleteForm(CompleteFormIntent {
-        fields: vec![
-            CompleteFormField {
-                name: "email".into(),
-                purpose: "enter email".into(),
-                hints: IntentHints {
-                    role: Some("textbox".into()),
-                    near_text: Some(TextMatch::Exact("Email address".into())),
-                    ..IntentHints::default()
-                },
-                value: FillValue::Text {
-                    text: "ada@example.test".into(),
-                    clear_first: true,
-                },
+        candidates: Arc::new(vec![textbox("Postal code")]),
+        calls: Arc::new(Mutex::new(CallLog::default())),
+        type_text_evidence: vec![
+            Evidence::Element {
+                selector: "#postal-code".into(),
+                text: Some("12".into()),
             },
-            CompleteFormField {
-                name: "terms".into(),
-                purpose: "accept terms".into(),
-                hints: IntentHints {
-                    role: Some("checkbox".into()),
-                    near_text: Some(TextMatch::Exact("Accept terms".into())),
-                    ..IntentHints::default()
-                },
-                value: FillValue::Checked { checked: true },
+            Evidence::Configuration {
+                name: "formControlValid".into(),
+                value: "false".into(),
+            },
+            Evidence::Configuration {
+                name: "formControlValidationMessage".into(),
+                value: "Please match the requested format.".into(),
             },
         ],
-    });
-
-    let outcome =
-        IntentEngine::execute(&intent, &PageId::new(), &browser, &VisionContext::default()).await;
-    let IntentOutcome::Failed { evidence, .. } = outcome else {
-        panic!("second field must fail")
+        upload_evidence: Vec::new(),
     };
-    assert_eq!(calls.lock().unwrap().type_text.len(), 1);
-    assert!(evidence.iter().any(|item| matches!(item, Evidence::Element { text: Some(value), .. } if value == "ada@example.test")));
-    assert!(evidence.iter().any(|item| matches!(item, Evidence::IntentExecution { record } if record.intent_kind == "completeForm" && record.verification == "fieldFailed")));
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Postal code",
+            Some("textbox"),
+            FillValue::Text {
+                text: "12".into(),
+                clear_first: true,
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        IntentOutcome::Failed { error, evidence }
+            if error.code == ErrorCode::VerificationFailed
+                && error.message.contains("Please match the requested format")
+                && evidence.iter().any(|item| matches!(
+                    item,
+                    Evidence::Configuration { name, value }
+                        if name == "formControlValid" && value == "false"
+                ))
+    ));
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! Typed HTTP client for a running `bobby serve` instance.
 //!
-//! Mirrors `@bobby-browser/sdk` (`BrowserRuntimeClient`) for Rust callers.
+//! Mirrors `@cavi-ai/bobby-browser` (`BrowserRuntimeClient`) for Rust callers.
 
 use chrono::{Duration as ChronoDuration, Utc};
 use reqwest::{Client, Method};
@@ -10,7 +10,7 @@ use std::time::Duration;
 use thiserror::Error;
 use types::{
     CommandEnvelope, CommandOutcome, CreateSessionRequest, OpenPageRequest, PageState, RuntimeInfo,
-    SessionState, CURRENT_INTERFACE_VERSION,
+    SessionId, SessionState, CURRENT_INTERFACE_VERSION,
 };
 use uuid::Uuid;
 
@@ -108,6 +108,19 @@ impl BrowserRuntimeClient {
             .await
     }
 
+    pub async fn delete_session(
+        &self,
+        session_id: &SessionId,
+        options: Option<RequestOptions>,
+    ) -> Result<(), ClientError> {
+        self.empty(
+            Method::DELETE,
+            &format!("/v1/sessions/{}", session_id.0),
+            options,
+        )
+        .await
+    }
+
     pub async fn open_page(
         &self,
         input: &OpenPageRequest,
@@ -124,6 +137,47 @@ impl BrowserRuntimeClient {
     ) -> Result<CommandOutcome, ClientError> {
         self.json(Method::POST, "/v1/commands", Some(input), options)
             .await
+    }
+
+    async fn empty(
+        &self,
+        method: Method,
+        path: &str,
+        options: Option<RequestOptions>,
+    ) -> Result<(), ClientError> {
+        let options = options.unwrap_or_default();
+        let timeout = options.timeout.unwrap_or(self.default_timeout);
+        let deadline =
+            Utc::now() + ChronoDuration::from_std(timeout).unwrap_or(ChronoDuration::seconds(30));
+        let correlation = options
+            .correlation_id
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        let mut request = self
+            .http
+            .request(method, format!("{}{path}", self.base_url))
+            .timeout(timeout)
+            .header("authorization", format!("Bearer {}", self.bearer_token))
+            .header("x-interface-version", CURRENT_INTERFACE_VERSION)
+            .header("x-correlation-id", correlation)
+            .header("x-deadline", deadline.to_rfc3339());
+        if let Some(key) = options.idempotency_key {
+            request = request.header("idempotency-key", key);
+        }
+
+        let response = request.send().await.map_err(|error| {
+            ClientError::Transport(error.to_string()).redact(&self.bearer_token)
+        })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NO_CONTENT || status.is_success() {
+            return Ok(());
+        }
+        let text = response.text().await.unwrap_or_default();
+        Err(ClientError::Http {
+            status: status.as_u16(),
+            message: text,
+        }
+        .redact(&self.bearer_token))
     }
 
     async fn json<B, T>(
@@ -221,7 +275,7 @@ mod tests {
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
             json!({
-                "version": "0.3.0",
+                "version": env!("CARGO_PKG_VERSION"),
                 "capabilities": ["session:read"],
                 "active_sessions": 0,
                 "queued_jobs": 0,
@@ -242,7 +296,7 @@ mod tests {
 
         let client = BrowserRuntimeClient::new(format!("http://{addr}/v1"), "test-token").unwrap();
         let info = client.runtime_info(None).await.unwrap();
-        assert_eq!(info.version, "0.3.0");
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.active_sessions, 0);
     }
 

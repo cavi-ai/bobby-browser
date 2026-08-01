@@ -6,9 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact stable version to verify or backfill
-        required: true
-        default: "0.2.1"
+        description: Exact stable version to verify or backfill (defaults to package.json / Cargo workspace version)
+        required: false
         type: string
       dry_run:
         description: Build and verify without upload or dispatch
@@ -20,7 +19,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: publish-docs-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+  group: publish-docs-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version || 'package' }}
   cancel-in-progress: false
 
 jobs:
@@ -48,21 +47,33 @@ jobs:
           EVENT_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
+          PACKAGE_VERSION="$(node --input-type=module -e 'import { DOCUMENTED_VERSION } from "./scripts/docs/lib.mjs"; console.log(DOCUMENTED_VERSION)')"
           if [ "$GITHUB_EVENT_NAME" = "release" ]; then
             TAG="$EVENT_TAG"
             VERSION="${TAG#v}"
-          else
+          elif [ -n "${INPUT_VERSION:-}" ]; then
             VERSION="$INPUT_VERSION"
+            TAG="v${VERSION}"
+          else
+            VERSION="$PACKAGE_VERSION"
             TAG="v${VERSION}"
           fi
           if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || [ "$TAG" != "v${VERSION}" ]; then
             echo "::error::documentation releases require an exact v-prefixed stable version"
             exit 1
           fi
-          COMMIT="$(git rev-list -n 1 "$TAG")"
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error::requested version ${VERSION} does not match package sources of truth ${PACKAGE_VERSION}"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            COMMIT="$(git rev-list -n 1 "$TAG")"
+          else
+            COMMIT="$(git rev-parse HEAD)"
+          fi
           EPOCH="$(git show -s --format=%ct "$COMMIT")"
           if [[ ! "$COMMIT" =~ ^[a-f0-9]{40}$ ]] || [[ ! "$EPOCH" =~ ^[0-9]+$ ]]; then
-            echo "::error::release tag does not resolve to immutable provenance"
+            echo "::error::release identity does not resolve to immutable provenance"
             exit 1
           fi
           {
@@ -81,7 +92,7 @@ jobs:
           EPOCH: ${{ steps.release.outputs.epoch }}
         run: |
           node scripts/docs/build-bobby-browser.mjs --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --source-date-epoch "$EPOCH"
-          node scripts/docs/verify-bobby-browser.mjs
+          node scripts/docs/verify-bobby-browser.mjs --version "$VERSION" --tag "$TAG" --commit "$COMMIT" --source-date-epoch "$EPOCH"
           OUTPUT="$RUNNER_TEMP/bobby-docs-release"
           ENVELOPE="$RUNNER_TEMP/cavi-oss-release.json"
           node scripts/docs/release-artifact.mjs --docs-root "docs/bobby-browser/v${VERSION}" --output "$OUTPUT" --version "$VERSION" --tag "$TAG" --repository "$GITHUB_REPOSITORY" --commit "$COMMIT" --source-date-epoch "$EPOCH" > "$ENVELOPE"

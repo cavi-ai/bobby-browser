@@ -8,7 +8,17 @@ import type {
   InterfaceEvent,
   OpenPageRequest,
   RuntimeInfo,
+  TargetSpec,
 } from "../src/index.js";
+
+test("TargetSpec accepts the minimal semantic target supported by the wire schema", () => {
+  const target: TargetSpec = {
+    role: "textbox",
+    accessibleName: "Phone",
+    ordinal: 1,
+  };
+  assert.deepEqual(target, { role: "textbox", accessibleName: "Phone", ordinal: 1 });
+});
 
 test("contracts preserve every discriminated wire variant", () => {
   const evidence: Evidence[] = [

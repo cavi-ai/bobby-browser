@@ -17,11 +17,12 @@ use std::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
-    AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
+    AccessibilityNode, AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, Evidence, FillIntent, FillValue, InspectCommand, IntentCommand,
-    IntentHints, NavigateCommand, PrimitiveCommand, RuntimeCommand, ScreenshotMode, TextMatch,
-    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, Evidence, FillIntent,
+    FillValue, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, TextMatch, UploadFilesCommand, WaitUntil, WorkflowCheckpoint,
+    WorkflowId,
 };
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -88,7 +89,11 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         &mut server,
         &mut setup_id,
         "session_create",
-        json!({"profile":"mcp-conformance","proxy":null}),
+        json!({
+            "profile":"mcp-conformance",
+            "proxy":null,
+            "executionPolicy":{"javascriptEvaluation":true,"visionAssist":false}
+        }),
     )
     .await;
     let session_id = session["id"].as_str().unwrap().to_owned();
@@ -106,7 +111,202 @@ async fn mcp_production_server_executes_every_canonical_step_on_real_chrome() {
         site_url: harness.site_url(),
         upload_root: harness.upload_root().to_path_buf(),
     };
+    prove_snapshot_target_round_trip(
+        &mut server,
+        &session_id,
+        &page_id,
+        &metadata.site_url,
+        &metadata.upload_root,
+    )
+    .await;
     run_mcp_sample(&metadata, &mut server, &mut denied, &sid, &pid).await;
+}
+
+async fn prove_snapshot_target_round_trip(
+    server: &mut dyn McpEndpoint,
+    session_id: &str,
+    page_id: &str,
+    site_url: &str,
+    upload_root: &std::path::Path,
+) {
+    let mut id = 1_000;
+    tool(
+        server,
+        &mut id,
+        "navigate",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "url": site_url,
+            "waitUntil": "domContentLoaded"
+        }),
+    )
+    .await;
+    tool(
+        server,
+        &mut id,
+        "evaluate_javascript",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "expression": "document.body.innerHTML = `<label for=home>Phone</label><input id=home><label for=work>Phone</label><input id=work><label for=resume>Resume</label><input id=resume type=file><button id=continue>Continue</button>`; document.querySelector('#continue').addEventListener('click', () => { document.title = 'clicked'; }); true",
+            "awaitPromise": false
+        }),
+    )
+    .await;
+
+    let before = tool(
+        server,
+        &mut id,
+        "a11y_snapshot",
+        json!({"sessionId":session_id,"pageId":page_id,"maxNodes":64}),
+    )
+    .await;
+    let before: CommandOutcome = serde_json::from_value(before).unwrap();
+    let before_nodes = completed(&before)
+        .iter()
+        .find_map(|evidence| match evidence {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("MCP accessibility snapshot evidence");
+    let phones = actionable_nodes_named(before_nodes, "Phone");
+    assert_eq!(phones.len(), 2);
+    assert_eq!(phones[0].target.as_ref().unwrap().ordinal, Some(0));
+    assert_eq!(phones[1].target.as_ref().unwrap().ordinal, Some(1));
+    let work_phone_target = phones[1].target.as_ref().unwrap().clone();
+    let continue_target = actionable_nodes_named(before_nodes, "Continue")
+        .into_iter()
+        .next()
+        .expect("command-ready Continue button")
+        .target
+        .as_ref()
+        .unwrap()
+        .clone();
+    let resume_target = actionable_nodes_named(before_nodes, "Resume")
+        .into_iter()
+        .next()
+        .expect("command-ready Resume file input")
+        .target
+        .as_ref()
+        .unwrap()
+        .clone();
+
+    let fill = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: types::SessionId(uuid::Uuid::parse_str(session_id).unwrap()),
+        page_id: Some(types::PageId(uuid::Uuid::parse_str(page_id).unwrap())),
+        deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
+        command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
+            purpose: "enter the work phone".into(),
+            hints: IntentHints {
+                role: Some(work_phone_target.role),
+                near_text: Some(TextMatch::Exact(work_phone_target.accessible_name)),
+                ordinal: work_phone_target.ordinal,
+                ..IntentHints::default()
+            },
+            value: FillValue::Text {
+                text: "555-0102".into(),
+                clear_first: true,
+            },
+        })),
+    };
+    let fill: CommandOutcome =
+        serde_json::from_value(command(server, &mut id, &fill).await).unwrap();
+    completed(&fill);
+
+    tool(
+        server,
+        &mut id,
+        "click",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "target": continue_target
+        }),
+    )
+    .await;
+
+    let upload_path = upload_root.join("snapshot-target-upload.txt");
+    std::fs::write(&upload_path, b"snapshot target upload\n").unwrap();
+    let upload = tool(
+        server,
+        &mut id,
+        "upload_files",
+        json!({
+            "sessionId": session_id,
+            "pageId": page_id,
+            "target": resume_target,
+            "paths": [upload_path]
+        }),
+    )
+    .await;
+    let upload: CommandOutcome = serde_json::from_value(upload).unwrap();
+    assert!(completed(&upload)
+        .iter()
+        .any(|evidence| matches!(evidence, Evidence::Upload { paths, .. } if paths.len() == 1)));
+
+    let after = tool(
+        server,
+        &mut id,
+        "a11y_snapshot",
+        json!({"sessionId":session_id,"pageId":page_id,"maxNodes":64}),
+    )
+    .await;
+    let after: CommandOutcome = serde_json::from_value(after).unwrap();
+    let after_nodes = completed(&after)
+        .iter()
+        .find_map(|evidence| match evidence {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("MCP accessibility snapshot evidence after fill");
+    let phones = actionable_nodes_named(after_nodes, "Phone");
+    assert_eq!(phones[0].value.as_deref().unwrap_or_default(), "");
+    assert_eq!(phones[1].value.as_deref(), Some("555-0102"));
+
+    let title = tool(
+        server,
+        &mut id,
+        "evaluate_javascript",
+        json!({
+            "sessionId":session_id,
+            "pageId":page_id,
+            "expression":"document.title",
+            "awaitPromise":false
+        }),
+    )
+    .await;
+    let title: CommandOutcome = serde_json::from_value(title).unwrap();
+    assert!(completed(&title).iter().any(|evidence| matches!(
+        evidence,
+        Evidence::JavaScriptResult { value, .. } if value == "clicked"
+    )));
+}
+
+fn actionable_nodes_named<'a>(
+    nodes: &'a [AccessibilityNode],
+    name: &str,
+) -> Vec<&'a AccessibilityNode> {
+    fn collect<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+        output: &mut Vec<&'a AccessibilityNode>,
+    ) {
+        for node in nodes {
+            if node.name.as_deref() == Some(name) && node.target.is_some() {
+                output.push(node);
+            }
+            collect(&node.children, name, output);
+        }
+    }
+
+    let mut output = Vec::new();
+    collect(nodes, name, &mut output);
+    output
 }
 
 async fn run_mcp_stdio_performance(samples: usize) {
@@ -212,17 +412,21 @@ async fn run_mcp_sample(
             session_id: sid.clone(),
             page_id: Some(pid.clone()),
             deadline: chrono::Utc::now() + chrono::Duration::seconds(20),
-            command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
-                purpose: "enter the applicant name".into(),
-                hints: IntentHints {
-                    role: Some("textbox".into()),
-                    near_text: Some(TextMatch::Exact("Name".into())),
-                    ..IntentHints::default()
-                },
-                value: FillValue::Text {
-                    text: "Ada Lovelace".into(),
-                    clear_first: true,
-                },
+            command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
+                purpose: "complete the applicant form".into(),
+                fields: vec![CompleteFormField {
+                    name: "name".into(),
+                    purpose: "enter the applicant name".into(),
+                    hints: IntentHints {
+                        role: Some("textbox".into()),
+                        near_text: Some(TextMatch::Exact("Name".into())),
+                        ..IntentHints::default()
+                    },
+                    value: FillValue::Text {
+                        text: "Ada Lovelace".into(),
+                        clear_first: true,
+                    },
+                }],
             })),
         },
     )

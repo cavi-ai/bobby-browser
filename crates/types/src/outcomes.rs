@@ -3,7 +3,56 @@ use thiserror::Error;
 
 use crate::{AttemptId, CommandId, PageId};
 
+/// A minimal semantic target that can be copied directly into a command's
+/// `TargetSpec` without exposing engine-specific DOM identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessibilityTarget {
+    pub role: String,
+    pub accessible_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<usize>,
+}
+
+/// One node of a compact accessibility tree as returned by the
+/// `accessibilitySnapshot` primitive on any engine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessibilityNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<AccessibilityTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autocomplete: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_max: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<AccessibilityNode>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
@@ -49,6 +98,7 @@ pub enum CommandOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -145,6 +195,16 @@ pub enum Evidence {
         value: serde_json::Value,
         truncated: bool,
     },
+    AccessibilitySnapshot {
+        page_id: PageId,
+        nodes: Vec<AccessibilityNode>,
+        truncated: bool,
+    },
+    StructuredExtraction {
+        page_id: PageId,
+        value: serde_json::Value,
+        truncated: bool,
+    },
     IntentExecution {
         record: ExecutionRecord,
     },
@@ -166,6 +226,7 @@ pub enum Evidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum IntentResolutionPath {
     Deterministic,
@@ -173,6 +234,7 @@ pub enum IntentResolutionPath {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionRecord {
     pub intent_kind: String,
@@ -263,6 +325,7 @@ impl CommandOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionPath {
     DirectHttp,
@@ -271,6 +334,7 @@ pub enum ExecutionPath {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionReason {
     EligibleStaticDocument,
@@ -284,6 +348,7 @@ pub enum ExecutionReason {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateEvidence {
     pub role: Option<String>,
@@ -293,6 +358,7 @@ pub struct CandidateEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TargetFingerprint {
     pub page_id: PageId,
@@ -303,6 +369,7 @@ pub struct TargetFingerprint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PageEvidence {
     pub page_id: PageId,
@@ -311,6 +378,7 @@ pub struct PageEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandError {
     pub code: ErrorCode,
@@ -320,6 +388,7 @@ pub struct CommandError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
     InvalidRequest,
@@ -354,6 +423,7 @@ pub enum ErrorCode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorLayer {
     Interface,
@@ -368,6 +438,7 @@ pub enum ErrorLayer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum CommandPhase {
     Accepted,
@@ -381,6 +452,7 @@ pub enum CommandPhase {
 }
 
 #[derive(Debug, Error, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum RuntimeError {
     #[error("not found: {0}")]
     NotFound(String),
