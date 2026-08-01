@@ -31,7 +31,9 @@ jobs:
             target: aarch64-apple-darwin
             asset_os: macos
             asset_arch: arm64
-          - os: macos-13
+          # macos-13 was retired in December 2025; macos-15-intel is the
+          # remaining x86_64 macOS image.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             asset_os: macos
             asset_arch: x64
@@ -93,5 +95,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          # The release body is written from CHANGELOG.md when the release is
+          # created; generated notes would overwrite it.
+          generate_release_notes: false
           fail_on_unmatched_files: true
