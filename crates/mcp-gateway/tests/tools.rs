@@ -725,6 +725,7 @@ async fn command_execute_schema_accepts_bounded_complete_form_intent() {
         page_id: None,
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete application form".into(),
             fields: vec![CompleteFormField {
                 name: "email".into(),
                 purpose: "enter email".into(),

@@ -4,7 +4,6 @@ import test from "node:test";
 import { DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS, MAX_INTENT_PURPOSE_BYTES } from "../src/contracts.js";
 import {
   assertIntentPurpose,
-  completeFormEnvelope,
   completeFormRuntimeCommand,
   dismissObstructionEnvelope,
   dismissObstructionRuntimeCommand,
@@ -113,6 +112,7 @@ test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
 
 test("completeFormRuntimeCommand preserves ordered fields and normalizes nested hints", () => {
   const command = completeFormRuntimeCommand({
+    purpose: "complete application form",
     fields: [
       { name: "email", purpose: "enter email", hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } }, value: { kind: "text", text: "ada@example.test" } },
       { name: "terms", purpose: "accept terms", hints: { role: "checkbox", nearText: { kind: "exact", value: "Accept terms" } }, value: { kind: "checked", checked: true } },
@@ -127,19 +127,12 @@ test("completeFormRuntimeCommand preserves ordered fields and normalizes nested 
 });
 
 test("completeFormRuntimeCommand rejects empty and duplicate fields", () => {
-  assert.throws(() => completeFormRuntimeCommand({ fields: [] }), /between 1 and 128/);
+  assert.throws(() => completeFormRuntimeCommand({ purpose: "complete form", fields: [] }), /must not be empty/);
   const field = { name: "email", purpose: "enter email", value: { kind: "text", text: "a@b.co" } } as const;
-  assert.throws(() => completeFormRuntimeCommand({ fields: [field, field] }), /non-empty and unique/);
-});
-
-test("completeFormEnvelope builds a full agent command without submitting", () => {
-  const envelope = completeFormEnvelope(META, [
-    { name: "email", purpose: "enter email", value: { kind: "text", text: "a@b.co" } },
-  ]);
-  assert.equal(envelope.schemaVersion, 2);
-  assert.equal(envelope.command.kind, "intent");
-  if (envelope.command.kind !== "intent") throw new Error("expected intent");
-  assert.equal(envelope.command.input.kind, "completeForm");
+  assert.throws(
+    () => completeFormRuntimeCommand({ purpose: "complete form", fields: [field, field] }),
+    /duplicate completeForm field name/,
+  );
 });
 
 test("followRuntimeCommand matches Rust golden nested wire shape", () => {

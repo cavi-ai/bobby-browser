@@ -589,6 +589,7 @@ fn intent_commands_round_trip_and_classes() {
     assert_eq!(fill.class(), CommandClass::Reconciliable);
 
     let complete_form = IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "Complete application form".into(),
         fields: vec![CompleteFormField {
             name: "email".into(),
             purpose: "Enter email".into(),
