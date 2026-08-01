@@ -109,6 +109,13 @@ impl WorkerFactory for ChromiumWorkerFactory {
         if !self.config.headless {
             builder = builder.with_head();
         }
+        // Chrome refuses to run sandboxed as root; CI runners are root.
+        #[cfg(unix)]
+        {
+            if unsafe { libc::geteuid() } == 0 {
+                builder = builder.no_sandbox();
+            }
+        }
         let config = builder
             .build()
             .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;

@@ -45,9 +45,55 @@ jobs:
         run: cargo build --workspace --locked
 
       - name: Test
-        # Chromium-dependent tests are #[ignore]d and skipped here; they run in the
-        # certification job locally. This gate covers all logic/contract tests.
+        # Logic/contract tests. Chromium-dependent tests are #[ignore]d here and
+        # run live in the `chromium` job below.
         run: cargo test --workspace --locked
+
+  chromium:
+    name: chromium · live browser tests
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@latest
+
+      - name: Worker live tests
+        run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
+
+      - name: Runtime live tests
+        run: >-
+          cargo test -p runtime-tests --locked --
+          --test adaptive_http
+          --test agentic_interaction
+          --test browser_vertical_slice
+          --test checkpoint_recovery
+          --test intent_dismiss_obstruction_workflow
+          --test intent_extract_workflow
+          --test intent_follow_workflow
+          --test intent_form_workflow
+          --test intent_vision_escalation
+          --test interface_capacity
+          --test interface_recovery
+          --test interface_security
+          --ignored --test-threads=1
+
+      - name: Conformance live tests
+        run: cargo test -p interface-conformance --test javascript_evaluation --locked -- --ignored --test-threads=1
 
   node:
     name: node · typescript · docs
