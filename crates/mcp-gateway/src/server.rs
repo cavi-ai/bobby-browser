@@ -371,6 +371,9 @@ impl Server {
         for name in [
             "checkpoint_save",
             "click",
+            "cookie_delete",
+            "cookie_get",
+            "cookie_set",
             "command_execute",
             "intent_complete_form",
             "intent_dismiss_obstruction",
@@ -1052,6 +1055,59 @@ impl Server {
                     .form_snapshot(context, input.session_id, input.page_id)
                     .await
                     .and_then(to_json)
+            }
+            "cookie_get" => {
+                let input: CookieGetArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::GetCookies(
+                        types::GetCookiesCommand { urls: input.urls },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "cookie_set" => {
+                let input: CookieSetArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::SetCookies(
+                        types::SetCookiesCommand {
+                            cookies: input.cookies,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "cookie_delete" => {
+                let input: CookieDeleteArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::DeleteCookies(
+                        types::DeleteCookiesCommand {
+                            urls: input.urls,
+                            names: input.names,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
             }
             "extract_structured" => {
                 let input: ExtractStructuredArgs = match bounded_parse(call.arguments) {
@@ -1781,6 +1837,34 @@ struct A11ySnapshotArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieGetArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    urls: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieSetArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    cookies: Vec<types::SetCookieParam>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieDeleteArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    urls: Vec<String>,
+    #[serde(default)]
+    names: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ExtractStructuredArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
@@ -2028,7 +2112,8 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
         "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
-        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" => {
+        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot"
+        | "cookie_get" | "cookie_set" | "cookie_delete" => {
             Some(&[types::Capability::BrowserMutate])
         }
         "extract_structured" => Some(&[
@@ -2082,6 +2167,9 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "page_activate"
         | "a11y_snapshot"
         | "extract_structured"
+        | "cookie_get"
+        | "cookie_set"
+        | "cookie_delete"
         | "download_url"
         | "upload_files"
         | "evaluate_javascript"
@@ -2108,6 +2196,9 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
 fn tool_description(name: &str) -> &'static str {
     match name {
         "checkpoint_save" => "Persist a verified workflow checkpoint.",
+        "cookie_delete" => "Delete cookies by origin and name.",
+        "cookie_get" => "Read cookies for a page or origins.",
+        "cookie_set" => "Store cookies on a page's jar.",
         "click" => "Click an element on a page.",
         "command_execute" => "Execute one bounded browser command envelope.",
         "download_url" => "Download a URL into the session's downloads.",

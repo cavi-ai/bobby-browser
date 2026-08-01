@@ -208,6 +208,10 @@ pub enum Evidence {
         value: serde_json::Value,
         truncated: bool,
     },
+    CookieState {
+        page_id: Option<PageId>,
+        cookies: Vec<crate::CookieRecord>,
+    },
     IntentExecution {
         record: ExecutionRecord,
     },
