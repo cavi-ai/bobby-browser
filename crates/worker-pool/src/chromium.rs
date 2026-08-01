@@ -547,6 +547,49 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn print_to_pdf(
+        &self,
+        page_id: &PageId,
+        command: &types::PrintToPdfCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        if let Some(scale) = command.scale {
+            if !(0.1..=2.0).contains(&scale) {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "PDF scale must be within 0.1..=2.0",
+                ));
+            }
+        }
+        let params = chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams {
+            landscape: Some(command.landscape),
+            print_background: Some(command.print_background),
+            scale: command.scale,
+            page_ranges: command.page_ranges.clone(),
+            ..Default::default()
+        };
+        let bytes = page.pdf(params).await.map_err(screenshot_error)?;
+        let record = self
+            .artifacts
+            .put(
+                &self.session_id,
+                page_id,
+                "application/pdf",
+                "pdf",
+                &bytes,
+                MAX_VISION_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| driver_error(ErrorCode::ScreenshotCaptureFailed, error))?;
+        Ok(vec![Evidence::PdfArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+        }])
+    }
+
     async fn get_cookies(
         &self,
         page_id: &PageId,

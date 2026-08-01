@@ -3155,6 +3155,104 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
+    async fn print_to_pdf(
+        &self,
+        page_id: &PageId,
+        command: &types::PrintToPdfCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if let Some(scale) = command.scale {
+            if !(0.1..=2.0).contains(&scale) {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "PDF scale must be within 0.1..=2.0",
+                    false,
+                ));
+            }
+        }
+        let mut params = json!({
+            "context": context,
+            "landscape": command.landscape,
+            "background": command.print_background,
+        });
+        if let Some(scale) = command.scale {
+            params["scale"] = json!(scale);
+        }
+        if let Some(ranges) = &command.page_ranges {
+            params["pageRanges"] = json!([ranges]);
+        }
+        let response = self
+            .transport
+            .send("browsingContext.print", params)
+            .await?;
+        let encoded = response
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox PDF omitted document data",
+                    false,
+                )
+            })?;
+        if encoded.len() > MAX_SCREENSHOT_BYTES.saturating_mul(4) / 3 + 8 {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox PDF exceeded its encoded bound",
+                false,
+            ));
+        }
+        let bytes = BASE64.decode(encoded).map_err(|_| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox PDF returned invalid base64",
+                false,
+            )
+        })?;
+        if bytes.len() > MAX_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox PDF exceeded its byte bound",
+                false,
+            ));
+        }
+        if bytes.len() < 5 || &bytes[..5] != b"%PDF-" {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox print did not return PDF bytes",
+                false,
+            ));
+        }
+        let record = self
+            .artifacts
+            .as_ref()
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox PDF artifact storage is not configured",
+                    false,
+                )
+            })?
+            .put(
+                self.session_id.as_ref().ok_or_else(page_missing)?,
+                page_id,
+                "application/pdf",
+                "pdf",
+                &bytes,
+                MAX_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| {
+                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
+            })?;
+        Ok(vec![Evidence::PdfArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+        }])
+    }
+
     async fn get_cookies(
         &self,
         page_id: &PageId,

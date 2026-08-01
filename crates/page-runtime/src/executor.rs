@@ -522,6 +522,16 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::PrintToPdf(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::PdfArtifact { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("PDF command returned no PDF artifact"))
+                }
+            }
             PrimitiveCommand::GetCookies(_)
             | PrimitiveCommand::SetCookies(_)
             | PrimitiveCommand::DeleteCookies(_) => {
