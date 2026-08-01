@@ -1,7 +1,7 @@
-import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
+import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
-import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
+import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isFormSnapshot, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -88,6 +88,13 @@ export class BrowserRuntimeClient {
     } finally { scoped.scope.dispose(); }
   }
   async openPage(input: OpenPageRequest, options?: RequestOptions): Promise<PageState> { return this.#json("POST", "/v1/pages", input, options, isPageState); }
+  async formSnapshot(sessionId: string, pageId: string, options: FormSnapshotOptions = {}): Promise<FormSnapshot> {
+    if (!isUuid(sessionId) || !isUuid(pageId)) throw this.#protocol("session and page ids must be UUIDs");
+    const { maxControls, ...requestOptions } = options;
+    if (maxControls !== undefined && (!Number.isSafeInteger(maxControls) || maxControls < 1 || maxControls > 512)) throw this.#protocol("maxControls must be a safe integer between 1 and 512");
+    const query = maxControls === undefined ? "" : `?maxControls=${maxControls}`;
+    return this.#json("GET", `/v1/sessions/${encodeURIComponent(sessionId)}/pages/${encodeURIComponent(pageId)}/forms${query}`, undefined, requestOptions, isFormSnapshot);
+  }
 
   async submit(input: CommandEnvelope, options?: RequestOptions): Promise<CommandOutcome> {
     return this.#consumeJson("POST", "/v1/commands", input, options, (response, payload) => {

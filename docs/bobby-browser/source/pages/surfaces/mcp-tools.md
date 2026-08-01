@@ -31,7 +31,7 @@ Tools are advertised only when the principal holds the required capability.
 | `page_close` | `browser:mutate` | Close a page in an owned session |
 | `page_activate` | `browser:mutate` | Bring a page to the front |
 | `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree with bounded form-control state, sensitive-value redaction, and command-ready semantic targets (`maxNodes` optional, 1…2048; default 256) |
-| `form_snapshot` | `page:read` | Read the canonical bounded form inventory with sensitive-value redaction and no selectors, DOM IDs, or raw HTML |
+| `form_snapshot` | `page:read` | Read the canonical bounded form inventory with sensitive-value redaction and no selectors, DOM IDs, or raw HTML (`maxControls` optional, 1…512; default 512) |
 | `navigate` | `browser:mutate` | Navigate a page to a URL |
 | `click` | `browser:mutate` | Click an element |
 | `type_text` | `browser:mutate` | Type text (optional `expectedUrl` page guard) |

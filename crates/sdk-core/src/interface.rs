@@ -262,12 +262,13 @@ impl RuntimeInterface for AuthenticatedRuntime {
         ctx: RequestContext,
         session: SessionId,
         page: types::PageId,
+        max_controls: Option<u32>,
     ) -> InterfaceResult<types::FormSnapshot> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::ReadPage)?;
         self.require_owned_session(&ctx, &session)?;
         self.inner
-            .form_snapshot(&session, &page)
+            .form_snapshot(&session, &page, max_controls)
             .await
             .map_err(|error| map_runtime_error(&ctx, error))
     }

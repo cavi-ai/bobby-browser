@@ -125,6 +125,7 @@ impl PageRuntime {
         &self,
         session_id: &SessionId,
         page_id: &PageId,
+        max_controls: Option<u32>,
     ) -> Result<types::FormSnapshot, RuntimeError> {
         let page = self
             .inner
@@ -146,7 +147,7 @@ impl PageRuntime {
             .map_err(|error| RuntimeError::Internal(error.message))?;
         let evidence = lease
             .worker()
-            .form_snapshot(page_id)
+            .form_snapshot(page_id, max_controls)
             .await
             .map_err(|error| RuntimeError::Internal(error.message))?;
         evidence

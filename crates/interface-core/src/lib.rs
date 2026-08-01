@@ -53,6 +53,7 @@ pub trait RuntimeInterface: Send + Sync {
         _ctx: RequestContext,
         _session: SessionId,
         _page: types::PageId,
+        _max_controls: Option<u32>,
     ) -> InterfaceResult<types::FormSnapshot> {
         Err(InterfaceError {
             code: types::InterfaceErrorCode::UnsupportedOperation,
