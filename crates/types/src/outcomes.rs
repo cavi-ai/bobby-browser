@@ -218,6 +218,11 @@ pub enum Evidence {
         bytes: u64,
         sha256: String,
     },
+    Dialog {
+        dialog_type: String,
+        message: String,
+        action: String,
+    },
     IntentExecution {
         record: ExecutionRecord,
     },

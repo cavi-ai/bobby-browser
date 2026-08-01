@@ -547,6 +547,49 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn handle_dialog(
+        &self,
+        page_id: &PageId,
+        command: &types::HandleDialogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let timeout = std::time::Duration::from_millis(
+            command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
+        );
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let mut events = page
+            .event_listener::<chromiumoxide::cdp::browser_protocol::page::EventJavascriptDialogOpening>()
+            .await
+            .map_err(command_failed)?;
+        let event = tokio::time::timeout(timeout, events.next())
+            .await
+            .map_err(|_| {
+                driver_error(
+                    ErrorCode::DeadlineExceeded,
+                    format!(
+                        "no JavaScript dialog opened within {}ms",
+                        timeout.as_millis()
+                    ),
+                )
+            })?
+            .ok_or_else(|| driver_error(ErrorCode::NotFound, "dialog event stream closed"))?;
+        let accept = matches!(command.action, types::DialogAction::Accept);
+        page.execute(
+            chromiumoxide::cdp::browser_protocol::page::HandleJavaScriptDialogParams::new(accept),
+        )
+        .await
+        .map_err(command_failed)?;
+        Ok(vec![Evidence::Dialog {
+            dialog_type: format!("{:?}", event.r#type).to_lowercase(),
+            message: event.message.clone(),
+            action: if accept {
+                "accept".into()
+            } else {
+                "dismiss".into()
+            },
+        }])
+    }
+
     async fn print_to_pdf(
         &self,
         page_id: &PageId,

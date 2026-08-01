@@ -687,7 +687,7 @@ async fn worker_subscribes_to_context_destruction_before_exposure_and_propagates
         bidi.calls().await,
         vec![BidiCall {
             method: "session.subscribe".into(),
-            params: json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd"]}),
+            params: json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened"]}),
         }]
     );
 }
@@ -2932,4 +2932,43 @@ async fn type_text_with_mismatched_expected_url_fails_before_any_native_input() 
             .any(|call| { call.method.contains("type") || call.method.contains("performActions") }),
         "no native input must be dispatched on URL mismatch"
     );
+}
+
+#[tokio::test]
+async fn handle_dialog_waits_for_and_accepts_a_user_prompt() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+    let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let handle = tokio::spawn({
+        let worker = Arc::clone(&worker);
+        async move {
+            worker
+                .handle_dialog(
+                    &page_id,
+                    &types::HandleDialogCommand {
+                        action: types::DialogAction::Accept,
+                        timeout_ms: Some(2_000),
+                    },
+                )
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    bidi.emit(
+        "browsingContext.userPromptOpened",
+        json!({"context": "context-1", "type": "alert", "message": "Leave site?"}),
+    );
+
+    let evidence = handle.await.unwrap().unwrap();
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Dialog { dialog_type, message, action }
+            if dialog_type == "alert" && message == "Leave site?" && action == "accept"
+    )));
+    assert!(bidi.calls().await.iter().any(|call| {
+        call.method == "browsingContext.handleUserPrompt"
+            && call.params.get("accept") == Some(&json!(true))
+    }));
 }
