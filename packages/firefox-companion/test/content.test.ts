@@ -491,3 +491,25 @@ test("a11yTree exposes bounded form state without leaking sensitive values", () 
   assert.match(encoded, /"value":"\[redacted\]"/);
   assert.equal(encoded.includes(secret), false);
 });
+
+test("a11yTree keeps the global ordinal when a duplicate is truncated", () => {
+  const document = documentFor(`
+    <label for="home-phone">Phone</label><input id="home-phone">
+    <label for="work-phone">Phone</label><input id="work-phone">
+  `);
+
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 1 }) as {
+    nodes: Array<{
+      target?: { role: string; accessibleName: string; ordinal?: number };
+    }>;
+    truncated: boolean;
+  };
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.nodes.length, 1);
+  assert.deepEqual(result.nodes[0]?.target, {
+    role: "textbox",
+    accessibleName: "Phone",
+    ordinal: 0,
+  });
+});
