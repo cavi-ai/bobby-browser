@@ -3,6 +3,17 @@ use thiserror::Error;
 
 use crate::{AttemptId, CommandId, PageId};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlActionEvidence {
+    pub operation: crate::FormControlOperation,
+    pub target: crate::FormControlTarget,
+    pub state: crate::FormControlState,
+    pub validity: crate::FormControlValidity,
+    pub node_replaced: bool,
+}
+
 /// A minimal semantic target that can be copied directly into a command's
 /// `TargetSpec` without exposing engine-specific DOM identifiers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,6 +213,9 @@ pub enum Evidence {
     },
     FormSnapshot {
         snapshot: crate::FormSnapshot,
+    },
+    ControlAction {
+        action: ControlActionEvidence,
     },
     StructuredExtraction {
         page_id: PageId,

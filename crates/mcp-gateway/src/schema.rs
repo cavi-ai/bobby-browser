@@ -65,6 +65,35 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({"workflowId": id(), "sessionId": id(), "pageId": id(), "maxControls":{"type":"integer","minimum":1,"maximum":512}}),
             vec!["sessionId", "pageId"],
         ),
+        "control_action" => (
+            json!({
+                "workflowId": id(),
+                "sessionId": id(),
+                "pageId": id(),
+                "target": {
+                    "type":"object",
+                    "additionalProperties":false,
+                    "properties":{
+                        "role":string(1,128),
+                        "accessibleName":string(1,2048),
+                        "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
+                        "framePath":array(any_value(),8),
+                        "shadowPath":array(any_value(),8)
+                    },
+                    "required":["role","accessibleName","ordinal","framePath","shadowPath"]
+                },
+                "action": {"oneOf":[
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096)},"required":["kind","value"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
+                ]}
+            }),
+            vec!["sessionId", "pageId", "target", "action"],
+        ),
         "emulate" => (
             json!({
                 "sessionId": id(),
@@ -800,6 +829,35 @@ fn primitive_commands() -> Vec<Value> {
             ),
         ),
         tagged_input(
+            "controlAction",
+            object(
+                json!({
+                    "target": {
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                            "role":string(1,128),
+                            "accessibleName":string(1,2048),
+                            "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
+                            "framePath":array(any_value(),8),
+                            "shadowPath":array(any_value(),8)
+                        },
+                        "required":["role","accessibleName","ordinal","framePath","shadowPath"]
+                    },
+                    "action": {"oneOf":[
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096)},"required":["kind","value"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
+                    ]}
+                }),
+                &["target", "action"],
+            ),
+        ),
+        tagged_input(
             "openPage",
             object(json!({"url":nullable(string(0, MAX_URL_BYTES))}), &["url"]),
         ),
@@ -1143,6 +1201,7 @@ fn evidence_variants() -> Vec<Value> {
             json!({"snapshot":any_value()}),
             &["snapshot"],
         ),
+        tagged_fields("controlAction", json!({"action":any_value()}), &["action"]),
         tagged_fields(
             "emulation",
             json!({
