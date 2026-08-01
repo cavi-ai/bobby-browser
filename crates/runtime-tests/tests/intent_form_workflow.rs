@@ -146,6 +146,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
+        scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

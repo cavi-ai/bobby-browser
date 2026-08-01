@@ -77,6 +77,9 @@ impl JobQueue {
         if let Some(timeout) = config.timeout {
             job.timeout_ms = Some(timeout.as_millis() as u64);
         }
+        if let Some(correlation_id) = config.correlation_id {
+            job.correlation_id = Some(correlation_id);
+        }
 
         self.jobs.push_back(job.clone());
         Ok(job)

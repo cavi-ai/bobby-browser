@@ -73,6 +73,20 @@ impl BehavioralConfig {
     }
 }
 
+/// Sample a pre-interaction pause from session jitter.
+pub fn session_pause(random: &mut SessionRandom, config: &BehavioralConfig) -> Duration {
+    if config.session_jitter.is_zero() {
+        return Duration::from_millis(0);
+    }
+    // Keep most pauses modest: 10%–60% of configured session jitter.
+    let max = config.session_jitter;
+    let min = max / 10;
+    if min >= max {
+        return max;
+    }
+    random.next_duration(min, max)
+}
+
 /// Session-level randomness generator for consistent-but-unique behavior.
 #[derive(Clone)]
 pub struct SessionRandom {

@@ -57,6 +57,18 @@ fn every_operation_capability_is_stable_and_fail_closed() {
         &[Capability::ArtifactRead]
     );
     assert_eq!(
+        InterfaceOperation::SubmitJob.required(),
+        &[Capability::JobSubmit]
+    );
+    assert_eq!(
+        InterfaceOperation::ReadJob.required(),
+        &[Capability::JobRead]
+    );
+    assert_eq!(
+        InterfaceOperation::CancelJob.required(),
+        &[Capability::JobCancel]
+    );
+    assert_eq!(
         InterfaceOperation::IssuePrincipal.required(),
         &[Capability::AuthorityAdmin]
     );
