@@ -1489,6 +1489,7 @@ async fn immutable_authority_digest_allows_the_recovery_ladder_to_progress() {
     .await;
     envelope.command =
         types::RuntimeCommand::Primitive(PrimitiveCommand::TypeText(TypeTextCommand {
+            expected_url: None,
             selector: "#never-satisfied".into(),
             target: None,
             value: "expected-value".into(),

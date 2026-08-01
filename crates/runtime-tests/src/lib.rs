@@ -268,6 +268,7 @@ pub async fn run_installed_firefox_workflow(
                 target: None,
                 value: "Bobby".into(),
                 clear_first: true,
+                expected_url: None,
             },
         )
         .await?;

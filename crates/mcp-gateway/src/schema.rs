@@ -81,7 +81,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "selector": string(1, MAX_STRING_BYTES),
                 "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                 "value": string(0, MAX_STRING_BYTES),
-                "clearFirst": {"type":"boolean"}
+                "clearFirst": {"type":"boolean"},
+                "expectedUrl": nullable(string(1, MAX_URL_BYTES))
             }),
             vec!["sessionId", "pageId", "value"],
         ),

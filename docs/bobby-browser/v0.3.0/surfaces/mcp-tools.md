@@ -32,7 +32,7 @@ Tools are advertised only when the principal holds the required capability.
 | `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree with bounded form-control state, sensitive-value redaction, and command-ready semantic targets (`maxNodes` optional, 1…2048; default 256) |
 | `navigate` | `browser:mutate` | Navigate a page to a URL |
 | `click` | `browser:mutate` | Click an element |
-| `type_text` | `browser:mutate` | Type text into an element |
+| `type_text` | `browser:mutate` | Type text (optional `expectedUrl` page guard) |
 | `inspect` | `browser:mutate` | Read page state, optionally element-scoped |
 | `screenshot` | `browser:mutate` | Capture a screenshot artifact |
 | `wait_for` | `browser:mutate` | Wait for a page condition |

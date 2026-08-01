@@ -2014,6 +2014,7 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
         .type_text(
             &page,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(types::TargetSpec {
                     label: Some("Full name".into()),
@@ -2157,6 +2158,7 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
                 target: None,
                 value: "Hi".into(),
                 clear_first: true,
+                expected_url: None,
             },
         )
         .await
@@ -2198,6 +2200,7 @@ async fn type_text_selects_an_exact_option_value_without_keyboard_input() {
                 target: None,
                 value: "pro".into(),
                 clear_first: true,
+                expected_url: None,
             },
         )
         .await
@@ -2247,6 +2250,7 @@ async fn type_text_select_reports_missing_disabled_and_ambiguous_options() {
                     target: None,
                     value: "pro".into(),
                     clear_first: true,
+                    expected_url: None,
                 },
             )
             .await
@@ -2811,4 +2815,36 @@ async fn activate_page_sends_bidi_activation_for_the_pages_context() {
         })
         .await;
     assert!(missing.is_err());
+}
+
+#[tokio::test]
+async fn type_text_with_mismatched_expected_url_fails_before_any_native_input() {
+    let bidi = FakeBidi::new(vec![]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let error = worker
+        .type_text(
+            &page_id,
+            &types::TypeTextCommand {
+                selector: "#name".into(),
+                target: None,
+                value: "Ada".into(),
+                clear_first: true,
+                expected_url: Some("https://wrong.example/".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::VerificationFailed, "{error:?}");
+    assert!(error.message.contains("not the expected"));
+    assert!(
+        !bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| { call.method.contains("type") || call.method.contains("performActions") }),
+        "no native input must be dispatched on URL mismatch"
+    );
 }

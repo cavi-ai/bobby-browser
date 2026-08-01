@@ -414,6 +414,13 @@ pub struct TypeTextCommand {
     pub target: Option<TargetSpec>,
     pub value: String,
     pub clear_first: bool,
+    /// Optional page-identity confirmation: when set, the command fails before
+    /// typing unless the page's current URL matches. This is the type-side
+    /// counterpart of `ClickCommand.expected_url` — agents that navigate away
+    /// mid-flow (or address the wrong session) fail instead of typing into
+    /// the wrong page.
+    #[serde(default)]
+    pub expected_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

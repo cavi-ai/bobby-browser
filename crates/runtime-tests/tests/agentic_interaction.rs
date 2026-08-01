@@ -132,6 +132,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             }),
             value: "Ada".into(),
             clear_first: true,
+            expected_url: None,
         }),
     )
     .await;

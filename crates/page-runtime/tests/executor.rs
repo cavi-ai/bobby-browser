@@ -519,6 +519,7 @@ async fn raw_css_select_type_text_verifies_the_exact_option_value() {
                 target: None,
                 value: "pro".into(),
                 clear_first: true,
+                expected_url: None,
             }),
         ))
         .await;
