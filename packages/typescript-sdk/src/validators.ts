@@ -8,6 +8,10 @@ import type {
   EventGap,
   Evidence,
   ExecutionRecord,
+  FormControl,
+  FormControlTarget,
+  FormDescriptor,
+  FormSnapshot,
   InterfaceEvent,
   JsonValue,
   NetworkResourceType,
@@ -73,6 +77,53 @@ export function isIsoTimestamp(value: unknown): value is string {
 
 export function isLowerSha256(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+const utf8 = new TextEncoder();
+const boundedText = (value: unknown, max: number, allowEmpty = false): value is string => typeof value === "string" && (allowEmpty || value.length > 0) && utf8.encode(value).length <= max && !/[\u0000-\u001f\u007f]/.test(value);
+const nullableBoundedText = (value: unknown, max: number): value is string | null => value === null || boundedText(value, max);
+const oneOf = <T extends string>(value: unknown, values: readonly T[]): value is T => typeof value === "string" && values.includes(value as T);
+const unique = (values: readonly unknown[]): boolean => new Set(values).size === values.length;
+
+const CONTROL_KINDS = ["text", "email", "password", "search", "number", "checkbox", "radio", "switch", "selectOne", "selectMultiple", "date", "time", "dateTimeLocal", "range", "file", "contentEditable", "combobox", "listbox", "submit", "reset", "other"] as const;
+const OPERATIONS = ["setText", "setChecked", "selectOne", "selectMany", "setFiles", "clear", "activate"] as const;
+const VALIDITY_FLAGS = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"] as const;
+
+function isTargetSegment(value: unknown): boolean {
+  return hasExactKeys(value, ["role", "accessibleName", "ordinal"]) && boundedText(value.role, 128) && boundedText(value.accessibleName, 2048) && (value.ordinal === null || isSafeUnsigned(value.ordinal, 2047));
+}
+function isFormControlTarget(value: unknown): value is FormControlTarget {
+  return hasExactKeys(value, ["role", "accessibleName", "ordinal", "framePath", "shadowPath"]) && boundedText(value.role, 128) && boundedText(value.accessibleName, 2048) && (value.ordinal === null || isSafeUnsigned(value.ordinal, 2047)) && Array.isArray(value.framePath) && value.framePath.length <= 8 && value.framePath.every(isTargetSegment) && Array.isArray(value.shadowPath) && value.shadowPath.length <= 8 && value.shadowPath.every(isTargetSegment);
+}
+function isFormControl(value: unknown): value is FormControl {
+  if (!hasExactKeys(value, ["id", "formId", "groupId", "target", "controlKind", "accessibleName", "label", "description", "placeholder", "autocomplete", "state", "constraints", "validity", "options", "supportedOperations"]) || !boundedText(value.id, 128) || !(value.formId === null || boundedText(value.formId, 128)) || !(value.groupId === null || boundedText(value.groupId, 128)) || !(value.target === null || isFormControlTarget(value.target)) || !oneOf(value.controlKind, CONTROL_KINDS) || !nullableBoundedText(value.accessibleName, 2048) || !nullableBoundedText(value.label, 2048) || !nullableBoundedText(value.description, 2048) || !nullableBoundedText(value.placeholder, 2048) || !nullableBoundedText(value.autocomplete, 2048)) return false;
+  const state = value.state;
+  if (!isRecord(state)) return false;
+  const stateValid = state.kind === "empty" ? hasExactKeys(state, ["kind"]) : state.kind === "text" ? hasExactKeys(state, ["kind", "value"]) && value.controlKind !== "password" && boundedText(state.value, 4096, true) : state.kind === "redacted" ? hasExactKeys(state, ["kind", "present"]) && typeof state.present === "boolean" : state.kind === "checked" ? hasExactKeys(state, ["kind", "checked"]) && typeof state.checked === "boolean" : state.kind === "selection" ? hasExactKeys(state, ["kind", "values"]) && Array.isArray(state.values) && state.values.length <= 512 && state.values.every((v) => boundedText(v, 4096, true)) : state.kind === "files" && hasExactKeys(state, ["kind", "count"]) && isSafeUnsigned(state.count, 512);
+  const c = value.constraints;
+  const constraintsValid = hasExactKeys(c, ["required", "readOnly", "disabled", "pattern", "minLength", "maxLength", "min", "max", "step", "multiple", "accept"]) && typeof c.required === "boolean" && typeof c.readOnly === "boolean" && typeof c.disabled === "boolean" && nullableBoundedText(c.pattern, 2048) && (c.minLength === null || isSafeUnsigned(c.minLength, 4_294_967_295)) && (c.maxLength === null || isSafeUnsigned(c.maxLength, 4_294_967_295)) && !(typeof c.minLength === "number" && typeof c.maxLength === "number" && c.minLength > c.maxLength) && nullableBoundedText(c.min, 4096) && nullableBoundedText(c.max, 4096) && nullableBoundedText(c.step, 4096) && typeof c.multiple === "boolean" && Array.isArray(c.accept) && c.accept.length <= 128 && c.accept.every((v) => boundedText(v, 2048));
+  const validity = value.validity;
+  const validityValid = hasExactKeys(validity, ["willValidate", "valid", "flags", "message", "describedBy"]) && typeof validity.willValidate === "boolean" && typeof validity.valid === "boolean" && Array.isArray(validity.flags) && validity.flags.length <= 10 && validity.flags.every((v) => oneOf(v, VALIDITY_FLAGS)) && unique(validity.flags) && (!validity.valid || validity.flags.length === 0) && nullableBoundedText(validity.message, 1024) && Array.isArray(validity.describedBy) && validity.describedBy.length <= 512 && validity.describedBy.every((v) => boundedText(v, 2048));
+  const optionsValid = Array.isArray(value.options) && value.options.length <= 512 && value.options.every((option) => hasExactKeys(option, ["value", "label", "disabled", "selected", "groupLabel"]) && boundedText(option.value, 4096, true) && boundedText(option.label, 2048, true) && typeof option.disabled === "boolean" && typeof option.selected === "boolean" && nullableBoundedText(option.groupLabel, 2048));
+  return stateValid && constraintsValid && validityValid && optionsValid && Array.isArray(value.supportedOperations) && value.supportedOperations.every((v) => oneOf(v, OPERATIONS)) && unique(value.supportedOperations);
+}
+function isFormDescriptor(value: unknown, globalIds: Set<string>): value is FormDescriptor {
+  if (!hasExactKeys(value, ["id", "target", "accessibleName", "description", "groups", "controls", "submitControlIds", "resetControlIds", "validity"]) || !boundedText(value.id, 128) || !(value.target === null || isFormControlTarget(value.target)) || !nullableBoundedText(value.accessibleName, 2048) || !nullableBoundedText(value.description, 2048) || !Array.isArray(value.groups) || value.groups.length > 128 || !Array.isArray(value.controls) || value.controls.length > 512 || !value.controls.every(isFormControl)) return false;
+  const formGroups = value.groups;
+  const controls = new Map<string, FormControl>();
+  for (const control of value.controls) { if (control.formId !== value.id || controls.has(control.id) || globalIds.has(control.id)) return false; controls.set(control.id, control); globalIds.add(control.id); }
+  const groups = new Set<string>();
+  for (const group of formGroups) { if (!hasExactKeys(group, ["id", "label", "description", "controlIds"]) || !boundedText(group.id, 128) || groups.has(group.id) || !nullableBoundedText(group.label, 2048) || !nullableBoundedText(group.description, 2048) || !Array.isArray(group.controlIds) || group.controlIds.length > 512 || group.controlIds.some((id) => !boundedText(id, 128) || controls.get(id)?.groupId !== group.id)) return false; groups.add(group.id); }
+  if ([...controls.values()].some((control) => control.groupId !== null && (!groups.has(control.groupId) || !formGroups.some((group) => isRecord(group) && group.id === control.groupId && Array.isArray(group.controlIds) && group.controlIds.includes(control.id))))) return false;
+  if (!Array.isArray(value.submitControlIds) || value.submitControlIds.length > 512 || !unique(value.submitControlIds) || value.submitControlIds.some((id) => controls.get(id)?.controlKind !== "submit") || !Array.isArray(value.resetControlIds) || value.resetControlIds.length > 512 || !unique(value.resetControlIds) || value.resetControlIds.some((id) => controls.get(id)?.controlKind !== "reset")) return false;
+  return hasExactKeys(value.validity, ["valid", "invalidControlIds"]) && typeof value.validity.valid === "boolean" && Array.isArray(value.validity.invalidControlIds) && value.validity.invalidControlIds.length <= 512 && unique(value.validity.invalidControlIds) && value.validity.invalidControlIds.every((id) => controls.has(id));
+}
+export function isFormSnapshot(value: unknown): value is FormSnapshot {
+  if (!hasExactKeys(value, ["schemaVersion", "pageId", "forms", "unownedControls", "truncated"]) || value.schemaVersion !== 1 || !isUuid(value.pageId) || !Array.isArray(value.forms) || value.forms.length > 64 || !Array.isArray(value.unownedControls) || typeof value.truncated !== "boolean") return false;
+  const ids = new Set<string>(); const formIds = new Set<string>();
+  for (const form of value.forms) { if (!isRecord(form) || typeof form.id !== "string" || formIds.has(form.id) || !isFormDescriptor(form, ids)) return false; formIds.add(form.id); }
+  if (value.unownedControls.length + [...value.forms].reduce((n, form) => n + (isRecord(form) && Array.isArray(form.controls) ? form.controls.length : 0), 0) > 512) return false;
+  return value.unownedControls.every((control) => isFormControl(control) && control.formId === null && control.groupId === null && !ids.has(control.id) && (ids.add(control.id), true));
 }
 
 function isStringMap(value: unknown): value is Record<string, string> {
