@@ -730,11 +730,19 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
-    async fn form_snapshot(&self, page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let max_controls = max_controls.unwrap_or(512) as usize;
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
         let value: serde_json::Value = page
-            .evaluate(crate::form_snapshot_expression(page_id))
+            .evaluate(crate::form_snapshot_expression_with_limit(
+                page_id,
+                max_controls,
+            ))
             .await
             .map_err(command_failed)?
             .into_value()
@@ -745,8 +753,7 @@ impl BrowserWorker for ChromiumWorker {
                 "form snapshot returned non-text JSON",
             )
         })?;
-        let snapshot: types::FormSnapshot = serde_json::from_str(encoded)
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
         Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
 

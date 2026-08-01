@@ -203,6 +203,34 @@ async fn healthz_is_minimal_and_legacy_routes_do_not_exist() {
 }
 
 #[tokio::test]
+async fn form_snapshot_query_is_validated_before_runtime_dispatch() {
+    let (app, token, calls) = counted_app([Capability::PageRead], InterfaceConfig::default()).await;
+    let session = uuid!("20000000-0000-0000-0000-000000000020");
+    let page = uuid!("30000000-0000-0000-0000-000000000030");
+
+    for query in [
+        "maxControls=0",
+        "maxControls=513",
+        "unknown=1",
+        "maxControls=1&maxControls=2",
+    ] {
+        let uri = format!("/v1/sessions/{session}/pages/{page}/forms?{query}");
+        let response = app
+            .clone()
+            .oneshot(authorized("GET", &uri, &token, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+    }
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn body_limit_runs_before_deserialization_and_runtime_dispatch() {
     let interface = InterfaceConfig {
         max_request_bytes: 64,
