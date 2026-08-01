@@ -75,6 +75,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
+        scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

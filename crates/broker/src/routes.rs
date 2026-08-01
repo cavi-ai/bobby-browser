@@ -6,12 +6,13 @@ use axum::{
         HeaderMap, HeaderValue, Method, StatusCode,
     },
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::Utc;
-use interface_core::{Event, EventGap};
-use serde::{de::DeserializeOwned, Deserialize};
+use interface_core::{canonical_sha256, Event, EventGap, IdempotencyReservation};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use task_scheduler::{Job, JobConfig, JobError, JobId, JobPriority, JobStatus};
 use types::{
     CommandEnvelope, CommandOutcome, CorrelationId, Evidence, InterfaceErrorCode,
     InterfaceOperation, OpenPageRequest, PrincipalId, RecoveryDecision, WorkflowCheckpoint,
@@ -21,6 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{authorize_boundary, interface_error, AuthenticatedRequest, ProtocolError},
+    jobs::JobSubmitOutcome,
     AppState,
 };
 
@@ -45,6 +47,8 @@ pub(crate) fn protected_router() -> Router<AppState> {
         )
         .route("/v1/events", get(events))
         .route("/v1/artifacts/{id}", get(artifact))
+        .route("/v1/jobs", post(submit_job))
+        .route("/v1/jobs/{job}", get(get_job).delete(cancel_job))
         .route("/v1/principals", post(issue_principal))
         .route(
             "/v1/principals/{principal}",
@@ -475,6 +479,296 @@ async fn issue_principal(
         .into_response())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubmitJobRequest {
+    name: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+    #[serde(default)]
+    priority: JobPriorityDto,
+    #[serde(default = "default_max_retries")]
+    max_retries: u32,
+    timeout_ms: Option<u64>,
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum JobPriorityDto {
+    Low,
+    #[default]
+    Normal,
+    High,
+    Critical,
+}
+
+impl From<JobPriorityDto> for JobPriority {
+    fn from(value: JobPriorityDto) -> Self {
+        match value {
+            JobPriorityDto::Low => JobPriority::Low,
+            JobPriorityDto::Normal => JobPriority::Normal,
+            JobPriorityDto::High => JobPriority::High,
+            JobPriorityDto::Critical => JobPriority::Critical,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobSubmitResponse {
+    job_id: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobStatusResponse {
+    id: String,
+    name: String,
+    priority: String,
+    status: String,
+    payload: serde_json::Value,
+    created_at: chrono::DateTime<Utc>,
+    started_at: Option<chrono::DateTime<Utc>>,
+    completed_at: Option<chrono::DateTime<Utc>>,
+    retry_count: u32,
+    max_retries: u32,
+    result: Option<serde_json::Value>,
+    error: Option<String>,
+    timeout_ms: Option<u64>,
+    correlation_id: Option<String>,
+}
+
+fn status_wire(status: &JobStatus) -> String {
+    match status {
+        JobStatus::Pending => "pending",
+        JobStatus::Running => "running",
+        JobStatus::Completed => "completed",
+        JobStatus::Failed => "failed",
+        JobStatus::Cancelled => "cancelled",
+    }
+    .to_string()
+}
+
+fn priority_wire(priority: &JobPriority) -> String {
+    match priority {
+        JobPriority::Low => "low",
+        JobPriority::Normal => "normal",
+        JobPriority::High => "high",
+        JobPriority::Critical => "critical",
+    }
+    .to_string()
+}
+
+fn job_status_response(job: Job) -> JobStatusResponse {
+    JobStatusResponse {
+        id: job.id.0,
+        name: job.name,
+        priority: priority_wire(&job.priority),
+        status: status_wire(&job.status),
+        payload: job.payload,
+        created_at: job.created_at,
+        started_at: job.started_at,
+        completed_at: job.completed_at,
+        retry_count: job.retry_count,
+        max_retries: job.max_retries,
+        result: job.result.map(|r| {
+            serde_json::json!({
+                "jobId": r.job_id.0,
+                "success": r.success,
+                "output": r.output,
+                "error": r.error,
+                "completedAt": r.completed_at,
+            })
+        }),
+        error: job.error,
+        timeout_ms: job.timeout_ms,
+        correlation_id: job.correlation_id,
+    }
+}
+
+fn job_error(err: JobError, correlation_id: Option<CorrelationId>) -> ProtocolError {
+    match err {
+        JobError::NotFound(_) => ProtocolError::from(interface_error(
+            InterfaceErrorCode::InvalidRequest,
+            "job not found",
+            correlation_id,
+            None,
+        )),
+        JobError::QueueFull => ProtocolError::from(interface_error(
+            InterfaceErrorCode::ResourceExhausted,
+            "job queue is full",
+            correlation_id,
+            None,
+        )),
+        JobError::Execution(message) if message.contains("already finished") => {
+            ProtocolError::from(interface_error(
+                InterfaceErrorCode::Conflict,
+                message,
+                correlation_id,
+                None,
+            ))
+        }
+        other => ProtocolError::from(interface_error(
+            InterfaceErrorCode::InvalidRequest,
+            other.to_string(),
+            correlation_id,
+            None,
+        )),
+    }
+}
+
+async fn dispatch_submit_job(
+    state: &AppState,
+    request: &AuthenticatedRequest,
+    input: SubmitJobRequest,
+) -> Result<JobSubmitOutcome, ProtocolError> {
+    let mut config = JobConfig::new(input.name, input.payload)
+        .with_priority(input.priority.into())
+        .with_max_retries(input.max_retries);
+    if let Some(timeout_ms) = input.timeout_ms {
+        config = config.with_timeout(std::time::Duration::from_millis(timeout_ms));
+    }
+    if let Some(correlation_id) = &request.context.correlation_id {
+        config = config.with_correlation_id(correlation_id.to_string());
+    }
+    let id = state
+        .scheduler
+        .submit(config)
+        .await
+        .map_err(|e| job_error(e, request.context.correlation_id.clone()))?;
+    let status = state
+        .scheduler
+        .get_job(&id)
+        .await
+        .map(|job| job.status)
+        .unwrap_or(JobStatus::Pending);
+    Ok(JobSubmitOutcome {
+        job_id: id,
+        status,
+    })
+}
+
+async fn submit_job(
+    State(state): State<AppState>,
+    Extension(request): Extension<AuthenticatedRequest>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ProtocolError> {
+    authorize_boundary(&request, InterfaceOperation::SubmitJob)?;
+    let raw = match body {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Err(ProtocolError::invalid_with(
+                InterfaceErrorCode::InvalidRequest,
+                request.context.correlation_id.clone(),
+            ))
+        }
+    };
+    let input: SubmitJobRequest = serde_json::from_slice(&raw).map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?;
+    if input.name.trim().is_empty() {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        ));
+    }
+
+    let outcome = if let Some(key) = request.context.idempotency_key.clone() {
+        let digest = canonical_sha256(&input).map_err(|_| {
+            ProtocolError::invalid_with(
+                InterfaceErrorCode::InvalidRequest,
+                request.context.correlation_id.clone(),
+            )
+        })?;
+        let reservation = state
+            .job_idempotency
+            .reserve(
+                request.context.principal_id.clone(),
+                key,
+                InterfaceOperation::SubmitJob,
+                digest,
+                Utc::now(),
+                request.context.deadline,
+                request
+                    .context
+                    .correlation_id
+                    .clone()
+                    .unwrap_or_else(CorrelationId::new),
+            )
+            .await
+            .map_err(ProtocolError::from)?;
+        match reservation {
+            IdempotencyReservation::Replay(outcome) => outcome,
+            IdempotencyReservation::Acquired(permit) => {
+                match dispatch_submit_job(&state, &request, input).await {
+                    Ok(outcome) => {
+                        state
+                            .job_idempotency
+                            .finish(permit, outcome.clone(), Utc::now())
+                            .await
+                            .map_err(ProtocolError::from)?;
+                        outcome
+                    }
+                    Err(error) => {
+                        state.job_idempotency.abandon(permit).await;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    } else {
+        dispatch_submit_job(&state, &request, input).await?
+    };
+
+    Ok((
+        StatusCode::CREATED,
+        Json(JobSubmitResponse {
+            job_id: outcome.job_id.0,
+            status: status_wire(&outcome.status),
+        }),
+    )
+        .into_response())
+}
+
+async fn get_job(
+    State(state): State<AppState>,
+    Extension(request): Extension<AuthenticatedRequest>,
+    Path(job): Path<String>,
+) -> Result<Json<JobStatusResponse>, ProtocolError> {
+    authorize_boundary(&request, InterfaceOperation::ReadJob)?;
+    let id = JobId(job);
+    let Some(job) = state.scheduler.get_job(&id).await else {
+        return Err(job_error(
+            JobError::NotFound(id),
+            request.context.correlation_id.clone(),
+        ));
+    };
+    Ok(Json(job_status_response(job)))
+}
+
+async fn cancel_job(
+    State(state): State<AppState>,
+    Extension(request): Extension<AuthenticatedRequest>,
+    Path(job): Path<String>,
+) -> Result<StatusCode, ProtocolError> {
+    authorize_boundary(&request, InterfaceOperation::CancelJob)?;
+    let id = JobId(job);
+    state
+        .scheduler
+        .cancel_job(&id)
+        .await
+        .map_err(|e| job_error(e, request.context.correlation_id.clone()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn recovery_status(
     Path(workflow): Path<String>,
     Extension(request): Extension<AuthenticatedRequest>,
@@ -580,6 +874,7 @@ pub(crate) async fn validate_request_boundary(
             | (&Method::POST, "/v1/commands")
             | (&Method::POST, "/v1/checkpoints")
             | (&Method::POST, "/v1/principals")
+            | (&Method::POST, "/v1/jobs")
     );
 
     if path == "/v1/events" {

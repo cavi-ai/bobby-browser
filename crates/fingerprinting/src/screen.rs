@@ -1,7 +1,4 @@
 //! Screen resolution spoofing.
-//!
-//! Reports a standard resolution (e.g., 1920x1080) regardless of
-//! actual hardware to prevent fingerprinting via screen detection.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +16,8 @@ pub struct ScreenConfig {
     pub color_depth: u32,
     #[serde(default = "default_pixel_ratio")]
     pub pixel_ratio: f64,
+    #[serde(default = "default_taskbar_inset")]
+    pub taskbar_inset: u32,
 }
 
 impl Default for ScreenConfig {
@@ -28,6 +27,7 @@ impl Default for ScreenConfig {
             height: default_height(),
             color_depth: default_color_depth(),
             pixel_ratio: default_pixel_ratio(),
+            taskbar_inset: default_taskbar_inset(),
         }
     }
 }
@@ -46,6 +46,10 @@ fn default_color_depth() -> u32 {
 
 fn default_pixel_ratio() -> f64 {
     1.0
+}
+
+fn default_taskbar_inset() -> u32 {
+    40
 }
 
 impl ScreenConfig {
@@ -68,6 +72,11 @@ impl ScreenConfig {
         self.pixel_ratio = ratio;
         self
     }
+
+    pub fn with_taskbar_inset(mut self, inset: u32) -> Self {
+        self.taskbar_inset = inset;
+        self
+    }
 }
 
 /// Screen masker that returns spoofed resolution data.
@@ -82,7 +91,10 @@ impl ScreenMasker {
 
     /// Get the spoofed screen resolution.
     pub fn get_spoofed_resolution(&self) -> ScreenResolution {
-        let available_height = self.config.height.saturating_sub(40); // Taskbar
+        let available_height = self
+            .config
+            .height
+            .saturating_sub(self.config.taskbar_inset);
 
         ScreenResolution {
             width: self.config.width,

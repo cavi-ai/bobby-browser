@@ -84,13 +84,14 @@ fn bezier_mouse_path_basic() {
     assert!(path.points.len() >= 5);
     assert!(path.duration_ms > 0);
 
+    // First point should be exact start; last near target (landing jitter allowed).
     let first = path.points.first().unwrap();
     assert!((first.x - 0.0).abs() < 1e-9);
     assert!((first.y - 0.0).abs() < 1e-9);
 
     let last = path.points.last().unwrap();
-    assert!((last.x - 500.0).abs() < 1e-9);
-    assert!((last.y - 300.0).abs() < 1e-9);
+    assert!((last.x - 500.0).abs() <= 24.0);
+    assert!((last.y - 300.0).abs() <= 24.0);
 }
 
 #[test]
@@ -133,13 +134,63 @@ fn bezier_mouse_config_min_max_duration() {
 }
 
 #[test]
-fn bezier_approach_path_ends_at_origin() {
+fn bezier_approach_path_ends_near_origin() {
     let sim = BezierMouseSimulator::new(MouseConfig::default());
     let mut random = SessionRandom::new(401);
     let path = sim.generate_approach_path(&mut random);
     let last = path.points.last().unwrap();
-    assert!((last.x - 0.0).abs() < 1e-9);
-    assert!((last.y - 0.0).abs() < 1e-9);
+    assert!(last.x.abs() <= 24.0, "landing x too far: {}", last.x);
+    assert!(last.y.abs() <= 24.0, "landing y too far: {}", last.y);
+    assert!(path.hover_dwell_ms > 0);
+}
+
+#[test]
+fn bezier_rejects_non_finite_inputs() {
+    let sim = BezierMouseSimulator::new(MouseConfig::default());
+    let mut random = SessionRandom::new(402);
+    let path = sim.generate_path(&mut random, f64::NAN, f64::INFINITY, 10.0, 10.0);
+    assert!(path.points.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+}
+
+#[test]
+fn typing_select_all_clears_prior_buffer_in_compose() {
+    use behavioral_engine::TypingAction;
+    let actions = vec![
+        TypingAction::KeyDown {
+            character: "a".into(),
+            delay_ms: 1,
+        },
+        TypingAction::KeyUp {
+            character: "a".into(),
+            delay_ms: 1,
+        },
+        TypingAction::SelectAll { delay_ms: 1 },
+        TypingAction::Backspace {
+            count: 1,
+            delay_ms: 1,
+        },
+        TypingAction::KeyDown {
+            character: "z".into(),
+            delay_ms: 1,
+        },
+        TypingAction::KeyUp {
+            character: "z".into(),
+            delay_ms: 1,
+        },
+    ];
+    assert_eq!(compose_typed_text(&actions), "z");
+}
+
+#[test]
+fn session_pause_respects_jitter_band() {
+    use behavioral_engine::session_pause;
+    let config = BehavioralConfig::default().with_session_jitter(std::time::Duration::from_millis(500));
+    let mut random = SessionRandom::new(7);
+    for _ in 0..20 {
+        let pause = session_pause(&mut random, &config);
+        assert!(pause.as_millis() >= 50);
+        assert!(pause.as_millis() < 500);
+    }
 }
 
 #[test]

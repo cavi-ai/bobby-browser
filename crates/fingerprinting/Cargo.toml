@@ -8,14 +8,13 @@ repository.workspace = true
 publish = true
 
 [dependencies]
-getrandom = { version = "0.3", features = ["std"] }
+async-trait.workspace = true
 hex.workspace = true
 rand = { version = "0.9", features = ["std", "std_rng"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
-types = { path = "../types", version = "0.3.1" }
+thiserror.workspace = true
 
 [dev-dependencies]
-rand = { version = "0.9", features = ["std", "std_rng"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

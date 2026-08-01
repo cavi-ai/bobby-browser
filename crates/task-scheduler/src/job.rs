@@ -86,6 +86,9 @@ pub struct Job {
     /// Per-job timeout in milliseconds; when set, overrides scheduler default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Optional correlation id propagated from the calling request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 impl Job {
@@ -104,6 +107,7 @@ impl Job {
             result: None,
             error: None,
             timeout_ms: None,
+            correlation_id: None,
         }
     }
 
@@ -119,6 +123,11 @@ impl Job {
 
     pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
         self.timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    pub fn with_correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
+        self.correlation_id = Some(correlation_id.into());
         self
     }
 
@@ -184,6 +193,8 @@ pub struct JobConfig {
     pub priority: JobPriority,
     pub max_retries: u32,
     pub timeout: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 impl JobConfig {
@@ -194,6 +205,7 @@ impl JobConfig {
             priority: JobPriority::default(),
             max_retries: 3,
             timeout: None,
+            correlation_id: None,
         }
     }
 
@@ -209,6 +221,11 @@ impl JobConfig {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
+        self.correlation_id = Some(correlation_id.into());
         self
     }
 }

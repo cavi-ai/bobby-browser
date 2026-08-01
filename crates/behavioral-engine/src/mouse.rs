@@ -23,6 +23,9 @@ pub struct MousePoint {
 pub struct MousePath {
     pub points: Vec<MousePoint>,
     pub duration_ms: u64,
+    /// Pause after arriving, before click (hover / aim settle).
+    #[serde(default)]
+    pub hover_dwell_ms: u64,
 }
 
 /// Configuration for mouse movement simulation.
@@ -42,6 +45,16 @@ pub struct MouseConfig {
     /// Probability of a small overshoot past the target before settling.
     #[serde(default = "default_overshoot_probability")]
     pub overshoot_probability: f64,
+    /// Random landing offset from the exact target (px).
+    #[serde(default = "default_landing_jitter_px")]
+    pub landing_jitter_px: f64,
+    /// Per-sample path noise (px), excluding endpoints.
+    #[serde(default = "default_path_noise_px")]
+    pub path_noise_px: f64,
+    #[serde(default = "default_hover_dwell_min_ms")]
+    pub hover_dwell_min_ms: u64,
+    #[serde(default = "default_hover_dwell_max_ms")]
+    pub hover_dwell_max_ms: u64,
 }
 
 impl Default for MouseConfig {
@@ -53,6 +66,10 @@ impl Default for MouseConfig {
             curve_samples: default_curve_samples(),
             acceleration_curve: default_acceleration_curve(),
             overshoot_probability: default_overshoot_probability(),
+            landing_jitter_px: default_landing_jitter_px(),
+            path_noise_px: default_path_noise_px(),
+            hover_dwell_min_ms: default_hover_dwell_min_ms(),
+            hover_dwell_max_ms: default_hover_dwell_max_ms(),
         }
     }
 }
@@ -79,6 +96,22 @@ fn default_acceleration_curve() -> f64 {
 
 fn default_overshoot_probability() -> f64 {
     0.18
+}
+
+fn default_landing_jitter_px() -> f64 {
+    3.0
+}
+
+fn default_path_noise_px() -> f64 {
+    1.2
+}
+
+fn default_hover_dwell_min_ms() -> u64 {
+    35
+}
+
+fn default_hover_dwell_max_ms() -> u64 {
+    140
 }
 
 impl MouseConfig {
@@ -112,6 +145,22 @@ impl MouseConfig {
         self
     }
 
+    pub fn with_landing_jitter(mut self, px: f64) -> Self {
+        self.landing_jitter_px = px;
+        self
+    }
+
+    pub fn with_path_noise(mut self, px: f64) -> Self {
+        self.path_noise_px = px;
+        self
+    }
+
+    pub fn with_hover_dwell_range(mut self, min_ms: u64, max_ms: u64) -> Self {
+        self.hover_dwell_min_ms = min_ms;
+        self.hover_dwell_max_ms = max_ms;
+        self
+    }
+
     pub fn sanitize(mut self) -> Self {
         let (min, max) = order_u64(self.min_duration_ms, self.max_duration_ms);
         self.min_duration_ms = min;
@@ -125,7 +174,26 @@ impl MouseConfig {
             self.acceleration_curve = default_acceleration_curve();
         }
         self.overshoot_probability = crate::clamp_probability(self.overshoot_probability);
+        if !self.landing_jitter_px.is_finite() || self.landing_jitter_px < 0.0 {
+            self.landing_jitter_px = 0.0;
+        }
+        self.landing_jitter_px = self.landing_jitter_px.min(24.0);
+        if !self.path_noise_px.is_finite() || self.path_noise_px < 0.0 {
+            self.path_noise_px = 0.0;
+        }
+        self.path_noise_px = self.path_noise_px.min(8.0);
+        let (dmin, dmax) = order_u64(self.hover_dwell_min_ms, self.hover_dwell_max_ms);
+        self.hover_dwell_min_ms = dmin;
+        self.hover_dwell_max_ms = dmax.max(dmin);
         self
+    }
+}
+
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
     }
 }
 
@@ -157,17 +225,28 @@ impl BezierMouseSimulator {
         end_x: f64,
         end_y: f64,
     ) -> MousePath {
-        let dx = end_x - start_x;
-        let dy = end_y - start_y;
+        let start_x = finite_or(start_x, 0.0);
+        let start_y = finite_or(start_y, 0.0);
+        let end_x = finite_or(end_x, 0.0);
+        let end_y = finite_or(end_y, 0.0);
+
+        let land_x = end_x + random.offset(self.config.landing_jitter_px);
+        let land_y = end_y + random.offset(self.config.landing_jitter_px);
+
+        let dx = land_x - start_x;
+        let dy = land_y - start_y;
         let distance = (dx * dx + dy * dy).sqrt().max(1.0);
 
         let max_offset = (distance * self.config.control_point_variance).max(50.0);
-        let cp1_x = self.clamp_control(start_x + dx * 0.3 + random.offset(max_offset), start_x, end_x);
-        let cp1_y = self.clamp_control(start_y + dy * 0.3 + random.offset(max_offset), start_y, end_y);
-        let cp2_x = self.clamp_control(start_x + dx * 0.7 + random.offset(max_offset), start_x, end_x);
-        let cp2_y = self.clamp_control(start_y + dy * 0.7 + random.offset(max_offset), start_y, end_y);
+        let cp1_x =
+            self.clamp_control(start_x + dx * 0.3 + random.offset(max_offset), start_x, land_x);
+        let cp1_y =
+            self.clamp_control(start_y + dy * 0.3 + random.offset(max_offset), start_y, land_y);
+        let cp2_x =
+            self.clamp_control(start_x + dx * 0.7 + random.offset(max_offset), start_x, land_x);
+        let cp2_y =
+            self.clamp_control(start_y + dy * 0.7 + random.offset(max_offset), start_y, land_y);
 
-        // Fitts-inspired duration: longer travels take longer, still within configured band.
         let (min_ms, max_ms) = order_u64(self.config.min_duration_ms, self.config.max_duration_ms);
         let span = (max_ms - min_ms) as f64;
         let distance_factor = (distance / 900.0).clamp(0.0, 1.0);
@@ -176,18 +255,22 @@ impl BezierMouseSimulator {
         let duration_ms = ((target_ms * jitter) as u64).clamp(min_ms, max_ms);
         let duration = Duration::from_millis(duration_ms);
 
-        let samples = ((distance / 40.0) as usize)
-            .clamp(3, self.config.curve_samples.max(3));
+        let samples = ((distance / 40.0) as usize).clamp(3, self.config.curve_samples.max(3));
         let acceleration = self.config.acceleration_curve;
+        let noise = self.config.path_noise_px;
 
         let mut points: Vec<MousePoint> = (0..=samples)
             .map(|i| {
                 let t = i as f64 / samples as f64;
                 let accel_t = self.accelerate(t, acceleration);
-                let (x, y) = self.bezier_point(
-                    start_x, start_y, cp1_x, cp1_y, cp2_x, cp2_y, end_x, end_y, accel_t,
+                let (mut x, mut y) = self.bezier_point(
+                    start_x, start_y, cp1_x, cp1_y, cp2_x, cp2_y, land_x, land_y, accel_t,
                 );
-                // Wall-clock timestamps follow sample index so move durations stay monotonic.
+                // Keep endpoints exact; add tremor only on intermediate samples.
+                if i > 0 && i < samples && noise > 0.0 {
+                    x += random.offset(noise);
+                    y += random.offset(noise);
+                }
                 let timestamp_ms = (t * duration.as_millis() as f64) as u64;
                 MousePoint {
                     x,
@@ -197,16 +280,22 @@ impl BezierMouseSimulator {
             })
             .collect();
 
+        if let Some(first) = points.first_mut() {
+            first.x = start_x;
+            first.y = start_y;
+            first.timestamp_ms = 0;
+        }
         if let Some(last) = points.last_mut() {
-            last.x = end_x;
-            last.y = end_y;
+            last.x = land_x;
+            last.y = land_y;
             last.timestamp_ms = duration_ms;
         }
 
+        let mut duration_ms = duration_ms;
         if random.chance(self.config.overshoot_probability) && distance > 20.0 {
             let overshoot_scale = random.next_f64(0.02, 0.08);
-            let ox = end_x + dx.signum() * distance * overshoot_scale + random.offset(4.0);
-            let oy = end_y + dy.signum() * distance * overshoot_scale + random.offset(4.0);
+            let ox = land_x + dx.signum() * distance * overshoot_scale + random.offset(4.0);
+            let oy = land_y + dy.signum() * distance * overshoot_scale + random.offset(4.0);
             let overshoot_at = duration_ms.saturating_add(random.gen_u32(20, 60) as u64);
             let settle_at = overshoot_at.saturating_add(random.gen_u32(30, 90) as u64);
             points.push(MousePoint {
@@ -215,34 +304,44 @@ impl BezierMouseSimulator {
                 timestamp_ms: overshoot_at,
             });
             points.push(MousePoint {
-                x: end_x,
-                y: end_y,
+                x: land_x,
+                y: land_y,
                 timestamp_ms: settle_at,
             });
-            return MousePath {
-                points,
-                duration_ms: settle_at,
-            };
+            duration_ms = settle_at;
         }
+
+        let hover_dwell_ms = if self.config.hover_dwell_max_ms == 0 {
+            0
+        } else {
+            random
+                .next_duration(
+                    Duration::from_millis(self.config.hover_dwell_min_ms),
+                    Duration::from_millis(self.config.hover_dwell_max_ms.max(self.config.hover_dwell_min_ms + 1)),
+                )
+                .as_millis() as u64
+        };
 
         MousePath {
             points,
             duration_ms,
+            hover_dwell_ms,
         }
     }
 
-    /// Path from a randomized approach offset to the element-local origin `(0, 0)`.
+    /// Path from a randomized approach offset to a jittered element-local origin.
     pub fn generate_approach_path(&self, random: &mut SessionRandom) -> MousePath {
         let start_x = random.next_f64(-180.0, 180.0);
         let start_y = random.next_f64(-140.0, 140.0);
-        // Avoid near-zero starts that collapse the path.
         let start_x = if start_x.abs() < 24.0 {
-            start_x.signum() * 24.0 + random.next_f64(10.0, 40.0)
+            let sign = if start_x >= 0.0 { 1.0 } else { -1.0 };
+            sign * 24.0 + random.next_f64(10.0, 40.0) * sign
         } else {
             start_x
         };
         let start_y = if start_y.abs() < 24.0 {
-            start_y.signum() * 24.0 + random.next_f64(10.0, 40.0)
+            let sign = if start_y >= 0.0 { 1.0 } else { -1.0 };
+            sign * 24.0 + random.next_f64(10.0, 40.0) * sign
         } else {
             start_y
         };
@@ -253,7 +352,7 @@ impl BezierMouseSimulator {
         let min = start.min(end);
         let max = start.max(end);
         let pad = (max - min) * 0.2;
-        cp.clamp(min - pad, max + pad)
+        finite_or(cp, (min + max) / 2.0).clamp(min - pad, max + pad)
     }
 
     fn bezier_point(
@@ -277,7 +376,7 @@ impl BezierMouseSimulator {
         let x = uuu * x0 + 3.0 * uu * t * x1 + 3.0 * u * tt * x2 + ttt * x3;
         let y = uuu * y0 + 3.0 * uu * t * y1 + 3.0 * u * tt * y2 + ttt * y3;
 
-        (x, y)
+        (finite_or(x, x3), finite_or(y, y3))
     }
 
     fn accelerate(&self, t: f64, curve: f64) -> f64 {
@@ -287,6 +386,12 @@ impl BezierMouseSimulator {
         if t >= 1.0 {
             return 1.0;
         }
-        t.powf(curve) / (t.powf(curve) + (1.0 - t).powf(curve))
+        let numerator = t.powf(curve);
+        let denom = numerator + (1.0 - t).powf(curve);
+        if denom == 0.0 || !denom.is_finite() {
+            return t;
+        }
+        let value = numerator / denom;
+        finite_or(value, t)
     }
 }

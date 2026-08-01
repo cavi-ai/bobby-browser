@@ -1,7 +1,4 @@
 //! AudioContext fingerprint masking.
-//!
-//! Returns consistent noise for audio fingerprinting to avoid
-//! detection while maintaining realistic audio context behavior.
 
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -35,6 +32,18 @@ fn default_analyser_size() -> usize {
     2048
 }
 
+impl AudioConfig {
+    pub fn with_hash_seed(mut self, seed: u64) -> Self {
+        self.hash_seed = seed;
+        self
+    }
+
+    pub fn with_analyser_size(mut self, size: usize) -> Self {
+        self.analyser_size = size;
+        self
+    }
+}
+
 /// Audio masker that generates consistent noise patterns.
 pub struct AudioMasker {
     config: AudioConfig,
@@ -45,20 +54,27 @@ impl AudioMasker {
         Self { config }
     }
 
+    pub fn config(&self) -> &AudioConfig {
+        &self.config
+    }
+
     /// Generate a consistent audio hash for fingerprinting.
     pub fn generate_hash(&self, mut rng: StdRng) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.config.hash_seed.to_le_bytes());
-
-        // Generate deterministic noise pattern
+        hasher.update(self.config.analyser_size.to_le_bytes());
         let noise: [u8; 64] = rng.random();
-        hasher.update(&noise);
-
+        hasher.update(noise);
         hex::encode(hasher.finalize())
     }
 
     /// Get the standard analyser buffer size.
     pub fn analyser_size(&self) -> usize {
         self.config.analyser_size
+    }
+
+    /// Deterministic float noise scale applied to AudioBuffer channel data.
+    pub fn noise_scale(&self, mut rng: StdRng) -> f64 {
+        1e-7 + (rng.random::<f64>() * 1e-7)
     }
 }

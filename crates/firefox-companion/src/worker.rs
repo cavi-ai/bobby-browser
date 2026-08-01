@@ -12,9 +12,11 @@ use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use behavioral_engine::{
-    BezierMouseSimulator, BehavioralConfig, MousePath, ScrollAction, ScrollSimulator,
-    SessionRandom, TypingSimulator,
+    session_pause, BezierMouseSimulator, BehavioralConfig, MousePath, ScrollAction,
+    ScrollSimulator, SessionRandom, TypingSimulator,
 };
+use fingerprinting::FingerprintApplyPlan;
+use fingerprinting::FingerprintConfig;
 use companion_core::{
     AttachmentLease, CompanionServerHandle, CompanionSessionError, PageBindingTicket,
 };
@@ -593,6 +595,10 @@ pub struct FirefoxCompanionWorker {
     mouse_simulator: BezierMouseSimulator,
     typing_simulator: TypingSimulator,
     scroll_simulator: ScrollSimulator,
+    session_jitter: Duration,
+    fingerprint: TaskMutex<FingerprintConfig>,
+    fingerprint_enabled: AtomicBool,
+    fingerprint_preload_script: TaskMutex<Option<String>>,
 }
 
 struct WorkerShutdown {
@@ -1028,6 +1034,14 @@ impl FirefoxCompanionWorker {
         self.mouse_simulator = BezierMouseSimulator::new(config.mouse);
         self.typing_simulator = TypingSimulator::new(config.typing);
         self.scroll_simulator = ScrollSimulator::new(config.scroll);
+        self.session_jitter = config.session_jitter;
+        self
+    }
+
+    pub fn with_fingerprint_config(mut self, config: FingerprintConfig) -> Self {
+        self.fingerprint_enabled
+            .store(config.enabled, Ordering::Relaxed);
+        self.fingerprint = TaskMutex::new(config);
         self
     }
 
@@ -1036,6 +1050,68 @@ impl FirefoxCompanionWorker {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .seed()
+    }
+
+    async fn sync_fingerprint_preload(&self) -> Result<(), CommandError> {
+        let enabled = self.fingerprint_enabled.load(Ordering::Relaxed);
+        let existing = self
+            .fingerprint_preload_script
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
+        if enabled && existing.is_some() {
+            return Ok(());
+        }
+        if !enabled && existing.is_none() {
+            return Ok(());
+        }
+
+        let host = crate::fingerprint_host::FirefoxBidiHost {
+            transport: self.transport.as_ref(),
+            context: None,
+        };
+
+        if let Some(script_id) = existing {
+            let _ = host.remove_preload_script(&script_id).await;
+            *self
+                .fingerprint_preload_script
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+
+        if !enabled {
+            return Ok(());
+        }
+
+        let config = {
+            let mut config = self
+                .fingerprint
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            config.enabled = true;
+            config
+        };
+        let plan = match FingerprintApplyPlan::from_config(&config) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    error.to_string(),
+                    false,
+                ))
+            }
+        };
+        let script_id = host.add_preload_script(&plan).await.map_err(|error| {
+            driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
+        })?;
+        *self
+            .fingerprint_preload_script
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(script_id);
+        Ok(())
     }
 
     fn with_session_random<R>(&self, f: impl FnOnce(&mut SessionRandom) -> R) -> R {
@@ -1140,8 +1216,11 @@ impl FirefoxCompanionWorker {
         let mouse_simulator = BezierMouseSimulator::new(behavioral_config.mouse);
         let typing_simulator = TypingSimulator::new(behavioral_config.typing);
         let scroll_simulator = ScrollSimulator::new(behavioral_config.scroll);
+        let session_jitter = behavioral_config.session_jitter;
+        let fingerprint = FingerprintConfig::default().with_session_seed(session_seed);
+        let fingerprint_enabled = AtomicBool::new(fingerprint.enabled);
 
-        Ok(Self {
+        let worker = Self {
             id,
             profile_dir,
             lease,
@@ -1168,7 +1247,13 @@ impl FirefoxCompanionWorker {
             mouse_simulator,
             typing_simulator,
             scroll_simulator,
-        })
+            session_jitter,
+            fingerprint: TaskMutex::new(fingerprint),
+            fingerprint_enabled,
+            fingerprint_preload_script: TaskMutex::new(None),
+        };
+        worker.sync_fingerprint_preload().await?;
+        Ok(worker)
     }
 
     fn start_shutdown(&self) {
@@ -1678,6 +1763,21 @@ impl FirefoxCompanionWorker {
                 let pointer_moves = self.pointer_moves_for_path(&path.points, &shared_id);
                 let mut actions_array = Vec::new();
                 actions_array.extend(pointer_moves);
+                let mut dwell_ms = path.hover_dwell_ms;
+                let jitter_ms = self.with_session_random(|random| {
+                    let config = BehavioralConfig {
+                        session_jitter: self.session_jitter,
+                        ..BehavioralConfig::default()
+                    };
+                    session_pause(random, &config).as_millis() as u64
+                });
+                dwell_ms = dwell_ms.saturating_add(jitter_ms / 4);
+                if dwell_ms > 0 {
+                    actions_array.push(serde_json::json!({
+                        "type": "pause",
+                        "duration": dwell_ms
+                    }));
+                }
                 actions_array.push(serde_json::json!({"type": "pointerDown", "button": 0}));
                 actions_array.push(serde_json::json!({"type": "pointerUp", "button": 0}));
                 serde_json::json!({
@@ -1775,7 +1875,23 @@ impl FirefoxCompanionWorker {
         if actions.is_empty() {
             return Ok(());
         }
-        let mut wheel_actions = Vec::new();
+
+        let mut wheel_batch = Vec::new();
+        let flush_wheel = |batch: &mut Vec<Value>| -> Result<Option<Value>, CommandError> {
+            if batch.is_empty() {
+                return Ok(None);
+            }
+            let actions = std::mem::take(batch);
+            Ok(Some(json!({
+                "context": context,
+                "actions": [{
+                    "type": "wheel",
+                    "id": "automation-runtime-wheel",
+                    "actions": actions
+                }]
+            })))
+        };
+
         for action in actions {
             match action {
                 ScrollAction::Scroll {
@@ -1786,7 +1902,7 @@ impl FirefoxCompanionWorker {
                     delta_y,
                     duration_ms,
                 } => {
-                    wheel_actions.push(json!({
+                    wheel_batch.push(json!({
                         "type": "scroll",
                         "x": 0,
                         "y": 0,
@@ -1797,38 +1913,33 @@ impl FirefoxCompanionWorker {
                     }));
                 }
                 ScrollAction::Pause { duration_ms } => {
-                    // Wheel sources do not support sleep; pause via a null input source.
-                    // Emit a zero-delta scroll with duration as a timing stand-in.
+                    if let Some(payload) = flush_wheel(&mut wheel_batch)? {
+                        self.transport.send("input.performActions", payload).await?;
+                    }
                     if *duration_ms > 0 {
-                        wheel_actions.push(json!({
-                            "type": "scroll",
-                            "x": 0,
-                            "y": 0,
-                            "deltaX": 0,
-                            "deltaY": 0,
-                            "duration": duration_ms,
-                            "origin": "viewport"
-                        }));
+                        self.transport
+                            .send(
+                                "input.performActions",
+                                json!({
+                                    "context": context,
+                                    "actions": [{
+                                        "type": "none",
+                                        "id": "automation-runtime-scroll-pause",
+                                        "actions": [{
+                                            "type": "pause",
+                                            "duration": duration_ms
+                                        }]
+                                    }]
+                                }),
+                            )
+                            .await?;
                     }
                 }
             }
         }
-        if wheel_actions.is_empty() {
-            return Ok(());
+        if let Some(payload) = flush_wheel(&mut wheel_batch)? {
+            self.transport.send("input.performActions", payload).await?;
         }
-        self.transport
-            .send(
-                "input.performActions",
-                json!({
-                    "context": context,
-                    "actions": [{
-                        "type": "wheel",
-                        "id": "automation-runtime-wheel",
-                        "actions": wheel_actions
-                    }]
-                }),
-            )
-            .await?;
         Ok(())
     }
 
@@ -2274,7 +2385,16 @@ impl BrowserWorker for FirefoxCompanionWorker {
         &self.profile_dir
     }
 
+    fn set_fingerprint_enabled(&self, enabled: bool) {
+        self.fingerprint_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    fn fingerprint_enabled(&self) -> bool {
+        self.fingerprint_enabled.load(Ordering::Relaxed)
+    }
+
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
+        self.sync_fingerprint_preload().await?;
         let guard = self.open_page_owned(page_id).await?;
         guard.disarm().await
     }
@@ -3270,11 +3390,23 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .await?;
 
         let typing_actions = self.with_session_random(|random| {
-            self.typing_simulator.generate_with_clear(
+            let mut actions = Vec::new();
+            let config = BehavioralConfig {
+                session_jitter: self.session_jitter,
+                ..BehavioralConfig::default()
+            };
+            let pause_ms = session_pause(random, &config).as_millis() as u64;
+            if pause_ms > 0 {
+                actions.push(behavioral_engine::TypingAction::Pause {
+                    duration_ms: pause_ms,
+                });
+            }
+            actions.extend(self.typing_simulator.generate_with_clear(
                 random,
                 &command.value,
                 command.clear_first,
-            )
+            ));
+            actions
         });
 
         let bidi_actions = self.behavioral_typing_to_bidi(&context, &typing_actions);

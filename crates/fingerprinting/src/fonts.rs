@@ -1,7 +1,4 @@
 //! Font enumeration masking.
-//!
-//! Returns a standardized, common font list instead of the user's
-//! actual fonts to prevent fingerprinting via font enumeration.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +27,6 @@ fn default_standard_fonts() -> Vec<String> {
         "Comic Sans MS".to_string(),
         "Courier New".to_string(),
         "Georgia".to_string(),
-        "Helvetica".to_string(),
         "Impact".to_string(),
         "Lucida Console".to_string(),
         "Lucida Sans Unicode".to_string(),

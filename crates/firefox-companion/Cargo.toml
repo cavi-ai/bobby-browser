@@ -15,6 +15,7 @@ behavioral-engine = { path = "../behavioral-engine", version = "0.3.1" }
 companion-core = { path = "../companion-core", version = "0.3.1" }
 companion-protocol = { path = "../companion-protocol", version = "0.3.1" }
 dom-engine = { path = "../dom-engine", version = "0.3.1" }
+fingerprinting = { path = "../fingerprinting", version = "0.3.1" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

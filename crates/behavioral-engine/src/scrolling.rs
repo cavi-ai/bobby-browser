@@ -240,11 +240,17 @@ impl ScrollSimulator {
         let chunk_size = (viewport_height * 0.8) as i64;
         let abs_delta = delta.abs();
         let sign = delta.signum() as i64;
+        const MAX_CHUNKS: usize = 64;
 
         if abs_delta > chunk_size && chunk_size > 0 {
             let mut remaining = abs_delta;
-            while remaining > 0 {
-                let chunk = chunk_size.min(remaining);
+            let mut chunks = 0usize;
+            while remaining > 0 && chunks < MAX_CHUNKS {
+                let chunk = if chunks + 1 == MAX_CHUNKS {
+                    remaining
+                } else {
+                    chunk_size.min(remaining)
+                };
                 actions.extend(self.generate_actions_inner(
                     random,
                     chunk * sign,
@@ -252,6 +258,7 @@ impl ScrollSimulator {
                     false,
                 ));
                 remaining -= chunk;
+                chunks += 1;
                 if remaining > 0 {
                     actions.push(ScrollAction::Pause {
                         duration_ms: random.next_f64(80.0, 280.0) as u64,

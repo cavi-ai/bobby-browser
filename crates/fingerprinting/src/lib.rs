@@ -1,33 +1,60 @@
-//! Fingerprinting masking module for browser automation.
+//! Fingerprinting profiles and engine-agnostic apply plans.
 //!
-//! Provides Canvas/WebGL hash generation, AudioContext masking, font
-//! enumeration standardization, and screen resolution spoofing to
-//! evade bot detection systems.
+//! Generates a coherent session profile and an init script that masks
+//! Canvas/WebGL/Audio/fonts/screen/navigator surfaces. Hosts (Chromium CDP,
+//! Firefox BiDi, companion extensions) implement [`FingerprintHost`] to apply
+//! the portable [`FingerprintApplyPlan`].
 
+mod apply;
 mod audio;
 mod canvas;
+mod error;
 mod fonts;
 mod screen;
+mod script;
+mod webgl;
 
+pub use apply::{DeviceMetrics, FingerprintApplyPlan, FingerprintHost};
 pub use audio::{AudioConfig, AudioMasker};
 pub use canvas::{CanvasConfig, CanvasMasker};
+pub use error::FingerprintApplyError;
 pub use fonts::{FontConfig, FontMasker};
 pub use screen::{ScreenConfig, ScreenMasker};
+pub use script::{build_init_script, build_probe_script};
+pub use webgl::{WebGlConfig, WebGlProfile};
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for the fingerprinting mask.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FingerprintConfig {
+    /// Master on/off switch. When false, [`FingerprintApplyPlan::from_config`]
+    /// returns `None` and hosts must skip injection.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     pub canvas: CanvasConfig,
     pub audio: AudioConfig,
     pub fonts: FontConfig,
     pub screen: ScreenConfig,
+    #[serde(default)]
+    pub webgl: WebGlConfig,
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    #[serde(default = "default_timezone")]
+    pub timezone_id: String,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+    #[serde(default = "default_hardware_concurrency")]
+    pub hardware_concurrency: u32,
+    #[serde(default = "default_device_memory")]
+    pub device_memory: u32,
+    #[serde(default = "default_max_touch_points")]
+    pub max_touch_points: u32,
+    #[serde(default = "default_chrome_major")]
+    pub chrome_major: u32,
     #[serde(default = "default_session_seed")]
     pub session_seed: u64,
 }
@@ -35,24 +62,66 @@ pub struct FingerprintConfig {
 impl Default for FingerprintConfig {
     fn default() -> Self {
         Self {
+            enabled: default_enabled(),
             canvas: CanvasConfig::default(),
             audio: AudioConfig::default(),
             fonts: FontConfig::default(),
             screen: ScreenConfig::default(),
+            webgl: WebGlConfig::default(),
+            locale: default_locale(),
+            timezone_id: default_timezone(),
+            platform: default_platform(),
+            hardware_concurrency: default_hardware_concurrency(),
+            device_memory: default_device_memory(),
+            max_touch_points: default_max_touch_points(),
+            chrome_major: default_chrome_major(),
             session_seed: default_session_seed(),
         }
     }
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_locale() -> String {
+    "en-US".to_string()
+}
+
+fn default_timezone() -> String {
+    "America/New_York".to_string()
+}
+
+fn default_platform() -> String {
+    "Win32".to_string()
+}
+
+fn default_hardware_concurrency() -> u32 {
+    8
+}
+
+fn default_device_memory() -> u32 {
+    8
+}
+
+fn default_max_touch_points() -> u32 {
+    0
+}
+
+fn default_chrome_major() -> u32 {
+    131
+}
+
 fn default_session_seed() -> u64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before epoch")
-        .as_nanos();
-    (nanos as u64).wrapping_mul(2654435761)
+    0xB0B_5F1D_u64
 }
 
 impl FingerprintConfig {
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
     pub fn with_canvas(mut self, config: CanvasConfig) -> Self {
         self.canvas = config;
         self
@@ -73,26 +142,92 @@ impl FingerprintConfig {
         self
     }
 
+    pub fn with_webgl(mut self, config: WebGlConfig) -> Self {
+        self.webgl = config;
+        self
+    }
+
+    pub fn with_locale(mut self, locale: impl Into<String>) -> Self {
+        self.locale = locale.into();
+        self
+    }
+
+    pub fn with_timezone_id(mut self, timezone_id: impl Into<String>) -> Self {
+        self.timezone_id = timezone_id.into();
+        self
+    }
+
     pub fn with_session_seed(mut self, seed: u64) -> Self {
         self.session_seed = seed;
+        self
+    }
+
+    pub fn with_chrome_major(mut self, major: u32) -> Self {
+        self.chrome_major = major;
         self
     }
 }
 
 /// A complete fingerprint session with consistent masks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FingerprintSession {
     pub session_id: String,
+    pub session_seed: u64,
     pub canvas_hash: String,
-    pub webgl_hash: String,
+    pub canvas_noise_amplitude: u8,
+    pub webgl: WebGlProfile,
     pub audio_hash: String,
+    pub audio_noise_scale: f64,
     pub font_list: Vec<String>,
     pub screen_resolution: ScreenResolution,
     pub user_agent: String,
+    pub platform: String,
+    pub locale: String,
+    pub timezone_id: String,
+    pub hardware_concurrency: u32,
+    pub device_memory: u32,
+    pub max_touch_points: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl FingerprintSession {
+    /// Fail closed when cross-signal profile fields contradict each other.
+    pub fn validate_consistency(&self) -> Result<(), FingerprintApplyError> {
+        if self.user_agent.contains("Windows") && self.platform != "Win32" {
+            return Err(FingerprintApplyError::Inconsistent(
+                "Windows user-agent requires platform Win32".into(),
+            ));
+        }
+        if self.user_agent.contains("Windows")
+            && self
+                .font_list
+                .iter()
+                .any(|font| font == "Helvetica" || font == "Menlo")
+        {
+            return Err(FingerprintApplyError::Inconsistent(
+                "Windows profile must not advertise macOS-only fonts".into(),
+            ));
+        }
+        if self.screen_resolution.width == 0 || self.screen_resolution.height == 0 {
+            return Err(FingerprintApplyError::Inconsistent(
+                "screen dimensions must be non-zero".into(),
+            ));
+        }
+        if self.screen_resolution.pixel_ratio <= 0.0 {
+            return Err(FingerprintApplyError::Inconsistent(
+                "pixel ratio must be positive".into(),
+            ));
+        }
+        if !(1..=3).contains(&self.canvas_noise_amplitude) {
+            return Err(FingerprintApplyError::Inconsistent(
+                "canvas noise amplitude out of range".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenResolution {
     pub width: u32,
@@ -118,48 +253,55 @@ impl Default for ScreenResolution {
 
 /// Generates a fingerprinting session from configuration.
 pub fn create_session(config: &FingerprintConfig) -> FingerprintSession {
-    let _rng = StdRng::seed_from_u64(config.session_seed);
-
-    // Generate consistent canvas hash
+    let seed = config.session_seed;
     let canvas_masker = CanvasMasker::new(config.canvas.clone());
-    let canvas_hash = canvas_masker.generate_hash(StdRng::seed_from_u64(config.session_seed));
+    let canvas_hash = canvas_masker.generate_hash(StdRng::seed_from_u64(seed));
+    let canvas_noise_amplitude =
+        canvas_masker.noise_amplitude(StdRng::seed_from_u64(seed.wrapping_add(10)));
 
-    // Generate consistent WebGL hash
-    let webgl_hash = generate_webgl_hash(&canvas_hash, StdRng::seed_from_u64(config.session_seed.wrapping_add(1)));
+    let webgl = webgl::build_profile(&config.webgl, StdRng::seed_from_u64(seed.wrapping_add(1)));
 
-    // Generate consistent audio hash
     let audio_masker = AudioMasker::new(config.audio.clone());
-    let audio_hash = audio_masker.generate_hash(StdRng::seed_from_u64(config.session_seed.wrapping_add(2)));
+    let audio_hash = audio_masker.generate_hash(StdRng::seed_from_u64(seed.wrapping_add(2)));
+    let audio_noise_scale =
+        audio_masker.noise_scale(StdRng::seed_from_u64(seed.wrapping_add(11)));
 
-    // Get standardized font list
     let font_masker = FontMasker::new(config.fonts.clone());
     let font_list = font_masker.get_standard_fonts();
 
-    // Get spoofed screen resolution
     let screen_masker = ScreenMasker::new(config.screen.clone());
     let screen_res = screen_masker.get_spoofed_resolution();
+    let user_agent = generate_user_agent(config.chrome_major, &config.platform);
 
     FingerprintSession {
-        session_id: format!("fp_{}", config.session_seed),
+        session_id: format!("fp_{seed}"),
+        session_seed: seed,
         canvas_hash,
-        webgl_hash,
+        canvas_noise_amplitude,
+        webgl,
         audio_hash,
+        audio_noise_scale,
         font_list,
-        screen_resolution: screen_res.clone(),
-        user_agent: generate_user_agent(&screen_res),
+        screen_resolution: screen_res,
+        user_agent,
+        platform: config.platform.clone(),
+        locale: config.locale.clone(),
+        timezone_id: config.timezone_id.clone(),
+        hardware_concurrency: config.hardware_concurrency,
+        device_memory: config.device_memory,
+        max_touch_points: config.max_touch_points,
     }
 }
 
-fn generate_webgl_hash(canvas_hash: &str, mut rng: StdRng) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(canvas_hash.as_bytes());
-    let random_bytes: [u8; 32] = rng.random();
-    hasher.update(&random_bytes);
-    hex::encode(hasher.finalize())
-}
-
-fn generate_user_agent(_res: &ScreenResolution) -> String {
-    format!(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
+fn generate_user_agent(chrome_major: u32, platform: &str) -> String {
+    let major = chrome_major.max(100);
+    if platform == "MacIntel" {
+        format!(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        )
+    } else {
+        format!(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        )
+    }
 }

@@ -1,7 +1,4 @@
-//! Canvas and WebGL hash masking.
-//!
-//! Generates consistent, random-but-realistic hashes for Canvas and
-//! WebGL contexts that remain stable across page visits.
+//! Canvas fingerprint profile generation.
 
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -14,15 +11,16 @@ use sha2::{Digest, Sha256};
 pub struct CanvasConfig {
     #[serde(default = "default_hash_seed")]
     pub hash_seed: u64,
-    #[serde(default = "default_canvas_id")]
-    pub canvas_id: String,
+    /// Opaque seed material for canvas noise; never used as a DOM id.
+    #[serde(default = "default_noise_key")]
+    pub noise_key: String,
 }
 
 impl Default for CanvasConfig {
     fn default() -> Self {
         Self {
             hash_seed: default_hash_seed(),
-            canvas_id: default_canvas_id(),
+            noise_key: default_noise_key(),
         }
     }
 }
@@ -31,8 +29,8 @@ fn default_hash_seed() -> u64 {
     42
 }
 
-fn default_canvas_id() -> String {
-    "automation-canvas".to_string()
+fn default_noise_key() -> String {
+    "fp-canvas".to_string()
 }
 
 impl CanvasConfig {
@@ -41,13 +39,18 @@ impl CanvasConfig {
         self
     }
 
-    pub fn with_canvas_id(mut self, id: String) -> Self {
-        self.canvas_id = id;
+    pub fn with_noise_key(mut self, key: impl Into<String>) -> Self {
+        self.noise_key = key.into();
         self
+    }
+
+    /// Backward-compatible alias for [`Self::with_noise_key`].
+    pub fn with_canvas_id(self, id: String) -> Self {
+        self.with_noise_key(id)
     }
 }
 
-/// Canvas masker that generates consistent hashes.
+/// Canvas masker that generates consistent hashes and noise seeds.
 pub struct CanvasMasker {
     config: CanvasConfig,
 }
@@ -57,16 +60,22 @@ impl CanvasMasker {
         Self { config }
     }
 
+    pub fn config(&self) -> &CanvasConfig {
+        &self.config
+    }
+
     /// Generate a consistent canvas hash for fingerprinting.
     pub fn generate_hash(&self, mut rng: StdRng) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(self.config.canvas_id.as_bytes());
+        hasher.update(self.config.noise_key.as_bytes());
         hasher.update(self.config.hash_seed.to_le_bytes());
-
-        // Add random but deterministic noise
         let noise: [u8; 32] = rng.random();
-        hasher.update(&noise);
-
+        hasher.update(noise);
         hex::encode(hasher.finalize())
+    }
+
+    /// Deterministic byte used as canvas pixel noise amplitude (1..=3).
+    pub fn noise_amplitude(&self, mut rng: StdRng) -> u8 {
+        1 + (rng.random::<u8>() % 3)
     }
 }

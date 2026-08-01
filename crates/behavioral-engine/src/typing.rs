@@ -200,12 +200,14 @@ impl TypingSimulator {
                 }
                 if end > i {
                     let paste_text: String = chars[i..end].iter().collect();
-                    actions.push(TypingAction::CopyPaste {
-                        text: paste_text,
-                        delay_ms: random.next_f64(80.0, 220.0) as u64,
-                    });
-                    i = end;
-                    continue;
+                    if !paste_text.is_empty() {
+                        actions.push(TypingAction::CopyPaste {
+                            text: paste_text,
+                            delay_ms: random.next_f64(80.0, 220.0) as u64,
+                        });
+                        i = end;
+                        continue;
+                    }
                 }
             }
 
@@ -214,14 +216,16 @@ impl TypingSimulator {
             // Mistype then correct: wrong key → backspace → correct key.
             if !ch.is_whitespace() && random.chance(self.config.correction_probability) {
                 let wrong = nearby_typo(ch, random);
-                self.push_key(&mut actions, random, wrong);
-                actions.push(TypingAction::Pause {
-                    duration_ms: random.next_f64(40.0, 120.0) as u64,
-                });
-                actions.push(TypingAction::Backspace {
-                    count: 1,
-                    delay_ms: random.next_f64(60.0, 160.0) as u64,
-                });
+                if wrong != ch {
+                    self.push_key(&mut actions, random, wrong);
+                    actions.push(TypingAction::Pause {
+                        duration_ms: random.next_f64(40.0, 120.0) as u64,
+                    });
+                    actions.push(TypingAction::Backspace {
+                        count: 1,
+                        delay_ms: random.next_f64(60.0, 160.0) as u64,
+                    });
+                }
             }
 
             self.push_key(&mut actions, random, ch);
@@ -277,44 +281,84 @@ impl TypingSimulator {
 }
 
 fn nearby_typo(ch: char, random: &mut SessionRandom) -> char {
-    const ROWS: [&str; 3] = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
+    const ROWS: [&str; 4] = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
     let lower = ch.to_ascii_lowercase();
     for row in ROWS {
         if let Some(idx) = row.chars().position(|c| c == lower) {
-            let neighbors = [
-                idx.saturating_sub(1),
-                (idx + 1).min(row.len() - 1),
-            ];
-            let pick = neighbors[random.gen_usize(0, neighbors.len() - 1)];
-            let typo = row.chars().nth(pick).unwrap_or(lower);
-            return if ch.is_ascii_uppercase() {
-                typo.to_ascii_uppercase()
-            } else {
-                typo
-            };
+            let mut candidates = Vec::with_capacity(2);
+            if idx > 0 {
+                if let Some(c) = row.chars().nth(idx - 1) {
+                    candidates.push(c);
+                }
+            }
+            if idx + 1 < row.len() {
+                if let Some(c) = row.chars().nth(idx + 1) {
+                    candidates.push(c);
+                }
+            }
+            candidates.retain(|c| *c != lower);
+            if let Some(&typo) = candidates
+                .get(random.gen_usize(0, candidates.len().saturating_sub(1).max(0)))
+                .or_else(|| candidates.first())
+            {
+                return if ch.is_ascii_uppercase() {
+                    typo.to_ascii_uppercase()
+                } else {
+                    typo
+                };
+            }
         }
     }
-    let fallback = ['a', 'e', 'i', 'o', 'u'];
-    fallback[random.gen_usize(0, fallback.len() - 1)]
+    let fallback = ['a', 'e', 'i', 'o', 'u', 'n', 't'];
+    let mut pick = fallback[random.gen_usize(0, fallback.len() - 1)];
+    if pick.eq_ignore_ascii_case(&ch) {
+        pick = 'x';
+    }
+    if ch.is_ascii_uppercase() {
+        pick.to_ascii_uppercase()
+    } else {
+        pick
+    }
 }
 
 /// Replay typing actions into a string buffer (for tests / validation).
+///
+/// `SelectAll` marks the buffer as selected; the next `Backspace` clears it.
 pub fn compose_typed_text(actions: &[TypingAction]) -> String {
     let mut buf = String::new();
+    let mut selected = false;
     for action in actions {
         match action {
             TypingAction::KeyDown { character, .. } => {
+                if selected {
+                    buf.clear();
+                    selected = false;
+                }
                 if let Some(ch) = character.chars().next() {
                     buf.push(ch);
                 }
             }
-            TypingAction::KeyUp { .. } | TypingAction::Pause { .. } | TypingAction::SelectAll { .. } => {}
+            TypingAction::KeyUp { .. } | TypingAction::Pause { .. } => {}
+            TypingAction::SelectAll { .. } => {
+                selected = !buf.is_empty();
+            }
             TypingAction::Backspace { count, .. } => {
-                for _ in 0..*count {
-                    buf.pop();
+                if selected {
+                    buf.clear();
+                    selected = false;
+                } else {
+                    for _ in 0..*count {
+                        buf.pop();
+                    }
                 }
             }
-            TypingAction::CopyPaste { text, .. } => buf.push_str(text),
+            TypingAction::CopyPaste { text, .. } => {
+                if selected {
+                    buf.clear();
+                    selected = false;
+                }
+                buf.push_str(text);
+            }
         }
     }
     buf
