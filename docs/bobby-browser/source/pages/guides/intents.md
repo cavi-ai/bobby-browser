@@ -306,6 +306,15 @@ and expects:
 `action.kind` is one of `click` (`x`,`y`), `typeText` (`text`), or
 `extractValue` (`value`). Invalid responses, out-of-range confidence, oversized
 bodies, and transport failures **decline** the escalation (fail closed).
+
+### Structured extraction
+
+The same endpoint serves `extract_structured` (MCP). The runtime sends
+`{schema, content, purpose}` (bounded page text) and the provider returns
+`{"value": <json>}`. The runtime validates the value against the supplied
+JSON schema and bounds it before it becomes `structuredExtraction` evidence.
+Gated like vision: `browser:mutate` + `vision:assist`, session vision policy,
+and a configured provider.
 Accepted proposals still require the engine's **0.75** confidence floor and
 sha256-pinned verification before any browser action.
 

@@ -419,6 +419,9 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
         RuntimeCommand::Primitive(PrimitiveCommand::EvaluateJavaScript(_)) => {
             vec![Capability::JavascriptEvaluate]
         }
+        RuntimeCommand::Primitive(PrimitiveCommand::ExtractStructured(_)) => {
+            vec![Capability::VisionAssist]
+        }
         RuntimeCommand::Primitive(_) => vec![],
         RuntimeCommand::Intent(IntentCommand::Fill(fill))
             if matches!(fill.value, FillValue::Files { .. }) =>
