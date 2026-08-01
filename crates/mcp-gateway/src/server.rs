@@ -606,26 +606,79 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                self.runtime
-                    .open_page(
-                        context,
-                        types::OpenPageRequest {
-                            session_id: input.session_id,
-                        },
-                    )
-                    .await
-                    .and_then(to_json)
+                async {
+                    if input.url.is_some() {
+                        self.authorization
+                            .require_capability(&context, types::Capability::BrowserMutate)?;
+                    }
+                    let session_id = input.session_id;
+                    let page = self
+                        .runtime
+                        .open_page(
+                            context.clone(),
+                            types::OpenPageRequest {
+                                session_id: session_id.clone(),
+                            },
+                        )
+                        .await?;
+                    let Some(url) = input.url else {
+                        return to_json(page);
+                    };
+                    let page_id = page.id.clone();
+                    let (navigation_context, envelope) = primitive_envelope(
+                        context.clone(),
+                        session_id.clone(),
+                        Some(page_id.clone()),
+                        None,
+                        types::PrimitiveCommand::Navigate(types::NavigateCommand {
+                            url,
+                            wait_until: types::WaitUntil::Interactive,
+                            timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
+                        }),
+                    );
+                    let navigation_outcome =
+                        self.runtime.submit(navigation_context, envelope).await?;
+                    let navigation_completed =
+                        matches!(navigation_outcome, types::CommandOutcome::Completed { .. });
+                    let mut value = to_json(page)?;
+                    let object = value
+                        .as_object_mut()
+                        .expect("page state serializes as an object");
+                    object.insert("navigationOutcome".to_owned(), to_json(navigation_outcome)?);
+                    if !navigation_completed {
+                        let (cleanup_context, cleanup_envelope) = primitive_envelope(
+                            context,
+                            session_id,
+                            Some(page_id.clone()),
+                            None,
+                            types::PrimitiveCommand::ClosePage(types::ClosePageCommand { page_id }),
+                        );
+                        let cleanup_outcome = self
+                            .runtime
+                            .submit(cleanup_context, cleanup_envelope)
+                            .await?;
+                        let page_closed =
+                            matches!(cleanup_outcome, types::CommandOutcome::Completed { .. });
+                        object.insert("cleanupOutcome".to_owned(), to_json(cleanup_outcome)?);
+                        object.insert("pageClosed".to_owned(), json!(page_closed));
+                    }
+                    Ok(value)
+                }
+                .await
             }
             "command_execute" => {
                 let input: CommandExecuteArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                if input.envelope.deadline <= Utc::now()
-                    || input.envelope.deadline > context.deadline
+                let now = Utc::now();
+                if input.envelope.deadline <= now
+                    || input.envelope.deadline
+                        > now + Duration::milliseconds(MAX_COMMAND_DEADLINE_MS)
                 {
                     return invalid_params_reason(id, "deadlineOutOfRange");
                 }
+                context.deadline = input.envelope.deadline;
                 context.idempotency_key = match input.idempotency_key {
                     Some(key) => match types::IdempotencyKey::try_from(key) {
                         Ok(key) => Some(key),
@@ -1526,6 +1579,8 @@ struct SessionCreateArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PageOpenArgs {
     session_id: types::SessionId,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1882,6 +1937,7 @@ fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
+const MAX_COMMAND_DEADLINE_MS: i64 = 300_000;
 
 /// Builds the envelope a flat tool submits.
 ///

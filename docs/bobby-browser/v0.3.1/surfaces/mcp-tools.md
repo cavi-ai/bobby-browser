@@ -26,7 +26,7 @@ Tools are advertised only when the principal holds the required capability.
 | `session_create` | `session:write` | Create a browser session |
 | `session_close` | `session:write` | Close a session and release its worker |
 | `session_list` | `session:read` | List sessions visible to the principal |
-| `page_open` | `page:write` | Open a page in an owned session |
+| `page_open` | `page:write` (+ `browser:mutate` when `url` is supplied) | Open a page in an owned session and optionally navigate it |
 | `page_list` | `browser:mutate` | List pages in an owned session |
 | `page_close` | `browser:mutate` | Close a page in an owned session |
 | `page_activate` | `browser:mutate` | Bring a page to the front |
@@ -61,6 +61,11 @@ The flat browser tools (`navigate` … `evaluate_javascript` /
 server-generated) and return the same `CommandOutcome` shape as
 `command_execute`, including artifact / accessibility evidence.
 
+`page_open` requires `sessionId` and optionally accepts `url`. With no URL it
+returns the page state exactly as before. With a URL it opens and navigates in
+one call, requires `browser:mutate`, and adds `navigationOutcome` to the page
+state so navigation failure cannot be mistaken for a successfully loaded page.
+
 `click`, `type_text`, and `upload_files` accept either a raw `selector` or a
 semantic `target`. Targets returned by `a11y_snapshot` can be passed through
 unchanged; a legacy selector is not required when `target` is present.
@@ -88,7 +93,7 @@ A `-32602` response carries `data` describing what failed:
 |---|---|---|
 | `schemaViolation` | `pointer`, `constraint` | JSON Pointer to the offending argument and the schema keyword it violated |
 | `malformedArguments` | — | Cleared the schema but failed to deserialize |
-| `deadlineOutOfRange` | — | `command_execute` envelope deadline is past, or beyond the request deadline |
+| `deadlineOutOfRange` | — | `command_execute` envelope deadline is past, or more than five minutes in the future |
 | `invalidIdempotencyKey` | — | Key is not 1–128 printable ASCII characters |
 
 `pointer` and `constraint` describe the published schema, never the submitted
@@ -100,8 +105,8 @@ Compact accessibility trees (including form-control state):
 
 Live JSON Schemas for tool arguments are defined in
 `crates/mcp-gateway/src/schema.rs` (for example `session_create` requires
-`profile`; `page_open` takes `sessionId`; `command_execute` takes `envelope`
-and optional `idempotencyKey`). Each tool advertises only the `$defs` its own
+`profile`; `page_open` takes `sessionId` and optional `url`; `command_execute`
+takes `envelope` and optional `idempotencyKey`). Each tool advertises only the `$defs` its own
 arguments reach, so schemas stay self-contained without carrying the whole
 type system. MCP argument names are camelCase even where
 some HTTP request bodies use snake_case. The gateway's `schema_parity` tests

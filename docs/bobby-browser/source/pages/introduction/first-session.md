@@ -145,7 +145,7 @@ Order:
 
 1. `initialize` (protocol `2025-11-25`) — required before tools
 2. `tools/call` → `session_create` with `{ "profile": "default" }`
-3. `tools/call` → `page_open` with `{ "sessionId": "…" }`
+3. `tools/call` → `page_open` with `{ "sessionId": "…", "url": "https://…" }`
 4. Prefer flat tools: `navigate`, `a11y_snapshot`, `click` / `type_text` /
    `upload_files` (selector or snapshot `target`), and `intent_*` for
    goal-oriented steps — they mint the envelope server-side
