@@ -121,6 +121,43 @@ impl PageRuntime {
         Ok(page)
     }
 
+    pub async fn form_snapshot(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+    ) -> Result<types::FormSnapshot, RuntimeError> {
+        let page = self
+            .inner
+            .read()
+            .await
+            .get(page_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::NotFound("page".into()))?;
+        if &page.session_id != session_id {
+            return Err(RuntimeError::NotFound("page".into()));
+        }
+        let workers = self
+            .workers
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Internal("browser workers are not configured".into()))?;
+        let lease = workers
+            .lease(session_id.clone())
+            .await
+            .map_err(|error| RuntimeError::Internal(error.message))?;
+        let evidence = lease
+            .worker()
+            .form_snapshot(page_id)
+            .await
+            .map_err(|error| RuntimeError::Internal(error.message))?;
+        evidence
+            .into_iter()
+            .find_map(|item| match item {
+                types::Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| RuntimeError::Internal("worker omitted form snapshot evidence".into()))
+    }
+
     async fn register_page(&self, session_id: SessionId) -> PageState {
         let page = PageState {
             id: PageId::default(),

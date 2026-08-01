@@ -2046,6 +2046,44 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
+    async fn form_snapshot(&self, page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": worker_pool::form_snapshot_expression(page_id),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        let encoded = response
+            .pointer("/result/value")
+            .or_else(|| response.get("value"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox BiDi returned an invalid form snapshot",
+                    false,
+                )
+            })?;
+        let snapshot: types::FormSnapshot = serde_json::from_str(encoded).map_err(|error| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("invalid Firefox form snapshot: {error}"),
+                false,
+            )
+        })?;
+        Ok(vec![
+            Evidence::FormSnapshot { snapshot },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+
     async fn inspect(
         &self,
         page_id: &PageId,

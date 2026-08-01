@@ -210,6 +210,15 @@ impl RuntimeService {
         Ok(page)
     }
 
+    pub async fn form_snapshot(
+        &self,
+        session_id: &types::SessionId,
+        page_id: &types::PageId,
+    ) -> Result<types::FormSnapshot, RuntimeError> {
+        self.sessions.get(session_id).await?;
+        self.pages.form_snapshot(session_id, page_id).await
+    }
+
     pub async fn submit(&self, envelope: CommandEnvelope) -> CommandOutcome {
         self.submit_with_vision_capability(envelope, false).await
     }

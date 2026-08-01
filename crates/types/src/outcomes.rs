@@ -200,6 +200,9 @@ pub enum Evidence {
         nodes: Vec<AccessibilityNode>,
         truncated: bool,
     },
+    FormSnapshot {
+        snapshot: crate::FormSnapshot,
+    },
     StructuredExtraction {
         page_id: PageId,
         value: serde_json::Value,

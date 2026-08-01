@@ -6,7 +6,9 @@ documentedVersion: 0.3.1
 
 `FormSnapshot` is the versioned, engine-neutral contract for observing forms
 before an agent plans edits. Version 1 is additive: it does not change the
-existing accessibility snapshot or expose a new browser command by itself.
+existing accessibility snapshot. Agents can request the contract through the
+read-only MCP `form_snapshot` tool with `{ sessionId, pageId }`; it requires
+`page:read`, not browser mutation or caller-enabled JavaScript evaluation.
 
 The contract represents owned forms, unowned controls, labeled groups,
 constraints, validity, options, supported operations, and safe semantic
