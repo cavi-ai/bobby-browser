@@ -3,15 +3,16 @@ use serde_json::json;
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandError, CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent,
-    CreateSessionRequest, DismissObstructionIntent, DownloadUrlCommand, ElementState, ErrorCode,
-    ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy,
-    ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent, ExtractValueKind, FillIntent,
-    FillValue, FollowIntent, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
-    ListPagesCommand, LocateIntent, NetworkResourceType, OpenPageCommand, PageId, PrimitiveCommand,
-    RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
-    WaitUntil, WorkflowId,
+    CommandError, CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, ControlAction,
+    ControlActionCommand, ControlActionEvidence, CreateSessionRequest, DismissObstructionIntent,
+    DownloadUrlCommand, ElementState, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
+    ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent,
+    ExtractValueKind, FillIntent, FillValue, FollowIntent, FormControlOperation, FormControlState,
+    FormControlTarget, FormControlValidity, InspectCommand, IntentCommand, IntentHints,
+    IntentResolutionPath, ListPagesCommand, LocateIntent, NetworkResourceType, OpenPageCommand,
+    PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent,
+    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -1246,4 +1247,104 @@ fn accessibility_snapshot_action_target_round_trips_without_dom_identifiers() {
 
     let evidence: Evidence = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(evidence).unwrap(), value);
+}
+
+#[test]
+fn control_action_contract_is_closed_reconciliable_and_secret_safe() {
+    let target = FormControlTarget {
+        role: "checkbox".into(),
+        accessible_name: "Terms".into(),
+        ordinal: None,
+        frame_path: Vec::new(),
+        shadow_path: Vec::new(),
+    };
+    let command = PrimitiveCommand::ControlAction(ControlActionCommand {
+        target: target.clone(),
+        action: ControlAction::SetChecked { checked: true },
+    });
+    assert_eq!(command.class(), CommandClass::Reconciliable);
+    assert_eq!(
+        serde_json::to_value(&command).unwrap(),
+        json!({
+            "kind": "controlAction",
+            "input": {
+                "target": {
+                    "role": "checkbox",
+                    "accessibleName": "Terms",
+                    "ordinal": null,
+                    "framePath": [],
+                    "shadowPath": []
+                },
+                "action": {"kind": "setChecked", "checked": true}
+            }
+        })
+    );
+    assert!(serde_json::from_value::<ControlActionCommand>(json!({
+        "target": target,
+        "action": {"kind": "clear"},
+        "selector": "#forbidden"
+    }))
+    .is_err());
+
+    let unsafe_envelope = test_envelope(PrimitiveCommand::ControlAction(ControlActionCommand {
+        target: FormControlTarget {
+            role: "textbox".into(),
+            accessible_name: "Upload".into(),
+            ordinal: None,
+            frame_path: Vec::new(),
+            shadow_path: Vec::new(),
+        },
+        action: ControlAction::SetFiles {
+            paths: vec!["/private/secret.txt".into()],
+        },
+    }));
+    let journal = serde_json::to_string(&unsafe_envelope.journal_safe()).unwrap();
+    assert!(!journal.contains("/private/secret.txt"));
+    assert!(journal.contains("upload://input/0"));
+}
+
+#[test]
+fn control_action_validates_bounds_and_evidence_round_trips() {
+    assert!(ControlAction::SelectMany { values: Vec::new() }
+        .validate()
+        .is_err());
+    assert!(ControlAction::SelectMany {
+        values: vec!["one".into(), "one".into()]
+    }
+    .validate()
+    .is_err());
+    assert!(ControlAction::SetText {
+        value: "x".repeat(types::MAX_FORM_VALUE_BYTES + 1)
+    }
+    .validate()
+    .is_err());
+
+    let evidence = Evidence::ControlAction {
+        action: ControlActionEvidence {
+            operation: FormControlOperation::SetChecked,
+            target: FormControlTarget {
+                role: "checkbox".into(),
+                accessible_name: "Terms".into(),
+                ordinal: None,
+                frame_path: Vec::new(),
+                shadow_path: Vec::new(),
+            },
+            state: FormControlState::Checked { checked: true },
+            validity: FormControlValidity {
+                will_validate: true,
+                valid: true,
+                flags: Vec::new(),
+                message: None,
+                described_by: Vec::new(),
+            },
+            node_replaced: false,
+        },
+    };
+    let value = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(value["kind"], "controlAction");
+    assert_eq!(value["action"]["operation"], "setChecked");
+    assert_eq!(
+        serde_json::to_value(serde_json::from_value::<Evidence>(value.clone()).unwrap()).unwrap(),
+        value
+    );
 }

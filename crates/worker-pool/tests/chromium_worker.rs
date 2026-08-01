@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use types::{
     AccessibilityNode, AccessibilitySnapshotCommand, CaptureScreenshotCommand,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
-    ElementState, ErrorCode, EvaluateJavaScriptCommand, Evidence, InspectCommand, ListPagesCommand,
-    NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
+    ControlAction, ControlActionCommand, ElementState, ErrorCode, EvaluateJavaScriptCommand,
+    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId,
+    ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -591,6 +592,27 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
     assert!(city
         .supported_operations
         .contains(&types::FormControlOperation::SetText));
+
+    let updates = snapshot
+        .unowned_controls
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("Product updates"))
+        .unwrap();
+    let action_evidence = worker
+        .control_action(
+            &page_id,
+            &ControlActionCommand {
+                target: updates.target.clone().unwrap(),
+                action: ControlAction::SetChecked { checked: true },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(action_evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ControlAction { action }
+            if action.state == types::FormControlState::Checked { checked: true }
+    )));
     let encoded = serde_json::to_string(snapshot).unwrap();
     assert!(!encoded.contains("vault-secret-92"));
     assert!(!encoded.contains("cssPath"));

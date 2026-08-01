@@ -69,3 +69,12 @@ Live Chromium and Firefox reads use the same bounded raw DOM projection and
 the same Rust normalizer. Canonical IDs, control kinds, typed state, validity,
 supported operations, redaction, and truncation are not decided by
 engine-specific scripts.
+
+## Typed control actions
+
+Each control advertises the exact operations accepted by the reconciliable
+`controlAction` primitive. Chromium and Firefox preflight the operation against
+the reread control, execute it once through their native transport, then return
+`ControlActionEvidence` with the operation, semantic target, typed state,
+validity, and node-replacement status. Unsupported or ambiguous targets fail
+before mutation; uncertainty after dispatch is never blindly replayed.

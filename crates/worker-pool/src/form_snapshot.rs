@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use types::{
-    CommandError, ErrorCode, ErrorLayer, FormControl, FormControlConstraints, FormControlKind,
-    FormControlOperation, FormControlState, FormControlTarget, FormControlValidity, FormDescriptor,
-    FormGroup, FormOption, FormSnapshot, FormValidity, FormValidityFlag, PageId,
-    SemanticTargetSegment, FORM_SNAPSHOT_SCHEMA_VERSION, MAX_FORM_SNAPSHOT_CONTROLS,
+    CommandError, ControlAction, ControlActionEvidence, ErrorCode, ErrorLayer, FormControl,
+    FormControlConstraints, FormControlKind, FormControlOperation, FormControlState,
+    FormControlTarget, FormControlValidity, FormDescriptor, FormGroup, FormOption, FormSnapshot,
+    FormValidity, FormValidityFlag, PageId, SemanticTargetSegment, FORM_SNAPSHOT_SCHEMA_VERSION,
+    MAX_FORM_SNAPSHOT_CONTROLS,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,6 +482,88 @@ fn supported_operations(
     }
 }
 
+pub fn validate_control_action(
+    control: &FormControl,
+    action: &ControlAction,
+) -> Result<(), CommandError> {
+    action
+        .validate()
+        .map_err(|message| snapshot_error(ErrorCode::InvalidRequest, message))?;
+    let operation = action.operation();
+    if !control.supported_operations.contains(&operation) {
+        return Err(snapshot_error(
+            ErrorCode::IntentActionMismatch,
+            format!(
+                "control kind {:?} does not support operation {:?}",
+                control.control_kind, operation
+            ),
+        ));
+    }
+    if control.constraints.disabled || control.constraints.read_only {
+        return Err(snapshot_error(
+            ErrorCode::IntentActionMismatch,
+            "control is not mutable",
+        ));
+    }
+    Ok(())
+}
+
+pub fn control_action_evidence(
+    control: &FormControl,
+    action: &ControlAction,
+    node_replaced: bool,
+) -> Result<ControlActionEvidence, CommandError> {
+    validate_control_action(control, action)?;
+    let matched = match (action, &control.state) {
+        (ControlAction::SetText { value }, FormControlState::Text { value: actual }) => {
+            value == actual
+        }
+        (ControlAction::SetText { value }, FormControlState::Empty) => value.is_empty(),
+        (ControlAction::SetText { value }, FormControlState::Redacted { present }) => {
+            *present == !value.is_empty()
+        }
+        (ControlAction::SetChecked { checked }, FormControlState::Checked { checked: actual }) => {
+            checked == actual
+        }
+        (ControlAction::SelectOne { value }, FormControlState::Selection { values }) => {
+            values.len() == 1 && values[0] == *value
+        }
+        (ControlAction::SelectMany { values }, FormControlState::Selection { values: actual }) => {
+            values.iter().collect::<BTreeSet<_>>() == actual.iter().collect::<BTreeSet<_>>()
+        }
+        (ControlAction::SetFiles { paths }, FormControlState::Files { count }) => {
+            paths.len() == *count
+        }
+        (ControlAction::Clear, FormControlState::Empty) => true,
+        (ControlAction::Clear, FormControlState::Text { value }) => value.is_empty(),
+        (ControlAction::Clear, FormControlState::Redacted { present }) => !present,
+        (ControlAction::Clear, FormControlState::Checked { checked }) => !checked,
+        (ControlAction::Clear, FormControlState::Selection { values }) => values.is_empty(),
+        (ControlAction::Clear, FormControlState::Files { count }) => *count == 0,
+        (ControlAction::Activate, _) => true,
+        _ => false,
+    };
+    if !matched {
+        return Err(snapshot_error(
+            ErrorCode::VerificationFailed,
+            "control action immediate postcondition was not observed",
+        ));
+    }
+    let target = control.target.clone().ok_or_else(|| {
+        snapshot_error(
+            ErrorCode::TargetNotFound,
+            "control has no stable semantic target",
+        )
+    })?;
+    Ok(ControlActionEvidence {
+        operation: action.operation(),
+        target,
+        state: control.state.clone(),
+        validity: control.validity.clone(),
+        node_replaced,
+    })
+}
+
 fn snapshot_error(code: ErrorCode, message: impl Into<String>) -> CommandError {
     CommandError {
         code,
@@ -540,7 +623,7 @@ return{schemaVersion:1,pageId:__PAGE_ID__,forms:descriptors,unownedControls:all.
 mod tests {
     use super::*;
     use types::{
-        FormControlKind, FormControlOperation, FormControlState, FormValidityFlag,
+        ControlAction, FormControlKind, FormControlOperation, FormControlState, FormValidityFlag,
         SemanticTargetSegment,
     };
 
@@ -698,5 +781,91 @@ mod tests {
             None
         );
         snapshot.validate().unwrap();
+    }
+
+    #[test]
+    fn control_action_compatibility_matches_snapshot_operations_and_typed_postconditions() {
+        let mut checkbox = raw_control("terms", "Terms");
+        checkbox.input_type = Some("checkbox".into());
+        checkbox.checked = true;
+        let snapshot = normalize_form_snapshot(
+            PageId::new(),
+            RawFormSnapshot {
+                forms: Vec::new(),
+                groups: Vec::new(),
+                controls: vec![checkbox],
+                truncated: false,
+            },
+            512,
+        )
+        .unwrap();
+        let control = &snapshot.unowned_controls[0];
+
+        let action = ControlAction::SetChecked { checked: true };
+        validate_control_action(control, &action).unwrap();
+        let evidence = control_action_evidence(control, &action, false).unwrap();
+        assert_eq!(evidence.operation, FormControlOperation::SetChecked);
+        assert_eq!(evidence.state, FormControlState::Checked { checked: true });
+        assert!(!evidence.node_replaced);
+
+        assert!(validate_control_action(
+            control,
+            &ControlAction::SetText {
+                value: "wrong kind".into()
+            }
+        )
+        .is_err());
+        assert!(control_action_evidence(
+            control,
+            &ControlAction::SetChecked { checked: false },
+            false
+        )
+        .is_err());
+        for operation in &control.supported_operations {
+            let compatible = match operation {
+                FormControlOperation::SetChecked => ControlAction::SetChecked { checked: true },
+                _ => panic!("unexpected advertised operation {operation:?}"),
+            };
+            validate_control_action(control, &compatible).unwrap();
+        }
+    }
+
+    #[test]
+    fn control_action_rejects_disabled_controls_and_redacts_password_receipts() {
+        let mut disabled = raw_control("disabled", "Disabled");
+        disabled.disabled = true;
+        let mut password = raw_control("password", "Password");
+        password.input_type = Some("password".into());
+        password.value = None;
+        password.value_present = true;
+        let snapshot = normalize_form_snapshot(
+            PageId::new(),
+            RawFormSnapshot {
+                forms: Vec::new(),
+                groups: Vec::new(),
+                controls: vec![disabled, password],
+                truncated: false,
+            },
+            512,
+        )
+        .unwrap();
+
+        assert!(validate_control_action(
+            &snapshot.unowned_controls[0],
+            &ControlAction::SetText { value: "x".into() }
+        )
+        .is_err());
+        let evidence = control_action_evidence(
+            &snapshot.unowned_controls[1],
+            &ControlAction::SetText {
+                value: "never-retained".into(),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(evidence.state, FormControlState::Redacted { present: true });
+        assert!(!serde_json::to_string(&evidence)
+            .unwrap()
+            .contains("never-retained"));
     }
 }
