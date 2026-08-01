@@ -5,9 +5,18 @@ documentedVersion: 0.3.0
 # Intent commands
 
 Semantic automation is available through the authenticated HTTP / TypeScript /
-MCP surfaces when the principal holds `intent:execute`. There are **no**
-dedicated intent HTTP routes or MCP tools — submit via `POST /v1/commands` /
-`command_execute` / `BrowserRuntimeClient.submit` with
+MCP surfaces when the principal holds `intent:execute`.
+
+MCP exposes one tool per intent (`intent_locate`, `intent_fill`,
+`intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`,
+`intent_follow`, `intent_dismiss_obstruction`, `intent_extract`). They take
+`sessionId` / `pageId` / the intent's own fields, plus optional `workflowId`
+and `idempotencyKey`, and build the envelope server-side — see
+[MCP tools](../surfaces/mcp-tools.md).
+
+There are **no** dedicated intent HTTP routes. Over HTTP, and over MCP when you
+need the escape hatch, submit via `POST /v1/commands` / `command_execute` /
+`BrowserRuntimeClient.submit` with
 
 ```json
 { "kind": "intent", "input": { "kind": "<intent>", "input": { … } } }
