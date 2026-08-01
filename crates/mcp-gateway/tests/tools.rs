@@ -346,12 +346,30 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .len(),
         8
     );
+    // `CommandEnvelope` does not carry evidence, so the closure keeps `Evidence`
+    // out of this tool entirely.
+    assert!(
+        command_schema["inputSchema"]["$defs"]["Evidence"].is_null(),
+        "{}",
+        command_schema["inputSchema"]["$defs"]
+    );
+
+    let checkpoint_schema = tools
+        .iter()
+        .find(|tool| tool["name"] == "checkpoint_save")
+        .unwrap();
+    assert_eq!(
+        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
+            ["recoveryReceipts"]["maxItems"],
+        0
+    );
+
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,
     // `BrowserExecution`, and `JavaScriptResult` previously were) makes
     // `checkpoint_save` reject any evidence array containing that variant with
     // `INVALID_PARAMS`, even though the type itself round-trips fine.
-    let evidence_variants = command_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
+    let evidence_variants = checkpoint_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
     assert_eq!(evidence_variants.len(), 18, "{evidence_variants:?}");
@@ -369,14 +387,12 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     );
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
 
-    let checkpoint_schema = tools
-        .iter()
-        .find(|tool| tool["name"] == "checkpoint_save")
-        .unwrap();
+    // The accessibility tree is self-referential now, so `children` must resolve
+    // through `$defs` rather than another inlined copy.
     assert_eq!(
-        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
-            ["recoveryReceipts"]["maxItems"],
-        0
+        checkpoint_schema["inputSchema"]["$defs"]["AccessibilityNode"]["properties"]["children"]
+            ["items"]["$ref"],
+        "#/$defs/AccessibilityNode"
     );
 
     let envelope = CommandEnvelope {
@@ -1344,3 +1360,77 @@ async fn session_close_deletes_an_owned_session() {
         .unwrap();
     assert_eq!(missing["error"]["code"], -32000, "{missing}");
 }
+
+#[tokio::test]
+async fn tools_list_fits_the_frame_budget_for_a_full_capability_principal() {
+    // Regression guard. Every tool schema used to carry the complete `$defs`
+    // block, so a principal holding the `bobby init` default capability set
+    // produced a `tools/list` result past MAX_FRAME_BYTES and the gateway
+    // answered `resultTooLarge` — no client could enumerate the surface.
+    let server = fixture_server(vec![
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageRead,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::FileUpload,
+        Capability::FileDownload,
+        Capability::JavascriptEvaluate,
+        Capability::IntentExecute,
+        Capability::VisionAssist,
+        Capability::ArtifactRead,
+        Capability::ArtifactCapture,
+        Capability::RecoveryRead,
+        Capability::RecoveryWrite,
+        Capability::AuthorityAdmin,
+    ])
+    .await;
+
+    let list = server
+        .handle_message(request(90, "tools/list", json!({})))
+        .await
+        .expect("tools/list returns a response");
+    assert!(
+        list.get("error").is_none(),
+        "tools/list must not exceed the frame budget: {list}"
+    );
+
+    let mut sizes = list["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|tool| {
+            (
+                serde_json::to_vec(tool).expect("serializable").len(),
+                tool["name"].as_str().expect("tool name").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    sizes.sort_unstable();
+    sizes.reverse();
+    let breakdown = sizes
+        .iter()
+        .map(|(size, name)| format!("{name}={size}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let bytes = serde_json::to_vec(&list).expect("serializable").len();
+    assert!(
+        bytes <= TOOLS_LIST_BYTE_BUDGET,
+        "tools/list is {bytes} bytes, budget is {TOOLS_LIST_BYTE_BUDGET}: {breakdown}"
+    );
+
+    // No single tool may reintroduce the shared type system either.
+    for (size, name) in &sizes {
+        assert!(
+            *size <= PER_TOOL_BYTE_BUDGET,
+            "tool {name} schema is {size} bytes, budget is {PER_TOOL_BYTE_BUDGET}"
+        );
+    }
+}
+
+/// Well under the 1 MiB frame cap, and small enough that an agent can hold the
+/// whole catalog in context.
+const TOOLS_LIST_BYTE_BUDGET: usize = 64 * 1024;
+/// Only `checkpoint_save` legitimately carries deep evidence types.
+const PER_TOOL_BYTE_BUDGET: usize = 32 * 1024;

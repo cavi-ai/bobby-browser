@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde_json::{json, Map, Value};
 
 use crate::protocol::MAX_EVENT_LIMIT;
@@ -171,8 +173,59 @@ pub(crate) fn tool_schema(name: &str) -> Value {
     };
     let mut schema = object(properties, &required);
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
-    schema["$defs"] = definitions();
+    schema["$defs"] = reachable_definitions(&schema);
     schema
+}
+
+/// Emits only the definitions a tool can actually reach.
+///
+/// Every schema used to carry the complete `$defs` block, so zero-argument
+/// tools like `runtime_info` paid for `AccessibilityNode` (32 inlined depth
+/// levels) and the full command union. Across a full-capability catalog that
+/// pushed `tools/list` past the frame cap. `validate` resolves `$ref` against
+/// `root.$defs` and fails closed on a missing target, so the closure must be
+/// transitive — a partial one would reject valid arguments rather than
+/// silently accept invalid ones.
+fn reachable_definitions(schema: &Value) -> Value {
+    let all = definitions();
+    let all = all.as_object().expect("definitions is an object");
+    let mut pending = BTreeSet::new();
+    collect_refs(schema, &mut pending);
+    let mut reachable = Map::new();
+    while let Some(name) = pending.pop_first() {
+        if reachable.contains_key(&name) {
+            continue;
+        }
+        let Some(definition) = all.get(&name) else {
+            continue;
+        };
+        collect_refs(definition, &mut pending);
+        reachable.insert(name, definition.clone());
+    }
+    Value::Object(reachable)
+}
+
+fn collect_refs(value: &Value, found: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(name) = fields
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            {
+                found.insert(name.to_owned());
+            }
+            for field in fields.values() {
+                collect_refs(field, found);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_refs(item, found);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn definitions() -> Value {
@@ -193,7 +246,7 @@ fn definitions() -> Value {
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
         "AccessibilityTarget": accessibility_target(),
-        "AccessibilityNode": accessibility_node(0),
+        "AccessibilityNode": accessibility_node(),
         "WaitForCommand": wait_for_command(),
         "TargetSpec": target_spec(),
         "TextMatch": {"oneOf":[
@@ -941,6 +994,27 @@ fn positive_number() -> Value {
 }
 
 fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
+    validate_at(root, schema, value, 0)
+}
+
+/// Bounds validator recursion independently of schema shape.
+///
+/// Schemas used to bound themselves: `AccessibilityNode` inlined 32 depth
+/// levels, so recursion stopped when the schema ran out. That cost ~40 KiB in
+/// every tool carrying `Evidence`. The definition is now self-referential, so
+/// the guard has to live here — without it a deeply nested argument within the
+/// 256 KiB input cap would exhaust the stack.
+///
+/// Generous enough for the deepest legitimate argument (a `checkpoint_save`
+/// accessibility tree, which spends two levels per node) and far below any
+/// stack concern.
+const MAX_VALIDATION_DEPTH: usize = 128;
+
+fn validate_at(root: &Value, schema: &Value, value: &Value, depth: usize) -> bool {
+    if depth > MAX_VALIDATION_DEPTH {
+        return false;
+    }
+    let depth = depth + 1;
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(name) = reference.strip_prefix("#/$defs/") else {
             return false;
@@ -948,12 +1022,12 @@ fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
         let Some(target) = root.get("$defs").and_then(|defs| defs.get(name)) else {
             return false;
         };
-        return validate(root, target, value);
+        return validate_at(root, target, value, depth);
     }
     if let Some(choices) = schema.get("oneOf").and_then(Value::as_array) {
         return choices
             .iter()
-            .filter(|choice| validate(root, choice, value))
+            .filter(|choice| validate_at(root, choice, value, depth))
             .count()
             == 1;
     }
@@ -982,7 +1056,7 @@ fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
         }
     }
     match value {
-        Value::Object(values) => validate_object(root, schema, values),
+        Value::Object(values) => validate_object(root, schema, values, depth),
         Value::Array(values) => {
             if schema
                 .get("maxItems")
@@ -998,9 +1072,11 @@ fn validate(root: &Value, schema: &Value, value: &Value) -> bool {
             {
                 return false;
             }
-            schema
-                .get("items")
-                .is_none_or(|items| values.iter().all(|value| validate(root, items, value)))
+            schema.get("items").is_none_or(|items| {
+                values
+                    .iter()
+                    .all(|value| validate_at(root, items, value, depth))
+            })
         }
         Value::String(value) => validate_string(schema, value),
         Value::Number(number) => validate_number(schema, number.as_f64()),
@@ -1021,7 +1097,12 @@ fn matches_type(kind: &str, value: &Value) -> bool {
     }
 }
 
-fn validate_object(root: &Value, schema: &Value, values: &Map<String, Value>) -> bool {
+fn validate_object(
+    root: &Value,
+    schema: &Value,
+    values: &Map<String, Value>,
+    depth: usize,
+) -> bool {
     if schema
         .get("maxProperties")
         .and_then(Value::as_u64)
@@ -1033,7 +1114,7 @@ fn validate_object(root: &Value, schema: &Value, values: &Map<String, Value>) ->
     if schema.get("propertyNames").is_some_and(|property_names| {
         values
             .keys()
-            .any(|key| !validate(root, property_names, &Value::String(key.clone())))
+            .any(|key| !validate_at(root, property_names, &Value::String(key.clone()), depth))
     }) {
         return false;
     }
@@ -1051,14 +1132,14 @@ fn validate_object(root: &Value, schema: &Value, values: &Map<String, Value>) ->
     }
     for (key, value) in values {
         if let Some(property) = properties.and_then(|properties| properties.get(key)) {
-            if !validate(root, property, value) {
+            if !validate_at(root, property, value, depth) {
                 return false;
             }
         } else {
             match schema.get("additionalProperties") {
                 Some(Value::Bool(false)) => return false,
                 Some(additional)
-                    if additional.is_object() && !validate(root, additional, value) =>
+                    if additional.is_object() && !validate_at(root, additional, value, depth) =>
                 {
                     return false
                 }
@@ -1130,7 +1211,12 @@ fn validate_number(schema: &Value, number: Option<f64>) -> bool {
     true
 }
 
-fn accessibility_node(depth: usize) -> Value {
+/// Self-referential rather than depth-inlined.
+///
+/// Inlining 32 levels made this definition ~40 KiB, which every tool carrying
+/// `Evidence` paid for. Recursion is now bounded by `MAX_VALIDATION_DEPTH` in
+/// the validator instead of by the shape of the schema.
+fn accessibility_node() -> Value {
     let mut schema = object(
         json!({
             "role":string(1, 256),
@@ -1149,9 +1235,7 @@ fn accessibility_node(depth: usize) -> Value {
         }),
         &[],
     );
-    if depth < 32 {
-        schema["properties"]["children"] = array(accessibility_node(depth + 1), 256);
-    }
+    schema["properties"]["children"] = array(json!({"$ref":"#/$defs/AccessibilityNode"}), 256);
     schema
 }
 
