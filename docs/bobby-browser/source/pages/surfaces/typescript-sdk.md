@@ -58,8 +58,9 @@ Pass `options.idempotencyKey` on mutating POSTs for replay-safe retries.
 | `openPage(input, options?)` | `POST /v1/pages` | |
 | `submit(envelope, options?)` | `POST /v1/commands` | Includes primitives such as `activatePage` and `accessibilitySnapshot` |
 | `checkpoint(input, options?)` | `POST /v1/checkpoints` | |
+| `recoveryStatus(workflowId, options?)` | `GET /v1/recovery/{id}` | `RecoveryStatus` (`workflowId`, `checkpoint`, `receipts`) |
 | `recover(workflowId, options?)` | `POST /v1/recovery/{id}` | |
-| `events(cursor, options?)` | `GET /v1/events` | Async iterable; handles `EventGap` |
+| `events(cursor, options?)` | `GET /v1/events` | Async iterable over JSON batches (not `stream=1` SSE); handles `EventGap` |
 | `artifact(reference, options?)` | `GET /v1/artifacts/{id}` | Verified byte stream |
 
 There is no principals helper on the client today — mint/revoke with raw HTTP
@@ -70,15 +71,20 @@ There is no principals helper on the client today — mint/revoke with raw HTTP
 Build envelopes with helpers from the package (`locateEnvelope`,
 `fillEnvelope`, `submitAndVerifyEnvelope`, `waitForStateEnvelope`,
 `followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
-them to `submit`. Multi-field verified forms use `completeFormRuntimeCommand`
-plus `intentEnvelope`. `FillValue` kinds: `text`, `select`, `checked`, `files`.
+them to `submit`. Over MCP, prefer the dedicated `intent_*` tools (same
+semantics; server-minted envelopes). Multi-field verified forms use
+`completeFormRuntimeCommand` plus `intentEnvelope`. `FillValue` kinds: `text`,
+`select`, `checked`, `files`.
 Use `intentHintsFromAccessibilityTarget(node.target)` to carry snapshot role,
 accessible name, and duplicate-control ordinal into any intent. `TargetSpec`
 fields are optional, so primitive commands can also accept the minimal
-`{ role, accessibleName, ordinal? }` snapshot target without fabricated CSS.
+`{ role, accessibleName, ordinal? }` snapshot target without fabricated CSS
+(HTTP/TS still require `selector: ""` beside `target`).
 `AccessibilityNode` fields (form state + command-ready `target`):
 [Accessibility snapshot](../guides/accessibility-snapshot.md).
 Intent / vision details: [Intent commands](../guides/intents.md).
+Structured extraction: MCP `extract_structured` / primitive `extractStructured`
+(requires `vision:assist`).
 
 ## Errors
 

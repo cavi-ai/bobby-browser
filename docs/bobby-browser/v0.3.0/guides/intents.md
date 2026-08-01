@@ -307,16 +307,40 @@ and expects:
 `extractValue` (`value`). Invalid responses, out-of-range confidence, oversized
 bodies, and transport failures **decline** the escalation (fail closed).
 
+Accepted proposals still require the engine's **0.75** confidence floor and
+sha256-pinned verification before any browser action. That floor applies only
+to vision *proposals* that drive browser actions — not to structured
+extraction below.
+
 ### Structured extraction
 
-The same endpoint serves `extract_structured` (MCP). The runtime sends
+The same `[vision]` endpoint also serves MCP `extract_structured` (HTTP /
+TypeScript: primitive `extractStructured`). The runtime sends
 `{schema, content, purpose}` (bounded page text) and the provider returns
-`{"value": <json>}`. The runtime validates the value against the supplied
-JSON schema and bounds it before it becomes `structuredExtraction` evidence.
-Gated like vision: `browser:mutate` + `vision:assist`, session vision policy,
-and a configured provider.
-Accepted proposals still require the engine's **0.75** confidence floor and
-sha256-pinned verification before any browser action.
+`{"value": <json>}`. The runtime validates the value against the supplied JSON
+schema and bounds it before it becomes `structuredExtraction` evidence — there
+is no confidence floor or action verification on this path.
+Gated like vision: `browser:mutate` + `vision:assist`, session
+`executionPolicy.visionAssist`, and a configured `[vision]` provider.
+
+## IntentHints
+
+Optional disambiguation on most intents (`locate`, `fill`, `follow`, …). Wire
+fields (camelCase):
+
+| Field | Meaning |
+|---|---|
+| `role` | Accessible role hint |
+| `nearText` | `TextMatch` (`exact` / `contains` / `regex`) near the control |
+| `ordinal` | Zero-based index among same role/name peers (from snapshot targets) |
+| `framePath` / `shadowPath` | Nested `TargetSpec` paths |
+| `allowBestMatch` | Permit best-effort matching when set |
+
+Copy snapshot targets with `intentHintsFromAccessibilityTarget` so `ordinal`
+survives. IntentHints support ordinal; when you need the full `TargetSpec` on
+a primitive, prefer MCP flat tools (omit `selector`) or HTTP/TS with
+`selector: ""` beside `target` — see
+[Accessibility snapshot](accessibility-snapshot.md).
 
 ## Purpose bounds
 
