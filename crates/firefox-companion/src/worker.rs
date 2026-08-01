@@ -3181,10 +3181,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         if let Some(ranges) = &command.page_ranges {
             params["pageRanges"] = json!([ranges]);
         }
-        let response = self
-            .transport
-            .send("browsingContext.print", params)
-            .await?;
+        let response = self.transport.send("browsingContext.print", params).await?;
         let encoded = response
             .get("data")
             .and_then(Value::as_str)
