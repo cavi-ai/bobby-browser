@@ -91,7 +91,9 @@ All Events are bundled in single enum (`CdpEvent`)
 By default `chromiumoxide` will try to find an installed version of chromium on the computer it runs on.
 It is possible to download and install one automatically for some platforms using the `fetcher` feature.
 
-You need to enable either the `rustls` or the `native-tls` feature and the `zip0` or `zip8` feature to allow the fetcher to download binaries.
+Enable either the `rustls` or `native-tls` feature together with `zip8` to let
+the fetcher download browser binaries. The legacy `zip0` backend is not exposed
+because it cannot coexist with `zip8` in Cargo all-features builds.
 
 ```rust
 use std::path::Path;

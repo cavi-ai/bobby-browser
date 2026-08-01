@@ -1,5 +1,6 @@
 mod auth;
 mod commands;
+mod forms;
 mod ids;
 mod interface;
 mod outcomes;
@@ -9,6 +10,7 @@ mod state;
 
 pub use auth::*;
 pub use commands::*;
+pub use forms::*;
 pub use ids::*;
 pub use interface::*;
 pub use outcomes::*;
