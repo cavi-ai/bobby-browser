@@ -47,7 +47,8 @@ jobs:
           EVENT_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          PACKAGE_VERSION="$(node --input-type=module -e 'import { DOCUMENTED_VERSION } from "./scripts/docs/lib.mjs"; console.log(DOCUMENTED_VERSION)')"          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+          PACKAGE_VERSION="$(node --input-type=module -e 'import { DOCUMENTED_VERSION } from "./scripts/docs/lib.mjs"; console.log(DOCUMENTED_VERSION)')"
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
             TAG="$EVENT_TAG"
             VERSION="${TAG#v}"
           elif [ -n "${INPUT_VERSION:-}" ]; then
