@@ -167,7 +167,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 }
 
 fn definitions() -> Value {
-    json!({
+    let mut definitions = json!({
         "CommandEnvelope": object(json!({
             "schemaVersion":{"type":"integer","const":2},
             "commandId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(),
@@ -216,7 +216,17 @@ fn definitions() -> Value {
             "recoveryReceipts":{"type":"array","maxItems":0},
             "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
         }), &["schemaVersion","checkpointId","workflowId","attemptId","sessionId","pageId","restartUrl","currentUrl","recoveryClass","invariants","replayableInputs","evidence","createdAt"])
-    })
+    });
+    definitions["CompleteFormField"] = object(
+        json!({
+            "name":string(1, 256),
+            "purpose":string(1, 256),
+            "hints":{"$ref":"#/$defs/IntentHints"},
+            "value":{"$ref":"#/$defs/FillValue"}
+        }),
+        &["name", "purpose", "value"],
+    );
+    definitions
 }
 
 fn runtime_commands() -> Vec<Value> {
@@ -247,6 +257,15 @@ fn intent_commands() -> Vec<Value> {
                     "value":{"$ref":"#/$defs/FillValue"}
                 }),
                 &["purpose", "value"],
+            ),
+        ),
+        tagged_input(
+            "completeForm",
+            object(
+                json!({
+                    "fields":array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS)
+                }),
+                &["fields"],
             ),
         ),
         tagged_input(

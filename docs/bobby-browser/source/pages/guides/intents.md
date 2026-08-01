@@ -14,7 +14,7 @@ dedicated intent HTTP routes or MCP tools — submit via `POST /v1/commands` /
 ```
 
 inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
-`locateEnvelope`, `fillEnvelope`, `submitAndVerifyEnvelope`,
+`locateEnvelope`, `fillEnvelope`, `completeFormEnvelope`, `submitAndVerifyEnvelope`,
 `waitForStateEnvelope`, `followEnvelope`, `dismissObstructionEnvelope`,
 `extractEnvelope`.
 
@@ -32,6 +32,7 @@ inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
 | `waitForState` | Replayable |
 | `extract` | Replayable |
 | `fill` | Reconciliable |
+| `completeForm` | Reconciliable |
 | `dismissObstruction` | Reconciliable |
 | `submitAndVerify` | Boundary |
 | `follow` | Boundary if `boundary: true`, else Reconciliable |
@@ -81,6 +82,34 @@ accessible name while `purpose` remains the agent's task description. This
 avoids requiring natural task phrasing to equal a page label. A fill completes
 only when the worker returns value/upload postcondition evidence; an action
 without verification evidence fails closed.
+
+### CompleteForm (Reconciliable)
+
+```ts
+import { completeFormEnvelope } from "@bobby-browser/sdk";
+await client.submit(
+  completeFormEnvelope(meta, [
+    {
+      name: "email",
+      purpose: "enter the applicant email",
+      hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
+      value: { kind: "text", text: "a@example.com", clearFirst: true },
+    },
+    {
+      name: "terms",
+      purpose: "accept the terms",
+      hints: { role: "checkbox", nearText: { kind: "exact", value: "Accept terms" } },
+      value: { kind: "checked", checked: true },
+    },
+  ]),
+  { idempotencyKey: crypto.randomUUID() },
+);
+```
+
+`completeForm` accepts 1–128 ordered fields with unique, non-empty names. It
+fills and verifies each field sequentially, stops at the first failure, and
+preserves evidence for fields already completed. It never submits the form;
+use a separate `submitAndVerify` boundary command.
 
 ### SubmitAndVerify (Boundary)
 

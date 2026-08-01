@@ -6,10 +6,10 @@ use mcp_gateway::{ArtifactResources, Server};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{
-    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, DismissObstructionIntent,
-    Evidence, FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints, LocateIntent,
-    PrimitiveCommand, RuntimeCommand, SessionId, TextMatch, WaitCondition, WaitForCommand,
-    WorkflowCheckpoint, WorkflowId,
+    AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, CompleteFormField,
+    CompleteFormIntent, DismissObstructionIntent, Evidence, FillIntent, FillValue, FollowIntent,
+    IntentCommand, IntentHints, LocateIntent, PrimitiveCommand, RuntimeCommand, SessionId,
+    TextMatch, WaitCondition, WaitForCommand, WorkflowCheckpoint, WorkflowId,
 };
 use types::{Capability, PrincipalId};
 use uuid::uuid;
@@ -344,7 +344,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        7
+        8
     );
     // Must match `crates/types/src/outcomes.rs`'s `Evidence` enum variant-for-variant: a
     // hand-listed schema that silently drops a variant (as `Configuration`,
@@ -676,6 +676,45 @@ async fn command_execute_schema_accepts_fill_intent_with_explicit_near_text() {
         response["error"]["code"], -32602,
         "{response}; envelope={envelope_value}"
     );
+}
+
+#[tokio::test]
+async fn command_execute_schema_accepts_bounded_complete_form_intent() {
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
+    initialize(&server).await;
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
+            fields: vec![CompleteFormField {
+                name: "email".into(),
+                purpose: "enter email".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    near_text: Some(TextMatch::Exact("Email address".into())),
+                    ..IntentHints::default()
+                },
+                value: FillValue::Text {
+                    text: "ada@example.test".into(),
+                    clear_first: true,
+                },
+            }],
+        })),
+    };
+    let response = server
+        .handle_message(request(
+            72,
+            "tools/call",
+            json!({"name":"command_execute", "arguments":{"envelope":serde_json::to_value(envelope).unwrap()}}),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(response["error"]["code"], -32602, "{response}");
 }
 
 #[tokio::test]
