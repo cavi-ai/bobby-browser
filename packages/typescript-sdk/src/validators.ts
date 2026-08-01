@@ -1,5 +1,6 @@
 import type {
   AccessibilityTarget,
+  RecoveryStatus,
   CandidateEvidence,
   CommandError,
   CommandOutcome,
@@ -235,6 +236,13 @@ export function isEvidence(value: unknown): value is Evidence {
     case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     default: return false;
   }
+}
+
+export function isRecoveryStatus(value: unknown): value is RecoveryStatus {
+  return hasExactKeys(value, ["workflowId", "checkpoint", "receipts"])
+    && isUuid(value.workflowId)
+    && isWorkflowCheckpoint(value.checkpoint)
+    && Array.isArray(value.receipts);
 }
 
 function isAccessibilityNode(value: unknown, depth = 0): boolean {

@@ -1587,3 +1587,62 @@ async fn delete_session_rejects_another_principals_session_as_not_found() {
         .iter()
         .any(|listed| listed.id == session.id));
 }
+
+#[tokio::test]
+async fn recovery_status_returns_the_checkpoint_and_requires_ownership() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: PageId::new(),
+        restart_url: "https://example.test".into(),
+        current_url: "https://example.test".into(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Replayable,
+        invariants: Vec::new(),
+        replayable_inputs: Vec::new(),
+        evidence: Vec::new(),
+        recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.save(&checkpoint).await.unwrap();
+    let runtime = RuntimeService::with_recovery(
+        Default::default(),
+        Default::default(),
+        RecoveryCoordinator::new(store),
+    );
+    let authority = AuthorityStore::in_memory();
+    let principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000041"));
+    let token = authority
+        .issue(principal.clone(), [Capability::RecoveryRead], expiry())
+        .await
+        .unwrap()
+        .expose_once();
+    let handle = authority.verify(&token).await.unwrap();
+    let (_ownership, recorder) = SessionOwnershipRegistry::bounded(4);
+    recorder
+        .record_authenticated_session(principal, checkpoint.session_id.clone())
+        .unwrap();
+    let api = AuthenticatedRuntime::with_session_ownership(runtime, handle.clone(), recorder);
+
+    let status = api
+        .recovery_status(
+            handle.context(expiry(), None),
+            checkpoint.workflow_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.checkpoint.checkpoint_id, checkpoint.checkpoint_id);
+    assert!(status.receipts.is_empty());
+
+    let missing = api
+        .recovery_status(handle.context(expiry(), None), WorkflowId::new())
+        .await;
+    assert!(missing.is_err());
+}

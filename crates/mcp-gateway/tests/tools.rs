@@ -1750,3 +1750,32 @@ async fn rejected_arguments_name_the_offending_field_and_constraint() {
         "{stale_deadline}"
     );
 }
+
+#[tokio::test]
+async fn recovery_status_follows_recovery_read_capability() {
+    let server = fixture_server(vec![Capability::RecoveryRead]).await;
+    let listed = server
+        .handle_message(request(95, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"recovery_status".to_owned()), "{names:?}");
+
+    let denied = fixture_server(vec![Capability::SessionRead]).await;
+    let listed = denied
+        .handle_message(request(96, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(!names.contains(&"recovery_status".to_owned()), "{names:?}");
+}

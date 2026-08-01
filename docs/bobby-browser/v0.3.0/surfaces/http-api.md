@@ -25,6 +25,7 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | POST | `/v1/commands` | Submit command envelope | `browser:mutate` (+ nested caps for upload / download / JS / intents) |
 | POST | `/v1/checkpoints` | Persist workflow checkpoint | `recovery:write` |
 | POST | `/v1/recovery/{workflow}` | Recover workflow | `recovery:write` |
+| GET | `/v1/recovery/{workflow}` | Checkpoint + receipts | `recovery:read` |
 | GET | `/v1/events` | Read events (`after`, `limit` query) | `session:read` |
 | GET | `/v1/artifacts/{id}` | Read artifact bytes | `artifact:read` |
 | POST | `/v1/principals` | Issue scoped bearer | `authority:admin` |
