@@ -454,6 +454,11 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
         RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(_)) => {
             vec![Capability::FileUpload]
         }
+        RuntimeCommand::Primitive(PrimitiveCommand::ControlAction(command))
+            if matches!(command.action, types::ControlAction::SetFiles { .. }) =>
+        {
+            vec![Capability::FileUpload]
+        }
         RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(_))
         | RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForDownload(_)) => {
             vec![Capability::FileDownload]

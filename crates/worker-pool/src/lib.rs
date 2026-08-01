@@ -24,7 +24,8 @@ use types::{
 
 pub use chromium::ChromiumWorkerFactory;
 pub use form_snapshot::{
-    decode_form_snapshot, form_snapshot_expression, form_snapshot_expression_with_limit,
+    control_action_evidence, decode_form_snapshot, form_snapshot_expression,
+    form_snapshot_expression_with_limit, validate_control_action,
 };
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
@@ -197,6 +198,13 @@ pub trait BrowserWorker: Send + Sync {
         &self,
         _page_id: &PageId,
         _command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        _command: &types::ControlActionCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
