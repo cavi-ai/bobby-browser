@@ -25,8 +25,11 @@ fn schemars_kinds(schema: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-fn hand_kinds(def: &str) -> BTreeSet<String> {
-    let schema = mcp_gateway::schema_for_test("command_execute");
+/// `tool` names the tool whose schema reaches `def`. Each tool now carries only
+/// the definitions it can actually reach, so command variants come from
+/// `command_execute` and evidence variants from `checkpoint_save`.
+fn hand_kinds(tool: &str, def: &str) -> BTreeSet<String> {
+    let schema = mcp_gateway::schema_for_test(tool);
     schema["$defs"][def]["oneOf"]
         .as_array()
         .unwrap_or_else(|| panic!("{def} oneOf must be an array"))
@@ -45,19 +48,19 @@ fn primitive_command_variants_match_the_wire_type() {
     let generated = schemars_kinds(
         &serde_json::to_value(schemars::schema_for!(types::PrimitiveCommand)).unwrap(),
     );
-    assert_eq!(generated, hand_kinds("PrimitiveCommand"));
+    assert_eq!(generated, hand_kinds("command_execute", "PrimitiveCommand"));
 }
 
 #[test]
 fn intent_command_variants_match_the_wire_type() {
     let generated =
         schemars_kinds(&serde_json::to_value(schemars::schema_for!(types::IntentCommand)).unwrap());
-    assert_eq!(generated, hand_kinds("IntentCommand"));
+    assert_eq!(generated, hand_kinds("command_execute", "IntentCommand"));
 }
 
 #[test]
 fn evidence_variants_match_the_wire_type() {
     let generated =
         schemars_kinds(&serde_json::to_value(schemars::schema_for!(types::Evidence)).unwrap());
-    assert_eq!(generated, hand_kinds("Evidence"));
+    assert_eq!(generated, hand_kinds("checkpoint_save", "Evidence"));
 }
