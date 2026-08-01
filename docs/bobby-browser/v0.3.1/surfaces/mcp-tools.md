@@ -43,6 +43,7 @@ Tools are advertised only when the principal holds the required capability.
 | `evaluate_javascript` | `browser:mutate` + `javascript:evaluate` | Evaluate JavaScript (also session-policy gated) |
 | `extract_structured` | `browser:mutate` + `vision:assist` | Schema-shaped JSON extraction via the configured vision provider (also session `executionPolicy.visionAssist` + `[vision]`) |
 | `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
+| `control_action` | `browser:mutate` | Perform one typed native action against a semantic form-control target (Reconciliable) |
 | `intent_locate` | `browser:mutate` + `intent:execute` | Locate an element by described purpose (Replayable) |
 | `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable) |
 | `intent_complete_form` | `browser:mutate` + `intent:execute` | Apply an ordered list of named fields as one intent; never submits (Reconciliable) |
@@ -59,7 +60,6 @@ Tools are advertised only when the principal holds the required capability.
 | `dialog` | `browser:mutate` | Accept or dismiss the next JS dialog |
 | `cookie_set` | `browser:mutate` | Store cookies |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
->>>>>> 27941c6 (feat(cookies): cookie primitives on Chromium and Firefox)
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
 
 The flat browser tools (`navigate` … `evaluate_javascript` /
@@ -67,6 +67,11 @@ The flat browser tools (`navigate` … `evaluate_javascript` /
 `intent_*` tools build the command envelope for you (ids and deadline are
 server-generated) and return the same `CommandOutcome` shape as
 `command_execute`, including artifact / accessibility evidence.
+
+`control_action` accepts the exact `target` returned by `form_snapshot` and
+one of `setText`, `setChecked`, `selectOne`, `selectMany`, `setFiles`, `clear`,
+or `activate`. It returns typed reread evidence; file paths and password values
+are never returned. `setFiles` additionally requires `file:upload` at runtime.
 
 `page_open` requires `sessionId` and optionally accepts `url`. With no URL it
 returns the page state exactly as before. With a URL it opens and navigates in
