@@ -40,13 +40,13 @@ curl -sS http://127.0.0.1:7777/v1/runtime \
 Install the published package, or use the workspace package from this repo:
 
 ```bash
-npm install @bobby-browser/sdk
+npm install @cavi-ai/bobby-browser
 # workspace:
-# pnpm --filter @bobby-browser/sdk…  (from monorepo root after pnpm install)
+# pnpm --filter @cavi-ai/bobby-browser…  (from monorepo root after pnpm install)
 ```
 
 ```ts
-import { BrowserRuntimeClient } from "@bobby-browser/sdk";
+import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
 import { randomUUID } from "node:crypto";
 
 const client = new BrowserRuntimeClient({
@@ -131,7 +131,7 @@ await client.deleteSession(session.id);
 ```
 
 For goal-oriented steps, use intent helpers (`locateEnvelope`, …) from
-`@bobby-browser/sdk` — they still submit via `client.submit` and need
+`@cavi-ai/bobby-browser` — they still submit via `client.submit` and need
 `intent:execute` (included in default bootstrap). See [Intent commands](../guides/intents.md).
 
 ## 3. Parallel MCP path

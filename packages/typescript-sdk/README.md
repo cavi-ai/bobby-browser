@@ -1,9 +1,9 @@
-# @bobby-browser/sdk
+# @cavi-ai/bobby-browser
 
 Typed client for the authenticated Bobby Browser runtime interface.
 
 ```bash
-npm install @bobby-browser/sdk
+npm install @cavi-ai/bobby-browser
 ```
 
 - **Documentation:** [cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser)

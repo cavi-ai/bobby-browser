@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { Agent, request as httpRequest } from "node:http";
 import { writeFile } from "node:fs/promises";
 import { test } from "node:test";
-import { BrowserRuntimeClient, RuntimeClientError, type CommandEnvelope, type Evidence, type PrimitiveCommand, type WorkflowCheckpoint } from "@bobby-browser/sdk";
+import { BrowserRuntimeClient, RuntimeClientError, type CommandEnvelope, type Evidence, type PrimitiveCommand, type WorkflowCheckpoint } from "@cavi-ai/bobby-browser";
 import { equalityProof, runCanonicalInterfaceScenario, type CanonicalInterfaceProof } from "../src/scenario.js";
 import { typescriptSdkDriver } from "../src/typescript-sdk.js";
 import { type OperationTimer, requestedPerformanceSamples, runPersistentPerformance } from "./performance-support.js";

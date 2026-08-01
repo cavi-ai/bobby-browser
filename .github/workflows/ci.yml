@@ -67,7 +67,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: TypeScript SDK
-        run: pnpm --filter @bobby-browser/sdk test
+        run: pnpm --filter @cavi-ai/bobby-browser test
 
       - name: Firefox companion
         run: pnpm --filter @bobby-browser/firefox-companion test
