@@ -548,7 +548,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .await
         .unwrap();
 
-    let form_snapshot = worker.form_snapshot(&page_id).await.unwrap();
+    let form_snapshot = worker.form_snapshot(&page_id, None).await.unwrap();
     let snapshot = form_snapshot
         .iter()
         .find_map(|item| match item {

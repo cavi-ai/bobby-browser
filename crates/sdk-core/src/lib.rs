@@ -214,9 +214,12 @@ impl RuntimeService {
         &self,
         session_id: &types::SessionId,
         page_id: &types::PageId,
+        max_controls: Option<u32>,
     ) -> Result<types::FormSnapshot, RuntimeError> {
         self.sessions.get(session_id).await?;
-        self.pages.form_snapshot(session_id, page_id).await
+        self.pages
+            .form_snapshot(session_id, page_id, max_controls)
+            .await
     }
 
     pub async fn submit(&self, envelope: CommandEnvelope) -> CommandOutcome {

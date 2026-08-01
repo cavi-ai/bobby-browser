@@ -859,10 +859,45 @@ async fn open_page_uses_a_transient_binding_title_and_restores_the_exact_origina
 async fn form_snapshot_deserializes_the_shared_projection_over_bidi() {
     let page_id = PageId::new();
     let encoded = serde_json::to_string(&json!({
-        "schemaVersion": 1,
-        "pageId": page_id,
         "forms": [],
-        "unownedControls": [],
+        "groups": [],
+        "controls": [{
+            "key": "raw-control-1",
+            "formKey": null,
+            "groupKey": null,
+            "tag": "input",
+            "inputType": "password",
+            "contentEditable": false,
+            "explicitRole": null,
+            "accessibleName": "Secret",
+            "label": "Secret",
+            "description": null,
+            "placeholder": null,
+            "autocomplete": "current-password",
+            "value": null,
+            "valuePresent": true,
+            "checked": false,
+            "fileCount": 0,
+            "required": true,
+            "readOnly": false,
+            "disabled": false,
+            "pattern": null,
+            "minLength": 8,
+            "maxLength": 64,
+            "min": null,
+            "max": null,
+            "step": null,
+            "multiple": false,
+            "accept": [],
+            "willValidate": true,
+            "valid": false,
+            "validityFlags": ["valueMissing"],
+            "validationMessage": null,
+            "describedBy": [],
+            "options": [],
+            "framePath": [],
+            "shadowPath": []
+        }],
         "truncated": false
     }))
     .unwrap();
@@ -873,20 +908,30 @@ async fn form_snapshot_deserializes_the_shared_projection_over_bidi() {
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     worker.open_page(page_id.clone()).await.unwrap();
 
-    let evidence = worker.form_snapshot(&page_id).await.unwrap();
+    let evidence = worker.form_snapshot(&page_id, None).await.unwrap();
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::FormSnapshot { snapshot }
-            if snapshot.page_id == page_id && snapshot.forms.is_empty()
+            if snapshot.page_id == page_id
+                && snapshot.forms.is_empty()
+                && matches!(
+                    snapshot.unowned_controls.as_slice(),
+                    [control]
+                        if control.control_kind == types::FormControlKind::Password
+                            && control.state == types::FormControlState::Redacted { present: true }
+                            && control.supported_operations
+                                == vec![
+                                    types::FormControlOperation::SetText,
+                                    types::FormControlOperation::Clear,
+                                ]
+                )
     )));
     let calls = bidi.calls().await;
     let snapshot_call = calls
         .iter()
         .find(|call| {
             call.method == "script.evaluate"
-                && call.params["expression"]
-                    .as_str()
-                    .is_some_and(|expression| expression.contains("schemaVersion:1"))
+                && call.params["target"]["context"] == "context-form-snapshot"
         })
         .expect("shared form projection evaluated through Firefox BiDi");
     assert_eq!(

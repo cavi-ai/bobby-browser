@@ -23,7 +23,9 @@ use types::{
 };
 
 pub use chromium::ChromiumWorkerFactory;
-pub use form_snapshot::form_snapshot_expression;
+pub use form_snapshot::{
+    decode_form_snapshot, form_snapshot_expression, form_snapshot_expression_with_limit,
+};
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
@@ -253,7 +255,11 @@ pub trait BrowserWorker: Send + Sync {
         Err(unsupported_error())
     }
 
-    async fn form_snapshot(&self, _page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+    async fn form_snapshot(
+        &self,
+        _page_id: &PageId,
+        _max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
 

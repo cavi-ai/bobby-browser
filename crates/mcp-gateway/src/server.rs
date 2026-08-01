@@ -1000,7 +1000,7 @@ impl Server {
                 self.submit_envelope(context, envelope).await
             }
             "page_close" => {
-                let input: PageCloseArgs = match bounded_parse(call.arguments) {
+                let input: FormSnapshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
@@ -1048,12 +1048,18 @@ impl Server {
                 self.submit_envelope(context, envelope).await
             }
             "form_snapshot" => {
-                let input: PageCloseArgs = match bounded_parse(call.arguments) {
+                let input: FormSnapshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                if input
+                    .max_controls
+                    .is_some_and(|limit| !(1..=512).contains(&limit))
+                {
+                    return invalid_params_reason(id, "malformedArguments");
+                }
                 self.runtime
-                    .form_snapshot(context, input.session_id, input.page_id)
+                    .form_snapshot(context, input.session_id, input.page_id, input.max_controls)
                     .await
                     .and_then(to_json)
             }
@@ -1842,6 +1848,17 @@ struct SessionCloseArgs {
 struct PageCloseArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FormSnapshotArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    max_controls: Option<u32>,
     #[serde(default)]
     workflow_id: Option<types::WorkflowId>,
 }

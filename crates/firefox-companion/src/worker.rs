@@ -2046,14 +2046,19 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
-    async fn form_snapshot(&self, page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let max_controls = max_controls.unwrap_or(512) as usize;
         let context = self.context(page_id).await?;
         let response = self
             .transport
             .send(
                 "script.evaluate",
                 json!({
-                    "expression": worker_pool::form_snapshot_expression(page_id),
+                    "expression": worker_pool::form_snapshot_expression_with_limit(page_id, max_controls),
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "awaitPromise": false,
                     "resultOwnership": "none",
@@ -2071,13 +2076,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     false,
                 )
             })?;
-        let snapshot: types::FormSnapshot = serde_json::from_str(encoded).map_err(|error| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                format!("invalid Firefox form snapshot: {error}"),
-                false,
-            )
-        })?;
+        let snapshot = worker_pool::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
         Ok(vec![
             Evidence::FormSnapshot { snapshot },
             self.evidence(InteractionPath::EngineNative),

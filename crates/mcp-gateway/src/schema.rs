@@ -62,7 +62,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["sessionId", "pageId"],
         ),
         "form_snapshot" => (
-            json!({"workflowId": id(), "sessionId": id(), "pageId": id()}),
+            json!({"workflowId": id(), "sessionId": id(), "pageId": id(), "maxControls":{"type":"integer","minimum":1,"maximum":512}}),
             vec!["sessionId", "pageId"],
         ),
         "pdf" => (

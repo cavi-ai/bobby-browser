@@ -33,6 +33,10 @@ pub(crate) fn protected_router() -> Router<AppState> {
             axum::routing::delete(delete_session),
         )
         .route("/v1/pages", post(open_page))
+        .route(
+            "/v1/sessions/{session}/pages/{page}/forms",
+            get(form_snapshot),
+        )
         .route("/v1/commands", post(submit_command))
         .route("/v1/checkpoints", post(checkpoint))
         .route(
@@ -95,6 +99,31 @@ async fn open_page(
     request
         .runtime
         .open_page(request.context, input)
+        .await
+        .map(Json)
+        .map_err(ProtocolError::from)
+}
+
+async fn form_snapshot(
+    Path((session, page)): Path<(String, String)>,
+    Extension(query): Extension<FormSnapshotQuery>,
+    Extension(request): Extension<AuthenticatedRequest>,
+) -> Result<Json<types::FormSnapshot>, ProtocolError> {
+    let session = types::SessionId(Uuid::parse_str(&session).map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?);
+    let page = types::PageId(Uuid::parse_str(&page).map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?);
+    request
+        .runtime
+        .form_snapshot(request.context, session, page, query.max_controls)
         .await
         .map(Json)
         .map_err(ProtocolError::from)
@@ -525,6 +554,11 @@ pub(crate) struct EventQuery {
     stream: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+struct FormSnapshotQuery {
+    max_controls: Option<u32>,
+}
+
 pub(crate) async fn validate_request_boundary(
     state: &AppState,
     request: &mut Request,
@@ -551,6 +585,26 @@ pub(crate) async fn validate_request_boundary(
     if path == "/v1/events" {
         let query = parse_event_query(request.uri().query(), state, &correlation_id)?;
         request.extensions_mut().insert(query);
+    } else if path.starts_with("/v1/sessions/") && path.ends_with("/forms") {
+        let mut parsed = FormSnapshotQuery::default();
+        if let Some(query) = request.uri().query() {
+            let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+            if pairs.len() != 1 || pairs[0].0 != "maxControls" {
+                return Err(ProtocolError::invalid_with(
+                    InterfaceErrorCode::InvalidRequest,
+                    correlation_id,
+                ));
+            }
+            let value = pairs[0].1.parse::<u32>().ok();
+            if value.is_none_or(|value| !(1..=512).contains(&value)) {
+                return Err(ProtocolError::invalid_with(
+                    InterfaceErrorCode::InvalidRequest,
+                    correlation_id,
+                ));
+            }
+            parsed.max_controls = value;
+        }
+        request.extensions_mut().insert(parsed);
     } else if request.uri().query().is_some() {
         return Err(ProtocolError::invalid_with(
             InterfaceErrorCode::InvalidRequest,
