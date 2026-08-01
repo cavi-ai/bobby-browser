@@ -94,6 +94,13 @@ with `sessionId` and `pageId`; omit `selector`. `upload_files` also requires
 `paths`. A selector is required only on the legacy raw-selector path. See
 [MCP tools](../surfaces/mcp-tools.md).
 
+**HTTP / TypeScript primitives** — `ClickCommand`, `TypeTextCommand`, and
+`UploadFilesCommand` still carry a required `selector: string` on the wire.
+When driving from a snapshot `target`, set `selector: ""` and pass `target`
+(the SDK accepts a minimal `{ role, accessibleName, ordinal? }` as
+`TargetSpec`). Prefer MCP flat tools when you want to omit `selector`
+entirely.
+
 **Intent targeting** — convert the snapshot target into intent hints. The SDK
 helper preserves `role`, accessible name, and `ordinal`, so the same flow works
 for both unique and duplicate controls:
@@ -114,11 +121,14 @@ await client.submit(
 ```
 
 For primitive commands, `TargetSpec` fields are optional in the TypeScript SDK,
-matching the wire schema. A snapshot target can therefore be copied without
-fabricating CSS, attribute, frame, or matching fields:
+matching the wire schema. Copy the snapshot target and pair it with an empty
+selector string on HTTP/TS:
 
 ```ts
-const target: TargetSpec = node.target!;
+await client.submit(/* envelope with */ {
+  kind: "click",
+  input: { selector: "", target: node.target!, boundary: false },
+});
 ```
 
 Always verify with command / intent evidence — do not treat the snapshot alone

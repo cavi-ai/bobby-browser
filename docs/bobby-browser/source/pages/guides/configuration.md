@@ -77,6 +77,7 @@ Capability + session gates: [Capabilities](../concepts/capabilities.md).
 | `token_records_path` | `./data/storage/authorities.json` | Issued principal records |
 | `max_principals` | `16` | Max enrolled principals |
 | `max_in_flight_per_principal` | `8` | Fairness / concurrency cap |
+| `max_rejection_workers` | `16` | Concurrent rejection / policy-worker permits (must be > 0) |
 
 ## Bootstrap env (not in config.toml)
 
