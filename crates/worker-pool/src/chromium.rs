@@ -1608,6 +1608,21 @@ fn compact_ax_tree(
         })
     }
 
+    let mut target_totals = std::collections::BTreeMap::new();
+    for node in raw {
+        let role = text(&node.role);
+        let name = text(&node.name);
+        if let (Some(role), Some(name)) = (role, name) {
+            if !node.ignored
+                && super::accessibility_role_is_actionable(&role)
+                && !name.is_empty()
+                && name != "[redacted]"
+            {
+                *target_totals.entry((role, name)).or_default() += 1;
+            }
+        }
+    }
+
     let by_id: HashMap<&str, &AxNode> = raw
         .iter()
         .map(|node| (node.node_id.as_ref(), node))
@@ -1716,7 +1731,7 @@ fn compact_ax_tree(
         }
     }
     let truncated = budget == 0 && raw.len() > max_nodes;
-    super::annotate_accessibility_targets(&mut roots_built);
+    super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals);
     (roots_built, truncated)
 }
 
@@ -1782,6 +1797,35 @@ mod tests {
         );
         assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
         assert_eq!(nodes[1].target.as_ref().unwrap().ordinal, Some(1));
+    }
+
+    #[test]
+    fn accessibility_snapshot_keeps_global_ordinal_when_duplicate_is_truncated() {
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
+            serde_json::from_value(serde_json::json!([{
+                "nodeId": "root",
+                "ignored": true,
+                "childIds": ["1", "2"]
+            }, {
+                "nodeId": "1",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "textbox"},
+                "name": {"type": "computedString", "value": "Phone"}
+            }, {
+                "nodeId": "2",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "textbox"},
+                "name": {"type": "computedString", "value": "Phone"}
+            }]))
+            .expect("valid CDP AX fixture");
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 1);
+
+        assert!(truncated);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
     }
 
     // The underlying reap/register/kill mechanics are engine-agnostic and

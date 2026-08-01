@@ -82,7 +82,10 @@ heuristics) serialize as `"[redacted]"` rather than the live contents.
 Actionable nodes with a non-empty accessible name include a command-ready
 `target`. Unique role/name pairs omit `ordinal`. Repeated pairs receive stable,
 zero-based ordinals in accessibility-tree order (the second `Phone` textbox has
-`ordinal: 1`). Targets are omitted when the name is redacted.
+`ordinal: 1`). Duplicate accounting covers the full engine snapshot before
+`maxNodes` truncation, so a retained target keeps its ordinal even when another
+matching control is outside the returned tree. Targets are omitted when the
+name is redacted.
 
 ### Using `target` in commands
 

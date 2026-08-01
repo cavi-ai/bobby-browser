@@ -780,6 +780,7 @@ const A11Y_STRUCTURAL_ROLES = new Set([
 type A11yNode = {
   role?: string;
   name?: string;
+  target?: { role: string; accessibleName: string; ordinal?: number };
   value?: string;
   description?: string;
   required?: boolean;
@@ -792,6 +793,20 @@ type A11yNode = {
   valueMax?: string;
   children?: A11yNode[];
 };
+
+const A11Y_ACTIONABLE_ROLES = new Set([
+  "button",
+  "checkbox",
+  "combobox",
+  "link",
+  "listbox",
+  "radio",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "switch",
+  "textbox",
+]);
 
 function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode[]; truncated: boolean } {
   let maxNodes = 256;
@@ -836,13 +851,35 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     return undefined;
   };
 
-  const build = (element: Element, depth: number): A11yNode | undefined => {
+  const semantics = (element: Element): { role?: string; name?: string; sensitive: boolean } => {
     const budget: WorkBudget = { remaining: 64 };
     const sensitive = isSensitiveControl(element, budget);
     const role = implicitRole(element, !sensitive) ?? structuralRole(element);
     const name = sensitive
       ? REDACTED
       : accessibleName(element, labelText(element, labelsByControlId, budget), budget, sensitive);
+    return { role, name, sensitive };
+  };
+
+  const targetTotals = new Map<string, number>();
+  const targetKey = (role: string, name: string): string => `${role}\u0000${name}`;
+  const countTargets = (element: Element, depth: number): void => {
+    if (isElementHidden(element)) return;
+    const { role, name } = semantics(element);
+    if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
+      const key = targetKey(role, name);
+      targetTotals.set(key, (targetTotals.get(key) ?? 0) + 1);
+    }
+    if (depth < A11Y_MAX_DEPTH) {
+      for (const child of Array.from(element.children).slice(0, 256)) {
+        countTargets(child, depth + 1);
+      }
+    }
+  };
+  countTargets(root, 0);
+
+  const build = (element: Element, depth: number): A11yNode | undefined => {
+    const { role, name, sensitive } = semantics(element);
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
       for (const child of Array.from(element.children).slice(0, 256)) {
@@ -893,6 +930,23 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     if (!onlyNode || onlyNode.role || onlyNode.name || !onlyNode.children) break;
     nodes = onlyNode.children;
   }
+  const targetSeen = new Map<string, number>();
+  const annotateTargets = (candidates: A11yNode[]): void => {
+    for (const node of candidates) {
+      if (node.role && node.name && node.name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(node.role)) {
+        const key = targetKey(node.role, node.name);
+        const ordinal = targetSeen.get(key) ?? 0;
+        node.target = {
+          role: node.role,
+          accessibleName: node.name,
+          ...(targetTotals.get(key)! > 1 ? { ordinal } : {}),
+        };
+        targetSeen.set(key, ordinal + 1);
+      }
+      annotateTargets(node.children ?? []);
+    }
+  };
+  annotateTargets(nodes);
   if (state.remaining <= 0) state.truncated = true;
   return { nodes, truncated: state.truncated };
 }

@@ -36,34 +36,46 @@ pub use skill_adapter::{
 /// Duplicate role/name pairs receive an ordinal in tree traversal order,
 /// matching the candidate collection order used by the resolver.
 pub fn annotate_accessibility_targets(nodes: &mut [types::AccessibilityNode]) {
-    fn actionable(role: &str) -> bool {
-        matches!(
-            role,
-            "button"
-                | "checkbox"
-                | "combobox"
-                | "link"
-                | "listbox"
-                | "radio"
-                | "searchbox"
-                | "slider"
-                | "spinbutton"
-                | "switch"
-                | "textbox"
-        )
-    }
+    let mut totals = BTreeMap::new();
+    count_accessibility_targets(nodes, &mut totals);
+    annotate_accessibility_targets_with_totals(nodes, &totals);
+}
 
-    fn count(nodes: &[types::AccessibilityNode], totals: &mut BTreeMap<(String, String), usize>) {
-        for node in nodes {
-            if let (Some(role), Some(name)) = (&node.role, &node.name) {
-                if actionable(role) && !name.is_empty() && name != "[redacted]" {
-                    *totals.entry((role.clone(), name.clone())).or_default() += 1;
-                }
+pub(crate) fn accessibility_role_is_actionable(role: &str) -> bool {
+    matches!(
+        role,
+        "button"
+            | "checkbox"
+            | "combobox"
+            | "link"
+            | "listbox"
+            | "radio"
+            | "searchbox"
+            | "slider"
+            | "spinbutton"
+            | "switch"
+            | "textbox"
+    )
+}
+
+fn count_accessibility_targets(
+    nodes: &[types::AccessibilityNode],
+    totals: &mut BTreeMap<(String, String), usize>,
+) {
+    for node in nodes {
+        if let (Some(role), Some(name)) = (&node.role, &node.name) {
+            if accessibility_role_is_actionable(role) && !name.is_empty() && name != "[redacted]" {
+                *totals.entry((role.clone(), name.clone())).or_default() += 1;
             }
-            count(&node.children, totals);
         }
+        count_accessibility_targets(&node.children, totals);
     }
+}
 
+pub(crate) fn annotate_accessibility_targets_with_totals(
+    nodes: &mut [types::AccessibilityNode],
+    totals: &BTreeMap<(String, String), usize>,
+) {
     fn annotate(
         nodes: &mut [types::AccessibilityNode],
         totals: &BTreeMap<(String, String), usize>,
@@ -72,14 +84,19 @@ pub fn annotate_accessibility_targets(nodes: &mut [types::AccessibilityNode]) {
         for node in nodes {
             if let (Some(role), Some(name)) = (&node.role, &node.name) {
                 let key = (role.clone(), name.clone());
-                if actionable(role) && !name.is_empty() && name != "[redacted]" {
+                if accessibility_role_is_actionable(role)
+                    && !name.is_empty()
+                    && name != "[redacted]"
+                {
                     let index = seen.entry(key.clone()).or_default();
-                    node.target = Some(types::AccessibilityTarget {
-                        role: role.clone(),
-                        accessible_name: name.clone(),
-                        ordinal: (totals.get(&key).copied().unwrap_or_default() > 1)
-                            .then_some(*index),
-                    });
+                    if node.target.is_none() {
+                        node.target = Some(types::AccessibilityTarget {
+                            role: role.clone(),
+                            accessible_name: name.clone(),
+                            ordinal: (totals.get(&key).copied().unwrap_or_default() > 1)
+                                .then_some(*index),
+                        });
+                    }
                     *index += 1;
                 }
             }
@@ -87,9 +104,7 @@ pub fn annotate_accessibility_targets(nodes: &mut [types::AccessibilityNode]) {
         }
     }
 
-    let mut totals = BTreeMap::new();
-    count(nodes, &mut totals);
-    annotate(nodes, &totals, &mut BTreeMap::new());
+    annotate(nodes, totals, &mut BTreeMap::new());
 }
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
