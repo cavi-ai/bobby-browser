@@ -19,9 +19,9 @@ use session_manager::SessionManager;
 use sha2::{Digest, Sha256};
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickCommand,
-    CommandEnvelope, CommandError, CommandId, ErrorLayer, Evidence, InspectCommand,
-    NavigateCommand, PageId, PrimitiveCommand, PrincipalId, RuntimeCommand, SessionId,
-    TypeTextCommand, WorkerId, WorkflowId,
+    ClosePageCommand, CommandEnvelope, CommandError, CommandId, ErrorLayer, Evidence,
+    InspectCommand, ListPagesCommand, NavigateCommand, PageId, PrimitiveCommand, PrincipalId,
+    RuntimeCommand, SessionId, TypeTextCommand, WorkerId, WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -56,9 +56,15 @@ impl BrowserWorker for ScreenshotWorker {
     async fn navigate(
         &self,
         _: &PageId,
-        _: &NavigateCommand,
+        command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
+        if command.url.ends_with("/fail") {
+            return Err(fixture_error("fixture navigation failed"));
+        }
+        Ok(vec![Evidence::Navigation {
+            url: command.url.clone(),
+            title: "Fixture page".to_owned(),
+        }])
     }
     async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![])
@@ -107,6 +113,19 @@ impl BrowserWorker for ScreenshotWorker {
             bytes: DOWNLOAD_BYTES.len() as u64,
             sha256: format!("{:x}", Sha256::digest(DOWNLOAD_BYTES)),
         }])
+    }
+    async fn close_page_command(
+        &self,
+        command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Page {
+            page_id: command.page_id.clone(),
+            url: "about:blank".to_owned(),
+            title: "Fixture page".to_owned(),
+        }])
+    }
+    async fn list_pages(&self, _: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Pages { pages: vec![] }])
     }
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
@@ -249,18 +268,7 @@ fn request(id: u64, method: &str, params: Value) -> Value {
 }
 
 async fn create_session_page(server: &Server) -> (SessionId, PageId) {
-    let session = server
-        .handle_message(request(
-            2,
-            "tools/call",
-            json!({
-                "name":"session_create","arguments":{"profile":"fixture"}
-            }),
-        ))
-        .await
-        .unwrap();
-    let session_id: SessionId =
-        serde_json::from_value(session["result"]["structuredContent"]["id"].clone()).unwrap();
+    let session_id = create_session(server).await;
     let page = server
         .handle_message(request(
             3,
@@ -274,6 +282,122 @@ async fn create_session_page(server: &Server) -> (SessionId, PageId) {
     let page_id: PageId =
         serde_json::from_value(page["result"]["structuredContent"]["id"].clone()).unwrap();
     (session_id, page_id)
+}
+
+async fn create_session(server: &Server) -> SessionId {
+    let session = server
+        .handle_message(request(
+            2,
+            "tools/call",
+            json!({
+                "name":"session_create","arguments":{"profile":"fixture"}
+            }),
+        ))
+        .await
+        .unwrap();
+    serde_json::from_value(session["result"]["structuredContent"]["id"].clone()).unwrap()
+}
+
+#[tokio::test]
+async fn page_open_accepts_a_url_and_returns_the_navigation_outcome() {
+    let (server, _root) = fixture().await;
+    let session_id = create_session(&server).await;
+
+    let response = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"page_open","arguments":{
+                    "sessionId":session_id,
+                    "url":"https://example.test/jobs"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert!(response.get("error").is_none(), "{response}");
+    assert!(response["result"]["structuredContent"]["id"].is_string());
+    assert_eq!(
+        response["result"]["structuredContent"]["navigationOutcome"]["status"],
+        json!("completed")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["navigationOutcome"]["evidence"][0]["url"],
+        json!("https://example.test/jobs")
+    );
+}
+
+#[tokio::test]
+async fn page_open_closes_the_new_page_when_initial_navigation_fails() {
+    let (server, _root) = fixture().await;
+    let session_id = create_session(&server).await;
+
+    let response = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"page_open","arguments":{
+                    "sessionId":session_id,
+                    "url":"https://example.test/fail"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["navigationOutcome"]["status"],
+        json!("failed")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["cleanupOutcome"]["status"],
+        json!("completed")
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["pageClosed"],
+        json!(true)
+    );
+}
+
+#[tokio::test]
+async fn command_execute_list_pages_succeeds_without_a_page_id() {
+    let (server, _root) = fixture().await;
+    let session_id = create_session(&server).await;
+
+    let response = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"command_execute","arguments":{"envelope":{
+                    "schemaVersion":2,
+                    "commandId":"10000000-0000-0000-0000-000000000121",
+                    "workflowId":"10000000-0000-0000-0000-000000000122",
+                    "attemptId":"10000000-0000-0000-0000-000000000123",
+                    "sessionId":session_id,
+                    "pageId":null,
+                    "deadline":(Utc::now() + Duration::seconds(270)).to_rfc3339(),
+                    "command":{"kind":"primitive","input":{"kind":"listPages","input":null}}
+                }}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["status"],
+        json!("completed"),
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["evidence"][0]["kind"],
+        json!("pages")
+    );
 }
 
 async fn execute_screenshot(server: &Server) -> Value {

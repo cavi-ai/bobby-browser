@@ -182,21 +182,23 @@ impl PageRuntime {
                     .await;
             }
         };
-        let page_id = envelope.page_id.as_ref().expect("validated page id");
-        let page_state = match self.get(page_id).await {
-            Ok(page) => page,
-            Err(_) => {
-                return self
-                    .finish_failure(
-                        &envelope,
-                        classify_failure(
+        let page_state = match envelope.page_id.as_ref() {
+            Some(page_id) => match self.get(page_id).await {
+                Ok(page) => Some(page),
+                Err(_) => {
+                    return self
+                        .finish_failure(
                             &envelope,
-                            internal_error("page disappeared before dispatch"),
-                            Vec::new(),
-                        ),
-                    )
-                    .await;
-            }
+                            classify_failure(
+                                &envelope,
+                                internal_error("page disappeared before dispatch"),
+                                Vec::new(),
+                            ),
+                        )
+                        .await;
+                }
+            },
+            None => None,
         };
         let mut execution = match self
             .adaptive
@@ -323,7 +325,13 @@ impl PageRuntime {
                 if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_)) = &envelope.command
                 {
                     if let Some(Evidence::Navigation { url, .. }) = evidence.first() {
-                        let _ = self.set_url(page_id, url.clone(), "interactive").await;
+                        let _ = self
+                            .set_url(
+                                envelope.page_id.as_ref().expect("validated page id"),
+                                url.clone(),
+                                "interactive",
+                            )
+                            .await;
                     }
                 }
                 let outcome = CommandOutcome::Completed {
@@ -361,6 +369,12 @@ impl PageRuntime {
                 layer: ErrorLayer::Workflow,
                 retryable: false,
             });
+        }
+        if matches!(
+            envelope.command,
+            RuntimeCommand::Primitive(PrimitiveCommand::ListPages(_))
+        ) {
+            return Ok(());
         }
         let page_id = envelope
             .page_id
@@ -410,7 +424,7 @@ impl PageRuntime {
         lease: &worker_pool::WorkerLease,
         evidence: Vec<Evidence>,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let page_id = envelope.page_id.as_ref().expect("validated page id");
+        let page_id = envelope.page_id.as_ref();
         let RuntimeCommand::Primitive(command) = &envelope.command else {
             // IntentEngine owns verify for intent commands.
             if evidence
@@ -439,7 +453,7 @@ impl PageRuntime {
                 let verification = lease
                     .worker()
                     .inspect(
-                        page_id,
+                        page_id.expect("validated page id"),
                         &InspectCommand {
                             selector: (!command.selector.is_empty())
                                 .then(|| command.selector.clone()),
@@ -463,7 +477,10 @@ impl PageRuntime {
                 if let Some(expected_url) = &command.expected_url {
                     let verification = lease
                         .worker()
-                        .inspect(page_id, &InspectCommand::default())
+                        .inspect(
+                            page_id.expect("validated page id"),
+                            &InspectCommand::default(),
+                        )
                         .await?;
                     let matches = verification.iter().any(|item| {
                         matches!(item, Evidence::Inspection { url, .. } if url == expected_url)

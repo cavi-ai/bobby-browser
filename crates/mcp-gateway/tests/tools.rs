@@ -129,6 +129,41 @@ async fn tools_are_capability_filtered_sorted_and_have_closed_schemas() {
 }
 
 #[tokio::test]
+async fn page_open_with_url_requires_browser_mutate_before_opening_a_page() {
+    let server = fixture_server(vec![Capability::SessionWrite, Capability::PageWrite]).await;
+    let created = server
+        .handle_message(request(
+            2,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"fixture"}}),
+        ))
+        .await
+        .unwrap();
+    let session_id = created["result"]["structuredContent"]["id"].clone();
+
+    let denied = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"page_open",
+                "arguments":{"sessionId":session_id,"url":"https://example.test/jobs"}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        denied["error"]["data"]["interfaceError"]["code"],
+        json!("missingCapability")
+    );
+    assert_eq!(
+        denied["error"]["data"]["interfaceError"]["requiredCapability"],
+        json!("browser:mutate")
+    );
+}
+
+#[tokio::test]
 async fn runtime_info_calls_the_authenticated_runtime_and_returns_structured_content() {
     let server = fixture_server(vec![Capability::SessionRead]).await;
     let response = server
@@ -1748,6 +1783,74 @@ async fn rejected_arguments_name_the_offending_field_and_constraint() {
         stale_deadline["error"]["data"]["reason"],
         json!("deadlineOutOfRange"),
         "{stale_deadline}"
+    );
+}
+
+#[tokio::test]
+async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes() {
+    let server = fixture_server(vec![Capability::BrowserMutate]).await;
+    let deadline = (Utc::now() + Duration::seconds(270)).to_rfc3339();
+
+    let response = server
+        .handle_message(request(
+            65,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":{
+                    "schemaVersion":2,
+                    "commandId":"10000000-0000-0000-0000-000000000101",
+                    "workflowId":"10000000-0000-0000-0000-000000000102",
+                    "attemptId":"10000000-0000-0000-0000-000000000103",
+                    "sessionId":"10000000-0000-0000-0000-000000000104",
+                    "pageId":null,
+                    "deadline":deadline,
+                    "command":{"kind":"primitive","input":{"kind":"listPages","input":null}}
+                }}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["commandId"],
+        "10000000-0000-0000-0000-000000000101",
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn command_execute_rejects_an_agent_deadline_beyond_five_minutes() {
+    let server = fixture_server(vec![Capability::BrowserMutate]).await;
+    let deadline = (Utc::now() + Duration::seconds(310)).to_rfc3339();
+
+    let response = server
+        .handle_message(request(
+            66,
+            "tools/call",
+            json!({
+                "name":"command_execute",
+                "arguments":{"envelope":{
+                    "schemaVersion":2,
+                    "commandId":"10000000-0000-0000-0000-000000000111",
+                    "workflowId":"10000000-0000-0000-0000-000000000112",
+                    "attemptId":"10000000-0000-0000-0000-000000000113",
+                    "sessionId":"10000000-0000-0000-0000-000000000114",
+                    "pageId":null,
+                    "deadline":deadline,
+                    "command":{"kind":"primitive","input":{"kind":"listPages","input":null}}
+                }}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response["error"]["code"], json!(-32602), "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason"],
+        json!("deadlineOutOfRange"),
+        "{response}"
     );
 }
 
