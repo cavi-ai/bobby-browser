@@ -64,6 +64,11 @@ pub trait RuntimeInterface: Send + Sync {
         ctx: RequestContext,
         workflow: WorkflowId,
     ) -> InterfaceResult<RecoveryDecision>;
+    async fn recovery_status(
+        &self,
+        ctx: RequestContext,
+        workflow: WorkflowId,
+    ) -> InterfaceResult<types::RecoveryStatus>;
 }
 
 #[derive(Clone)]

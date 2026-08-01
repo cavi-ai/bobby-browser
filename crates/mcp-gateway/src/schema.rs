@@ -228,6 +228,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["checkpoint"],
         ),
         "workflow_recover" => (json!({"workflowId":id()}), vec!["workflowId"]),
+        "recovery_status" => (json!({"workflowId":id()}), vec!["workflowId"]),
         "events_read" => (
             json!({
                 "cursor":{"type":"integer","minimum":0},
