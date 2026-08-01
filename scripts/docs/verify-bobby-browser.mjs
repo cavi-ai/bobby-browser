@@ -6,9 +6,12 @@ import {
   DOCUMENTED_VERSION,
   OUTPUT_REL,
   PRODUCT_ID,
+  VERSIONED_REPO_DOCS,
   assertNavigationResolves,
   computeContentSha256,
+  findStaleVersionReferences,
   listFilesRecursive,
+  readRepoDoc,
   resolveReleaseIdentity,
 } from "./lib.mjs";
 
@@ -17,6 +20,16 @@ const COMMIT_SHA = /^[a-f0-9]{40}$/u;
 
 export async function verifyBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
   const release = releaseInput ? resolveReleaseIdentity(releaseInput) : null;
+  for (const relativePath of VERSIONED_REPO_DOCS) {
+    const text = await readRepoDoc(root, relativePath);
+    if (text === null) continue;
+    const stale = findStaleVersionReferences(text);
+    if (stale.length > 0) {
+      throw new Error(
+        `${relativePath} names a version other than ${DOCUMENTED_VERSION}: ${stale.join(", ")}`,
+      );
+    }
+  }
   const artifactRoot = path.join(root, OUTPUT_REL);
   const manifestPath = path.join(artifactRoot, "manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));

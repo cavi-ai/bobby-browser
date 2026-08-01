@@ -123,6 +123,71 @@ export function stampVersionTokens(text) {
     .replaceAll(INTERFACE_VERSION_TOKEN, INTERFACE_VERSION);
 }
 
+/**
+ * Repo-root documents that carry the product version but are not built from
+ * `docs/bobby-browser/source`, so they never see `{{PRODUCT_VERSION}}`. They
+ * held `0.2.1` through the whole 0.3.0 line until this was mechanised.
+ */
+export const VERSIONED_REPO_DOCS = Object.freeze([
+  "README.md",
+  `docs/${PRODUCT_ID}/CONSUMER.md`,
+]);
+
+const SEMVER = String.raw`(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)`;
+/** A literal backtick cannot appear inside the template literals below. */
+const TICK = "`";
+
+/**
+ * Every shape a product version appears in outside the built artifact. Each is
+ * anchored to surrounding literal text so no unrelated version is rewritten.
+ */
+const VERSION_REFERENCES = Object.freeze([
+  new RegExp(`(docs/${PRODUCT_ID}/v)${SEMVER}`, "gu"),
+  new RegExp(`(${PRODUCT_ID}-docs-v)${SEMVER}`, "gu"),
+  new RegExp(`(${PRODUCT_ID} ${TICK})${SEMVER}(${TICK})`, "gu"),
+  new RegExp(`(documented version, ${TICK})${SEMVER}(${TICK})`, "gu"),
+]);
+
+/** Rewrite every product-version reference in a repo-root document. */
+export function stampVersionReferences(text) {
+  return VERSION_REFERENCES.reduce(
+    (current, pattern) =>
+      current.replace(pattern, (...args) => {
+        // Replacer args are [match, ...groups, offset, whole]; a pattern with
+        // one group would otherwise splice the offset in as the suffix.
+        const groups = args.slice(1, -2);
+        return `${groups[0]}${DOCUMENTED_VERSION}${groups[1] ?? ""}`;
+      }),
+    text,
+  );
+}
+
+/**
+ * Reads a repo-root document, or null when the root has none. Fixture roots
+ * carry only the source tree.
+ * @param {string} root @param {string} relativePath
+ */
+export async function readRepoDoc(root, relativePath) {
+  try {
+    return await readFile(path.join(root, relativePath), "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/** Version references that still name some other version. */
+export function findStaleVersionReferences(text) {
+  /** @type {string[]} */
+  const stale = [];
+  for (const pattern of VERSION_REFERENCES) {
+    for (const match of text.matchAll(pattern)) {
+      if (!match[0].includes(DOCUMENTED_VERSION)) stale.push(match[0]);
+    }
+  }
+  return stale;
+}
+
 /** @param {string} root @param {string} directory */
 export async function listFilesRecursive(root, directory) {
   /** @type {string[]} */
