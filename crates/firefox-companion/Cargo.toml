@@ -9,20 +9,20 @@ publish = true
 
 [dependencies]
 async-trait.workspace = true
-artifact-store = { path = "../artifact-store", version = "0.3.0" }
+artifact-store = { path = "../artifact-store", version = "0.3.1" }
 base64.workspace = true
-companion-core = { path = "../companion-core", version = "0.3.0" }
-companion-protocol = { path = "../companion-protocol", version = "0.3.0" }
-dom-engine = { path = "../dom-engine", version = "0.3.0" }
+companion-core = { path = "../companion-core", version = "0.3.1" }
+companion-protocol = { path = "../companion-protocol", version = "0.3.1" }
+dom-engine = { path = "../dom-engine", version = "0.3.1" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
-types = { path = "../types", version = "0.3.0" }
+types = { path = "../types", version = "0.3.1" }
 url.workspace = true
-worker-pool = { path = "../worker-pool", version = "0.3.0" }
+worker-pool = { path = "../worker-pool", version = "0.3.1" }
 
 [dev-dependencies]
 tempfile.workspace = true
