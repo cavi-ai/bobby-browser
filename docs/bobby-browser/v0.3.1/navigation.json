@@ -1,0 +1,78 @@
+{
+  "title": "bobby-browser",
+  "version": "0.3.1",
+  "sections": [
+    {
+      "title": "Introduction",
+      "pages": [
+        { "title": "Overview", "path": "introduction/overview.md" },
+        { "title": "Installation", "path": "introduction/installation.md" },
+        { "title": "Quickstart", "path": "introduction/quickstart.md" },
+        { "title": "First browser session", "path": "introduction/first-session.md" }
+      ]
+    },
+    {
+      "title": "Concepts",
+      "pages": [
+        { "title": "Multi-principal runtime", "path": "concepts/multi-principal.md" },
+        { "title": "Capabilities", "path": "concepts/capabilities.md" },
+        { "title": "Evidence and checkpoints", "path": "concepts/evidence-checkpoints.md" }
+      ]
+    },
+    {
+      "title": "Control surfaces",
+      "pages": [
+        { "title": "HTTP API", "path": "surfaces/http-api.md" },
+        { "title": "TypeScript SDK", "path": "surfaces/typescript-sdk.md" },
+        { "title": "Rust SDK", "path": "surfaces/rust-sdk.md" },
+        { "title": "MCP tools", "path": "surfaces/mcp-tools.md" },
+        { "title": "MCP stdio", "path": "surfaces/mcp-stdio.md" },
+        { "title": "MCP over HTTP", "path": "surfaces/mcp-http.md" },
+        { "title": "Authenticated CDP", "path": "surfaces/cdp.md" }
+      ]
+    },
+    {
+      "title": "Guides",
+      "pages": [
+        { "title": "CLI reference", "path": "guides/cli.md" },
+        { "title": "Authentication", "path": "guides/auth.md" },
+        { "title": "JavaScript evaluation", "path": "guides/javascript-eval.md" },
+        { "title": "Accessibility snapshot", "path": "guides/accessibility-snapshot.md" },
+        { "title": "Intent commands", "path": "guides/intents.md" },
+        { "title": "Bobby skills", "path": "guides/skills.md" },
+        { "title": "Browser gauntlet", "path": "guides/gauntlet.md" },
+        { "title": "Events and recovery", "path": "guides/events-recovery.md" },
+        { "title": "Configuration", "path": "guides/configuration.md" },
+        { "title": "Firefox companion", "path": "guides/firefox-companion.md" },
+        { "title": "Troubleshooting", "path": "guides/troubleshooting.md" },
+        { "title": "Run the server", "path": "guides/run.md" }
+      ]
+    },
+    {
+      "title": "Rust crate book",
+      "pages": [
+        { "title": "Index and tiers", "path": "rust/index.md" },
+        { "title": "bobby-browser-client", "path": "rust/bobby-browser-client.md" },
+        { "title": "types", "path": "rust/types.md" },
+        { "title": "interface-core", "path": "rust/interface-core.md" },
+        { "title": "sdk-core", "path": "rust/sdk-core.md" },
+        { "title": "broker", "path": "rust/broker.md" },
+        { "title": "Engines and stores", "path": "rust/engines.md" }
+      ]
+    },
+    {
+      "title": "Security",
+      "pages": [
+        { "title": "Security model", "path": "security/model.md" },
+        { "title": "Reporting vulnerabilities", "path": "security/reporting.md" }
+      ]
+    },
+    {
+      "title": "Release",
+      "pages": [
+        { "title": "Version and support", "path": "release/version-and-support.md" },
+        { "title": "MIT license", "path": "release/license.md" }
+      ]
+    }
+  ]
+}
