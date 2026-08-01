@@ -9,7 +9,7 @@ mod scheduler;
 
 pub use job::{Job, JobConfig, JobError, JobId, JobPriority, JobStatus};
 pub use queue::{JobQueue, RetryConfig};
-pub use scheduler::JobScheduler;
+pub use scheduler::{JobHandler, JobScheduler};
 
 use serde::{Deserialize, Serialize};
 

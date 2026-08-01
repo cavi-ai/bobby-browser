@@ -10,9 +10,14 @@ publish = true
 [dependencies]
 async-trait.workspace = true
 chrono = { workspace = true, features = ["serde"] }
+rand = { workspace = true, features = ["std", "std_rng", "thread_rng"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 types = { path = "../types", version = "0.3.1" }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

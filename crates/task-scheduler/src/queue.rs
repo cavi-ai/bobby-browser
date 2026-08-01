@@ -1,5 +1,6 @@
 //! Priority-based job queue with retry logic.
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -30,11 +31,11 @@ impl RetryConfig {
     pub fn calculate_backoff(&self, retry_count: u32) -> Duration {
         let base = self.backoff_base_ms as f64;
         let max = self.backoff_max_ms as f64;
-        // Exponential backoff with jitter
         let exponential = base * (2.0_f64.powi(retry_count as i32));
         let backoff_ms = exponential.min(max);
-        // Add jitter (0-20% of backoff)
-        let jitter = backoff_ms * 0.2 * (retry_count as f64 * 7.0 % 1.0);
+        // Jitter: 0-20% of capped backoff
+        let jitter_factor: f64 = rand::rng().random();
+        let jitter = backoff_ms * 0.2 * jitter_factor;
         Duration::from_millis((backoff_ms + jitter) as u64)
     }
 }
@@ -60,8 +61,12 @@ impl JobQueue {
         self
     }
 
+    pub fn retry_config(&self) -> &RetryConfig {
+        &self.retry_config
+    }
+
     /// Submit a job to the queue.
-    pub fn submit(&mut self, config: JobConfig) -> Result<JobId, crate::JobError> {
+    pub fn submit(&mut self, config: JobConfig) -> Result<Job, crate::JobError> {
         if self.jobs.len() >= self.max_size {
             return Err(crate::JobError::QueueFull);
         }
@@ -70,83 +75,93 @@ impl JobQueue {
             .with_max_retries(config.max_retries);
 
         if let Some(timeout) = config.timeout {
-            // Timeout is handled by the scheduler, store as metadata
-            job.payload
-                .as_object_mut()
-                .map(|obj| {
-                    obj.insert("timeout_ms".to_string(), serde_json::json!(timeout.as_millis()));
-                });
-        }
-
-        let id = job.id.clone();
-        self.jobs.push_back(job);
-        Ok(id)
-    }
-
-    /// Get the next job to execute (highest priority, FIFO within priority).
-    pub fn next_job(&mut self) -> Option<Job> {
-        if self.jobs.is_empty() {
-            return None;
-        }
-
-        // Find the highest priority job
-        let mut best_idx = 0;
-        let mut best_priority = self.jobs[0].priority.clone();
-
-        for (i, job) in self.jobs.iter().enumerate().skip(1) {
-            if job.priority > best_priority {
-                best_idx = i;
-                best_priority = job.priority.clone();
+            if let Some(obj) = job.payload.as_object_mut() {
+                obj.insert(
+                    "timeout_ms".to_string(),
+                    serde_json::json!(timeout.as_millis()),
+                );
             }
         }
 
-        Some(self.jobs.remove(best_idx).unwrap())
+        self.jobs.push_back(job.clone());
+        Ok(job)
     }
 
-    /// Complete a job and optionally requeue it for retry.
+    /// Re-queue an existing job (same id) after a retry delay.
+    pub fn requeue(&mut self, job: Job) -> Result<(), crate::JobError> {
+        if self.jobs.len() >= self.max_size {
+            return Err(crate::JobError::QueueFull);
+        }
+        self.jobs.push_back(job);
+        Ok(())
+    }
+
+    /// Get the next pending job (highest priority, FIFO within priority).
+    pub fn next_job(&mut self) -> Option<Job> {
+        let best_idx = self
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, job)| job.status == JobStatus::Pending)
+            .max_by(|(ia, a), (ib, b)| {
+                // Higher priority wins; on ties, earlier index (FIFO) wins.
+                a.priority.cmp(&b.priority).then_with(|| ib.cmp(ia))
+            })
+            .map(|(i, _)| i)?;
+
+        let mut job = self.jobs.remove(best_idx).unwrap();
+        job.start();
+        Some(job)
+    }
+
+    /// Complete a job still present in the queue.
     pub fn complete_job(
         &mut self,
         job_id: &JobId,
         result: JobResult,
     ) -> Result<(), crate::JobError> {
         if let Some(job) = self.jobs.iter_mut().find(|j| j.id == *job_id) {
-            job.clone().complete(result);
+            job.complete(result);
             Ok(())
         } else {
-            Err(crate::JobError::Execution(
-                "job not found in queue".to_string(),
-            ))
+            Err(crate::JobError::NotFound(job_id.clone()))
         }
     }
 
-    /// Mark a job for retry.
+    /// Mark a queued job for retry and return backoff duration.
     pub fn retry_job(&mut self, job_id: &JobId) -> Result<Duration, crate::JobError> {
         if let Some(job) = self.jobs.iter_mut().find(|j| j.id == *job_id) {
             if job.can_retry() {
-                job.increment_retry();
-                job.status = JobStatus::Pending;
-                let backoff = self.retry_config.calculate_backoff(job.retry_count);
-                Ok(backoff)
+                job.prepare_retry();
+                Ok(self.retry_config.calculate_backoff(job.retry_count))
             } else {
-                let _failed = job.clone().fail("max retries exceeded".to_string());
-                Err(crate::JobError::Execution("max retries exceeded".to_string()))
+                job.fail("max retries exceeded".to_string());
+                Err(crate::JobError::Execution(
+                    "max retries exceeded".to_string(),
+                ))
             }
         } else {
-            Err(crate::JobError::Execution(
-                "job not found in queue".to_string(),
-            ))
+            Err(crate::JobError::NotFound(job_id.clone()))
         }
     }
 
-    /// Cancel a job by ID.
-    pub fn cancel_job(&mut self, job_id: &JobId) -> Result<(), crate::JobError> {
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == *job_id) {
-            job.clone().cancel();
-            Ok(())
+    /// Cancel a job by ID. Removes it from the pending queue.
+    pub fn cancel_job(&mut self, job_id: &JobId) -> Result<Job, crate::JobError> {
+        if let Some(idx) = self.jobs.iter().position(|j| j.id == *job_id) {
+            let mut job = self.jobs.remove(idx).unwrap();
+            if matches!(
+                job.status,
+                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            ) {
+                return Err(crate::JobError::Execution(format!(
+                    "job {} already finished with status {}",
+                    job_id, job.status
+                )));
+            }
+            job.cancel();
+            Ok(job)
         } else {
-            Err(crate::JobError::Execution(
-                "job not found in queue".to_string(),
-            ))
+            Err(crate::JobError::NotFound(job_id.clone()))
         }
     }
 
@@ -160,12 +175,21 @@ impl JobQueue {
         self.jobs.is_empty()
     }
 
+    /// Count pending jobs.
+    pub fn pending_count(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Pending)
+            .count()
+    }
+
     /// Get queue statistics.
     pub fn stats(&self) -> QueueStats {
         let mut pending = 0;
         let mut running = 0;
         let mut failed = 0;
         let mut completed = 0;
+        let mut cancelled = 0;
 
         for job in &self.jobs {
             match job.status {
@@ -173,7 +197,7 @@ impl JobQueue {
                 JobStatus::Running => running += 1,
                 JobStatus::Completed => completed += 1,
                 JobStatus::Failed => failed += 1,
-                JobStatus::Cancelled => {}
+                JobStatus::Cancelled => cancelled += 1,
             }
         }
 
@@ -183,6 +207,7 @@ impl JobQueue {
             running,
             completed,
             failed,
+            cancelled,
         }
     }
 }
@@ -196,4 +221,5 @@ pub struct QueueStats {
     pub running: usize,
     pub completed: usize,
     pub failed: usize,
+    pub cancelled: usize,
 }
