@@ -324,7 +324,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "checkpoint_save" => (
             json!({
                 "checkpoint":{"$ref":"#/$defs/WorkflowCheckpoint"},
-                "evidence":array(json!({"$ref":"#/$defs/Evidence"}), MAX_EVIDENCE_ITEMS)
+                "evidenceRefs":array(id(), MAX_EVIDENCE_ITEMS)
             }),
             vec!["checkpoint"],
         ),
@@ -563,8 +563,16 @@ fn workflow_checkpoint() -> Value {
                 "recoveryClass":{"type":"string","enum":["replayable","reconciliable","boundary"]},
                 "invariants":array(json!({"$ref":"#/$defs/CheckpointInvariant"}), MAX_COLLECTION_ITEMS),
                 "replayableInputs":array(string(0, MAX_STRING_BYTES), MAX_COLLECTION_ITEMS),
-                "evidence":array(json!({"$ref":"#/$defs/Evidence"}), MAX_EVIDENCE_ITEMS),
-                "recoveryHistory":array(json!({"$ref":"#/$defs/RecoveryRecord"}), MAX_COLLECTION_ITEMS),
+                // `checkpoint_save` resolves evidence from `evidenceRefs` server-side
+                // (`RecoveryCoordinator::save_verified` overwrites this field
+                // unconditionally), and recovery history is only ever appended by
+                // the runtime's own recovery flow — never authored by the caller of
+                // a fresh checkpoint. Both are forced empty here, same as
+                // `recoveryReceipts` below, which drops `Evidence` (and
+                // `RecoveryDecision`/`RecoveryRecord`) out of this tool's reachable
+                // `$defs` entirely.
+                "evidence":{"type":"array","maxItems":0},
+                "recoveryHistory":{"type":"array","maxItems":0},
                 "recoveryReceipts":{"type":"array","maxItems":0},
                 "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
         }),

@@ -11,8 +11,8 @@ use interface_core::{
     SessionOwnershipRecorder,
 };
 use types::{
-    Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
-    FillValue, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
+    Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
+    Evidence, FillValue, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
     OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeCommand,
     RuntimeError, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint, WorkflowId,
 };
@@ -150,9 +150,21 @@ impl AuthenticatedRuntime {
     ) -> InterfaceResult<WorkflowCheckpoint> {
         self.checkpoint_dispatches.fetch_add(1, Ordering::AcqRel);
         self.inner
-            .checkpoint(checkpoint, evidence)
+            .checkpoint_with_evidence(checkpoint, evidence)
             .await
             .map_err(|_| internal_error(ctx))
+    }
+
+    /// Evidence the runtime recorded for already-run commands, resolved by
+    /// command id. Used by the MCP surface's `checkpoint_save`, which names
+    /// commands rather than supplying `Evidence` directly — the raw-evidence
+    /// path above (`checkpoint`/`dispatch_checkpoint`) remains the HTTP
+    /// surface's unchanged contract.
+    pub async fn resolve_command_evidence(
+        &self,
+        command_ids: Vec<CommandId>,
+    ) -> Result<Vec<Evidence>, page_runtime::RecoveryError> {
+        self.inner.resolve_evidence(command_ids).await
     }
 }
 

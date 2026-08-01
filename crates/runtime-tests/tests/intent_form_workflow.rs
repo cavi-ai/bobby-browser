@@ -328,7 +328,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 page_id: page.id.clone(),
                 restart_url: fixture.base_url(),
                 current_url: current_url.clone(),
-                cursor: Some(inspect_id),
+                cursor: Some(inspect_id.clone()),
                 boundary_command_id: Some(submit_id.clone()),
                 recovery_class: CommandClass::Boundary,
                 invariants: vec![
@@ -341,7 +341,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
-            observed,
+            vec![inspect_id],
         )
         .await
         .unwrap();

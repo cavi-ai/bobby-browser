@@ -512,16 +512,17 @@ async fn run_mcp_sample(
             CheckpointInvariant::Title { value: title },
         ],
         replayable_inputs: vec![],
-        evidence: inspect_evidence.clone(),
+        evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
         created_at: chrono::Utc::now(),
     };
+    let popup_evidence_ref = popup_checkpoint.cursor.clone().unwrap();
     tool(
         server,
         &mut id,
         "checkpoint_save",
-        json!({"checkpoint":popup_checkpoint,"evidence":inspect_evidence}),
+        json!({"checkpoint":popup_checkpoint,"evidenceRefs":[popup_evidence_ref]}),
     )
     .await;
     event_ordering.push("checkpoint.saved".to_owned());
@@ -583,16 +584,17 @@ async fn run_mcp_sample(
             CheckpointInvariant::Title { value: title },
         ],
         replayable_inputs: vec![],
-        evidence: inspect_evidence.clone(),
+        evidence: vec![],
         recovery_history: vec![],
         recovery_receipts: vec![],
         created_at: chrono::Utc::now(),
     };
+    let checkpoint_evidence_ref = checkpoint.cursor.clone().unwrap();
     let saved_checkpoint = tool(
         server,
         &mut id,
         "checkpoint_save",
-        json!({"checkpoint":checkpoint,"evidence":inspect_evidence}),
+        json!({"checkpoint":checkpoint,"evidenceRefs":[checkpoint_evidence_ref]}),
     )
     .await;
     event_ordering.push("checkpoint.saved".to_owned());
@@ -661,7 +663,7 @@ async fn run_mcp_sample(
         server,
         &mut id,
         "checkpoint_save",
-        json!({"checkpoint":checkpoint,"evidence":checkpoint.evidence}),
+        json!({"checkpoint":checkpoint,"evidenceRefs":[checkpoint_evidence_ref]}),
     )
     .await;
     observed.push("recovery.inspect");

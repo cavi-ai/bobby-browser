@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
 use chrono::Utc;
-use page_runtime::{evaluate_invariants, RecoveryCoordinator};
+use page_runtime::{evaluate_invariants, PageRuntime, RecoveryCoordinator};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use types::{
     WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
+use workflow_journal::CommandJournal;
 
 fn checkpoint() -> WorkflowCheckpoint {
     WorkflowCheckpoint {
@@ -415,4 +416,65 @@ async fn recovery_resumes_reconciles_or_restarts_without_guessing() {
         navigations,
         vec![checkpoint.current_url, checkpoint.restart_url]
     );
+}
+
+fn no_op_worker_pool() -> Arc<WorkerPool> {
+    Arc::new(WorkerPool::new(
+        1,
+        Arc::new(RecoveryFactory {
+            launches: Arc::new(AtomicUsize::new(0)),
+            replacement_matches: true,
+            navigations: Arc::new(Mutex::new(Vec::new())),
+        }),
+    ))
+}
+
+#[tokio::test]
+async fn evidence_for_command_returns_the_terminal_outcome_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let runtime = PageRuntime::new(journal.clone(), no_op_worker_pool());
+
+    let command_id = CommandId::new();
+    let evidence = vec![Evidence::Navigation {
+        url: "https://example.test/".to_owned(),
+        title: "fixture".to_owned(),
+    }];
+    journal
+        .append(workflow_journal::JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: types::CommandPhase::Completed,
+            envelope: None,
+            outcome: Some(CommandOutcome::Completed {
+                command_id: command_id.clone(),
+                evidence: evidence.clone(),
+            }),
+            prepared_result: None,
+        })
+        .await
+        .unwrap();
+
+    let resolved = runtime.evidence_for_command(command_id).await.unwrap();
+    assert_eq!(resolved, evidence);
+}
+
+#[tokio::test]
+async fn evidence_for_command_rejects_a_command_with_no_journal_record() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let runtime = PageRuntime::new(journal, no_op_worker_pool());
+    assert!(runtime
+        .evidence_for_command(CommandId::new())
+        .await
+        .is_err());
 }
