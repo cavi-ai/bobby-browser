@@ -18,6 +18,7 @@ import {
   submitAndVerifyEnvelope,
   waitForStateEnvelope,
 } from "../src/intents.js";
+import { controlActionRuntimeCommand } from "../src/controls.js";
 
 const META = {
   commandId: "00000000-0000-4000-8000-000000000001",
@@ -27,6 +28,25 @@ const META = {
   pageId: "00000000-0000-4000-8000-000000000005",
   deadline: "2026-07-16T12:00:00Z",
 };
+
+test("controlActionRuntimeCommand emits the exact primitive wire shape", () => {
+  assert.deepEqual(
+    controlActionRuntimeCommand(
+      { role: "checkbox", accessibleName: "Terms", ordinal: null, framePath: [], shadowPath: [] },
+      { kind: "setChecked", checked: true },
+    ),
+    {
+      kind: "primitive",
+      input: {
+        kind: "controlAction",
+        input: {
+          target: { role: "checkbox", accessibleName: "Terms", ordinal: null, framePath: [], shadowPath: [] },
+          action: { kind: "setChecked", checked: true },
+        },
+      },
+    },
+  );
+});
 
 test("intentHintsFromAccessibilityTarget preserves duplicate-control identity", () => {
   assert.deepEqual(

@@ -71,6 +71,10 @@ Pass `options.idempotencyKey` on mutating POSTs for replay-safe retries.
 There is no principals helper on the client today — mint/revoke with raw HTTP
 (see [Authentication](../guides/auth.md)).
 
+Use `controlActionRuntimeCommand(target, action)` to build the typed primitive
+for `submit()`. The semantic target comes directly from `formSnapshot()`; no
+CSS selector or test ID is accepted by this primitive.
+
 ## Intents
 
 Build envelopes with helpers from the package (`locateEnvelope`,

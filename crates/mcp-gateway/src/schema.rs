@@ -65,6 +65,55 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({"workflowId": id(), "sessionId": id(), "pageId": id(), "maxControls":{"type":"integer","minimum":1,"maximum":512}}),
             vec!["sessionId", "pageId"],
         ),
+        "control_action" => (
+            json!({
+                "workflowId": id(),
+                "sessionId": id(),
+                "pageId": id(),
+                "target": {
+                    "type":"object",
+                    "additionalProperties":false,
+                    "properties":{
+                        "role":string(1,128),
+                        "accessibleName":string(1,2048),
+                        "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
+                        "framePath":array(any_value(),8),
+                        "shadowPath":array(any_value(),8)
+                    },
+                    "required":["role","accessibleName","ordinal","framePath","shadowPath"]
+                },
+                "action": {"oneOf":[
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096)},"required":["kind","value"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
+                ]}
+            }),
+            vec!["sessionId", "pageId", "target", "action"],
+        ),
+        "emulate" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "viewport": nullable(object(
+                    json!({"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384}}),
+                    &["width", "height"]
+                )),
+                "geolocation": nullable(object(
+                    json!({
+                        "latitude":{"type":"number","minimum":-90,"maximum":90},
+                        "longitude":{"type":"number","minimum":-180,"maximum":180},
+                        "accuracy":nullable(json!({"type":"number","minimum":0}))
+                    }),
+                    &["latitude", "longitude"]
+                )),
+                "mobile": {"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "dialog" => (
             json!({
                 "sessionId": id(),
@@ -406,6 +455,15 @@ fn definitions() -> Value {
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
         "AccessibilityTarget": accessibility_target(),
+        "ViewportSize": object(json!({
+            "width":{"type":"integer","minimum":1,"maximum":16384},
+            "height":{"type":"integer","minimum":1,"maximum":16384}
+        }), &["width", "height"]),
+        "GeolocationCoordinates": object(json!({
+            "latitude":{"type":"number","minimum":-90,"maximum":90},
+            "longitude":{"type":"number","minimum":-180,"maximum":180},
+            "accuracy":nullable(json!({"type":"number","minimum":0}))
+        }), &["latitude", "longitude"]),
         "CookieRecord": object(json!({
             "name":string(0, 1024),
             "value":string(0, 4096),
@@ -771,12 +829,52 @@ fn primitive_commands() -> Vec<Value> {
             ),
         ),
         tagged_input(
+            "controlAction",
+            object(
+                json!({
+                    "target": {
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                            "role":string(1,128),
+                            "accessibleName":string(1,2048),
+                            "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
+                            "framePath":array(any_value(),8),
+                            "shadowPath":array(any_value(),8)
+                        },
+                        "required":["role","accessibleName","ordinal","framePath","shadowPath"]
+                    },
+                    "action": {"oneOf":[
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096)},"required":["kind","value"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
+                    ]}
+                }),
+                &["target", "action"],
+            ),
+        ),
+        tagged_input(
             "openPage",
             object(json!({"url":nullable(string(0, MAX_URL_BYTES))}), &["url"]),
         ),
         tagged_input("listPages", json!({"type":"null"})),
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
+        tagged_input(
+            "emulate",
+            object(
+                json!({
+                    "viewport":nullable(json!({"$ref":"#/$defs/ViewportSize"})),
+                    "geolocation":nullable(json!({"$ref":"#/$defs/GeolocationCoordinates"})),
+                    "mobile":{"type":"boolean"}
+                }),
+                &[],
+            ),
+        ),
         tagged_input(
             "handleDialog",
             object(
@@ -1102,6 +1200,15 @@ fn evidence_variants() -> Vec<Value> {
             "formSnapshot",
             json!({"snapshot":any_value()}),
             &["snapshot"],
+        ),
+        tagged_fields("controlAction", json!({"action":any_value()}), &["action"]),
+        tagged_fields(
+            "emulation",
+            json!({
+                "viewport":nullable(json!({"$ref":"#/$defs/ViewportSize"})),
+                "geolocation":nullable(json!({"$ref":"#/$defs/GeolocationCoordinates"}))
+            }),
+            &[],
         ),
         tagged_fields(
             "dialog",
