@@ -284,6 +284,7 @@ pub enum PrimitiveCommand {
     ClosePage(ClosePageCommand),
     ActivatePage(ActivatePageCommand),
     AccessibilitySnapshot(AccessibilitySnapshotCommand),
+    ExtractStructured(ExtractStructuredCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
     ClickAndWaitForDownload(ClickAndWaitForDownloadCommand),
     WaitFor(WaitForCommand),
@@ -337,6 +338,7 @@ impl PrimitiveCommand {
             | Self::WaitFor(_)
             | Self::ActivatePage(_)
             | Self::AccessibilitySnapshot(_)
+            | Self::ExtractStructured(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
             Self::DownloadUrl(_)
             | Self::TypeText(_)
@@ -466,6 +468,14 @@ pub struct ActivatePageCommand {
 #[serde(rename_all = "camelCase")]
 pub struct AccessibilitySnapshotCommand {
     pub max_nodes: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractStructuredCommand {
+    pub schema: serde_json::Value,
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
