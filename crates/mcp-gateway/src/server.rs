@@ -372,6 +372,14 @@ impl Server {
             "checkpoint_save",
             "click",
             "command_execute",
+            "intent_complete_form",
+            "intent_dismiss_obstruction",
+            "intent_extract",
+            "intent_fill",
+            "intent_follow",
+            "intent_locate",
+            "intent_submit_and_verify",
+            "intent_wait_for_state",
             "download_url",
             "evaluate_javascript",
             "events_read",
@@ -613,10 +621,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::Navigate(types::NavigateCommand {
                         url: input.url,
                         wait_until: input.wait_until.unwrap_or(types::WaitUntil::Interactive),
@@ -630,10 +639,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::Click(types::ClickCommand {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
@@ -648,10 +658,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::TypeText(types::TypeTextCommand {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
@@ -667,10 +678,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::Inspect(types::InspectCommand {
                         selector: input.selector,
                         target: input.target,
@@ -684,10 +696,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::CaptureScreenshot(types::CaptureScreenshotCommand {
                         mode: input.mode.unwrap_or(types::ScreenshotMode::Viewport),
                     }),
@@ -699,14 +712,199 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::WaitFor(types::WaitForCommand {
                         condition: input.condition,
                         timeout_ms: input.timeout_ms,
                     }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_locate" => {
+                let input: IntentLocateArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent = types::IntentCommand::Locate(types::LocateIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_fill" => {
+                let input: IntentFillArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent = types::IntentCommand::Fill(types::FillIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                    value: input.value,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_complete_form" => {
+                let input: IntentCompleteFormArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent = types::IntentCommand::CompleteForm(types::CompleteFormIntent {
+                    purpose: input.purpose,
+                    fields: input.fields,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_submit_and_verify" => {
+                let input: IntentSubmitAndVerifyArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent = types::IntentCommand::SubmitAndVerify(types::SubmitAndVerifyIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                    expected_state: input.expected_state,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_wait_for_state" => {
+                let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent = types::IntentCommand::WaitForState(types::WaitForStateIntent {
+                    condition: input.condition,
+                    timeout_ms: input.timeout_ms,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_follow" => {
+                let input: IntentFollowArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent = types::IntentCommand::Follow(types::FollowIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                    expected_destination: input.expected_destination,
+                    boundary: input.boundary.unwrap_or(false),
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_dismiss_obstruction" => {
+                let input: IntentDismissObstructionArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent =
+                    types::IntentCommand::DismissObstruction(types::DismissObstructionIntent {
+                        purpose: input.purpose,
+                        hints: input.hints.unwrap_or_default(),
+                        timeout_ms: input
+                            .timeout_ms
+                            .unwrap_or(types::DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS),
+                    });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_extract" => {
+                let input: IntentExtractArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                };
+                let intent = types::IntentCommand::Extract(types::ExtractIntent {
+                    purpose: input.purpose,
+                    fields: input.fields,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+                }
+                let (context, envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
                 );
                 self.submit_envelope(context, envelope).await
             }
@@ -715,10 +913,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     None,
+                    input.workflow_id,
                     types::PrimitiveCommand::ListPages(types::ListPagesCommand),
                 );
                 self.submit_envelope(context, envelope).await
@@ -729,10 +928,11 @@ impl Server {
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
                 let page_id = input.page_id;
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(page_id.clone()),
+                    input.workflow_id,
                     types::PrimitiveCommand::ClosePage(types::ClosePageCommand { page_id }),
                 );
                 self.submit_envelope(context, envelope).await
@@ -743,10 +943,11 @@ impl Server {
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
                 let page_id = input.page_id;
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(page_id.clone()),
+                    input.workflow_id,
                     types::PrimitiveCommand::ActivatePage(types::ActivatePageCommand { page_id }),
                 );
                 self.submit_envelope(context, envelope).await
@@ -756,10 +957,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::AccessibilitySnapshot(
                         types::AccessibilitySnapshotCommand {
                             max_nodes: input.max_nodes,
@@ -773,10 +975,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     None,
+                    input.workflow_id,
                     types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
                         url: input.url,
                         expected_content_type: input.expected_content_type,
@@ -790,10 +993,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
@@ -807,10 +1011,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
                 };
-                let (context, envelope) = command_envelope(
+                let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
+                    input.workflow_id,
                     types::PrimitiveCommand::EvaluateJavaScript(types::EvaluateJavaScriptCommand {
                         expression: input.expression,
                         timeout_ms: input.timeout_ms.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
@@ -951,6 +1156,17 @@ impl Server {
                 match to_json(outcome) {
                     Ok(mut value) => {
                         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
+                        // `CommandOutcome` carries only `commandId`, so without
+                        // this an agent cannot name the workflow it just ran in
+                        // and `checkpoint_save` / `workflow_recover` stay out of
+                        // reach. Pass it back into any tool's `workflowId` to
+                        // keep subsequent commands in the same workflow.
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert(
+                                "workflowId".to_owned(),
+                                json!(envelope.workflow_id.clone()),
+                            );
+                        }
                         self.events
                             .append_for(
                                 registration_context.principal_id.clone(),
@@ -1295,10 +1511,79 @@ macro_rules! page_scoped_args {
         struct $name {
             session_id: types::SessionId,
             page_id: types::PageId,
+            #[serde(default)]
+            workflow_id: Option<types::WorkflowId>,
             $($field : $ty,)*
         }
     };
 }
+
+/// Intent tools take the same page scope plus the intent's own payload.
+///
+/// Intents were reachable only by hand-building a `CommandEnvelope` for
+/// `command_execute`, which meant minting three UUIDs and an RFC3339 deadline
+/// per call. These mirror the flat primitive tools instead: the server builds
+/// the envelope.
+macro_rules! intent_args {
+    ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct $name {
+            session_id: types::SessionId,
+            page_id: types::PageId,
+            #[serde(default)]
+            workflow_id: Option<types::WorkflowId>,
+            #[serde(default)]
+            idempotency_key: Option<String>,
+            $($field : $ty,)*
+        }
+    };
+}
+
+intent_args!(IntentLocateArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+});
+
+intent_args!(IntentFillArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    value: types::FillValue,
+});
+
+intent_args!(IntentCompleteFormArgs {
+    purpose: String,
+    fields: Vec<types::CompleteFormField>,
+});
+
+intent_args!(IntentSubmitAndVerifyArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    expected_state: types::WaitForCommand,
+});
+
+intent_args!(IntentWaitForStateArgs {
+    condition: types::WaitCondition,
+    timeout_ms: u64,
+});
+
+intent_args!(IntentFollowArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    expected_destination: types::WaitForCommand,
+    boundary: Option<bool>,
+});
+
+intent_args!(IntentDismissObstructionArgs {
+    purpose: String,
+    hints: Option<types::IntentHints>,
+    timeout_ms: Option<u64>,
+});
+
+intent_args!(IntentExtractArgs {
+    purpose: String,
+    fields: Vec<types::ExtractField>,
+});
 
 page_scoped_args!(NavigateArgs {
     url: String,
@@ -1352,6 +1637,8 @@ page_scoped_args!(EvaluateJavaScriptArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PageListArgs {
     session_id: types::SessionId,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1365,6 +1652,8 @@ struct SessionCloseArgs {
 struct PageCloseArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1374,6 +1663,8 @@ struct A11ySnapshotArgs {
     page_id: types::PageId,
     #[serde(default)]
     max_nodes: Option<u32>,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1384,6 +1675,8 @@ struct DownloadUrlArgs {
     #[serde(default)]
     expected_content_type: Option<String>,
     max_bytes: u64,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -1503,11 +1796,19 @@ fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
 
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 
+/// Builds the envelope a flat tool submits.
+///
+/// `workflow_id` is the caller's when supplied. Every call used to mint a fresh
+/// one and the outcome never echoed it back, so an agent on the flat tools
+/// could not name the workflow it had just run in — which made
+/// `checkpoint_save` and `workflow_recover` reachable only by hand-building
+/// envelopes through `command_execute`.
 fn command_envelope(
     context: types::RequestContext,
     session_id: types::SessionId,
     page_id: Option<types::PageId>,
-    command: types::PrimitiveCommand,
+    workflow_id: Option<types::WorkflowId>,
+    command: types::RuntimeCommand,
 ) -> (types::RequestContext, types::CommandEnvelope) {
     let deadline = context.deadline;
     (
@@ -1515,13 +1816,56 @@ fn command_envelope(
         types::CommandEnvelope {
             schema_version: types::CommandEnvelope::SCHEMA_VERSION,
             command_id: types::CommandId::new(),
-            workflow_id: types::WorkflowId::new(),
+            workflow_id: workflow_id.unwrap_or_default(),
             attempt_id: types::AttemptId::new(),
             session_id,
             page_id,
             deadline,
-            command: types::RuntimeCommand::Primitive(command),
+            command,
         },
+    )
+}
+
+fn apply_idempotency_key(
+    context: &mut types::RequestContext,
+    key: Option<String>,
+) -> Result<(), ()> {
+    context.idempotency_key = match key {
+        Some(key) => Some(types::IdempotencyKey::try_from(key).map_err(|_| ())?),
+        None => None,
+    };
+    Ok(())
+}
+
+fn primitive_envelope(
+    context: types::RequestContext,
+    session_id: types::SessionId,
+    page_id: Option<types::PageId>,
+    workflow_id: Option<types::WorkflowId>,
+    command: types::PrimitiveCommand,
+) -> (types::RequestContext, types::CommandEnvelope) {
+    command_envelope(
+        context,
+        session_id,
+        page_id,
+        workflow_id,
+        types::RuntimeCommand::Primitive(command),
+    )
+}
+
+fn intent_envelope(
+    context: types::RequestContext,
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    workflow_id: Option<types::WorkflowId>,
+    command: types::IntentCommand,
+) -> (types::RequestContext, types::CommandEnvelope) {
+    command_envelope(
+        context,
+        session_id,
+        Some(page_id),
+        workflow_id,
+        types::RuntimeCommand::Intent(command),
     )
 }
 
@@ -1543,6 +1887,17 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         "evaluate_javascript" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::JavascriptEvaluate,
+        ]),
+        "intent_complete_form"
+        | "intent_dismiss_obstruction"
+        | "intent_extract"
+        | "intent_fill"
+        | "intent_follow"
+        | "intent_locate"
+        | "intent_submit_and_verify"
+        | "intent_wait_for_state" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::IntentExecute,
         ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),
@@ -1567,7 +1922,15 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "a11y_snapshot"
         | "download_url"
         | "upload_files"
-        | "evaluate_javascript" => Some(types::InterfaceOperation::SubmitCommand),
+        | "evaluate_javascript"
+        | "intent_complete_form"
+        | "intent_dismiss_obstruction"
+        | "intent_extract"
+        | "intent_fill"
+        | "intent_follow"
+        | "intent_locate"
+        | "intent_submit_and_verify"
+        | "intent_wait_for_state" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
@@ -1587,6 +1950,14 @@ fn tool_description(name: &str) -> &'static str {
         "download_url" => "Download a URL into the session's downloads.",
         "evaluate_javascript" => "Evaluate JavaScript on a page (session policy gated).",
         "events_read" => "Read retained runtime events after a cursor.",
+        "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable).",
+        "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner (Reconciliable).",
+        "intent_extract" => "Read named fields off the page without mutating it (Replayable).",
+        "intent_fill" => "Fill one described form control and verify the value (Reconciliable).",
+        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable).",
+        "intent_locate" => "Locate an element by described purpose (Replayable).",
+        "intent_submit_and_verify" => "Submit a form and verify the expected resulting state (Boundary; needs a matching checkpoint).",
+        "intent_wait_for_state" => "Wait for a described page state (Replayable).",
         "inspect" => "Read page state, optionally element-scoped.",
         "navigate" => "Navigate a page to a URL.",
         "a11y_snapshot" => "Capture a compact accessibility tree of a page.",
