@@ -3,12 +3,10 @@
 //! Adds random pauses, variable scroll speeds, and "scrolling to read"
 //! behaviors (stopping mid-scroll) to mimic human browsing.
 
-use rand::Rng;
-
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::SessionRandom;
+use crate::{clamp_probability, order_u64, SessionRandom};
 
 /// Configuration for scrolling simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +101,19 @@ impl ScrollConfig {
         self.bounce_probability = prob;
         self
     }
+
+    pub fn sanitize(mut self) -> Self {
+        let (min, max) = order_u64(self.min_scroll_duration_ms, self.max_scroll_duration_ms);
+        self.min_scroll_duration_ms = min;
+        self.max_scroll_duration_ms = max.max(min + 1);
+        let (pmin, pmax) = order_u64(self.read_pause_min_ms, self.read_pause_max_ms);
+        self.read_pause_min_ms = pmin;
+        self.read_pause_max_ms = pmax.max(pmin + 1);
+        self.read_pause_probability = clamp_probability(self.read_pause_probability);
+        self.fast_scroll_probability = clamp_probability(self.fast_scroll_probability);
+        self.bounce_probability = clamp_probability(self.bounce_probability);
+        self
+    }
 }
 
 /// A scrolling action for the behavioral engine.
@@ -129,11 +140,13 @@ pub struct ScrollSimulator {
 
 impl ScrollSimulator {
     pub fn new(config: ScrollConfig) -> Self {
-        Self { config }
+        Self {
+            config: config.sanitize(),
+        }
     }
 
     pub fn with_config(mut self, config: ScrollConfig) -> Self {
-        self.config = config;
+        self.config = config.sanitize();
         self
     }
 
@@ -144,18 +157,24 @@ impl ScrollSimulator {
         delta_y: i64,
         page_height: f64,
     ) -> Vec<ScrollAction> {
+        self.generate_actions_inner(random, delta_y, page_height, true)
+    }
+
+    fn generate_actions_inner(
+        &self,
+        random: &mut SessionRandom,
+        delta_y: i64,
+        page_height: f64,
+        include_trailing_read: bool,
+    ) -> Vec<ScrollAction> {
         if delta_y == 0 {
             return Vec::new();
         }
 
         let mut actions = Vec::new();
-        // Decide scroll speed
-        let is_fast_scroll = random.rng.random_range(0.0..1.0) < self.config.fast_scroll_probability;
+        let is_fast_scroll = random.chance(self.config.fast_scroll_probability);
         let duration = if is_fast_scroll {
-            random.next_duration(
-                Duration::from_millis(50),
-                Duration::from_millis(200),
-            )
+            random.next_duration(Duration::from_millis(50), Duration::from_millis(200))
         } else {
             random.next_duration(
                 Duration::from_millis(self.config.min_scroll_duration_ms),
@@ -168,8 +187,7 @@ impl ScrollSimulator {
             duration_ms: duration.as_millis() as u64,
         });
 
-        // Add "reading pause" (stop mid-scroll to read content)
-        if random.rng.random_range(0.0..1.0) < self.config.read_pause_probability {
+        if random.chance(self.config.read_pause_probability) {
             let pause_ms = random.next_f64(
                 self.config.read_pause_min_ms as f64,
                 self.config.read_pause_max_ms as f64,
@@ -179,8 +197,7 @@ impl ScrollSimulator {
             });
         }
 
-        // Add bounce back (human tendency to scroll back slightly)
-        if random.rng.random_range(0.0..1.0) < self.config.bounce_probability {
+        if random.chance(self.config.bounce_probability) {
             let bounce = (delta_y as f64 * -0.1).round() as i64;
             if bounce != 0 {
                 actions.push(ScrollAction::Bounce {
@@ -190,16 +207,22 @@ impl ScrollSimulator {
             }
         }
 
-        // Add post-scroll reading pause based on page length
-        let read_ms = (page_height * 10.0) as u64;
-        actions.push(ScrollAction::Pause {
-            duration_ms: random.next_f64(read_ms as f64 * 0.5, read_ms as f64 * 2.0) as u64,
-        });
+        if include_trailing_read {
+            let read_ms = (page_height.max(0.0) * 10.0) as u64;
+            let lo = (read_ms as f64 * 0.5).max(1.0);
+            let hi = (read_ms as f64 * 2.0).max(lo + 1.0);
+            actions.push(ScrollAction::Pause {
+                duration_ms: random.next_f64(lo, hi) as u64,
+            });
+        }
 
         actions
     }
 
     /// Generate actions for scrolling to a specific position.
+    ///
+    /// Intermediate chunks omit the long trailing read pause; one settle pause
+    /// is appended at the end.
     pub fn generate_to_position(
         &self,
         random: &mut SessionRandom,
@@ -208,33 +231,43 @@ impl ScrollSimulator {
         viewport_height: f64,
     ) -> Vec<ScrollAction> {
         let mut actions = Vec::new();
-        let _rng = &mut random.rng;
-
         let delta = (target_y - current_y) as i64;
         if delta == 0 {
             return actions;
         }
 
-        // Scroll in chunks for long distances
+        let viewport_height = viewport_height.max(1.0);
         let chunk_size = (viewport_height * 0.8) as i64;
-        let _y = current_y as i64;
         let abs_delta = delta.abs();
+        let sign = delta.signum() as i64;
 
-        if abs_delta > chunk_size {
+        if abs_delta > chunk_size && chunk_size > 0 {
             let mut remaining = abs_delta;
             while remaining > 0 {
                 let chunk = chunk_size.min(remaining);
-                actions.extend(self.generate_actions(random, chunk * (delta.signum() as i64), viewport_height));
+                actions.extend(self.generate_actions_inner(
+                    random,
+                    chunk * sign,
+                    viewport_height,
+                    false,
+                ));
                 remaining -= chunk;
                 if remaining > 0 {
                     actions.push(ScrollAction::Pause {
-                        duration_ms: random.next_f64(100.0, 400.0) as u64,
+                        duration_ms: random.next_f64(80.0, 280.0) as u64,
                     });
                 }
             }
         } else {
-            actions.extend(self.generate_actions(random, delta, viewport_height));
+            actions.extend(self.generate_actions_inner(random, delta, viewport_height, false));
         }
+
+        let settle = (viewport_height * 8.0) as u64;
+        let lo = (settle as f64 * 0.4).max(40.0);
+        let hi = (settle as f64 * 1.2).max(lo + 1.0);
+        actions.push(ScrollAction::Pause {
+            duration_ms: random.next_f64(lo, hi) as u64,
+        });
 
         actions
     }

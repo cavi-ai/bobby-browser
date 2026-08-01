@@ -1,17 +1,31 @@
 //! Task scheduler for browser automation with job queues, retries, and concurrency limits.
 //!
 //! Provides a priority-based job queue with exponential backoff retry logic,
-//! configurable concurrency limits, and job lifecycle tracking.
+//! configurable concurrency limits, optional durable JSONL journaling, and
+//! job lifecycle tracking.
+//!
+//! # Durability
+//!
+//! - Default: in-memory ([`MemoryJobStore`]) — process restart loses the queue.
+//! - Optional: [`JournalJobStore`] via [`JobScheduler::open_journal`] or
+//!   [`SchedulerConfig::journal_path`] — append-only JSONL with fsync; on reopen,
+//!   `Running` jobs are recovered as `Pending`.
 
 mod job;
 mod queue;
 mod scheduler;
+mod store;
 
 pub use job::{Job, JobConfig, JobError, JobId, JobPriority, JobStatus};
 pub use queue::{JobQueue, RetryConfig};
 pub use scheduler::{JobHandler, JobScheduler};
+pub use store::{
+    JobEvent, JobStore, JournalJobStore, JournalRecord, MemoryJobStore, StoreError,
+    JOURNAL_SCHEMA_VERSION,
+};
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuration for the task scheduler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +43,12 @@ pub struct SchedulerConfig {
     pub retry_backoff_max_ms: u64,
     #[serde(default = "default_job_timeout_ms")]
     pub job_timeout_ms: u64,
+    /// How long `run` waits for in-flight work after shutdown before aborting.
+    #[serde(default = "default_drain_timeout_ms")]
+    pub drain_timeout_ms: u64,
+    /// When set, [`JobScheduler::from_config`] opens a journal at this path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_path: Option<PathBuf>,
 }
 
 impl Default for SchedulerConfig {
@@ -40,6 +60,8 @@ impl Default for SchedulerConfig {
             retry_backoff_base_ms: default_retry_base_ms(),
             retry_backoff_max_ms: default_retry_max_ms(),
             job_timeout_ms: default_job_timeout_ms(),
+            drain_timeout_ms: default_drain_timeout_ms(),
+            journal_path: None,
         }
     }
 }
@@ -68,6 +90,10 @@ fn default_job_timeout_ms() -> u64 {
     300000 // 5 minutes
 }
 
+fn default_drain_timeout_ms() -> u64 {
+    30000
+}
+
 impl SchedulerConfig {
     pub fn with_max_concurrent(mut self, count: usize) -> Self {
         self.max_concurrent_jobs = count;
@@ -92,6 +118,16 @@ impl SchedulerConfig {
 
     pub fn with_job_timeout(mut self, timeout_ms: u64) -> Self {
         self.job_timeout_ms = timeout_ms;
+        self
+    }
+
+    pub fn with_drain_timeout(mut self, timeout_ms: u64) -> Self {
+        self.drain_timeout_ms = timeout_ms;
+        self
+    }
+
+    pub fn with_journal_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.journal_path = Some(path.into());
         self
     }
 }

@@ -10,9 +10,9 @@ pub use worker::{
 };
 
 pub use behavioral_engine::{
-    BezierMouseSimulator, BehavioralConfig, MouseConfig, MousePath, MousePoint, ScrollAction,
-    ScrollConfig, ScrollSimulator, SessionRandom, TextConfig, TypingAction, TypingSimulator,
-    generate_session_seed,
+    compose_typed_text, generate_session_seed, BezierMouseSimulator, BehavioralConfig, MouseConfig,
+    MousePath, MousePoint, ScrollAction, ScrollConfig, ScrollSimulator, SessionRandom, TextConfig,
+    TypingAction, TypingSimulator,
 };
 
 pub fn required_extension_capabilities() -> worker_pool::RequiredCapabilities {

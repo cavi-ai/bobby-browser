@@ -282,9 +282,6 @@ dependencies = [
  "getrandom 0.3.4",
  "rand 0.9.5",
  "serde",
- "serde_json",
- "tokio",
- "types",
 ]
 
 [[package]]
@@ -3409,10 +3406,10 @@ dependencies = [
  "rand 0.9.5",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
- "types",
  "uuid",
 ]
 

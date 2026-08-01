@@ -233,6 +233,17 @@ impl BidiTransport for FakeBidi {
             );
         }
         if method == "script.callFunction" {
+            if params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+            {
+                return Ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": "{\"needed\":false,\"currentY\":0,\"targetY\":0,\"viewportHeight\":800,\"pageHeight\":800}"
+                    }
+                }));
+            }
             if let Some(response) = self.preflight.lock().await.pop_front() {
                 return response;
             }
@@ -1365,12 +1376,37 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[6].method, "script.callFunction");
-    assert_eq!(calls[7].method, "input.performActions");
-    assert_eq!(calls[7].params["context"], "context-1");
-    assert_eq!(calls[7].params["actions"][0]["type"], "pointer");
+    let preflight = calls
+        .iter()
+        .find(|call| {
+            call.method == "script.callFunction"
+                && call.params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+        })
+        .expect("native click must preflight the live element");
     assert_eq!(
-        calls[7].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        calls
+            .iter()
+            .find(|call| {
+                call.method == "script.callFunction"
+                    && call.params["functionDeclaration"]
+                        .as_str()
+                        .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+            })
+            .expect("native click must measure scroll before pointer input")
+            .params["arguments"][0]["sharedId"],
+        "element-1"
+    );
+    assert_eq!(preflight.params["arguments"][0]["sharedId"], "element-1");
+    let pointer = calls
+        .iter()
+        .find(|call| call.method == "input.performActions")
+        .expect("native click must emit pointer actions");
+    assert_eq!(pointer.params["context"], "context-1");
+    assert_eq!(pointer.params["actions"][0]["type"], "pointer");
+    assert_eq!(
+        pointer.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
         "element-1"
     );
     assert_engine_native(&evidence);
@@ -1408,13 +1444,20 @@ async fn native_click_scrolls_and_revalidates_a_below_fold_element_before_pointe
     let calls = bidi.calls().await;
     let preflight = calls
         .iter()
-        .find(|call| call.method == "script.callFunction")
+        .find(|call| {
+            call.method == "script.callFunction"
+                && call.params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+        })
         .expect("native click must preflight the live element");
     assert_eq!(preflight.params["arguments"][0]["sharedId"], "below-fold");
-    assert!(preflight.params["functionDeclaration"]
-        .as_str()
-        .unwrap()
-        .contains("scrollIntoView"));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+    }));
     let pointer = calls
         .iter()
         .find(|call| call.method == "input.performActions")
@@ -1534,8 +1577,21 @@ async fn semantic_click_resolves_test_id_to_verified_css_before_native_input() {
         .as_str()
         .unwrap()
         .contains("[data-testid=\\\"confirm\\\"]"));
-    assert_eq!(calls[6].method, "script.callFunction");
-    assert_eq!(calls[7].method, "input.performActions");
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+    }));
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "input.performActions"));
 }
 
 #[tokio::test]
@@ -2118,8 +2174,15 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
         .as_str()
         .unwrap()
         .contains("#confirm"));
-    assert_eq!(calls[7].method, "script.callFunction");
-    assert_eq!(calls[8].method, "input.performActions");
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+    }));
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "input.performActions"));
 }
 
 #[tokio::test]
@@ -2250,12 +2313,26 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[7].method, "script.callFunction");
-    assert_eq!(calls[8].method, "input.performActions");
-    assert_eq!(calls[8].params["actions"][0]["type"], "pointer");
-    assert_eq!(calls[9].method, "input.performActions");
-    assert_eq!(calls[9].params["actions"][0]["type"], "key");
-    let keys = calls[9].params["actions"][0]["actions"].as_array().unwrap();
+    let pointer = calls
+        .iter()
+        .find(|call| {
+            call.method == "input.performActions" && call.params["actions"][0]["type"] == "pointer"
+        })
+        .expect("type_text must focus with pointer actions");
+    let keys = calls
+        .iter()
+        .find(|call| {
+            call.method == "input.performActions" && call.params["actions"][0]["type"] == "key"
+        })
+        .expect("type_text must emit key actions");
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+    }));
+    assert_eq!(pointer.params["actions"][0]["type"], "pointer");
+    let keys = keys.params["actions"][0]["actions"].as_array().unwrap();
     assert!(keys.iter().any(|action| action["value"] == "a"));
     assert!(keys.iter().any(|action| action["value"] == "\u{e003}"));
     assert!(keys.iter().any(|action| action["value"] == "H"));
@@ -2423,6 +2500,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
             "script.evaluate",
             "script.evaluate",
             "script.evaluate",
+            "script.callFunction",
             "script.callFunction",
             "input.performActions"
         ]
