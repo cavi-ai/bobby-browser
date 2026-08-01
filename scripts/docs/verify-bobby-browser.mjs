@@ -6,9 +6,12 @@ import {
   DOCUMENTED_VERSION,
   OUTPUT_REL,
   PRODUCT_ID,
+  VERSIONED_REPO_DOCS,
   assertNavigationResolves,
   computeContentSha256,
+  findStaleVersionReferences,
   listFilesRecursive,
+  readRepoDoc,
   resolveReleaseIdentity,
 } from "./lib.mjs";
 
@@ -17,6 +20,16 @@ const COMMIT_SHA = /^[a-f0-9]{40}$/u;
 
 export async function verifyBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
   const release = releaseInput ? resolveReleaseIdentity(releaseInput) : null;
+  for (const relativePath of VERSIONED_REPO_DOCS) {
+    const text = await readRepoDoc(root, relativePath);
+    if (text === null) continue;
+    const stale = findStaleVersionReferences(text);
+    if (stale.length > 0) {
+      throw new Error(
+        `${relativePath} names a version other than ${DOCUMENTED_VERSION}: ${stale.join(", ")}`,
+      );
+    }
+  }
   const artifactRoot = path.join(root, OUTPUT_REL);
   const manifestPath = path.join(artifactRoot, "manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -64,7 +77,21 @@ const isMain =
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isMain) {
-  verifyBobbyBrowserDocs()
+  const values = Object.fromEntries(process.argv.slice(2).reduce((entries, option, index, args) => {
+    if (option.startsWith("--") && args[index + 1] && !args[index + 1].startsWith("--")) {
+      entries.push([option.slice(2), args[index + 1]]);
+    }
+    return entries;
+  }, []));
+  const releaseInput = Object.keys(values).length === 0 ? undefined : {
+    ...(values.version !== undefined ? { version: values.version } : {}),
+    ...(values.tag !== undefined ? { tag: values.tag } : {}),
+    ...(values.commit !== undefined ? { commit: values.commit } : {}),
+    ...(values["source-date-epoch"] !== undefined
+      ? { sourceDateEpoch: Number(values["source-date-epoch"]) }
+      : {}),
+  };
+  verifyBobbyBrowserDocs(REPO_ROOT, releaseInput)
     .then(({ contentSha256 }) => {
       console.log(`verified contentSha256=${contentSha256}`);
     })

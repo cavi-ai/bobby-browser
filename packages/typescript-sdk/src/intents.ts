@@ -1,8 +1,9 @@
 /**
  * Helpers that build CommandEnvelope wire shapes for unified intents.
  *
- * Agents submit these via `command_execute` / `BrowserRuntimeClient.submit` —
- * there are no dedicated intent_* MCP tools. Nested shape matches Rust serde:
+ * Over HTTP / TypeScript, submit via `BrowserRuntimeClient.submit`. Over MCP,
+ * prefer the dedicated `intent_*` tools; `command_execute` remains the escape
+ * hatch for nested envelopes. Nested shape matches Rust serde:
  * `{ kind: "intent", input: { kind: "locate", input: { … } } }`.
  */
 import {
@@ -10,6 +11,7 @@ import {
   MAX_INTENT_PURPOSE_BYTES,
   type CommandEnvelope,
   type CompleteFormIntent,
+  type AccessibilityTarget,
   type DismissObstructionIntent,
   type ExtractField,
   type ExtractIntent,
@@ -52,9 +54,18 @@ function defaultHints(): IntentHints {
   return {
     role: null,
     nearText: null,
+    ordinal: null,
     framePath: [],
     shadowPath: [],
     allowBestMatch: false,
+  };
+}
+
+export function intentHintsFromAccessibilityTarget(target: AccessibilityTarget): IntentHints {
+  return {
+    role: target.role,
+    nearText: { kind: "exact", value: target.accessibleName },
+    ...(target.ordinal === undefined ? {} : { ordinal: target.ordinal }),
   };
 }
 
@@ -92,24 +103,18 @@ export function fillRuntimeCommand(input: FillIntent): RuntimeCommand {
 }
 
 export function completeFormRuntimeCommand(input: CompleteFormIntent): RuntimeCommand {
-  if (input.fields.length === 0 || input.fields.length > 128) {
-    throw new Error("complete form fields must contain between 1 and 128 items");
-  }
+  assertIntentPurpose(input.purpose);
+  if (input.fields.length === 0) throw new Error("completeForm fields must not be empty");
+  if (input.fields.length > 128) throw new Error("completeForm fields must not exceed 128 items");
   const names = new Set<string>();
   const fields = input.fields.map((field) => {
-    if (field.name.length === 0 || names.has(field.name)) {
-      throw new Error("complete form field names must be non-empty and unique");
-    }
+    if (field.name.trim().length === 0) throw new Error("completeForm field name must not be empty");
+    if (names.has(field.name)) throw new Error(`duplicate completeForm field name: ${field.name}`);
     names.add(field.name);
     assertIntentPurpose(field.purpose);
-    return {
-      name: field.name,
-      purpose: field.purpose,
-      hints: withHints(field.hints),
-      value: normalizeFillValue(field.value),
-    };
+    return { ...field, hints: withHints(field.hints), value: normalizeFillValue(field.value) };
   });
-  return { kind: "intent", input: { kind: "completeForm", input: { fields } } };
+  return { kind: "intent", input: { kind: "completeForm", input: { purpose: input.purpose, fields } } };
 }
 
 function normalizeFillValue(value: FillValue): FillValue {
@@ -235,10 +240,6 @@ export function locateEnvelope(meta: IntentEnvelopeMeta, purpose: string, hints?
 
 export function fillEnvelope(meta: IntentEnvelopeMeta, purpose: string, value: FillValue, hints?: IntentHints): CommandEnvelope {
   return intentEnvelope(meta, fillRuntimeCommand({ purpose, value, hints }));
-}
-
-export function completeFormEnvelope(meta: IntentEnvelopeMeta, fields: CompleteFormIntent["fields"]): CommandEnvelope {
-  return intentEnvelope(meta, completeFormRuntimeCommand({ fields }));
 }
 
 export function submitAndVerifyEnvelope(

@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Quickstart
@@ -36,7 +36,7 @@ operator-controlled boundary. Do not expose it to untrusted networks.
 ## TypeScript client
 
 ```ts
-import { BrowserRuntimeClient } from "@bobby-browser/sdk";
+import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
 
 const client = new BrowserRuntimeClient({
   baseUrl: "http://127.0.0.1:7777",
@@ -45,7 +45,7 @@ const client = new BrowserRuntimeClient({
 const info = await client.runtimeInfo();
 ```
 
-The SDK sets `Authorization`, `x-interface-version` (`2026-07-23`),
+The SDK sets `Authorization`, `x-interface-version` (`{{INTERFACE_VERSION}}`),
 `x-correlation-id`, `x-deadline`, and `idempotency-key` on mutating POSTs. Raw
 HTTP callers must send those headers themselves — see [Authentication](../guides/auth.md).
 

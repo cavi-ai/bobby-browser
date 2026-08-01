@@ -56,7 +56,7 @@ importers:
 
   packages/interface-conformance:
     devDependencies:
-      '@bobby-browser/sdk':
+      '@cavi-ai/bobby-browser':
         specifier: workspace:*
         version: link:../typescript-sdk
       '@types/node':

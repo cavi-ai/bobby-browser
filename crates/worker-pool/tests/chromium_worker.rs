@@ -3,11 +3,11 @@ use network_engine::state::{HttpCookie, ResponseStateDelta};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use types::{
-    CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, ElementState, ErrorCode, EvaluateJavaScriptCommand, Evidence,
-    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode,
-    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
-    WaitForCommand, WaitUntil,
+    AccessibilityNode, AccessibilitySnapshotCommand, CaptureScreenshotCommand,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
+    ElementState, ErrorCode, EvaluateJavaScriptCommand, Evidence, InspectCommand, ListPagesCommand,
+    NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -353,6 +353,7 @@ async fn drives_a_real_chromium_page() {
                 target: None,
                 value: "Ada".into(),
                 clear_first: true,
+                expected_url: None,
             },
         )
         .await
@@ -445,6 +446,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     label: Some("Email address".into()),
@@ -526,7 +528,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select>".into(),
+                url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><option value=ca>Canada</option></select><label for=phone-home>Phone</label><input id=phone-home><label for=phone-work>Phone</label><input id=phone-work><label for=password>Password</label><input id=password type=password autocomplete=current-password value=vault-secret-92 required>".into(),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -566,10 +568,130 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         Some("radio")
     );
 
+    let invalid = worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                expected_url: None,
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Email address".into()),
+                    ..TargetSpec::default()
+                }),
+                value: "not-an-email".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(invalid.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, value }
+            if name == "formControlValid" && value == "false"
+    )));
+    assert!(invalid.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, value }
+            if name == "formControlValidationMessage" && !value.is_empty()
+    )));
+
+    let snapshot = worker
+        .a11y_snapshot(
+            &page_id,
+            &AccessibilitySnapshotCommand {
+                max_nodes: Some(128),
+            },
+        )
+        .await
+        .unwrap();
+    let nodes = snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("accessibility snapshot evidence");
+    fn find_form_node<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+    ) -> Option<&'a AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            (node.name.as_deref() == Some(name) && node.value.is_some())
+                .then_some(node)
+                .or_else(|| find_form_node(&node.children, name))
+        })
+    }
+    let email = find_form_node(nodes, "Email address").expect("email form node");
+    assert_eq!(email.value.as_deref(), Some("not-an-email"));
+    assert_eq!(email.required, Some(true));
+    assert_eq!(email.invalid, Some(true));
+    let password = find_form_node(nodes, "Password").expect("password form node");
+    assert_eq!(password.value.as_deref(), Some("[redacted]"));
+    assert!(!serde_json::to_string(nodes)
+        .unwrap()
+        .contains("vault-secret-92"));
+
+    fn collect_named<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+        output: &mut Vec<&'a AccessibilityNode>,
+    ) {
+        for node in nodes {
+            if node.name.as_deref() == Some(name) && node.target.is_some() {
+                output.push(node);
+            }
+            collect_named(&node.children, name, output);
+        }
+    }
+    let mut phones = Vec::new();
+    collect_named(nodes, "Phone", &mut phones);
+    assert_eq!(phones.len(), 2);
+    assert_eq!(phones[0].target.as_ref().unwrap().ordinal, Some(0));
+    assert_eq!(phones[1].target.as_ref().unwrap().ordinal, Some(1));
+    let work_phone = phones[1].target.as_ref().unwrap();
     worker
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some(work_phone.role.clone()),
+                    accessible_name: Some(work_phone.accessible_name.clone()),
+                    ordinal: work_phone.ordinal,
+                    ..TargetSpec::default()
+                }),
+                value: "555-0102".into(),
+                clear_first: true,
+            },
+        )
+        .await
+        .unwrap();
+    let candidates = worker
+        .collect_candidates(&page_id, &TargetSpec::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .find(|candidate| candidate.css.as_deref() == Some("#phone-home"))
+            .map(|candidate| candidate.text.as_str()),
+        Some("")
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .find(|candidate| candidate.css.as_deref() == Some("#phone-work"))
+            .map(|candidate| candidate.text.as_str()),
+        Some("555-0102")
+    );
+
+    worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     role: Some("combobox".into()),
@@ -601,6 +723,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
             .type_text(
                 &page_id,
                 &TypeTextCommand {
+                    expected_url: None,
                     selector: String::new(),
                     target: Some(TargetSpec {
                         role: Some(role.into()),
@@ -954,6 +1077,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         .type_text(
             &page_id,
             &TypeTextCommand {
+                expected_url: None,
                 selector: String::new(),
                 target: Some(TargetSpec {
                     label: Some("Name".into()),

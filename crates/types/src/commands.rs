@@ -7,6 +7,7 @@ use crate::{AttemptId, CommandId, PageId, SessionId, WorkflowId};
 pub const MAX_INTENT_PURPOSE_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CommandEnvelope {
     pub schema_version: u16,
@@ -32,6 +33,7 @@ impl CommandEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "input", rename_all = "camelCase")]
 pub enum RuntimeCommand {
     Primitive(PrimitiveCommand),
@@ -55,6 +57,7 @@ impl RuntimeCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "input", rename_all = "camelCase")]
 pub enum IntentCommand {
     Locate(LocateIntent),
@@ -86,17 +89,24 @@ impl IntentCommand {
     }
 }
 
+/// Every field is optional, and `#[serde(default)]` is what makes that true on
+/// the wire. Without it a caller sending `{"role":"textbox"}` — exactly what
+/// the published schema says is valid, since no hint is required — fails
+/// deserialization on the missing collection and boolean fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", default)]
 pub struct IntentHints {
     pub role: Option<String>,
     pub near_text: Option<TextMatch>,
+    pub ordinal: Option<usize>,
     pub frame_path: Vec<TargetSpec>,
     pub shadow_path: Vec<TargetSpec>,
     pub allow_best_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LocateIntent {
     pub purpose: String,
@@ -105,6 +115,7 @@ pub struct LocateIntent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FillIntent {
     pub purpose: String,
@@ -114,12 +125,7 @@ pub struct FillIntent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompleteFormIntent {
-    pub fields: Vec<CompleteFormField>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CompleteFormField {
     pub name: String,
@@ -130,6 +136,15 @@ pub struct CompleteFormField {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteFormIntent {
+    pub purpose: String,
+    pub fields: Vec<CompleteFormField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum FillValue {
     Text {
@@ -150,6 +165,7 @@ pub enum FillValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitAndVerifyIntent {
     pub purpose: String,
@@ -159,6 +175,7 @@ pub struct SubmitAndVerifyIntent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct WaitForStateIntent {
     pub condition: WaitCondition,
@@ -172,6 +189,7 @@ pub struct WaitForStateIntent {
 /// out") and therefore needs the pre-established checkpoint gate, or is
 /// ordinary navigation that can run without one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FollowIntent {
     pub purpose: String,
@@ -198,6 +216,7 @@ fn default_dismiss_timeout_ms() -> u64 {
 /// (removed from the DOM or no longer visible), not a caller-supplied
 /// expected post-dismiss state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DismissObstructionIntent {
     pub purpose: String,
@@ -211,6 +230,7 @@ pub struct DismissObstructionIntent {
 /// convenience over the common "attribute=href" case; anything else goes
 /// through `Attribute` directly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ExtractValueKind {
     Text,
@@ -222,6 +242,7 @@ pub enum ExtractValueKind {
 /// in the same `ExtractIntent` — effectively a per-field `LocateIntent` that
 /// also names what to read off the result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractField {
     pub name: String,
@@ -241,6 +262,7 @@ pub struct ExtractField {
 /// command. Callers get whatever the page currently offers instead of a
 /// result blocked on the least-available field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractIntent {
     pub purpose: String,
@@ -248,6 +270,7 @@ pub struct ExtractIntent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "input", rename_all = "camelCase")]
 pub enum PrimitiveCommand {
     Navigate(NavigateCommand),
@@ -260,6 +283,8 @@ pub enum PrimitiveCommand {
     ListPages(ListPagesCommand),
     ClosePage(ClosePageCommand),
     ActivatePage(ActivatePageCommand),
+    AccessibilitySnapshot(AccessibilitySnapshotCommand),
+    ExtractStructured(ExtractStructuredCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
     ClickAndWaitForDownload(ClickAndWaitForDownloadCommand),
     WaitFor(WaitForCommand),
@@ -312,6 +337,8 @@ impl PrimitiveCommand {
             | Self::ListPages(_)
             | Self::WaitFor(_)
             | Self::ActivatePage(_)
+            | Self::AccessibilitySnapshot(_)
+            | Self::ExtractStructured(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
             Self::DownloadUrl(_)
             | Self::TypeText(_)
@@ -330,6 +357,7 @@ impl PrimitiveCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadUrlCommand {
     pub url: String,
@@ -338,6 +366,7 @@ pub struct DownloadUrlCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum CommandClass {
     Replayable,
@@ -346,6 +375,7 @@ pub enum CommandClass {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct NavigateCommand {
     pub url: String,
@@ -354,6 +384,7 @@ pub struct NavigateCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum WaitUntil {
     Commit,
@@ -363,6 +394,7 @@ pub enum WaitUntil {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InspectCommand {
     pub selector: Option<String>,
@@ -371,6 +403,7 @@ pub struct InspectCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClickCommand {
     pub selector: String,
@@ -380,15 +413,24 @@ pub struct ClickCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TypeTextCommand {
     pub selector: String,
     pub target: Option<TargetSpec>,
     pub value: String,
     pub clear_first: bool,
+    /// Optional page-identity confirmation: when set, the command fails before
+    /// typing unless the page's current URL matches. This is the type-side
+    /// counterpart of `ClickCommand.expected_url` — agents that navigate away
+    /// mid-flow (or address the wrong session) fail instead of typing into
+    /// the wrong page.
+    #[serde(default)]
+    pub expected_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct UploadFilesCommand {
     pub selector: String,
@@ -397,27 +439,47 @@ pub struct UploadFilesCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct OpenPageCommand {
     pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ListPagesCommand;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClosePageCommand {
     pub page_id: PageId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ActivatePageCommand {
     pub page_id: PageId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AccessibilitySnapshotCommand {
+    pub max_nodes: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractStructuredCommand {
+    pub schema: serde_json::Value,
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClickAndWaitForPopupCommand {
     pub selector: String,
@@ -426,6 +488,7 @@ pub struct ClickAndWaitForPopupCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ClickAndWaitForDownloadCommand {
     pub selector: String,
@@ -434,6 +497,7 @@ pub struct ClickAndWaitForDownloadCommand {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TargetSpec {
     pub css: Option<String>,
@@ -454,6 +518,7 @@ pub struct TargetSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub enum TextMatch {
     Exact(String),
@@ -462,6 +527,7 @@ pub enum TextMatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ElementState {
     Attached,
@@ -473,6 +539,7 @@ pub enum ElementState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "PascalCase")]
 pub enum NetworkResourceType {
     Document,
@@ -555,6 +622,7 @@ impl std::str::FromStr for NetworkResourceType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum WaitCondition {
     Element {
@@ -605,6 +673,7 @@ pub enum WaitCondition {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct WaitForCommand {
     pub condition: WaitCondition,
@@ -612,6 +681,7 @@ pub struct WaitForCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ScreenshotMode {
     Viewport,
@@ -628,18 +698,21 @@ pub enum ScreenshotMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureScreenshotCommand {
     pub mode: ScreenshotMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SetFocusEmulationCommand {
     pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SetEmulatedMediaCommand {
     pub media: String,
@@ -647,6 +720,7 @@ pub struct SetEmulatedMediaCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EvaluateJavaScriptCommand {
     pub expression: String,
@@ -659,6 +733,7 @@ pub struct EvaluateJavaScriptCommand {
 /// (deny-by-default): a session must explicitly opt in to run JavaScript, even if
 /// the bearer token holds the `javascript:evaluate` capability.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPolicy {
     #[serde(default)]
@@ -668,6 +743,7 @@ pub struct ExecutionPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
     pub profile: String,
@@ -677,11 +753,13 @@ pub struct CreateSessionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpenPageRequest {
     pub session_id: SessionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NavigationRequest {
     pub page_id: PageId,
     pub url: String,
@@ -690,6 +768,7 @@ pub struct NavigationRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExtractRequest {
     pub page_id: PageId,
     pub fields: serde_json::Value,

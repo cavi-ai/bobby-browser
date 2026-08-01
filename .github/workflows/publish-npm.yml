@@ -25,12 +25,17 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @bobby-browser/sdk test
+      - run: pnpm --filter @cavi-ai/bobby-browser test
       - name: Dry-run pack
         working-directory: packages/typescript-sdk
         run: pnpm build && npm pack --dry-run
+      # Trusted publishing exchanges the job's OIDC identity for a
+      # short-lived credential. npm is restricting 2FA-bypass tokens, and the
+      # stored token now fails with EOTP, so there is no token path left for
+      # CI. Requires npm >= 11.5.1, which is newer than the version bundled
+      # with Node 22.
+      - name: Use an npm with OIDC support
+        run: npm install -g npm@latest
       - name: Publish
         working-directory: packages/typescript-sdk
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public

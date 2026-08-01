@@ -28,6 +28,7 @@ use tokio::{
     sync::{watch, Mutex as AsyncMutex, RwLock},
     task::JoinHandle,
 };
+use types::ProfileId;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, CommandId, ErrorCode, ErrorLayer, Evidence,
@@ -67,6 +68,13 @@ pub struct ExtensionObservation {
     pub controls: Vec<ExtensionControl>,
     #[serde(default)]
     pub html: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExtensionAccessibilitySnapshot {
+    nodes: Vec<types::AccessibilityNode>,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +128,22 @@ pub trait ExtensionObserver: Send + Sync {
         page_id: &PageId,
     ) -> Result<(), CommandError>;
 
+    /// Capture a compact accessibility tree for the page. Returns the tree
+    /// and whether it was truncated to the node bound.
+    async fn a11y_snapshot(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        max_nodes: u32,
+    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        let _ = (lease, page_id, max_nodes);
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "accessibility snapshot is not supported by this observer",
+            false,
+        ))
+    }
+
     /// Renew a live attachment lease, returning the extended lease. Observers
     /// that cannot renew leave leases to expire at their original TTL.
     async fn renew_lease(&self, lease: &AttachmentLease) -> Result<AttachmentLease, CommandError> {
@@ -168,11 +192,68 @@ impl ExtensionPageBinding for CompanionPageBinding {
 pub struct CompanionExtensionObserver {
     server: Arc<CompanionServerHandle>,
     timeout: Duration,
+    refreshed_leases: Arc<AsyncMutex<std::collections::HashMap<ProfileId, AttachmentLease>>>,
 }
 
 impl CompanionExtensionObserver {
     pub fn new(server: Arc<CompanionServerHandle>, timeout: Duration) -> Self {
-        Self { server, timeout }
+        Self {
+            server,
+            timeout,
+            refreshed_leases: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// The freshest attachment for this profile. After a companion re-pair
+    /// the original attachment is dead; `refresh_lease` replaces it and all
+    /// later dispatches use the replacement.
+    async fn effective_lease(&self, lease: &AttachmentLease) -> AttachmentLease {
+        self.refreshed_leases
+            .lock()
+            .await
+            .get(&lease.profile_id)
+            .cloned()
+            .unwrap_or_else(|| lease.clone())
+    }
+
+    async fn refresh_lease(
+        &self,
+        lease: &AttachmentLease,
+    ) -> Result<AttachmentLease, CompanionSessionError> {
+        let grant = self
+            .server
+            .grant_discovered_targets(&lease.profile_id)
+            .await?;
+        let fresh = self
+            .server
+            .registry()
+            .resolve_attachment(&grant.attachment_id)
+            .await
+            .map_err(|_| CompanionSessionError::GrantUnavailable)?;
+        self.refreshed_leases
+            .lock()
+            .await
+            .insert(lease.profile_id.clone(), fresh.clone());
+        Ok(fresh)
+    }
+
+    /// Dispatch an action, recovering once from a stale attachment when the
+    /// companion connection has cycled since the lease was issued.
+    async fn dispatch_with_refresh(
+        &self,
+        mut action: ActionRequest,
+        lease: &AttachmentLease,
+    ) -> Result<CompanionEvent, CompanionSessionError> {
+        let lease = self.effective_lease(lease).await;
+        action.attachment_id = lease.attachment_id.clone();
+        match self.server.dispatch_action(action.clone()).await {
+            Err(CompanionSessionError::ConnectionClosed) => {
+                let refreshed = self.refresh_lease(&lease).await?;
+                action.attachment_id = refreshed.attachment_id;
+                self.server.dispatch_action(action).await
+            }
+            result => result,
+        }
     }
 }
 
@@ -183,16 +264,20 @@ impl ExtensionObserver for CompanionExtensionObserver {
     }
 
     async fn renew_lease(&self, lease: &AttachmentLease) -> Result<AttachmentLease, CommandError> {
-        let grant = self
-            .server
-            .renew_grant(&lease.attachment_id)
-            .await
-            .map_err(session_error)?;
-        self.server
-            .registry()
-            .resolve_attachment(&grant.attachment_id)
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true))
+        let lease = self.effective_lease(lease).await;
+        match self.server.renew_grant(&lease.attachment_id).await {
+            Ok(grant) => self
+                .server
+                .registry()
+                .resolve_attachment(&grant.attachment_id)
+                .await
+                .map_err(|error| {
+                    driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true)
+                }),
+            Err(_) => self.refresh_lease(&lease).await.map_err(|error| {
+                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true)
+            }),
+        }
     }
 
     async fn begin_page_binding(
@@ -239,8 +324,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
-            .server
-            .dispatch_action(action)
+            .dispatch_with_refresh(action, lease)
             .await
             .map_err(session_error)?
         {
@@ -277,6 +361,69 @@ impl ExtensionObserver for CompanionExtensionObserver {
             _ => Err(driver_error(
                 ErrorCode::BrowserCommandFailed,
                 "extension returned an unexpected observation event",
+                false,
+            )),
+        }
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        max_nodes: u32,
+    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        if lease.expires_at <= Instant::now() {
+            return Err(lease_error());
+        }
+        let command_id = CommandId::new();
+        let action = ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            attachment_id: lease.attachment_id.clone(),
+            command_id: command_id.clone(),
+            page_id: page_id.clone(),
+            operation: "a11yTree".into(),
+            input: json!({"maxNodes": max_nodes}),
+            deadline_unix_ms: deadline_unix_ms(self.timeout),
+        };
+        match self
+            .dispatch_with_refresh(action, lease)
+            .await
+            .map_err(session_error)?
+        {
+            CompanionEvent::ActionCompleted(result)
+                if result.command_id == command_id
+                    && result.interaction_path == InteractionPath::ExtensionApi =>
+            {
+                let snapshot: ExtensionAccessibilitySnapshot =
+                    serde_json::from_value(result.output).map_err(|error| {
+                        driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            format!("invalid extension accessibility snapshot: {error}"),
+                            false,
+                        )
+                    })?;
+                if snapshot.nodes.len() > max_nodes as usize {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "extension accessibility snapshot exceeded its node bound",
+                        false,
+                    ));
+                }
+                Ok((snapshot.nodes, snapshot.truncated))
+            }
+            CompanionEvent::ActionCompleted(_) => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension accessibility snapshot returned an invalid execution path",
+                false,
+            )),
+            CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("extension accessibility snapshot failed ({code}): {message}"),
+                false,
+            )),
+            _ => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension returned an unexpected accessibility snapshot event",
                 false,
             )),
         }
@@ -1721,6 +1868,66 @@ fn require_remote_true(response: &Value, message: &'static str) -> Result<(), Co
     ))
 }
 
+async fn form_control_validity_evidence(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    selector_json: &str,
+) -> Result<Vec<Evidence>, CommandError> {
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)throw new Error('target detached');const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    let encoded = response
+        .pointer("/result/value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox form validity probe returned an invalid result",
+                false,
+            )
+        })?;
+    let decoded: Value = serde_json::from_str(encoded).map_err(|_| {
+        driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "Firefox form validity probe returned malformed JSON",
+            false,
+        )
+    })?;
+    let valid = decoded
+        .get("valid")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox form validity probe omitted validity",
+                false,
+            )
+        })?;
+    let message = decoded
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Ok(vec![
+        Evidence::Configuration {
+            name: "formControlValid".into(),
+            value: valid.to_string(),
+        },
+        Evidence::Configuration {
+            name: "formControlValidationMessage".into(),
+            value: message,
+        },
+    ])
+}
+
 async fn record_opening_context(
     pages: &Arc<RwLock<HashMap<PageId, PageContext>>>,
     page_id: &PageId,
@@ -2501,6 +2708,26 @@ impl BrowserWorker for FirefoxCompanionWorker {
             ));
         }
         let context = self.context(page_id).await?;
+        if let Some(expected) = &command.expected_url {
+            let tree = self
+                .transport
+                .send(
+                    "browsingContext.getTree",
+                    json!({"root": context, "maxDepth": 0}),
+                )
+                .await?;
+            let current = tree
+                .pointer("/contexts/0/url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if current != expected {
+                return Err(driver_error(
+                    ErrorCode::VerificationFailed,
+                    format!("page URL is {current}, not the expected {expected}"),
+                    false,
+                ));
+            }
+        }
         let (context, selector) = self
             .resolve_input_target(
                 page_id,
@@ -2521,13 +2748,18 @@ impl BrowserWorker for FirefoxCompanionWorker {
         })).await?;
         match selection.pointer("/result/value").and_then(Value::as_str) {
             Some("selected") => {
-                return Ok(vec![
+                let mut evidence = vec![
                     Evidence::Element {
                         selector: command.selector.clone(),
                         text: Some(command.value.clone()),
                     },
                     self.evidence(InteractionPath::ExtensionApi),
-                ])
+                ];
+                evidence.extend(
+                    form_control_validity_evidence(&self.transport, &context, &selector_json)
+                        .await?,
+                );
+                return Ok(evidence);
             }
             Some("missing") | Some("disabled") => {
                 return Err(driver_error(
@@ -2545,13 +2777,18 @@ impl BrowserWorker for FirefoxCompanionWorker {
             }
             Some("not-select") => {}
             Some(value @ ("checked:true" | "checked:false")) => {
-                return Ok(vec![
+                let mut evidence = vec![
                     Evidence::Element {
                         selector: command.selector.clone(),
                         text: Some(value.trim_start_matches("checked:").into()),
                     },
                     self.evidence(InteractionPath::ExtensionApi),
-                ])
+                ];
+                evidence.extend(
+                    form_control_validity_evidence(&self.transport, &context, &selector_json)
+                        .await?,
+                );
+                return Ok(evidence);
             }
             Some("invalid-checked") | Some("radio-uncheck") => {
                 return Err(driver_error(
@@ -2578,13 +2815,17 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 keyboard_actions(&context, &command.value, command.clear_first),
             )
             .await?;
-        Ok(vec![
+        let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: None,
             },
             self.evidence(InteractionPath::EngineNative),
-        ])
+        ];
+        evidence.extend(
+            form_control_validity_evidence(&self.transport, &context, &selector_json).await?,
+        );
+        Ok(evidence)
     }
 
     async fn wait_for(
@@ -2852,6 +3093,71 @@ impl BrowserWorker for FirefoxCompanionWorker {
             return Err(cleanup_failures_error(&failures));
         }
         Ok(vec![self.evidence(InteractionPath::EngineNative)])
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.context(page_id).await?;
+        let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
+        let (mut nodes, truncated) = self
+            .observer
+            .a11y_snapshot(&self.current_lease(), page_id, max_nodes)
+            .await?;
+        worker_pool::annotate_accessibility_targets(&mut nodes);
+        Ok(vec![
+            Evidence::AccessibilitySnapshot {
+                page_id: page_id.clone(),
+                nodes,
+                truncated,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+
+    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        let context = self.context(page_id).await?;
+        let response = self
+            .transport
+            .send(
+                "browsingContext.captureScreenshot",
+                json!({"context": context, "origin": "viewport"}),
+            )
+            .await?;
+        let encoded = response
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::ScreenshotCaptureFailed,
+                    "Firefox screenshot omitted PNG data",
+                    false,
+                )
+            })?;
+        if encoded.len() > MAX_SCREENSHOT_BYTES.saturating_mul(4) / 3 + 8 {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot exceeded its encoded bound",
+                false,
+            ));
+        }
+        let bytes = BASE64.decode(encoded).map_err(|_| {
+            driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot returned invalid base64",
+                false,
+            )
+        })?;
+        if bytes.len() > MAX_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot exceeded its byte bound",
+                false,
+            ));
+        }
+        Ok(bytes)
     }
 
     async fn activate_page(

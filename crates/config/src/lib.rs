@@ -77,6 +77,26 @@ pub struct AppConfig {
     pub interface: InterfaceConfig,
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    #[serde(default)]
+    pub vision: VisionConfig,
+}
+
+/// Vision-assist provider configuration. Deny by default: no endpoint means
+/// vision escalation is unavailable even when sessions and tokens opt in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VisionConfig {
+    #[serde(default, alias = "endpointUrl")]
+    pub endpoint_url: Option<String>,
+    /// Environment variable holding the provider bearer token. The token
+    /// itself is never stored in the config file.
+    #[serde(default, alias = "tokenEnv")]
+    pub token_env: Option<String>,
+    #[serde(default = "default_vision_timeout_ms", alias = "timeoutMs")]
+    pub timeout_ms: u64,
+}
+
+fn default_vision_timeout_ms() -> u64 {
+    15_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +357,7 @@ impl Default for AppConfig {
             http: HttpConfig::default(),
             interface: InterfaceConfig::default(),
             observability: ObservabilityConfig::default(),
+            vision: VisionConfig::default(),
         }
     }
 }

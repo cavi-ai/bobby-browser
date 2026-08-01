@@ -86,6 +86,12 @@ impl StartupCredential {
             .with_timezone(&Utc);
         Self::new(bearer, principal_id, capabilities, expires_at)
     }
+
+    /// When this credential stops working. Carries no bearer material, so
+    /// `bobby doctor` can warn before startup begins failing closed.
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
 }
 
 impl fmt::Debug for StartupCredential {

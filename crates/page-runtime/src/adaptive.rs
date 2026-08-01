@@ -84,15 +84,21 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
-        // Worker API returns artifact evidence only; PNG bytes for the vision
-        // provider are not yet plumbed through BrowserWorker (production providers
-        // are out of scope for this phase). Unit tests inject PNG via FakeBrowser.
+        // Real PNG bytes when the worker supports them; workers without byte
+        // plumbing keep the prior artifact-only behavior and vision providers
+        // receive an empty frame (their own confidence floor rejects).
+        let bytes = self
+            .lease
+            .worker()
+            .screenshot_bytes(page_id)
+            .await
+            .unwrap_or_default();
         let evidence = self
             .lease
             .worker()
             .capture_screenshot(page_id, command)
             .await?;
-        Ok((Vec::new(), evidence))
+        Ok((bytes, evidence))
     }
 }
 
@@ -129,6 +135,7 @@ pub struct PreparedHttpResult {
 pub struct AdaptivePageEngine {
     direct: Option<DirectComponents>,
     vision_assist: Option<Arc<dyn VisionAssist>>,
+    structured_extractor: Option<Arc<dyn intent_engine::StructuredExtractor>>,
 }
 
 #[derive(Clone)]
@@ -158,11 +165,20 @@ impl AdaptivePageEngine {
                 network,
             }),
             vision_assist: None,
+            structured_extractor: None,
         }
     }
 
     pub fn with_vision_assist(mut self, assist: Arc<dyn VisionAssist>) -> Self {
         self.vision_assist = Some(assist);
+        self
+    }
+
+    pub fn with_structured_extractor(
+        mut self,
+        extractor: Arc<dyn intent_engine::StructuredExtractor>,
+    ) -> Self {
+        self.structured_extractor = Some(extractor);
         self
     }
 
@@ -198,6 +214,18 @@ impl AdaptivePageEngine {
                 intent,
                 vision_gate,
                 self.vision_assist.clone(),
+            )
+            .await;
+        }
+        if let RuntimeCommand::Primitive(PrimitiveCommand::ExtractStructured(command)) =
+            &envelope.command
+        {
+            return extract_structured(
+                envelope,
+                lease,
+                command,
+                vision_gate,
+                self.structured_extractor.clone(),
             )
             .await;
         }
@@ -469,6 +497,9 @@ async fn browser_execute(
         PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await?,
         PrimitiveCommand::ClosePage(command) => lease.worker().close_page_command(command).await?,
         PrimitiveCommand::ActivatePage(command) => lease.worker().activate_page(command).await?,
+        PrimitiveCommand::AccessibilitySnapshot(command) => {
+            lease.worker().a11y_snapshot(page_id, command).await?
+        }
         PrimitiveCommand::ClickAndWaitForPopup(command) => {
             lease
                 .worker()
@@ -497,6 +528,9 @@ async fn browser_execute(
         PrimitiveCommand::EvaluateJavaScript(command) => {
             lease.worker().evaluate_javascript(page_id, command).await?
         }
+        PrimitiveCommand::ExtractStructured(_) => {
+            unreachable!("structured extraction is intercepted in execute")
+        }
         PrimitiveCommand::DownloadUrl(_) => {
             return Err(equivalence_unproven(reason).into());
         }
@@ -513,6 +547,143 @@ async fn browser_execute(
         reason,
         state_version,
         ExecutionMetrics::browser(bytes, sha256),
+    ));
+    Ok(AdaptiveExecution {
+        evidence,
+        used_browser: true,
+        prepared_http: None,
+    })
+}
+
+const MAX_EXTRACT_CONTENT_BYTES: usize = 16 * 1024;
+const MAX_EXTRACT_RESULT_BYTES: usize = 64 * 1024;
+const MAX_EXTRACT_SCHEMA_BYTES: usize = 16 * 1024;
+
+/// Structured extraction over the configured provider. Shares the vision
+/// double gate (session policy + token capability + configured provider)
+/// because page content leaves the runtime toward an external model.
+async fn extract_structured(
+    envelope: &CommandEnvelope,
+    lease: &WorkerLease,
+    command: &types::ExtractStructuredCommand,
+    vision_gate: VisionGate,
+    assist: Option<Arc<dyn intent_engine::StructuredExtractor>>,
+) -> Result<AdaptiveExecution, AdaptiveFailure> {
+    let denied = || {
+        AdaptiveFailure {
+        error: CommandError {
+            code: ErrorCode::VisionAssistDenied,
+            message: "structured extraction requires vision:assist capability, session vision policy, and a configured provider".into(),
+            layer: ErrorLayer::Workflow,
+            retryable: false,
+        },
+        evidence: Vec::new(),
+    }
+    };
+    if !vision_gate.session_ok || !vision_gate.capability_ok {
+        return Err(denied());
+    }
+    let Some(assist) = assist else {
+        return Err(denied());
+    };
+    let schema_bytes = serde_json::to_vec(&command.schema).map_err(|_| AdaptiveFailure {
+        error: CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "extraction schema is not serializable".into(),
+            layer: ErrorLayer::Workflow,
+            retryable: false,
+        },
+        evidence: Vec::new(),
+    })?;
+    if schema_bytes.len() > MAX_EXTRACT_SCHEMA_BYTES {
+        return Err(AdaptiveFailure {
+            error: CommandError {
+                code: ErrorCode::InvalidRequest,
+                message: format!("extraction schema exceeds {MAX_EXTRACT_SCHEMA_BYTES} bytes"),
+                layer: ErrorLayer::Workflow,
+                retryable: false,
+            },
+            evidence: Vec::new(),
+        });
+    }
+    jsonschema::validator_for(&command.schema).map_err(|_| AdaptiveFailure {
+        error: CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "extraction schema is not a valid JSON schema".into(),
+            layer: ErrorLayer::Workflow,
+            retryable: false,
+        },
+        evidence: Vec::new(),
+    })?;
+
+    let page_id = envelope.page_id.as_ref().expect("validated page id");
+    let mut evidence = lease
+        .worker()
+        .inspect(page_id, &types::InspectCommand::default())
+        .await?;
+    let content = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Inspection { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let content = if content.len() > MAX_EXTRACT_CONTENT_BYTES {
+        content[..MAX_EXTRACT_CONTENT_BYTES].to_owned()
+    } else {
+        content
+    };
+
+    let value = assist
+        .extract_structured(intent_engine::StructuredExtractRequest {
+            schema: command.schema.clone(),
+            content,
+            purpose: command.purpose.clone(),
+        })
+        .await?;
+
+    let validator = jsonschema::validator_for(&command.schema).map_err(|_| AdaptiveFailure {
+        error: CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "extraction schema is not a valid JSON schema".into(),
+            layer: ErrorLayer::Workflow,
+            retryable: false,
+        },
+        evidence: Vec::new(),
+    })?;
+    if validator.validate(&value).is_err() {
+        return Err(AdaptiveFailure {
+            error: CommandError {
+                code: ErrorCode::VerificationFailed,
+                message: "provider result does not match the extraction schema".into(),
+                layer: ErrorLayer::Workflow,
+                retryable: true,
+            },
+            evidence: Vec::new(),
+        });
+    }
+    let result_bytes = serde_json::to_vec(&value).unwrap_or_default();
+    if result_bytes.len() > MAX_EXTRACT_RESULT_BYTES {
+        return Err(AdaptiveFailure {
+            error: CommandError {
+                code: ErrorCode::VerificationFailed,
+                message: format!("provider result exceeds {MAX_EXTRACT_RESULT_BYTES} bytes"),
+                layer: ErrorLayer::Workflow,
+                retryable: false,
+            },
+            evidence: Vec::new(),
+        });
+    }
+    evidence.push(Evidence::StructuredExtraction {
+        page_id: page_id.clone(),
+        value,
+        truncated: false,
+    });
+    evidence.push(execution_evidence(
+        ExecutionPath::Chromium,
+        ExecutionReason::IneligibleCommand,
+        0,
+        ExecutionMetrics::browser(None, None),
     ));
     Ok(AdaptiveExecution {
         evidence,

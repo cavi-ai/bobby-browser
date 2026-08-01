@@ -13,6 +13,7 @@ import {
   fillEnvelope,
   followEnvelope,
   followRuntimeCommand,
+  intentHintsFromAccessibilityTarget,
   locateEnvelope,
   locateRuntimeCommand,
   submitAndVerifyEnvelope,
@@ -28,6 +29,17 @@ const META = {
   deadline: "2026-07-16T12:00:00Z",
 };
 
+test("intentHintsFromAccessibilityTarget preserves duplicate-control identity", () => {
+  assert.deepEqual(
+    intentHintsFromAccessibilityTarget({ role: "textbox", accessibleName: "Phone", ordinal: 1 }),
+    {
+      role: "textbox",
+      nearText: { kind: "exact", value: "Phone" },
+      ordinal: 1,
+    },
+  );
+});
+
 test("locateRuntimeCommand matches Rust golden nested wire shape", () => {
   const command = locateRuntimeCommand({ purpose: "Continue" });
   assert.deepEqual(command, {
@@ -39,6 +51,7 @@ test("locateRuntimeCommand matches Rust golden nested wire shape", () => {
         hints: {
           role: null,
           nearText: null,
+          ordinal: null,
           framePath: [],
           shadowPath: [],
           allowBestMatch: false,
@@ -67,6 +80,7 @@ test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
         hints: {
           role: null,
           nearText: null,
+          ordinal: null,
           framePath: [],
           shadowPath: [],
           allowBestMatch: false,
@@ -145,6 +159,7 @@ test("followRuntimeCommand matches Rust golden nested wire shape", () => {
         hints: {
           role: null,
           nearText: null,
+          ordinal: null,
           framePath: [],
           shadowPath: [],
           allowBestMatch: false,
@@ -175,6 +190,7 @@ test("followEnvelope forwards boundary:true verbatim", () => {
         hints: {
           role: null,
           nearText: null,
+          ordinal: null,
           framePath: [],
           shadowPath: [],
           allowBestMatch: false,
@@ -200,6 +216,7 @@ test("dismissObstructionRuntimeCommand matches Rust golden nested wire shape", (
         hints: {
           role: null,
           nearText: null,
+          ordinal: null,
           framePath: [],
           shadowPath: [],
           allowBestMatch: false,
@@ -223,6 +240,7 @@ test("dismissObstructionEnvelope forwards an explicit timeoutMs verbatim", () =>
         hints: {
           role: null,
           nearText: null,
+          ordinal: null,
           framePath: [],
           shadowPath: [],
           allowBestMatch: false,
@@ -254,6 +272,7 @@ test("extractRuntimeCommand matches Rust golden nested wire shape", () => {
             hints: {
               role: null,
               nearText: null,
+              ordinal: null,
               framePath: [],
               shadowPath: [],
               allowBestMatch: false,
@@ -266,6 +285,7 @@ test("extractRuntimeCommand matches Rust golden nested wire shape", () => {
             hints: {
               role: null,
               nearText: null,
+              ordinal: null,
               framePath: [],
               shadowPath: [],
               allowBestMatch: false,
@@ -324,6 +344,7 @@ test("extractEnvelope builds a full CommandEnvelope with an attribute field", ()
             hints: {
               role: null,
               nearText: null,
+              ordinal: null,
               framePath: [],
               shadowPath: [],
               allowBestMatch: false,

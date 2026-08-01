@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Configuration
@@ -10,20 +10,74 @@ malformed file fails startup and names the path.
 
 The committed
 [`config.toml`](https://github.com/cavi-ai/bobby-browser/blob/main/config.toml)
-documents every field and mirrors `AppConfig` (`crates/config`).
+is the canonical field list and mirrors `AppConfig` (`crates/config`). Values
+below match `AppConfig::default()` unless you override them.
 
-## Common overrides
+## `[server]`
 
-| Section | Fields | Default idea |
+| Field | Default | Meaning |
 |---|---|---|
-| `[server]` | `host`, `port` | `127.0.0.1:7777` |
-| `[browser]` | `headless`, `max_active`, profile/upload/download/artifact dirs | headless, bounded workers |
-| `[browser]` | `max_js_result_bytes`, `max_js_timeout_ms` | JS eval bounds |
-| `[storage]` | `journal_path`, `checkpoints_dir`, `authority_path` | under `./data/storage` |
-| `[interface]` | `max_request_bytes`, `max_event_batch`, `max_event_retention` | 1 MiB / 256 / 16k |
-| `[interface]` | `max_principals`, `max_in_flight_per_principal` | capacity / fairness |
-| `[http]` | outbound allowlists and body/timeout caps | egress policy |
-| engine selection | `AUTOMATION_RUNTIME_BROWSER_SELECTION` JSON | default exact **Firefox** |
+| `host` | `127.0.0.1` | Bind host (keep loopback unless you control the network) |
+| `port` | `7777` | HTTP listen port (`/healthz`, `/v1/*`) |
+
+## `[browser]`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `profiles_dir` | `./data/profiles` | Per-profile browser state |
+| `headless` | `true` | No visible window |
+| `max_active` | `8` | Max concurrent browser workers |
+| `upload_roots` | `["./data/uploads"]` | Allowed roots for file upload |
+| `downloads_dir` | `./data/downloads` | Download output directory |
+| `artifacts_dir` | `./data/artifacts` | Screenshots and other artifacts |
+| `max_artifact_bytes` | `8388608` | Max single artifact size |
+| `max_screenshot_dimension` | `16384` | Max screenshot width/height |
+| `max_js_result_bytes` | `65536` | JS eval result bound |
+| `max_js_timeout_ms` | `30000` | Clamp for JS `timeout_ms` |
+
+Engine choice is **not** a TOML field — use
+`AUTOMATION_RUNTIME_BROWSER_SELECTION` JSON (default exact **Firefox**).
+
+## `[storage]`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `journal_path` | `./data/storage/commands.jsonl` | Append-only command journal |
+| `checkpoints_dir` | `./data/storage/checkpoints` | Journal checkpoints |
+| `authority_path` | `./data/storage/authority.json` | Authority storage |
+
+## `[http]` (outbound)
+
+Controls egress from the runtime (downloads, fetches), not the broker listen
+socket: `allow_loopback`, `allow_private_network`, redirect/body/timeout caps,
+`max_concurrent_requests`. Defaults deny private/loopback egress.
+
+## `[vision]`
+
+Deny-by-default HTTP vision-assist provider. Unset `endpoint_url` means
+escalation is unavailable even when the bearer and session opt in.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `endpoint_url` | unset | Provider URL — **https**, or **http only on loopback** |
+| `token_env` | unset | Env var name holding the provider bearer (never store the token here) |
+| `timeout_ms` | `15000` | Per-proposal HTTP timeout |
+
+Request / response shapes and confidence floor: [Intent commands](intents.md#vision-provider).
+Capability + session gates: [Capabilities](../concepts/capabilities.md).
+
+## `[interface]`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_request_bytes` | `1048576` | Max inbound request body |
+| `max_event_batch` | `256` | Max events per batch read |
+| `max_event_retention` | `16384` | Retained events per principal stream |
+| `max_connections` | `64` | Concurrent interface connections |
+| `token_records_path` | `./data/storage/authorities.json` | Issued principal records |
+| `max_principals` | `16` | Max enrolled principals |
+| `max_in_flight_per_principal` | `8` | Fairness / concurrency cap |
+| `max_rejection_workers` | `16` | Concurrent rejection / policy-worker permits (must be > 0) |
 
 ## Bootstrap env (not in config.toml)
 

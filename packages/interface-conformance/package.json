@@ -1,6 +1,6 @@
 {
   "name": "@bobby-browser/interface-conformance",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -19,7 +19,7 @@
     "test:release": "cargo test -p runtime-tests --test interface_security --test interface_capacity --test interface_recovery --test interface_performance && cargo test -p runtime-tests --test interface_security real_security_release_matrix_executes_every_production_boundary -- --ignored --exact --nocapture && cargo test -p runtime-tests --test interface_recovery installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal -- --ignored --exact --nocapture && pnpm run test && pnpm run test:performance"
   },
   "devDependencies": {
-    "@bobby-browser/sdk": "workspace:*",
+    "@cavi-ai/bobby-browser": "workspace:*",
     "@types/node": "26.1.2",
     "playwright-core": "1.62.0",
     "puppeteer-core": "25.4.0",

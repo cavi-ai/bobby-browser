@@ -19,10 +19,11 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use types::{
     AttemptId, Capability, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError,
-    CommandId, CommandOutcome, CreateSessionRequest, Evidence, FillIntent, FillValue,
-    IdempotencyKey, InspectCommand, IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent,
-    NavigateCommand, OpenPageRequest, PageId, PrincipalId, RequestContext, RuntimeCommand,
-    SessionId, TypeTextCommand, WorkerId, WorkflowCheckpoint, WorkflowId,
+    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, CreateSessionRequest,
+    Evidence, FillIntent, FillValue, IdempotencyKey, InspectCommand, IntentCommand, IntentHints,
+    InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrincipalId,
+    RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId, WorkflowCheckpoint,
+    WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -1247,6 +1248,24 @@ fn fill_files_intent_envelope(session_id: SessionId) -> CommandEnvelope {
     }
 }
 
+fn complete_form_files_intent_envelope(session_id: SessionId) -> CommandEnvelope {
+    CommandEnvelope {
+        session_id,
+        command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "Complete application".into(),
+            fields: vec![CompleteFormField {
+                name: "resume".into(),
+                purpose: "Resume".into(),
+                hints: IntentHints::default(),
+                value: FillValue::Files {
+                    paths: vec!["./data/uploads/cv.pdf".into()],
+                },
+            }],
+        })),
+        ..submit_request()
+    }
+}
+
 #[tokio::test]
 async fn fill_files_intent_without_file_upload_capability_is_denied_before_dispatch() {
     let runtime = RuntimeService::default();
@@ -1273,6 +1292,40 @@ async fn fill_files_intent_without_file_upload_capability_is_denied_before_dispa
 
     let error = api
         .submit(context, fill_files_intent_envelope(session.id))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileUpload));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn complete_form_files_without_file_upload_capability_is_denied_before_dispatch() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::IntentExecute,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let error = api
+        .submit(context, complete_form_files_intent_envelope(session.id))
         .await
         .unwrap_err();
 
@@ -1533,4 +1586,63 @@ async fn delete_session_rejects_another_principals_session_as_not_found() {
         .await
         .iter()
         .any(|listed| listed.id == session.id));
+}
+
+#[tokio::test]
+async fn recovery_status_returns_the_checkpoint_and_requires_ownership() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: SessionId::new(),
+        page_id: PageId::new(),
+        restart_url: "https://example.test".into(),
+        current_url: "https://example.test".into(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Replayable,
+        invariants: Vec::new(),
+        replayable_inputs: Vec::new(),
+        evidence: Vec::new(),
+        recovery_history: Vec::new(),
+        recovery_receipts: Vec::new(),
+        created_at: Utc::now(),
+    };
+    store.save(&checkpoint).await.unwrap();
+    let runtime = RuntimeService::with_recovery(
+        Default::default(),
+        Default::default(),
+        RecoveryCoordinator::new(store),
+    );
+    let authority = AuthorityStore::in_memory();
+    let principal = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000041"));
+    let token = authority
+        .issue(principal.clone(), [Capability::RecoveryRead], expiry())
+        .await
+        .unwrap()
+        .expose_once();
+    let handle = authority.verify(&token).await.unwrap();
+    let (_ownership, recorder) = SessionOwnershipRegistry::bounded(4);
+    recorder
+        .record_authenticated_session(principal, checkpoint.session_id.clone())
+        .unwrap();
+    let api = AuthenticatedRuntime::with_session_ownership(runtime, handle.clone(), recorder);
+
+    let status = api
+        .recovery_status(
+            handle.context(expiry(), None),
+            checkpoint.workflow_id.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(status.checkpoint.checkpoint_id, checkpoint.checkpoint_id);
+    assert!(status.receipts.is_empty());
+
+    let missing = api
+        .recovery_status(handle.context(expiry(), None), WorkflowId::new())
+        .await;
+    assert!(missing.is_err());
 }

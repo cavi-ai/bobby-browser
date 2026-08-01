@@ -424,6 +424,19 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
+        if let Some(expected) = &command.expected_url {
+            let current = page
+                .url()
+                .await
+                .map_err(command_failed)?
+                .unwrap_or_default();
+            if &current != expected {
+                return Err(driver_error(
+                    ErrorCode::VerificationFailed,
+                    format!("page URL is {current}, not the expected {expected}"),
+                ));
+            }
+        }
         let resolved = self
             .resolve_target(page_id, page, &command.selector, command.target.as_ref())
             .await?;
@@ -443,10 +456,19 @@ impl BrowserWorker for ChromiumWorker {
                 .await?;
             resolved.value(page).await?.unwrap_or_default()
         };
+        let validity = resolved.form_control_validity(page).await?;
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: Some(observed),
+            },
+            Evidence::Configuration {
+                name: "formControlValid".into(),
+                value: validity.valid.to_string(),
+            },
+            Evidence::Configuration {
+                name: "formControlValidationMessage".into(),
+                value: validity.validation_message,
             },
             resolved.evidence,
         ])
@@ -522,6 +544,52 @@ impl BrowserWorker for ChromiumWorker {
             page_id: evidence.page_id,
             url: evidence.url,
             title: evidence.title,
+        }])
+    }
+
+    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let bytes = page
+            .screenshot(
+                ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .build(),
+            )
+            .await
+            .map_err(screenshot_error)?;
+        if bytes.len() > MAX_VISION_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "screenshot exceeded the vision byte bound",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let result = page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
+            )
+            .await
+            .map_err(command_failed)?
+            .result;
+        let max_nodes = command
+            .max_nodes
+            .unwrap_or(DEFAULT_A11Y_MAX_NODES)
+            .clamp(1, MAX_A11Y_NODES) as usize;
+        let (nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
+        Ok(vec![Evidence::AccessibilitySnapshot {
+            page_id: page_id.clone(),
+            nodes,
+            truncated,
         }])
     }
 
@@ -1490,6 +1558,183 @@ fn timeout_error(timeout_ms: u64) -> CommandError {
     }
 }
 
+const MAX_VISION_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
+
+const DEFAULT_A11Y_MAX_NODES: u32 = 256;
+const MAX_A11Y_NODES: u32 = 2048;
+
+/// Collapses Chrome's flat AXNode list into the engine-shared compact tree.
+/// Nodes Chrome marks ignored are skipped (their children are re-parented
+/// upward); generic containers without names are kept only as structure.
+fn compact_ax_tree(
+    raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+    max_nodes: usize,
+) -> (Vec<types::AccessibilityNode>, bool) {
+    use chromiumoxide::cdp::browser_protocol::accessibility::AxNode;
+    use std::collections::HashMap;
+
+    fn text(
+        value: &Option<chromiumoxide::cdp::browser_protocol::accessibility::AxValue>,
+    ) -> Option<String> {
+        value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn property_text(node: &AxNode, name: &str) -> Option<String> {
+        node.properties
+            .as_ref()?
+            .iter()
+            .find(|property| property.name.as_ref() == name)?
+            .value
+            .value
+            .as_ref()
+            .and_then(|value| match value {
+                serde_json::Value::String(value) => Some(value.clone()),
+                serde_json::Value::Bool(value) => Some(value.to_string()),
+                serde_json::Value::Number(value) => Some(value.to_string()),
+                _ => None,
+            })
+    }
+
+    fn property_bool(node: &AxNode, name: &str) -> Option<bool> {
+        property_text(node, name).and_then(|value| match value.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+    }
+
+    let mut target_totals = std::collections::BTreeMap::new();
+    for node in raw {
+        let role = text(&node.role);
+        let name = text(&node.name);
+        if let (Some(role), Some(name)) = (role, name) {
+            if !node.ignored
+                && super::accessibility_role_is_actionable(&role)
+                && !name.is_empty()
+                && name != "[redacted]"
+            {
+                *target_totals.entry((role, name)).or_default() += 1;
+            }
+        }
+    }
+
+    let by_id: HashMap<&str, &AxNode> = raw
+        .iter()
+        .map(|node| (node.node_id.as_ref(), node))
+        .collect();
+    let mut budget = max_nodes;
+    fn build(
+        id: &str,
+        by_id: &HashMap<&str, &AxNode>,
+        budget: &mut usize,
+        depth: usize,
+    ) -> Option<types::AccessibilityNode> {
+        let node = by_id.get(id)?;
+        let mut children = Vec::new();
+        if depth < 64 {
+            if let Some(child_ids) = &node.child_ids {
+                for child_id in child_ids {
+                    if let Some(mut child) = build(child_id.as_ref(), by_id, budget, depth + 1) {
+                        if child.role.is_none() && child.name.is_none() {
+                            children.append(&mut child.children);
+                        } else {
+                            children.push(child);
+                        }
+                    }
+                }
+            }
+        }
+        if node.ignored {
+            return (!children.is_empty()).then_some(types::AccessibilityNode {
+                children,
+                ..types::AccessibilityNode::default()
+            });
+        }
+        let role = text(&node.role);
+        let name = text(&node.name);
+        let autocomplete = property_text(node, "autocomplete");
+        let raw_value = text(&node.value);
+        let masked_value = raw_value.as_deref().is_some_and(|value| {
+            !value.is_empty()
+                && value
+                    .chars()
+                    .all(|character| matches!(character, '•' | '●' | '*' | '◦'))
+        });
+        let password_control = autocomplete
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("password"));
+        let value = if masked_value || password_control {
+            raw_value.map(|_| "[redacted]".to_owned())
+        } else {
+            raw_value
+        };
+        // Skip unlabeled generic wrappers; keep their children by re-parenting.
+        if matches!(
+            role.as_deref(),
+            None | Some("generic" | "InlineTextBox" | "none")
+        ) && name.is_none()
+        {
+            return (!children.is_empty()).then_some(types::AccessibilityNode {
+                children,
+                ..types::AccessibilityNode::default()
+            });
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        Some(types::AccessibilityNode {
+            role,
+            name,
+            target: None,
+            value,
+            description: text(&node.description),
+            required: property_bool(node, "required"),
+            disabled: property_bool(node, "disabled"),
+            read_only: property_bool(node, "readonly"),
+            invalid: property_text(node, "invalid").map(|value| value != "false"),
+            checked: property_bool(node, "checked"),
+            autocomplete,
+            value_min: property_text(node, "valuemin"),
+            value_max: property_text(node, "valuemax"),
+            children,
+        })
+    }
+
+    fn lift(node: types::AccessibilityNode, lifted: &mut Vec<types::AccessibilityNode>) {
+        lifted.push(node);
+    }
+
+    let roots: Vec<&str> = raw
+        .iter()
+        .filter(|node| {
+            node.parent_id
+                .as_ref()
+                .is_none_or(|parent| !by_id.contains_key(parent.as_ref()))
+        })
+        .map(|node| node.node_id.as_ref())
+        .collect();
+    let mut roots_built: Vec<types::AccessibilityNode> = Vec::new();
+    for root in &roots {
+        if let Some(mut node) = build(root, &by_id, &mut budget, 0) {
+            // Re-parent children of skipped nodes upward.
+            if node.role.is_none() && node.name.is_none() {
+                roots_built.append(&mut node.children);
+            } else {
+                lift(node, &mut roots_built);
+            }
+        }
+    }
+    let truncated = budget == 0 && raw.len() > max_nodes;
+    super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals);
+    (roots_built, truncated)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1500,9 +1745,88 @@ mod tests {
     };
 
     use super::{
-        apply_state_commit, clamp_js_timeout_ms, snapshot_cookie, text_matches, HttpBridgeState,
+        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, snapshot_cookie, text_matches,
+        HttpBridgeState,
     };
     use types::{ErrorCode, TextMatch};
+
+    #[test]
+    fn accessibility_snapshot_preserves_form_state_and_redacts_masked_values() {
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> = serde_json::from_value(serde_json::json!([{
+            "nodeId": "root",
+            "ignored": true,
+            "childIds": ["1", "2"]
+        }, {
+            "nodeId": "1",
+            "ignored": false,
+            "parentId": "root",
+            "role": {"type": "role", "value": "textbox"},
+            "name": {"type": "computedString", "value": "Password"},
+            "description": {"type": "computedString", "value": "At least eight characters"},
+            "value": {"type": "string", "value": "••••••••"},
+            "properties": [
+                {"name": "required", "value": {"type": "boolean", "value": true}},
+                {"name": "invalid", "value": {"type": "token", "value": "true"}},
+                {"name": "readonly", "value": {"type": "boolean", "value": false}},
+                {"name": "autocomplete", "value": {"type": "token", "value": "current-password"}}
+            ]
+        }, {
+            "nodeId": "2",
+            "ignored": false,
+            "parentId": "root",
+            "role": {"type": "role", "value": "textbox"},
+            "name": {"type": "computedString", "value": "Password"},
+            "value": {"type": "string", "value": "••••"}
+        }])).expect("valid CDP AX fixture");
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 10);
+        assert!(!truncated);
+        assert_eq!(nodes[0].value.as_deref(), Some("[redacted]"));
+        assert_eq!(
+            nodes[0].description.as_deref(),
+            Some("At least eight characters")
+        );
+        assert_eq!(nodes[0].required, Some(true));
+        assert_eq!(nodes[0].invalid, Some(true));
+        assert_eq!(nodes[0].read_only, Some(false));
+        assert_eq!(nodes[0].autocomplete.as_deref(), Some("current-password"));
+        assert_eq!(nodes[0].target.as_ref().unwrap().role, "textbox");
+        assert_eq!(
+            nodes[0].target.as_ref().unwrap().accessible_name,
+            "Password"
+        );
+        assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
+        assert_eq!(nodes[1].target.as_ref().unwrap().ordinal, Some(1));
+    }
+
+    #[test]
+    fn accessibility_snapshot_keeps_global_ordinal_when_duplicate_is_truncated() {
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
+            serde_json::from_value(serde_json::json!([{
+                "nodeId": "root",
+                "ignored": true,
+                "childIds": ["1", "2"]
+            }, {
+                "nodeId": "1",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "textbox"},
+                "name": {"type": "computedString", "value": "Phone"}
+            }, {
+                "nodeId": "2",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "textbox"},
+                "name": {"type": "computedString", "value": "Phone"}
+            }]))
+            .expect("valid CDP AX fixture");
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 1);
+
+        assert!(truncated);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
+    }
 
     // The underlying reap/register/kill mechanics are engine-agnostic and
     // tested directly in `process_registry`. These tests cover only the

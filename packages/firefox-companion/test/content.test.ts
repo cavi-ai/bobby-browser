@@ -426,3 +426,90 @@ test("content fallback actions resolve stable targets inside the isolated docume
   assert.equal(clicked, true);
   assert.equal((document.querySelector("#name") as HTMLInputElement).value, "Ada");
 });
+
+test("a11yTree builds a bounded, hidden-aware, redacting accessibility tree", () => {
+  const document = documentFor(`
+    <main>
+      <h1>Sign in</h1>
+      <form>
+        <label for="email">Email address</label>
+        <input id="email" type="email" value="user@example.test">
+        <input id="secret" type="password" value="hunter2">
+        <button>Continue</button>
+      </form>
+      <span hidden>not visible</span>
+    </main>
+  `);
+
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 64 }) as {
+    nodes: Array<{ role?: string; name?: string; children?: unknown[] }>;
+    truncated: boolean;
+  };
+
+  assert.equal(result.truncated, false);
+  const root = result.nodes[0]!;
+  assert.equal(root.role, "main");
+  const serialized = JSON.stringify(result.nodes);
+  assert.match(serialized, /"role":"heading"/);
+  assert.match(serialized, /"role":"textbox"/);
+  assert.match(serialized, /"role":"button"/);
+  assert.match(serialized, /Email address/);
+  assert.doesNotMatch(serialized, /hunter2/);
+  assert.doesNotMatch(serialized, /not visible/);
+
+  const bounded = executeContentAction(document, "a11yTree", { maxNodes: 1 }) as {
+    truncated: boolean;
+  };
+  assert.equal(bounded.truncated, true);
+});
+
+test("a11yTree exposes bounded form state without leaking sensitive values", () => {
+  const secret = "vault-secret-92";
+  const document = documentFor(`
+    <form>
+      <label for="email">Email address</label>
+      <input id="email" type="email" value="broken" required autocomplete="email">
+      <label><input id="terms" type="checkbox" checked disabled> Accept terms</label>
+      <label for="password">Password</label>
+      <input id="password" type="password" value="${secret}" required>
+    </form>
+  `);
+
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 64 }) as {
+    nodes: Array<Record<string, unknown>>;
+    truncated: boolean;
+  };
+  const encoded = JSON.stringify(result.nodes);
+
+  assert.match(encoded, /"name":"Email address"/);
+  assert.match(encoded, /"value":"broken"/);
+  assert.match(encoded, /"required":true/);
+  assert.match(encoded, /"invalid":true/);
+  assert.match(encoded, /"autocomplete":"email"/);
+  assert.match(encoded, /"checked":true/);
+  assert.match(encoded, /"disabled":true/);
+  assert.match(encoded, /"value":"\[redacted\]"/);
+  assert.equal(encoded.includes(secret), false);
+});
+
+test("a11yTree keeps the global ordinal when a duplicate is truncated", () => {
+  const document = documentFor(`
+    <label for="home-phone">Phone</label><input id="home-phone">
+    <label for="work-phone">Phone</label><input id="work-phone">
+  `);
+
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 1 }) as {
+    nodes: Array<{
+      target?: { role: string; accessibleName: string; ordinal?: number };
+    }>;
+    truncated: boolean;
+  };
+
+  assert.equal(result.truncated, true);
+  assert.equal(result.nodes.length, 1);
+  assert.deepEqual(result.nodes[0]?.target, {
+    role: "textbox",
+    accessibleName: "Phone",
+    ordinal: 0,
+  });
+});

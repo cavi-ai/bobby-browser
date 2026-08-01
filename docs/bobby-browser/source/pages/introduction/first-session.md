@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.3.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # First browser session
@@ -30,7 +30,7 @@ CORRELATION=$(uuidgen | tr '[:upper:]' '[:lower:]')
 DEADLINE=$(date -u -v+60S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+60 seconds' +%Y-%m-%dT%H:%M:%SZ)
 curl -sS http://127.0.0.1:7777/v1/runtime \
   -H "Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}" \
-  -H "x-interface-version: 2026-07-23" \
+  -H "x-interface-version: {{INTERFACE_VERSION}}" \
   -H "x-correlation-id: ${CORRELATION}" \
   -H "x-deadline: ${DEADLINE}"
 ```
@@ -40,13 +40,13 @@ curl -sS http://127.0.0.1:7777/v1/runtime \
 Install the published package, or use the workspace package from this repo:
 
 ```bash
-npm install @bobby-browser/sdk
+npm install @cavi-ai/bobby-browser
 # workspace:
-# pnpm --filter @bobby-browser/sdk…  (from monorepo root after pnpm install)
+# pnpm --filter @cavi-ai/bobby-browser…  (from monorepo root after pnpm install)
 ```
 
 ```ts
-import { BrowserRuntimeClient } from "@bobby-browser/sdk";
+import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
 import { randomUUID } from "node:crypto";
 
 const client = new BrowserRuntimeClient({
@@ -90,10 +90,48 @@ const outcome = await client.submit(
 );
 
 console.log(outcome.status, outcome);
+
+// Optional: compact accessibility tree (primitive accessibilitySnapshot)
+await client.submit(
+  {
+    schemaVersion: 2,
+    commandId: randomUUID(),
+    workflowId: randomUUID(),
+    attemptId: randomUUID(),
+    sessionId: session.id,
+    pageId: page.id,
+    deadline: new Date(Date.now() + 60_000).toISOString(),
+    command: {
+      kind: "primitive",
+      input: { kind: "accessibilitySnapshot", input: { maxNodes: 256 } },
+    },
+  },
+  { idempotencyKey: randomUUID() },
+);
+
+// Optional: bring a background page forward (primitive activatePage)
+await client.submit(
+  {
+    schemaVersion: 2,
+    commandId: randomUUID(),
+    workflowId: randomUUID(),
+    attemptId: randomUUID(),
+    sessionId: session.id,
+    pageId: page.id,
+    deadline: new Date(Date.now() + 60_000).toISOString(),
+    command: {
+      kind: "primitive",
+      input: { kind: "activatePage", input: { pageId: page.id } },
+    },
+  },
+  { idempotencyKey: randomUUID() },
+);
+
+await client.deleteSession(session.id);
 ```
 
 For goal-oriented steps, use intent helpers (`locateEnvelope`, …) from
-`@bobby-browser/sdk` — they still submit via `client.submit` and need
+`@cavi-ai/bobby-browser` — they still submit via `client.submit` and need
 `intent:execute` (included in default bootstrap). See [Intent commands](../guides/intents.md).
 
 ## 3. Parallel MCP path
@@ -108,11 +146,16 @@ Order:
 1. `initialize` (protocol `2025-11-25`) — required before tools
 2. `tools/call` → `session_create` with `{ "profile": "default" }`
 3. `tools/call` → `page_open` with `{ "sessionId": "…" }`
-4. `tools/call` → `command_execute` with a `CommandEnvelope` (same shape as TS)
-5. Optionally `events_read` / `checkpoint_save` / `workflow_recover`
+4. Prefer flat tools: `navigate`, `a11y_snapshot`, `click` / `type_text` /
+   `upload_files` (selector or snapshot `target`), and `intent_*` for
+   goal-oriented steps — they mint the envelope server-side
+5. Use `command_execute` when you need a nested primitive / intent envelope
+   the flat tools do not cover
+6. Optionally `events_read` / `checkpoint_save` / `workflow_recover` (pass a
+   returned `workflowId` to keep continuity)
 
-There are no dedicated intent MCP tools; intents go only through
-`command_execute`. Full catalog: [MCP tools](../surfaces/mcp-tools.md).
+Full catalog: [MCP tools](../surfaces/mcp-tools.md). Intents:
+[Intent commands](../guides/intents.md).
 
 ## 4. Outcome and recovery
 

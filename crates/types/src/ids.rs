@@ -4,6 +4,7 @@ use uuid::Uuid;
 macro_rules! uuid_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+        #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
         #[serde(transparent)]
         pub struct $name(pub Uuid);
 

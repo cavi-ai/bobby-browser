@@ -11,6 +11,7 @@ pub const CURRENT_INTERFACE_VERSION: &str = "2026-07-23";
 
 /// The only interface version accepted by this phase's wire contract.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InterfaceVersion;
 
 impl InterfaceVersion {
@@ -59,6 +60,7 @@ impl<'de> Deserialize<'de> for InterfaceVersion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct CorrelationId(Uuid);
 
@@ -80,6 +82,7 @@ impl Default for CorrelationId {
 
 /// A caller-provided key that can safely identify a repeated request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IdempotencyKey(String);
 
 impl IdempotencyKey {
@@ -134,6 +137,7 @@ impl<'de> Deserialize<'de> for IdempotencyKey {
 #[derive(
     Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
 )]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct EventCursor(pub u64);
 
@@ -148,6 +152,7 @@ impl From<u64> for EventCursor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RequestContext {
     pub interface_version: InterfaceVersion,
@@ -231,6 +236,7 @@ impl InterfaceOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum InterfaceEvent {
     CommandOutcome {
@@ -248,6 +254,7 @@ pub enum InterfaceEvent {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum InterfaceErrorCode {
     InvalidRequest,
@@ -267,6 +274,7 @@ pub enum InterfaceErrorCode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InterfaceError {
     pub code: InterfaceErrorCode,

@@ -6,6 +6,49 @@ use types::{
 };
 
 #[test]
+fn compile_complete_form_preserves_order_and_rejects_duplicate_names() {
+    let field = |name: &str, label: &str| CompleteFormField {
+        name: name.into(),
+        purpose: format!("fill {name}"),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            near_text: Some(TextMatch::Exact(label.into())),
+            ..Default::default()
+        },
+        value: FillValue::Text {
+            text: name.into(),
+            clear_first: true,
+        },
+    };
+    let plan = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "complete application".into(),
+        fields: vec![field("name", "Full name"), field("email", "Email address")],
+    }))
+    .unwrap();
+    let IntentPlan::CompleteForm { fields } = plan else {
+        panic!("expected complete form")
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["name", "email"]
+    );
+    assert_eq!(
+        fields[0].target.accessible_name.as_deref(),
+        Some("Full name")
+    );
+
+    let error = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "complete application".into(),
+        fields: vec![field("name", "Full name"), field("name", "Email address")],
+    }))
+    .unwrap_err();
+    assert!(matches!(error, CompileError::DuplicateFieldName(name) if name == "name"));
+}
+
+#[test]
 fn compile_locate_uses_purpose_as_accessible_name_hint() {
     let plan = compile_intent(&IntentCommand::Locate(LocateIntent {
         purpose: "Continue".into(),
@@ -92,92 +135,27 @@ fn compile_fill_uses_near_text_as_the_control_name_without_conflating_task_purpo
 }
 
 #[test]
-fn compile_complete_form_preserves_ordered_field_targets_and_values() {
-    let plan = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
-        fields: vec![
-            CompleteFormField {
-                name: "email".into(),
-                purpose: "enter email".into(),
-                hints: IntentHints {
-                    role: Some("textbox".into()),
-                    near_text: Some(TextMatch::Exact("Email address".into())),
-                    ..IntentHints::default()
-                },
-                value: FillValue::Text {
-                    text: "ada@example.test".into(),
-                    clear_first: true,
-                },
-            },
-            CompleteFormField {
-                name: "terms".into(),
-                purpose: "accept terms".into(),
-                hints: IntentHints {
-                    role: Some("checkbox".into()),
-                    near_text: Some(TextMatch::Exact("Accept terms".into())),
-                    ..IntentHints::default()
-                },
-                value: FillValue::Checked { checked: true },
-            },
-        ],
+fn compile_fill_preserves_snapshot_ordinal_for_duplicate_controls() {
+    let plan = compile_intent(&IntentCommand::Fill(FillIntent {
+        purpose: "enter the work phone".into(),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            near_text: Some(TextMatch::Exact("Phone".into())),
+            ordinal: Some(1),
+            ..IntentHints::default()
+        },
+        value: FillValue::Text {
+            text: "555-0102".into(),
+            clear_first: true,
+        },
     }))
     .expect("compile");
-    let IntentPlan::CompleteForm { fields } = plan else {
-        panic!("expected CompleteForm plan");
+    let IntentPlan::Fill { target, .. } = plan else {
+        panic!("expected Fill plan");
     };
-    assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].name, "email");
-    assert_eq!(
-        fields[0].target.accessible_name.as_deref(),
-        Some("Email address")
-    );
-    assert_eq!(fields[1].name, "terms");
-    assert!(matches!(
-        fields[1].value,
-        FillValue::Checked { checked: true }
-    ));
-}
-
-#[test]
-fn compile_complete_form_rejects_empty_and_duplicate_fields() {
-    assert_eq!(
-        compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
-            fields: vec![]
-        }))
-        .unwrap_err(),
-        CompileError::NoCompleteFormFields
-    );
-    let field = CompleteFormField {
-        name: "email".into(),
-        purpose: "enter email".into(),
-        hints: IntentHints::default(),
-        value: FillValue::Text {
-            text: "a@b.co".into(),
-            clear_first: true,
-        },
-    };
-    assert_eq!(
-        compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
-            fields: vec![field.clone(), field],
-        }))
-        .unwrap_err(),
-        CompileError::DuplicateCompleteFormFieldName("email".into())
-    );
-    let field = CompleteFormField {
-        name: "field".into(),
-        purpose: "fill field".into(),
-        hints: IntentHints::default(),
-        value: FillValue::Text {
-            text: "value".into(),
-            clear_first: true,
-        },
-    };
-    assert_eq!(
-        compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
-            fields: vec![field; 129],
-        }))
-        .unwrap_err(),
-        CompileError::TooManyCompleteFormFields
-    );
+    assert_eq!(target.role.as_deref(), Some("textbox"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Phone"));
+    assert_eq!(target.ordinal, Some(1));
 }
 
 #[test]

@@ -93,6 +93,22 @@ fn explicit_ordinal_and_best_match_are_auditable() {
 }
 
 #[test]
+fn ordinal_uses_candidate_collection_order_instead_of_lexical_internal_ids() {
+    let candidates = vec![
+        candidate("control-2", "Phone", true),
+        candidate("control-10", "Phone", true),
+    ];
+    let second = TargetSpec {
+        ordinal: Some(1),
+        ..target("Phone")
+    };
+
+    assert!(
+        matches!(resolve_candidates(&second, &candidates, &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "control-10")
+    );
+}
+
+#[test]
 fn text_and_attribute_constraints_filter_candidates() {
     let mut matching = candidate("match", "Save", true);
     matching.text = "Save changes".into();

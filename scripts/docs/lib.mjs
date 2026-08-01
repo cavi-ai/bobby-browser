@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -13,32 +14,178 @@ function workspacePackageVersion() {
   return match[1];
 }
 
+function rootPackageJsonVersion() {
+  const manifest = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  if (typeof manifest.version !== "string" || !manifest.version) {
+    throw new Error("package.json version is required");
+  }
+  return manifest.version;
+}
+
+function readInterfaceVersion() {
+  const ts = readFileSync(
+    path.join(REPO_ROOT, "packages/typescript-sdk/src/contracts.ts"),
+    "utf8",
+  );
+  const rust = readFileSync(path.join(REPO_ROOT, "crates/types/src/interface.rs"), "utf8");
+  const tsMatch = ts.match(/export const INTERFACE_VERSION = "([^"]+)"\s+as const/);
+  const rustMatch = rust.match(
+    /pub const CURRENT_INTERFACE_VERSION:\s*&str\s*=\s*"([^"]+)"/,
+  );
+  if (!tsMatch) throw new Error("INTERFACE_VERSION not found in typescript-sdk contracts");
+  if (!rustMatch) throw new Error("CURRENT_INTERFACE_VERSION not found in types::interface");
+  if (tsMatch[1] !== rustMatch[1]) {
+    throw new Error(
+      `interface version drift: typescript=${tsMatch[1]} rust=${rustMatch[1]}`,
+    );
+  }
+  return tsMatch[1];
+}
+
+const cargoVersion = workspacePackageVersion();
+const npmVersion = rootPackageJsonVersion();
+if (cargoVersion !== npmVersion) {
+  throw new Error(
+    `package version drift: Cargo.toml=${cargoVersion} package.json=${npmVersion}`,
+  );
+}
+
 export const PRODUCT_ID = "bobby-browser";
-export const DOCUMENTED_VERSION = workspacePackageVersion();
+export const DOCUMENTED_VERSION = cargoVersion;
+export const INTERFACE_VERSION = readInterfaceVersion();
 export const SOURCE_REL = "docs/bobby-browser/source";
 export const OUTPUT_REL = `docs/bobby-browser/v${DOCUMENTED_VERSION}`;
+export const PRODUCT_VERSION_TOKEN = "{{PRODUCT_VERSION}}";
+export const INTERFACE_VERSION_TOKEN = "{{INTERFACE_VERSION}}";
+
 const STABLE_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const COMMIT_SHA = /^[a-f0-9]{40}$/u;
 
+function git(command, args) {
+  return execFileSync("git", [command, ...args], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  }).trim();
+}
+
+/** Release identity derived from workspace version + current git HEAD. */
+export function defaultReleaseIdentity() {
+  const commit = git("rev-parse", ["HEAD"]);
+  if (!COMMIT_SHA.test(commit)) {
+    throw new Error("git HEAD must resolve to a full lowercase SHA");
+  }
+  const sourceDateEpoch = Number(git("show", ["-s", "--format=%ct", commit]));
+  if (!Number.isSafeInteger(sourceDateEpoch) || sourceDateEpoch < 0) {
+    throw new Error("git commit timestamp must be a non-negative integer");
+  }
+  return Object.freeze({
+    version: DOCUMENTED_VERSION,
+    tag: `v${DOCUMENTED_VERSION}`,
+    commit,
+    sourceDateEpoch,
+    generatedAt: new Date(sourceDateEpoch * 1000).toISOString(),
+  });
+}
+
+/**
+ * @param {Partial<{version:string,tag:string,commit:string,sourceDateEpoch:number}>|undefined|null} input
+ */
 export function resolveReleaseIdentity(input) {
-  if (!input || typeof input !== "object") throw new Error("release identity is required");
-  if (input.version !== DOCUMENTED_VERSION || !STABLE_VERSION.test(input.version)) {
+  const defaults = defaultReleaseIdentity();
+  const version = input?.version ?? defaults.version;
+  const tag = input?.tag ?? `v${version}`;
+  const commit = input?.commit ?? defaults.commit;
+  const sourceDateEpoch = input?.sourceDateEpoch ?? defaults.sourceDateEpoch;
+
+  if (version !== DOCUMENTED_VERSION || !STABLE_VERSION.test(version)) {
     throw new Error(`release version must be ${DOCUMENTED_VERSION}`);
   }
-  if (input.tag !== `v${input.version}`) throw new Error("release tag must match version");
-  if (typeof input.commit !== "string" || !COMMIT_SHA.test(input.commit)) {
+  if (tag !== `v${version}`) throw new Error("release tag must match version");
+  if (typeof commit !== "string" || !COMMIT_SHA.test(commit)) {
     throw new Error("release commit must be a full lowercase SHA");
   }
-  if (!Number.isSafeInteger(input.sourceDateEpoch) || input.sourceDateEpoch < 0) {
+  if (!Number.isSafeInteger(sourceDateEpoch) || sourceDateEpoch < 0) {
     throw new Error("source date epoch must be a non-negative integer");
   }
   return Object.freeze({
-    version: input.version,
-    tag: input.tag,
-    commit: input.commit,
-    sourceDateEpoch: input.sourceDateEpoch,
-    generatedAt: new Date(input.sourceDateEpoch * 1000).toISOString(),
+    version,
+    tag,
+    commit,
+    sourceDateEpoch,
+    generatedAt: new Date(sourceDateEpoch * 1000).toISOString(),
   });
+}
+
+/** Replace product/interface version tokens with live constants. */
+export function stampVersionTokens(text) {
+  return text
+    .replaceAll(PRODUCT_VERSION_TOKEN, DOCUMENTED_VERSION)
+    .replaceAll(INTERFACE_VERSION_TOKEN, INTERFACE_VERSION);
+}
+
+/**
+ * Repo-root documents that carry the product version but are not built from
+ * `docs/bobby-browser/source`, so they never see `{{PRODUCT_VERSION}}`. They
+ * held `0.2.1` through the whole 0.3.0 line until this was mechanised.
+ */
+export const VERSIONED_REPO_DOCS = Object.freeze([
+  "README.md",
+  `docs/${PRODUCT_ID}/CONSUMER.md`,
+]);
+
+const SEMVER = String.raw`(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)`;
+/** A literal backtick cannot appear inside the template literals below. */
+const TICK = "`";
+
+/**
+ * Every shape a product version appears in outside the built artifact. Each is
+ * anchored to surrounding literal text so no unrelated version is rewritten.
+ */
+const VERSION_REFERENCES = Object.freeze([
+  new RegExp(`(docs/${PRODUCT_ID}/v)${SEMVER}`, "gu"),
+  new RegExp(`(${PRODUCT_ID}-docs-v)${SEMVER}`, "gu"),
+  new RegExp(`(${PRODUCT_ID} ${TICK})${SEMVER}(${TICK})`, "gu"),
+  new RegExp(`(documented version, ${TICK})${SEMVER}(${TICK})`, "gu"),
+]);
+
+/** Rewrite every product-version reference in a repo-root document. */
+export function stampVersionReferences(text) {
+  return VERSION_REFERENCES.reduce(
+    (current, pattern) =>
+      current.replace(pattern, (...args) => {
+        // Replacer args are [match, ...groups, offset, whole]; a pattern with
+        // one group would otherwise splice the offset in as the suffix.
+        const groups = args.slice(1, -2);
+        return `${groups[0]}${DOCUMENTED_VERSION}${groups[1] ?? ""}`;
+      }),
+    text,
+  );
+}
+
+/**
+ * Reads a repo-root document, or null when the root has none. Fixture roots
+ * carry only the source tree.
+ * @param {string} root @param {string} relativePath
+ */
+export async function readRepoDoc(root, relativePath) {
+  try {
+    return await readFile(path.join(root, relativePath), "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/** Version references that still name some other version. */
+export function findStaleVersionReferences(text) {
+  /** @type {string[]} */
+  const stale = [];
+  for (const pattern of VERSION_REFERENCES) {
+    for (const match of text.matchAll(pattern)) {
+      if (!match[0].includes(DOCUMENTED_VERSION)) stale.push(match[0]);
+    }
+  }
+  return stale;
 }
 
 /** @param {string} root @param {string} directory */
