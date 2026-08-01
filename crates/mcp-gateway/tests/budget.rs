@@ -44,7 +44,7 @@ async fn fixture_server(capabilities: Vec<Capability>) -> Server {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
         .issue(
-            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000031")),
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000032")),
             capabilities,
             Utc::now() + Duration::hours(1),
         )
