@@ -522,6 +522,18 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::GetCookies(_)
+            | PrimitiveCommand::SetCookies(_)
+            | PrimitiveCommand::DeleteCookies(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::CookieState { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("cookie command returned no cookie state"))
+                }
+            }
             PrimitiveCommand::ExtractStructured(_) => {
                 if evidence
                     .iter()

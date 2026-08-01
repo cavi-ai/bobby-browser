@@ -286,6 +286,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "intentExecution": return hasExactKeys(value, ["kind", "record"]) && isExecutionRecord(value.record);
     case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
+    case "cookieState": return hasExactKeys(value, ["kind", "pageId", "cookies"], []) && (value.pageId === null || isUuid(value.pageId)) && Array.isArray(value.cookies) && value.cookies.every(isCookieRecord);
     default: return false;
   }
 }
@@ -295,6 +296,18 @@ export function isRecoveryStatus(value: unknown): value is RecoveryStatus {
     && isUuid(value.workflowId)
     && isWorkflowCheckpoint(value.checkpoint)
     && Array.isArray(value.receipts);
+}
+
+function isCookieRecord(value: unknown): boolean {
+  return hasExactKeys(value, ["name", "value", "domain", "path", "secure", "httpOnly"], ["sameSite", "expiresUnix"])
+    && isString(value.name)
+    && isString(value.value)
+    && isString(value.domain)
+    && isString(value.path)
+    && typeof value.secure === "boolean"
+    && typeof value.httpOnly === "boolean"
+    && (value.sameSite === undefined || isString(value.sameSite))
+    && (value.expiresUnix === undefined || (typeof value.expiresUnix === "number" && Number.isFinite(value.expiresUnix)));
 }
 
 function isAccessibilityNode(value: unknown, depth = 0): boolean {

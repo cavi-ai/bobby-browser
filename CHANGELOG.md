@@ -1,13 +1,14 @@
 # Changelog
 
 ## 0.3.1 - 2026-08-01
-
 ### Documentation
-
 - Publish a new immutable docs artifact that names `@cavi-ai/bobby-browser`
   throughout (the `v0.3.0` release asset still referenced `@bobby-browser/sdk`).
 - Carry forward post-`0.3.0` doc coverage already on main (`recovery_status`,
   MCP agent-surface catalog fixes, truncation ordinal notes) into `v0.3.1`.
+## Unreleased
+- Add cookie primitives (`getCookies`, `setCookies`, `deleteCookies`) on Chromium (CDP Network) and Firefox (BiDi storage), exposed as MCP `cookie_get`/`cookie_set`/`cookie_delete` with `cookieState` evidence.
+>>>>>> 27941c6 (feat(cookies): cookie primitives on Chromium and Firefox)
 
 ## 0.3.0 - 2026-08-01
 

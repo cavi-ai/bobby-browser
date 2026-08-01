@@ -547,6 +547,100 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn get_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let mut params = chromiumoxide::cdp::browser_protocol::network::GetCookiesParams::default();
+        if !command.urls.is_empty() {
+            params.urls = Some(command.urls.clone());
+        }
+        let result = page.execute(params).await.map_err(command_failed)?.result;
+        Ok(vec![Evidence::CookieState {
+            page_id: Some(page_id.clone()),
+            cookies: result.cookies.into_iter().map(cookie_record).collect(),
+        }])
+    }
+
+    async fn set_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        if command.cookies.len() > 128 {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "cookie set exceeds the 128-cookie bound",
+            ));
+        }
+        let params = chromiumoxide::cdp::browser_protocol::network::SetCookiesParams {
+            cookies: command.cookies.iter().map(set_cookie_param).collect(),
+        };
+        page.execute(params).await.map_err(command_failed)?;
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command
+                    .cookies
+                    .iter()
+                    .map(|cookie| cookie.url.clone())
+                    .collect(),
+            },
+        )
+        .await
+    }
+
+    async fn delete_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let current = self
+            .get_cookies(
+                page_id,
+                &types::GetCookiesCommand {
+                    urls: command.urls.clone(),
+                },
+            )
+            .await?;
+        let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
+            return Ok(current);
+        };
+        for cookie in cookies {
+            if !command.names.is_empty() && !command.names.contains(&cookie.name) {
+                continue;
+            }
+            let mut params =
+                chromiumoxide::cdp::browser_protocol::network::DeleteCookiesParams::new(
+                    &cookie.name,
+                );
+            params.url = command.urls.first().cloned().or_else(|| {
+                Some(format!(
+                    "https://{}{}",
+                    cookie.domain.trim_start_matches('.'),
+                    cookie.path
+                ))
+            });
+            params.domain = Some(cookie.domain.clone());
+            params.path = Some(cookie.path.clone());
+            page.execute(params).await.map_err(command_failed)?;
+        }
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command.urls.clone(),
+            },
+        )
+        .await
+    }
+
     async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
         let pages = self.pages.lock().await;
         let page = pages.get(page_id).ok_or_else(page_missing)?;
@@ -1753,6 +1847,42 @@ fn compact_ax_tree(
     let truncated = budget == 0 && raw.len() > max_nodes;
     super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals);
     (roots_built, truncated)
+}
+
+fn cookie_record(
+    cookie: chromiumoxide::cdp::browser_protocol::network::Cookie,
+) -> types::CookieRecord {
+    types::CookieRecord {
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path,
+        secure: cookie.secure,
+        http_only: cookie.http_only,
+        same_site: cookie.same_site.map(|value| format!("{value:?}")),
+        expires_unix: Some(cookie.expires),
+    }
+}
+
+fn set_cookie_param(
+    param: &types::SetCookieParam,
+) -> chromiumoxide::cdp::browser_protocol::network::CookieParam {
+    use chromiumoxide::cdp::browser_protocol::network::{
+        CookieParam, CookieSameSite, TimeSinceEpoch,
+    };
+    let mut built = CookieParam::new(&param.name, &param.value);
+    built.url = Some(param.url.clone());
+    built.path = param.path.clone();
+    built.secure = Some(param.secure);
+    built.http_only = Some(param.http_only);
+    built.same_site = param.same_site.as_deref().and_then(|value| match value {
+        "Strict" | "strict" => Some(CookieSameSite::Strict),
+        "Lax" | "lax" => Some(CookieSameSite::Lax),
+        "None" | "none" => Some(CookieSameSite::None),
+        _ => None,
+    });
+    built.expires = param.expires_unix.map(TimeSinceEpoch::new);
+    built
 }
 
 #[cfg(test)]
