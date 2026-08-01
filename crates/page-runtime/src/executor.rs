@@ -522,6 +522,16 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::HandleDialog(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Dialog { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("dialog command returned no dialog evidence"))
+                }
+            }
             PrimitiveCommand::PrintToPdf(_) => {
                 if evidence
                     .iter()

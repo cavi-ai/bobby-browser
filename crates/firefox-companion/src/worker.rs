@@ -531,6 +531,11 @@ enum PageContext {
     Releasing { context: Option<String> },
 }
 
+struct PendingPrompt {
+    prompt_type: String,
+    message: String,
+}
+
 pub struct FirefoxCompanionWorker {
     id: WorkerId,
     profile_dir: PathBuf,
@@ -539,6 +544,7 @@ pub struct FirefoxCompanionWorker {
     observer: Arc<dyn ExtensionObserver>,
     pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
     page_cleanups: Arc<RwLock<HashMap<PageId, OpenPageCleanup>>>,
+    pending_prompts: Arc<RwLock<HashMap<String, PendingPrompt>>>,
     closed: AtomicBool,
     lifecycle: AsyncMutex<()>,
     shutdown: Arc<WorkerShutdown>,
@@ -997,7 +1003,7 @@ impl FirefoxCompanionWorker {
         let subscription = transport
             .send(
                 "session.subscribe",
-                json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd"]}),
+                json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened"]}),
             )
             .await?;
         if !subscription.is_object() {
@@ -1009,6 +1015,8 @@ impl FirefoxCompanionWorker {
         }
         let pages = Arc::new(RwLock::new(HashMap::<PageId, PageContext>::new()));
         let page_cleanups = Arc::new(RwLock::new(HashMap::<PageId, OpenPageCleanup>::new()));
+        let pending_prompts = Arc::new(RwLock::new(HashMap::<String, PendingPrompt>::new()));
+        let cleanup_prompts = Arc::clone(&pending_prompts);
         let cleanup_pages = Arc::clone(&pages);
         let cleanup_registry = Arc::clone(&page_cleanups);
         let cleanup_transport = Arc::clone(&transport);
@@ -1023,6 +1031,22 @@ impl FirefoxCompanionWorker {
                                 mark_destroyed_context(&cleanup_pages, &cleanup_registry, context)
                                     .await;
                             release_removed_pages(&task_failure, removals).await;
+                        }
+                    }
+                    Ok(event) if event.method == "browsingContext.userPromptOpened" => {
+                        let context = event.params.get("context").and_then(Value::as_str);
+                        let prompt_type = event.params.get("type").and_then(Value::as_str);
+                        let message = event.params.get("message").and_then(Value::as_str);
+                        if let (Some(context), Some(prompt_type), Some(message)) =
+                            (context, prompt_type, message)
+                        {
+                            cleanup_prompts.write().await.insert(
+                                context.to_owned(),
+                                PendingPrompt {
+                                    prompt_type: prompt_type.to_owned(),
+                                    message: message.to_owned(),
+                                },
+                            );
                         }
                     }
                     Ok(_) => {}
@@ -1057,6 +1081,7 @@ impl FirefoxCompanionWorker {
             observer,
             pages,
             page_cleanups,
+            pending_prompts,
             closed: AtomicBool::new(false),
             lifecycle: AsyncMutex::new(()),
             shutdown: Arc::new(WorkerShutdown {
@@ -3152,6 +3177,55 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ])
+    }
+
+    async fn handle_dialog(
+        &self,
+        page_id: &PageId,
+        command: &types::HandleDialogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let timeout = std::time::Duration::from_millis(
+            command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
+        );
+        let context = self.context(page_id).await?;
+        let deadline = std::time::Instant::now() + timeout;
+        let prompt = loop {
+            let pending = self.pending_prompts.write().await.remove(&context);
+            if let Some(prompt) = pending {
+                break prompt;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(driver_error(
+                    ErrorCode::DeadlineExceeded,
+                    format!("no user prompt opened within {}ms", timeout.as_millis()),
+                    true,
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
+        let accept = matches!(command.action, types::DialogAction::Accept);
+        self.transport
+            .send(
+                "browsingContext.handleUserPrompt",
+                json!({"context": context, "accept": accept}),
+            )
+            .await
+            .map_err(|error| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    format!("Firefox user prompt handling failed: {}", error.message),
+                    false,
+                )
+            })?;
+        Ok(vec![Evidence::Dialog {
+            dialog_type: prompt.prompt_type,
+            message: prompt.message,
+            action: if accept {
+                "accept".into()
+            } else {
+                "dismiss".into()
+            },
+        }])
     }
 
     async fn print_to_pdf(

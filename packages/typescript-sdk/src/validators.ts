@@ -288,6 +288,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
     case "cookieState": return hasExactKeys(value, ["kind", "pageId", "cookies"], []) && (value.pageId === null || isUuid(value.pageId)) && Array.isArray(value.cookies) && value.cookies.every(isCookieRecord);
     case "pdfArtifact": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
+    case "dialog": return hasExactKeys(value, ["kind", "dialogType", "message", "action"]) && isString(value.dialogType) && isString(value.message) && (value.action === "accept" || value.action === "dismiss");
     default: return false;
   }
 }
