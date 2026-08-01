@@ -24,7 +24,9 @@ integrations. Those aliases exist in the in-process skill router
 Public clients automate with primitives and intents via
 [HTTP](../surfaces/http-api.md), [MCP tools](../surfaces/mcp-tools.md), or the
 [TypeScript SDK](../surfaces/typescript-sdk.md). Recovery for public surfaces is
-`checkpoint` + `recover` — see [Events and recovery](events-recovery.md).
+inspect (`recovery_status` / `GET /v1/recovery/{id}` / `recoveryStatus`) plus
+mutate (`checkpoint` + `recover`) — see
+[Events and recovery](events-recovery.md).
 
 ## Internal skill router (contributor / gauntlet)
 

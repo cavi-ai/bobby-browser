@@ -1,8 +1,9 @@
 /**
  * Helpers that build CommandEnvelope wire shapes for unified intents.
  *
- * Agents submit these via `command_execute` / `BrowserRuntimeClient.submit` —
- * there are no dedicated intent_* MCP tools. Nested shape matches Rust serde:
+ * Over HTTP / TypeScript, submit via `BrowserRuntimeClient.submit`. Over MCP,
+ * prefer the dedicated `intent_*` tools; `command_execute` remains the escape
+ * hatch for nested envelopes. Nested shape matches Rust serde:
  * `{ kind: "intent", input: { kind: "locate", input: { … } } }`.
  */
 import {

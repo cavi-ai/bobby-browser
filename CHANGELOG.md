@@ -10,12 +10,29 @@
 - Report rejected arguments as `data.pointer` (JSON Pointer) plus `data.constraint`, or as `malformedArguments` / `deadlineOutOfRange` / `invalidIdempotencyKey`, instead of an indistinguishable `"Invalid params"`.
 - Add `credentialExpiresAt` to `runtime_info` and a `bootstrap-expiry` check to `bobby doctor` that warns under 7 days and fails once expired.
 - Allow MCP `click`, `type_text`, and `upload_files` to consume accessibility-snapshot targets without also requiring a legacy CSS selector.
+- Add MCP `recovery_status` (`recovery:read`) alongside `checkpoint_save` / `workflow_recover`.
 - Guard MCP schema parity with schemars: `JsonSchema` derives on the wire types and tests that fail when the hand-bounded MCP tool schemas drift from the Rust command/evidence variants.
+
+### Sessions, pages, and events
+
+- Add `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` for session teardown.
+- Add the `activatePage` primitive (MCP `page_activate`) to bring a page to the front on Chromium and Firefox.
+- Add `GET /v1/events?stream=1` server-sent-event streaming with cursor frame ids and terminal gap frames.
+- `GET /v1/mcp` now opens the streamable-HTTP SSE channel (keep-alive) instead of 405.
+- Add `GET /v1/recovery/{workflow}`, MCP `recovery_status`, and TypeScript SDK `recoveryStatus` to inspect a workflow checkpoint and recovery receipts (`recovery:read`).
+- Honor idempotency keys on session creation and checkpoint save, replaying retained results.
+- Scope CDP-originated interface events to the authenticated principal.
+- Report real uptime and in-flight command counts in runtime info.
+- Add `listSessions` to the TypeScript SDK and stop rejecting checkpoints with recovery receipts.
+
+### Packages
+
+- Publish the TypeScript SDK as `@cavi-ai/bobby-browser` (replacing `@bobby-browser/sdk`).
 
 ### Semantic automation
 
 - Add the `accessibilitySnapshot` primitive (MCP `a11y_snapshot`): a compact tree capped at 2048 nodes, from Chrome's full AX tree on Chromium and the companion extension's DOM walker on Firefox. Form controls include current value, description, required/disabled/read-only/invalid/checked state, autocomplete, and numeric bounds; sensitive values are redacted.
-- Add command-ready semantic targets to actionable accessibility-snapshot nodes; duplicate role/name pairs receive deterministic tree-order ordinals without exposing DOM or browser IDs.
+- Add command-ready semantic targets to actionable accessibility-snapshot nodes; duplicate role/name pairs receive deterministic tree-order ordinals without exposing DOM or browser IDs. Duplicate ordinals are computed on the full accessibility tree before `maxNodes` truncation, so retained targets keep globally correct ordinals.
 - Carry snapshot targets into intents via `IntentHints.ordinal` and `intentHintsFromAccessibilityTarget`.
 - Add verified `completeForm` intent (ordered uniquely named fill fields; no implicit submit).
 - Add `FillValue` kind `checked` for reliable checkbox/radio semantic fills on Chromium and Firefox.
@@ -27,17 +44,6 @@
 - Add the `extractStructured` primitive (MCP `extract_structured`): bounded page text plus the caller's JSON schema go to the configured provider, and the result is schema-validated and size-bounded before becoming `structuredExtraction` evidence. Gated on `browser:mutate`, `vision:assist`, session policy, and a configured provider.
 - Plumb real screenshot bytes into vision escalation (`screenshot_bytes` on Chromium and Firefox workers); empty frames no longer reach providers.
 - Add an HTTP vision-assist provider (`[vision]` config: https or loopback endpoint, bearer via env var) with response validation and fail-closed escalation.
-
-### Sessions, pages, and events
-
-- Add `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` for session teardown.
-- Add the `activatePage` primitive (MCP `page_activate`) to bring a page to the front on Chromium and Firefox.
-- Add `GET /v1/events?stream=1` server-sent-event streaming with cursor frame ids and terminal gap frames.
-- `GET /v1/mcp` now opens the streamable-HTTP SSE channel (keep-alive) instead of 405.
-- Honor idempotency keys on session creation and checkpoint save, replaying retained results.
-- Scope CDP-originated interface events to the authenticated principal.
-- Report real uptime and in-flight command counts in runtime info.
-- Add `listSessions` to the TypeScript SDK and stop rejecting checkpoints with recovery receipts.
 
 ### Firefox companion
 

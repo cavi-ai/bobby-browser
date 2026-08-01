@@ -38,8 +38,11 @@ x-deadline: …
 ```
 
 Each event arrives as an SSE frame whose `id` is its cursor. A retention gap
-arrives as a terminal `event.gap` frame. Prefer the TypeScript SDK iterator
-unless you need raw SSE.
+arrives as a terminal `event.gap` frame.
+
+The TypeScript SDK `events()` iterator reads **JSON batches**
+(`GET /v1/events?after=&limit=`), not `stream=1`. Use raw SSE when you need a
+push stream; use the SDK when batch polling and `EventGap` handling are enough.
 
 ## EventGap
 
@@ -53,18 +56,33 @@ across a gap.
 
 ## Recovery
 
-Any loss at accepted, prepared, executing, verifying, or result-prepared
-boundaries that cannot prove the outcome remains `NeedsReconciliation`.
+Inspect durable state with `recovery:read`, then mutate with `recovery:write`.
 
 ```ts
+const status = await client.recoveryStatus(workflowId);
+// status.workflowId, status.checkpoint, status.receipts
+
 const decision = await client.recover(workflowId, {
   idempotencyKey: crypto.randomUUID(),
 });
 ```
 
+| Surface | Inspect (`recovery:read`) | Mutate (`recovery:write`) |
+|---|---|---|
+| HTTP | `GET /v1/recovery/{workflowId}` | `POST /v1/checkpoints`, `POST /v1/recovery/{workflowId}` |
+| MCP | `recovery_status` (`{ workflowId }`) | `checkpoint_save`, `workflow_recover` |
+| TypeScript SDK | `recoveryStatus(workflowId)` | `checkpoint(…)`, `recover(workflowId)` |
+
+`GET` / `recovery_status` returns camelCase `RecoveryStatus`:
+`{ workflowId, checkpoint, receipts }`. The workflow must be owned by the
+caller; missing or unowned workflows return not found. `receipts` mirrors the
+durable recovery receipts bound to the checkpoint.
+
+Any loss at accepted, prepared, executing, verifying, or result-prepared
+boundaries that cannot prove the outcome remains `NeedsReconciliation`.
+
 Skill-assisted recovery (internal skill runtime / gauntlet) follows the same
-authority rules — see [Bobby skills](skills.md). Public HTTP/MCP clients use
-`checkpoint` + `recover` only.
+authority rules — see [Bobby skills](skills.md).
 
 ## Next
 

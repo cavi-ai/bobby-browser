@@ -146,11 +146,16 @@ Order:
 1. `initialize` (protocol `2025-11-25`) — required before tools
 2. `tools/call` → `session_create` with `{ "profile": "default" }`
 3. `tools/call` → `page_open` with `{ "sessionId": "…" }`
-4. `tools/call` → `command_execute` with a `CommandEnvelope` (same shape as TS)
-5. Optionally `events_read` / `checkpoint_save` / `workflow_recover`
+4. Prefer flat tools: `navigate`, `a11y_snapshot`, `click` / `type_text` /
+   `upload_files` (selector or snapshot `target`), and `intent_*` for
+   goal-oriented steps — they mint the envelope server-side
+5. Use `command_execute` when you need a nested primitive / intent envelope
+   the flat tools do not cover
+6. Optionally `events_read` / `checkpoint_save` / `workflow_recover` (pass a
+   returned `workflowId` to keep continuity)
 
-There are no dedicated intent MCP tools; intents go only through
-`command_execute`. Full catalog: [MCP tools](../surfaces/mcp-tools.md).
+Full catalog: [MCP tools](../surfaces/mcp-tools.md). Intents:
+[Intent commands](../guides/intents.md).
 
 ## 4. Outcome and recovery
 

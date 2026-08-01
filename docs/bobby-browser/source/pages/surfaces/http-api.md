@@ -51,6 +51,11 @@ validators / Rust types.
   `{ kind: "accessibilitySnapshot", input: { maxNodes? } }` (default 256,
   max 2048; see [Accessibility snapshot](../guides/accessibility-snapshot.md)).
 - **POST `/v1/checkpoints`** — checkpoint request with verified evidence (see SDK `CheckpointRequest`)
+- **GET `/v1/recovery/{workflow}`** — `RecoveryStatus`
+  (`{ workflowId, checkpoint, receipts }`); requires `recovery:read` and session
+  ownership of the workflow. Missing / unowned → not found.
+- **POST `/v1/recovery/{workflow}`** — returns `RecoveryDecision`; maps
+  `needsReconciliation` to HTTP 409
 - **POST `/v1/principals`** — `{ principalId, capabilities, expiresAt }` → `201` with one-time `bearer`
 - **GET `/v1/events`** — query `after` (cursor) and `limit` (bounded; SDK max 256).
   Pass `stream=1` for a server-sent-event stream instead of a batch: each event

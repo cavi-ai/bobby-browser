@@ -35,6 +35,9 @@ await client.checkpoint(request, { idempotencyKey: crypto.randomUUID() });
 
 ## Recovery
 
+Inspect with `GET /v1/recovery/{workflowId}` / `client.recoveryStatus` /
+MCP `recovery_status` (`recovery:read`) before or after mutate calls.
+
 `POST /v1/recovery/{workflowId}` returns a `RecoveryDecision`. The TypeScript
 client maps `needsReconciliation` to HTTP 409.
 
@@ -43,6 +46,8 @@ that cannot prove the outcome remains `NeedsReconciliation` — never silently
 replayed. Replayable work may retry only through runtime policy. Boundary /
 reconciliable classes follow command-class rules — see
 [Intent commands](../guides/intents.md).
+
+Details and surface matrix: [Events and recovery](../guides/events-recovery.md).
 
 ## Evidence
 
