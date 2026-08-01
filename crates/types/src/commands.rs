@@ -286,6 +286,7 @@ pub enum PrimitiveCommand {
     AccessibilitySnapshot(AccessibilitySnapshotCommand),
     ExtractStructured(ExtractStructuredCommand),
     GetCookies(GetCookiesCommand),
+    PrintToPdf(PrintToPdfCommand),
     SetCookies(SetCookiesCommand),
     DeleteCookies(DeleteCookiesCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
@@ -343,6 +344,7 @@ impl PrimitiveCommand {
             | Self::AccessibilitySnapshot(_)
             | Self::ExtractStructured(_)
             | Self::GetCookies(_)
+            | Self::PrintToPdf(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
             Self::SetCookies(_) | Self::DeleteCookies(_) => CommandClass::Reconciliable,
             Self::DownloadUrl(_)
@@ -519,6 +521,24 @@ pub struct SetCookieParam {
     pub same_site: Option<String>,
     #[serde(default)]
     pub expires_unix: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrintToPdfCommand {
+    #[serde(default)]
+    pub landscape: bool,
+    #[serde(default = "default_print_background")]
+    pub print_background: bool,
+    #[serde(default)]
+    pub scale: Option<f64>,
+    #[serde(default)]
+    pub page_ranges: Option<String>,
+}
+
+fn default_print_background() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

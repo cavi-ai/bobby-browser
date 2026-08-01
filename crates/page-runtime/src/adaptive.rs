@@ -574,6 +574,12 @@ async fn browser_execute(
                 .evaluate_javascript(page_id.expect("validated page id"), command)
                 .await?
         }
+        PrimitiveCommand::PrintToPdf(command) => {
+            lease
+                .worker()
+                .print_to_pdf(page_id.expect("validated page id"), command)
+                .await?
+        }
         PrimitiveCommand::GetCookies(command) => {
             lease
                 .worker()

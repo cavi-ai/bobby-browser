@@ -362,7 +362,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        22
+        23
     );
     let runtime_command = &command_schema["inputSchema"]["$defs"]["RuntimeCommand"]["oneOf"];
     assert_eq!(

@@ -8,6 +8,7 @@
   MCP agent-surface catalog fixes, truncation ordinal notes) into `v0.3.1`.
 ## Unreleased
 - Add cookie primitives (`getCookies`, `setCookies`, `deleteCookies`) on Chromium (CDP Network) and Firefox (BiDi storage), exposed as MCP `cookie_get`/`cookie_set`/`cookie_delete` with `cookieState` evidence.
+- Add `printToPdf` (MCP `pdf`) on Chromium (CDP `Page.printToPDF`) and Firefox (BiDi `browsingContext.print`), producing a verified `application/pdf` artifact.
 >>>>>> 27941c6 (feat(cookies): cookie primitives on Chromium and Firefox)
 
 ## 0.3.0 - 2026-08-01

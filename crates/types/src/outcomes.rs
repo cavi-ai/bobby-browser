@@ -212,6 +212,12 @@ pub enum Evidence {
         page_id: Option<PageId>,
         cookies: Vec<crate::CookieRecord>,
     },
+    PdfArtifact {
+        artifact_id: String,
+        media_type: String,
+        bytes: u64,
+        sha256: String,
+    },
     IntentExecution {
         record: ExecutionRecord,
     },
