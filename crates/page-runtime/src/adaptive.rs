@@ -574,6 +574,24 @@ async fn browser_execute(
                 .evaluate_javascript(page_id.expect("validated page id"), command)
                 .await?
         }
+        PrimitiveCommand::GetCookies(command) => {
+            lease
+                .worker()
+                .get_cookies(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::SetCookies(command) => {
+            lease
+                .worker()
+                .set_cookies(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::DeleteCookies(command) => {
+            lease
+                .worker()
+                .delete_cookies(page_id.expect("validated page id"), command)
+                .await?
+        }
         PrimitiveCommand::ExtractStructured(_) => {
             unreachable!("structured extraction is intercepted in execute")
         }

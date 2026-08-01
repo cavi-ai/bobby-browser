@@ -65,6 +65,31 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({"workflowId": id(), "sessionId": id(), "pageId": id()}),
             vec!["sessionId", "pageId"],
         ),
+        "cookie_get" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "urls": array(string(1, MAX_URL_BYTES), 64)
+            }),
+            vec!["sessionId", "pageId"],
+        ),
+        "cookie_set" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "cookies": array(json!({"$ref":"#/$defs/SetCookieParam"}), 128)
+            }),
+            vec!["sessionId", "pageId", "cookies"],
+        ),
+        "cookie_delete" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "urls": array(string(1, MAX_URL_BYTES), 64),
+                "names": array(string(1, 1024), 128)
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "extract_structured" => (
             json!({
                 "workflowId": id(),
@@ -361,6 +386,26 @@ fn definitions() -> Value {
         "ExtractField": extract_field(),
         "ExtractValueKind": {"oneOf": extract_value_kinds()},
         "AccessibilityTarget": accessibility_target(),
+        "CookieRecord": object(json!({
+            "name":string(0, 1024),
+            "value":string(0, 4096),
+            "domain":string(0, 1024),
+            "path":string(0, 4096),
+            "secure":{"type":"boolean"},
+            "httpOnly":{"type":"boolean"},
+            "sameSite":nullable(string(0, 32)),
+            "expiresUnix":nullable(json!({"type":"number"}))
+        }), &["name", "value", "domain", "path", "secure", "httpOnly"]),
+        "SetCookieParam": object(json!({
+            "name":string(1, 1024),
+            "value":string(0, 4096),
+            "url":string(1, MAX_URL_BYTES),
+            "path":nullable(string(0, 4096)),
+            "secure":{"type":"boolean"},
+            "httpOnly":{"type":"boolean"},
+            "sameSite":nullable(string(0, 32)),
+            "expiresUnix":nullable(json!({"type":"number"}))
+        }), &["name", "value", "url"]),
         "AccessibilityNode": accessibility_node(),
         "WaitForCommand": wait_for_command(),
         "TargetSpec": target_spec(),
@@ -713,6 +758,27 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input(
+            "getCookies",
+            object(json!({"urls":array(string(1, MAX_URL_BYTES), 64)}), &[]),
+        ),
+        tagged_input(
+            "setCookies",
+            object(
+                json!({"cookies":array(json!({"$ref":"#/$defs/SetCookieParam"}), 128)}),
+                &["cookies"],
+            ),
+        ),
+        tagged_input(
+            "deleteCookies",
+            object(
+                json!({
+                    "urls":array(string(1, MAX_URL_BYTES), 64),
+                    "names":array(string(1, 1024), 128)
+                }),
+                &[],
+            ),
+        ),
+        tagged_input(
             "accessibilitySnapshot",
             object(
                 json!({"maxNodes":{"type":"integer","minimum":1,"maximum":2048}}),
@@ -994,6 +1060,14 @@ fn evidence_variants() -> Vec<Value> {
             "formSnapshot",
             json!({"snapshot":any_value()}),
             &["snapshot"],
+        ),
+        tagged_fields(
+            "cookieState",
+            json!({
+                "pageId":nullable(id()),
+                "cookies":array(json!({"$ref":"#/$defs/CookieRecord"}), 2048)
+            }),
+            &["pageId", "cookies"],
         ),
         tagged_fields(
             "structuredExtraction",
