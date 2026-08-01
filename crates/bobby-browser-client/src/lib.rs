@@ -1,6 +1,6 @@
 //! Typed HTTP client for a running `bobby serve` instance.
 //!
-//! Mirrors `@bobby-browser/sdk` (`BrowserRuntimeClient`) for Rust callers.
+//! Mirrors `@cavi-ai/bobby-browser` (`BrowserRuntimeClient`) for Rust callers.
 
 use chrono::{Duration as ChronoDuration, Utc};
 use reqwest::{Client, Method};

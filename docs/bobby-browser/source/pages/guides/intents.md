@@ -65,7 +65,7 @@ const meta = {
 ### Locate (Replayable)
 
 ```ts
-import { locateEnvelope } from "@bobby-browser/sdk";
+import { locateEnvelope } from "@cavi-ai/bobby-browser";
 await client.submit(locateEnvelope(meta, "primary search box"), { idempotencyKey: crypto.randomUUID() });
 ```
 
@@ -74,7 +74,7 @@ Wire command: `{ kind: "intent", input: { kind: "locate", input: { purpose, hint
 ### Fill (Reconciliable)
 
 ```ts
-import { fillEnvelope } from "@bobby-browser/sdk";
+import { fillEnvelope } from "@cavi-ai/bobby-browser";
 await client.submit(
   fillEnvelope(
     meta,
@@ -160,7 +160,7 @@ import {
   completeFormRuntimeCommand,
   intentEnvelope,
   submitAndVerifyEnvelope,
-} from "@bobby-browser/sdk";
+} from "@cavi-ai/bobby-browser";
 
 await client.submit(
   intentEnvelope(
@@ -199,7 +199,7 @@ where each field is `{ name, purpose, hints?, value }`.
 ### SubmitAndVerify (Boundary)
 
 ```ts
-import { submitAndVerifyEnvelope } from "@bobby-browser/sdk";
+import { submitAndVerifyEnvelope } from "@cavi-ai/bobby-browser";
 await client.submit(
   submitAndVerifyEnvelope(meta, "submit login", { /* WaitForCommand expectedState */ }),
   { idempotencyKey: crypto.randomUUID() },
@@ -209,7 +209,7 @@ await client.submit(
 ### WaitForState (Replayable)
 
 ```ts
-import { waitForStateEnvelope } from "@bobby-browser/sdk";
+import { waitForStateEnvelope } from "@cavi-ai/bobby-browser";
 await client.submit(
   waitForStateEnvelope(meta, { /* WaitCondition */ }, 15_000),
   { idempotencyKey: crypto.randomUUID() },
@@ -219,7 +219,7 @@ await client.submit(
 ### Follow
 
 ```ts
-import { followEnvelope } from "@bobby-browser/sdk";
+import { followEnvelope } from "@cavi-ai/bobby-browser";
 await client.submit(
   followEnvelope(meta, "docs link", { /* expectedDestination WaitForCommand */ }, { boundary: false }),
   { idempotencyKey: crypto.randomUUID() },
@@ -235,7 +235,7 @@ Clears a popup / overlay / cookie banner. No caller `boundary` flag — always
 reconciliable. Default `timeoutMs` is 5000.
 
 ```ts
-import { dismissObstructionEnvelope } from "@bobby-browser/sdk";
+import { dismissObstructionEnvelope } from "@cavi-ai/bobby-browser";
 await client.submit(
   dismissObstructionEnvelope(meta, "dismiss cookie banner"),
   { idempotencyKey: crypto.randomUUID() },
@@ -245,7 +245,7 @@ await client.submit(
 ### Extract (Replayable)
 
 ```ts
-import { extractEnvelope } from "@bobby-browser/sdk";
+import { extractEnvelope } from "@cavi-ai/bobby-browser";
 await client.submit(
   extractEnvelope(meta, "product fields", [
     { name: "title", purpose: "product title", value: { kind: "text" } },

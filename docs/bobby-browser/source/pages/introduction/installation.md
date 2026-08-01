@@ -29,7 +29,7 @@ Package name: `bobby-browser`. Binary name: `bobby`.
 cargo install bobby-browser
 
 # TypeScript SDK — after npm publish succeeds
-npm install @bobby-browser/sdk
+npm install @cavi-ai/bobby-browser
 
 # Rust HTTP client — after crates.io publish
 cargo add bobby-browser-client

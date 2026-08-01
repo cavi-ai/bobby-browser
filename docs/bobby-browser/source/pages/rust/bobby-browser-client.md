@@ -7,7 +7,7 @@ documentedVersion: {{PRODUCT_VERSION}}
 **Tier: Supported**
 
 Typed HTTP client for a running `bobby serve` instance. Mirrors
-`@bobby-browser/sdk` (`BrowserRuntimeClient`) for the common `/v1` path.
+`@cavi-ai/bobby-browser` (`BrowserRuntimeClient`) for the common `/v1` path.
 
 ```bash
 cargo add bobby-browser-client
