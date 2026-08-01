@@ -56,6 +56,7 @@ Tools are advertised only when the principal holds the required capability.
 | `recovery_status` | `recovery:read` | Read a workflow checkpoint and recovery receipts |
 | `cookie_get` | `browser:mutate` | Read cookies (all origins or filtered) |
 | `pdf` | `browser:mutate` | Print the page to a PDF artifact |
+| `dialog` | `browser:mutate` | Accept or dismiss the next JS dialog |
 | `cookie_set` | `browser:mutate` | Store cookies |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
 >>>>>> 27941c6 (feat(cookies): cookie primitives on Chromium and Firefox)

@@ -1063,6 +1063,25 @@ impl Server {
                     .await
                     .and_then(to_json)
             }
+            "dialog" => {
+                let input: DialogArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::HandleDialog(
+                        types::HandleDialogCommand {
+                            action: input.action,
+                            timeout_ms: input.timeout_ms,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
             "pdf" => {
                 let input: PdfArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
@@ -1876,6 +1895,16 @@ struct A11ySnapshotArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DialogArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    action: types::DialogAction,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PdfArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
@@ -2167,7 +2196,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
         "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
         | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" | "pdf"
-        | "cookie_get" | "cookie_set" | "cookie_delete" => {
+        | "dialog" | "cookie_get" | "cookie_set" | "cookie_delete" => {
             Some(&[types::Capability::BrowserMutate])
         }
         "extract_structured" => Some(&[
@@ -2222,6 +2251,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "a11y_snapshot"
         | "extract_structured"
         | "pdf"
+        | "dialog"
         | "cookie_get"
         | "cookie_set"
         | "cookie_delete"
@@ -2276,6 +2306,7 @@ fn tool_description(name: &str) -> &'static str {
         "page_close" => "Close a page in an owned session.",
         "page_list" => "List pages in an owned session.",
         "page_open" => "Open a page in an owned session.",
+        "dialog" => "Accept or dismiss the next JavaScript dialog on a page.",
         "pdf" => "Print a page to a PDF artifact.",
         "recovery_status" => "Read a workflow's checkpoint and recovery receipts.",
         "runtime_info" => "Read runtime capability and health information.",

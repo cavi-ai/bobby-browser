@@ -287,6 +287,7 @@ pub enum PrimitiveCommand {
     ExtractStructured(ExtractStructuredCommand),
     GetCookies(GetCookiesCommand),
     PrintToPdf(PrintToPdfCommand),
+    HandleDialog(HandleDialogCommand),
     SetCookies(SetCookiesCommand),
     DeleteCookies(DeleteCookiesCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
@@ -346,7 +347,9 @@ impl PrimitiveCommand {
             | Self::GetCookies(_)
             | Self::PrintToPdf(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
-            Self::SetCookies(_) | Self::DeleteCookies(_) => CommandClass::Reconciliable,
+            Self::SetCookies(_) | Self::DeleteCookies(_) | Self::HandleDialog(_) => {
+                CommandClass::Reconciliable
+            }
             Self::DownloadUrl(_)
             | Self::TypeText(_)
             | Self::UploadFiles(_)
@@ -521,6 +524,23 @@ pub struct SetCookieParam {
     pub same_site: Option<String>,
     #[serde(default)]
     pub expires_unix: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum DialogAction {
+    Accept,
+    Dismiss,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HandleDialogCommand {
+    pub action: DialogAction,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

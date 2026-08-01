@@ -65,6 +65,15 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({"workflowId": id(), "sessionId": id(), "pageId": id(), "maxControls":{"type":"integer","minimum":1,"maximum":512}}),
             vec!["sessionId", "pageId"],
         ),
+        "dialog" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "action": {"type":"string","enum":["accept","dismiss"]},
+                "timeoutMs": timeout_ms()
+            }),
+            vec!["sessionId", "pageId", "action"],
+        ),
         "pdf" => (
             json!({
                 "sessionId": id(),
@@ -769,6 +778,16 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input(
+            "handleDialog",
+            object(
+                json!({
+                    "action":{"type":"string","enum":["accept","dismiss"]},
+                    "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS}
+                }),
+                &["action"],
+            ),
+        ),
+        tagged_input(
             "printToPdf",
             object(
                 json!({
@@ -1083,6 +1102,15 @@ fn evidence_variants() -> Vec<Value> {
             "formSnapshot",
             json!({"snapshot":any_value()}),
             &["snapshot"],
+        ),
+        tagged_fields(
+            "dialog",
+            json!({
+                "dialogType":string(1, 64),
+                "message":string(0, MAX_STRING_BYTES),
+                "action":{"type":"string","enum":["accept","dismiss"]}
+            }),
+            &["dialogType", "message", "action"],
         ),
         tagged_fields(
             "pdfArtifact",
