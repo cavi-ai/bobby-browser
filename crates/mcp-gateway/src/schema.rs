@@ -65,6 +65,17 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({"workflowId": id(), "sessionId": id(), "pageId": id()}),
             vec!["sessionId", "pageId"],
         ),
+        "pdf" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "landscape": {"type":"boolean"},
+                "printBackground": {"type":"boolean"},
+                "scale": {"type":"number","minimum":0.1,"maximum":2.0},
+                "pageRanges": nullable(string(0, 256))
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "cookie_get" => (
             json!({
                 "sessionId": id(),
@@ -758,6 +769,18 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input(
+            "printToPdf",
+            object(
+                json!({
+                    "landscape":{"type":"boolean"},
+                    "printBackground":{"type":"boolean"},
+                    "scale":{"type":"number","minimum":0.1,"maximum":2.0},
+                    "pageRanges":nullable(string(0, 256))
+                }),
+                &[],
+            ),
+        ),
+        tagged_input(
             "getCookies",
             object(json!({"urls":array(string(1, MAX_URL_BYTES), 64)}), &[]),
         ),
@@ -1060,6 +1083,16 @@ fn evidence_variants() -> Vec<Value> {
             "formSnapshot",
             json!({"snapshot":any_value()}),
             &["snapshot"],
+        ),
+        tagged_fields(
+            "pdfArtifact",
+            json!({
+                "artifactId":string(1, 128),
+                "mediaType":string(1, 256),
+                "bytes":{"type":"integer","minimum":1,"maximum":16777216},
+                "sha256":sha256()
+            }),
+            &["artifactId", "mediaType", "bytes", "sha256"],
         ),
         tagged_fields(
             "cookieState",

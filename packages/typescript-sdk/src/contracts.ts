@@ -140,6 +140,7 @@ export interface SetCookieParam { name: string; value: string; url: string; path
 export interface GetCookiesCommand { urls?: string[] }
 export interface SetCookiesCommand { cookies: SetCookieParam[] }
 export interface DeleteCookiesCommand { urls?: string[]; names?: string[] }
+export interface PrintToPdfCommand { landscape?: boolean; printBackground?: boolean; scale?: number | null; pageRanges?: string | null }
 export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number }
 export interface AccessibilityNode {
   role?: string;
@@ -195,6 +196,7 @@ export type PrimitiveCommand =
   | { kind: "getCookies"; input: GetCookiesCommand }
   | { kind: "setCookies"; input: SetCookiesCommand }
   | { kind: "deleteCookies"; input: DeleteCookiesCommand }
+  | { kind: "printToPdf"; input: PrintToPdfCommand }
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }

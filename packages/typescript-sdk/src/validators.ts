@@ -287,6 +287,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
     case "cookieState": return hasExactKeys(value, ["kind", "pageId", "cookies"], []) && (value.pageId === null || isUuid(value.pageId)) && Array.isArray(value.cookies) && value.cookies.every(isCookieRecord);
+    case "pdfArtifact": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     default: return false;
   }
 }

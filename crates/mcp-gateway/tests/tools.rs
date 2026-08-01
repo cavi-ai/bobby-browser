@@ -362,7 +362,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
             .as_array()
             .unwrap()
             .len(),
-        22
+        23
     );
     let runtime_command = &command_schema["inputSchema"]["$defs"]["RuntimeCommand"]["oneOf"];
     assert_eq!(
@@ -407,7 +407,7 @@ async fn command_and_checkpoint_schemas_are_fully_nested_and_match_pre_dispatch_
     let evidence_variants = checkpoint_schema["inputSchema"]["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 21, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 22, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
