@@ -8,10 +8,10 @@ use futures::StreamExt;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fetcher browser
     let download_path = Path::new("./download");
-    tokio::fs::create_dir_all(&download_path).await?;
+    tokio::fs::create_dir_all(download_path).await?;
     let fetcher = BrowserFetcher::new(
         BrowserFetcherOptions::builder()
-            .with_path(&download_path)
+            .with_path(download_path)
             .build()?,
     );
     let info = fetcher.fetch().await?;
@@ -25,13 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     let handle = tokio::spawn(async move {
-        loop {
-            match handler.next().await {
-                Some(h) => match h {
-                    Ok(_) => continue,
-                    Err(_) => break,
-                },
-                None => break,
+        while let Some(result) = handler.next().await {
+            if result.is_err() {
+                break;
             }
         }
     });

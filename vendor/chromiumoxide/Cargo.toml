@@ -53,7 +53,6 @@ default = ["bytes"]
 fetcher = ["chromiumoxide_fetcher"]
 native-tls = ["chromiumoxide_fetcher/native-tls"]
 rustls = ["chromiumoxide_fetcher/rustls"]
-zip0 = ["chromiumoxide_fetcher/zip0"]
 zip8 = ["chromiumoxide_fetcher/zip8"]
 
 [lib]
