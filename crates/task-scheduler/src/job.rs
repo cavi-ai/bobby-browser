@@ -202,7 +202,7 @@ impl JobConfig {
 }
 
 /// Errors that can occur during job execution.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum JobError {
     #[error("job execution timeout after {0:?}")]
     Timeout(Duration),

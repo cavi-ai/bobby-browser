@@ -48,6 +48,28 @@ fn default_pixel_ratio() -> f64 {
     1.0
 }
 
+impl ScreenConfig {
+    pub fn with_width(mut self, width: u32) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub fn with_height(mut self, height: u32) -> Self {
+        self.height = height;
+        self
+    }
+
+    pub fn with_color_depth(mut self, depth: u32) -> Self {
+        self.color_depth = depth;
+        self
+    }
+
+    pub fn with_pixel_ratio(mut self, ratio: f64) -> Self {
+        self.pixel_ratio = ratio;
+        self
+    }
+}
+
 /// Screen masker that returns spoofed resolution data.
 pub struct ScreenMasker {
     config: ScreenConfig,

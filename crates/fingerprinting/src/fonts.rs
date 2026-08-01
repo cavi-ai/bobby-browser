@@ -44,6 +44,13 @@ fn default_standard_fonts() -> Vec<String> {
     ]
 }
 
+impl FontConfig {
+    pub fn with_standard_fonts(mut self, fonts: Vec<String>) -> Self {
+        self.standard_fonts = fonts;
+        self
+    }
+}
+
 /// Font masker that returns standardized font lists.
 pub struct FontMasker {
     config: FontConfig,
