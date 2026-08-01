@@ -102,7 +102,8 @@ Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
 - Primitive `accessibilitySnapshot` / MCP `a11y_snapshot` needs only
   `browser:mutate`.
 - Default `maxNodes` is 256 (clamp 1…2048). Large pages set `truncated: true`
-  — raise `maxNodes` or narrow the viewport / DOM before retrying.
+  — raise `maxNodes` or narrow the viewport / DOM for more context. Retained
+  command-ready targets still include globally correct duplicate ordinals.
 - Form-control nodes may include `value`, `required`, `invalid`, `checked`,
   bounds, and related flags. Password / masked values appear as
   `"[redacted]"`.
