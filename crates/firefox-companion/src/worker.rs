@@ -602,6 +602,11 @@ pub struct FirefoxCompanionWorker {
     session_jitter: Duration,
     fingerprint: TaskMutex<FingerprintConfig>,
     fingerprint_enabled: AtomicBool,
+    /// Whether input is synthesized through `behavioral-engine` rather than
+    /// driven directly. Deny-by-default: `PageRuntime` writes the session's
+    /// `ExecutionPolicy.humanize` onto every lease, so a session that did not
+    /// opt in never gets synthesized timing.
+    humanization_enabled: AtomicBool,
     fingerprint_preload_script: TaskMutex<Option<String>>,
 }
 
@@ -1347,6 +1352,7 @@ impl FirefoxCompanionWorker {
             .with_session_seed(session_seed)
             .with_inject_chrome(false);
         let fingerprint_enabled = AtomicBool::new(fingerprint.enabled);
+        let humanization_enabled = AtomicBool::new(false);
 
         let worker = Self {
             id,
@@ -1379,6 +1385,7 @@ impl FirefoxCompanionWorker {
             session_jitter,
             fingerprint: TaskMutex::new(fingerprint),
             fingerprint_enabled,
+            humanization_enabled,
             fingerprint_preload_script: TaskMutex::new(None),
         };
         worker.sync_fingerprint_preload().await?;
@@ -2512,6 +2519,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         &self.profile_dir
     }
 
+    async fn set_humanization_enabled(&self, enabled: bool) -> Result<(), CommandError> {
+        self.humanization_enabled.store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn humanization_enabled(&self) -> bool {
+        self.humanization_enabled.load(Ordering::Relaxed)
+    }
+
     async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
         self.fingerprint_enabled.store(enabled, Ordering::Relaxed);
         // Force resync: clear cached preload id so sync re-adds or removes now.
@@ -3610,17 +3626,20 @@ impl BrowserWorker for FirefoxCompanionWorker {
         self.perform_pointer_click(&context, &shared_id, Some(&path))
             .await?;
 
+        let humanize = self.humanization_enabled.load(Ordering::Relaxed);
         let typing_actions = self.with_session_random(|random| {
             let mut actions = Vec::new();
-            let config = BehavioralConfig {
-                session_jitter: self.session_jitter,
-                ..BehavioralConfig::default()
-            };
-            let pause_ms = session_pause(random, &config).as_millis() as u64;
-            if pause_ms > 0 {
-                actions.push(behavioral_engine::TypingAction::Pause {
-                    duration_ms: pause_ms,
-                });
+            if humanize {
+                let config = BehavioralConfig {
+                    session_jitter: self.session_jitter,
+                    ..BehavioralConfig::default()
+                };
+                let pause_ms = session_pause(random, &config).as_millis() as u64;
+                if pause_ms > 0 {
+                    actions.push(behavioral_engine::TypingAction::Pause {
+                        duration_ms: pause_ms,
+                    });
+                }
             }
             actions.extend(self.typing_simulator.generate_with_clear(
                 random,
@@ -3642,6 +3661,17 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ];
+        // Synthesized timing is only evidence when it was actually synthesized:
+        // a session that did not opt in drives input directly, and claiming a
+        // humanization record for it would be the same class of lie the
+        // evidence contract exists to prevent.
+        if humanize {
+            evidence.push(Evidence::Humanization {
+                engine: "behavioral-engine".to_owned(),
+                actions: u32::try_from(typing_actions.len()).unwrap_or(u32::MAX),
+                synthesized_ms: behavioral_engine::synthesized_total_ms(&typing_actions),
+            });
+        }
         evidence.extend(
             form_control_validity_evidence(&self.transport, &context, &selector_json).await?,
         );

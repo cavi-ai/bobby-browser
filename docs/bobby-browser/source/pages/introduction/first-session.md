@@ -55,7 +55,7 @@ const client = new BrowserRuntimeClient({
 });
 
 const session = await client.createSession(
-  { profile: "default", proxy: null, executionPolicy: { javascriptEvaluation: false, visionAssist: false } },
+  { profile: "default", proxy: null, executionPolicy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } },
   { idempotencyKey: randomUUID() },
 );
 

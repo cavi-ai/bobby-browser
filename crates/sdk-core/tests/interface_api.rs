@@ -1096,6 +1096,7 @@ async fn evaluate_javascript_clears_the_session_policy_gate_when_opted_in() {
             execution_policy: types::ExecutionPolicy {
                 javascript_evaluation: true,
                 vision_assist: false,
+                ..types::ExecutionPolicy::default()
             },
         })
         .await
@@ -1123,6 +1124,7 @@ async fn evaluate_javascript_without_capability_is_denied_before_the_session_gat
             execution_policy: types::ExecutionPolicy {
                 javascript_evaluation: true,
                 vision_assist: false,
+                ..types::ExecutionPolicy::default()
             },
         })
         .await
@@ -1347,6 +1349,7 @@ async fn locate_intent_does_not_require_vision_assist_upfront() {
             execution_policy: types::ExecutionPolicy {
                 javascript_evaluation: false,
                 vision_assist: true,
+                ..types::ExecutionPolicy::default()
             },
         })
         .await
@@ -1387,6 +1390,7 @@ async fn create_session_stores_vision_assist_execution_policy() {
             execution_policy: types::ExecutionPolicy {
                 javascript_evaluation: false,
                 vision_assist: true,
+                ..types::ExecutionPolicy::default()
             },
         })
         .await

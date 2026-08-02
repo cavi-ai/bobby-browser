@@ -359,3 +359,30 @@ pub fn compose_typed_text(actions: &[TypingAction]) -> String {
     }
     buf
 }
+
+impl TypingAction {
+    /// The scripted delay this action contributes, in milliseconds.
+    ///
+    /// `Backspace` multiplies by `count` because the executor issues that many
+    /// key events, each waiting `delay_ms`. Summing this across a plan is what
+    /// `Evidence::Humanization.synthesized_ms` reports, so it has to match
+    /// what the executor actually waits, not the plan's length.
+    pub fn synthesized_ms(&self) -> u64 {
+        match self {
+            Self::KeyDown { delay_ms, .. }
+            | Self::KeyUp { delay_ms, .. }
+            | Self::SelectAll { delay_ms }
+            | Self::CopyPaste { delay_ms, .. } => *delay_ms,
+            Self::Backspace { count, delay_ms } => delay_ms.saturating_mul(u64::from(*count)),
+            Self::Pause { duration_ms } => *duration_ms,
+        }
+    }
+}
+
+/// Total scripted delay across a typing plan.
+pub fn synthesized_total_ms(actions: &[TypingAction]) -> u64 {
+    actions
+        .iter()
+        .map(TypingAction::synthesized_ms)
+        .fold(0u64, u64::saturating_add)
+}

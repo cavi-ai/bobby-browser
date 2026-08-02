@@ -177,6 +177,17 @@ pub trait BrowserWorker: Send + Sync {
     fn fingerprint_enabled(&self) -> bool {
         false
     }
+    /// Toggle human-like input synthesis (`behavioral-engine`). Engines that
+    /// drive input directly and have no synthesizer accept the call and stay
+    /// direct — the default below — so the executor can write the session's
+    /// policy onto every worker without knowing which engine it holds.
+    async fn set_humanization_enabled(&self, _enabled: bool) -> Result<(), CommandError> {
+        Ok(())
+    }
+    /// Whether human-like input synthesis is currently enabled.
+    fn humanization_enabled(&self) -> bool {
+        false
+    }
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError>;
     async fn navigate(
         &self,
