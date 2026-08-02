@@ -3,6 +3,7 @@
 //! those tasks land.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
@@ -11,8 +12,8 @@ use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{
-    AttemptId, Capability, CommandEnvelope, CommandId, IntentCommand, IntentHints, LocateIntent,
-    PrincipalId, RuntimeCommand, SessionId, WorkflowId,
+    AttemptId, Capability, CommandEnvelope, CommandId, Evidence, IntentCommand, IntentHints,
+    LocateIntent, PrincipalId, RuntimeCommand, SessionId, WorkflowId,
 };
 use uuid::uuid;
 
@@ -144,9 +145,15 @@ async fn command_execute_does_not_advertise_the_command_union() {
         "command_execute still carries IntentCommand"
     );
     let bytes = serde_json::to_string(tool).unwrap().len();
+    // Raised from Task 2's original 2,000 to make room for Task 6's
+    // mandatory `outputSchema` (every tool now carries one — see
+    // `tools_that_return_structured_content_declare_an_output_schema`
+    // below), which command_execute's flattened fallback keeps to under
+    // 1,000 bytes on its own. The command-union narrowing this test exists
+    // to prove is unaffected either way.
     assert!(
-        bytes < 2_000,
-        "command_execute is {bytes} bytes, expected under 2000"
+        bytes < 3_500,
+        "command_execute is {bytes} bytes, expected under 3500"
     );
 }
 
@@ -379,4 +386,145 @@ async fn mutating_tools_describe_a_repair_action() {
             "{name} description has no repair clause: {description}"
         );
     }
+}
+
+// --- Task 6: output schemas -------------------------------------------------
+
+fn collect_refs(value: &Value, found: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(name) = fields
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            {
+                found.insert(name.to_owned());
+            }
+            for field in fields.values() {
+                collect_refs(field, found);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_refs(item, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every `$ref` a schema carries must resolve inside that same schema's own
+/// `$defs` — `reachable_definitions` fails closed on a missing target (it
+/// silently drops the ref out of `$defs` rather than erroring), so a dangling
+/// ref is otherwise invisible until the day some other change makes the
+/// referencing definition reachable from a tool schema. This is a general
+/// guard, not a special case for the `RecoveryDecision` -> `Evidence` ref that
+/// Task 3 left dangling and Task 6 had to fix before wiring up output schemas.
+fn assert_no_dangling_refs(schema: &Value, label: &str) {
+    let mut refs = BTreeSet::new();
+    collect_refs(schema, &mut refs);
+    let defs = schema.get("$defs").and_then(Value::as_object);
+    for name in &refs {
+        assert!(
+            defs.is_some_and(|defs| defs.contains_key(name)),
+            "{label} references #/$defs/{name}, which is absent from its own $defs"
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_schema_carries_a_ref_to_a_missing_definition() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        assert_no_dangling_refs(&tool["inputSchema"], &format!("{name} inputSchema"));
+        assert_no_dangling_refs(&tool["outputSchema"], &format!("{name} outputSchema"));
+        let validation_schema = mcp_gateway::schema_for_test(&name);
+        assert_no_dangling_refs(&validation_schema, &format!("{name} validation schema"));
+    }
+}
+
+#[tokio::test]
+async fn tools_that_return_structured_content_declare_an_output_schema() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap();
+        assert!(
+            tool["outputSchema"].is_object(),
+            "{name} returns structuredContent but declares no outputSchema"
+        );
+        assert_eq!(
+            tool["outputSchema"]["type"], "object",
+            "{name} outputSchema is not an object schema"
+        );
+    }
+}
+
+#[tokio::test]
+async fn output_schemas_carry_only_reachable_definitions() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap();
+        let Some(defs) = tool["outputSchema"]
+            .get("$defs")
+            .and_then(|d| d.as_object())
+        else {
+            continue;
+        };
+        let body = serde_json::to_string(&tool["outputSchema"]).unwrap();
+        for key in defs.keys() {
+            assert!(
+                body.contains(&format!("#/$defs/{key}")),
+                "{name} outputSchema carries unreachable definition {key}"
+            );
+        }
+    }
+}
+
+/// Drift guard: `Evidence`'s hand-written union must advertise exactly the
+/// same `kind` variants `types::Evidence` serializes — no more, no fewer.
+///
+/// This guard lived in `tests/schema_parity.rs` until Task 3 deleted both it
+/// and `Evidence` from `definitions()`, since `checkpoint_save` stopped
+/// accepting evidence as an input argument and nothing reached it any more.
+/// Task 6 (output schemas) restored `Evidence`, reachable again — but only
+/// from `workflow_recover`'s *output* schema (`RecoveryDecision`'s
+/// `resumed`/`needsReconciliation`/`restarted` variants each carry an
+/// `evidence: Vec<Evidence>` field), not from any input/validation schema.
+/// `schema_parity.rs`'s helpers only ever reach `mcp_gateway::schema_for_test`
+/// (the *input* schema), so this guard lives here instead, next to
+/// `list_tools`, which drives a real `tools/list` call and reads the
+/// genuine advertised `outputSchema`. Without it, the same drift that once
+/// let `Configuration`, `BrowserExecution`, and `JavaScriptResult` silently
+/// fall out of the hand-written union could recur unnoticed.
+#[tokio::test]
+async fn evidence_variants_match_the_wire_type() {
+    let generated_schema = serde_json::to_value(schemars::schema_for!(Evidence)).unwrap();
+    let generated: BTreeSet<String> = generated_schema["oneOf"]
+        .as_array()
+        .expect("Evidence schema is a oneOf variant list")
+        .iter()
+        .map(|variant| {
+            variant["properties"]["kind"]["const"]
+                .as_str()
+                .unwrap_or_else(|| panic!("Evidence variant must pin a kind const: {variant}"))
+                .to_owned()
+        })
+        .collect();
+
+    let tools = list_tools(all_capabilities()).await;
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "workflow_recover")
+        .expect("workflow_recover is advertised");
+    let hand_written: BTreeSet<String> = tool["outputSchema"]["$defs"]["Evidence"]["oneOf"]
+        .as_array()
+        .expect("Evidence oneOf must be an array")
+        .iter()
+        .map(|variant| {
+            variant["properties"]["kind"]["const"]
+                .as_str()
+                .unwrap_or_else(|| panic!("Evidence variant must pin a kind const: {variant}"))
+                .to_owned()
+        })
+        .collect();
+
+    assert_eq!(generated, hand_written);
 }
