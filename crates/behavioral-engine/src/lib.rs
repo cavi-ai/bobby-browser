@@ -5,10 +5,15 @@
 //! variable speeds) to evade bot detection systems.
 
 mod mouse;
+mod score;
 mod scrolling;
 mod typing;
 
 pub use mouse::{BezierMouseSimulator, MouseConfig, MousePath, MousePoint};
+pub use score::{
+    gates, human_config, robot_config, run_benchmark, BehavioralBenchmarkReport, DimensionScore,
+    ScoreCategory,
+};
 pub use scrolling::{ScrollAction, ScrollConfig, ScrollSimulator};
 pub use typing::{compose_typed_text, TextConfig, TypingAction, TypingSimulator};
 

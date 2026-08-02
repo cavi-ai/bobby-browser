@@ -1,6 +1,6 @@
 use behavioral_engine::{
     compose_typed_text, generate_session_seed, BehavioralConfig, BezierMouseSimulator, MouseConfig,
-    ScrollConfig, ScrollSimulator, SessionRandom, TextConfig, TypingSimulator,
+    ScrollAction, ScrollConfig, ScrollSimulator, SessionRandom, TextConfig, TypingSimulator,
 };
 
 #[test]
@@ -314,6 +314,15 @@ fn scroll_simulator_to_position() {
     let actions = sim.generate_to_position(&mut random, 2000.0, 0.0, 1080.0);
 
     assert!(actions.len() >= 2);
+    let trailing_pauses = actions
+        .iter()
+        .rev()
+        .take_while(|action| matches!(action, ScrollAction::Pause { .. }))
+        .count();
+    assert_eq!(
+        trailing_pauses, 1,
+        "chunked scroll must end with exactly one settle pause"
+    );
 }
 
 #[test]
