@@ -69,14 +69,14 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
           const popupState = popupObserved.evidence.find((item): item is Extract<Evidence, { kind: "inspection" }> => item.kind === "inspection"); assert(popupState);
           const popupEnvelope = command("clickAndWaitForPopup", { selector: "#root-popup", target: null, timeoutMs: 15_000 });
           const popupCheckpoint: WorkflowCheckpoint = { schemaVersion: 1, checkpointId: randomUUID(), workflowId: ids.workflow, attemptId: ids.attempt, sessionId, pageId, restartUrl: popupState.url, currentUrl: popupState.url, cursor: popupInspection.commandId, boundaryCommandId: popupEnvelope.commandId, recoveryClass: "boundary", invariants: [{ kind: "url", value: popupState.url }, { kind: "title", value: popupState.title }], replayableInputs: [], evidence: popupObserved.evidence, recoveryHistory: [], recoveryReceipts: [], createdAt: new Date().toISOString() };
-          await activeClient.checkpoint({ checkpoint: popupCheckpoint, evidence: popupObserved.evidence }); eventOrdering.push("checkpoint.saved");
+          await activeClient.checkpoint({ checkpoint: popupCheckpoint, evidenceRefs: [popupInspection.commandId] }); eventOrdering.push("checkpoint.saved");
           const popupOutcome = await activeClient.submit(popupEnvelope); assert.equal(popupOutcome.status, "completed"); eventOrdering.push("boundary.completed");
           const inspection = command("inspect", { selector: null, target: null, includeHtml: false });
           const observed = await activeClient.submit(inspection); assert.equal(observed.status, "completed");
           const state = observed.evidence.find((item): item is Extract<Evidence, { kind: "inspection" }> => item.kind === "inspection"); assert(state);
           const envelope = command("clickAndWaitForDownload", { selector: "#download", target: null, timeoutMs: 15_000 }); boundaryId = envelope.commandId;
           boundaryCheckpoint = { schemaVersion: 1, checkpointId: randomUUID(), workflowId: ids.workflow, attemptId: ids.attempt, sessionId, pageId, restartUrl: state.url, currentUrl: state.url, cursor: inspection.commandId, boundaryCommandId: boundaryId, recoveryClass: "boundary", invariants: [{ kind: "url", value: state.url }, { kind: "title", value: state.title }], replayableInputs: [], evidence: observed.evidence, recoveryHistory: [], recoveryReceipts: [], createdAt: new Date().toISOString() };
-          const saved = await activeClient.checkpoint({ checkpoint: boundaryCheckpoint, evidence: observed.evidence }); savedCheckpointId = saved.checkpointId; eventOrdering.push("checkpoint.saved");
+          const saved = await activeClient.checkpoint({ checkpoint: boundaryCheckpoint, evidenceRefs: [inspection.commandId] }); savedCheckpointId = saved.checkpointId; eventOrdering.push("checkpoint.saved");
           const outcome = await activeClient.submit(envelope); assert.equal(outcome.status, "completed");
           const download = outcome.evidence.find((item): item is Extract<Evidence, { kind: "download" }> => item.kind === "download"); assert(download);
           proofEvidence.push({ kind: "download", sha256: download.sha256, size: download.bytes }); eventOrdering.push("boundary.completed"); break;
@@ -89,7 +89,7 @@ test("TypeScript SDK executes every canonical step on the authenticated Chrome r
           proofEvidence.splice(2, 0, { kind: "screenshot", sha256: screenshot.sha256, size }); eventOrdering.push("screenshot.verified"); break;
         }
         case "checkpoint.save": {
-          assert(boundaryCheckpoint); const saved = await activeClient.checkpoint({ checkpoint: boundaryCheckpoint, evidence: boundaryCheckpoint.evidence }); assert.equal(saved.checkpointId, savedCheckpointId); break;
+          assert(boundaryCheckpoint); assert(boundaryCheckpoint.cursor); const saved = await activeClient.checkpoint({ checkpoint: boundaryCheckpoint, evidenceRefs: [boundaryCheckpoint.cursor] }); assert.equal(saved.checkpointId, savedCheckpointId); break;
         }
         case "recovery.inspect": { const recovery = await activeClient.recover(ids.workflow); recoveryStatus = recovery.status; recoveryCheckpointId = recovery.checkpointId; replayed = recovery.status === "restarted"; assert.equal(recoveryCheckpointId, savedCheckpointId); eventOrdering.push("recovery.inspected"); break; }
         case "events.read": {
