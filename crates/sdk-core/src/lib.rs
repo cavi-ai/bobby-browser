@@ -324,10 +324,27 @@ impl RuntimeService {
     }
 
     /// Save a checkpoint, resolving its evidence from the journal by command
-    /// id rather than accepting `Evidence` directly from the caller — an
-    /// agent naming a command it never ran, or one that never reached a
-    /// terminal outcome, fails the checkpoint instead of getting to author
+    /// id rather than accepting `Evidence` directly from the caller: a command
+    /// id that has no journal record, or one that never reached a terminal
+    /// outcome, fails the checkpoint instead of letting the caller author
     /// evidence for work it never performed.
+    ///
+    /// **This method performs NO ownership check.** `resolve_evidence` reads
+    /// the journal by command id alone, and that journal is fleet-wide (one
+    /// `RuntimeService` is shared across every principal, per
+    /// `broker::bootstrap_listener_with`), so a command id belonging to
+    /// another principal resolves here exactly like one of the caller's own.
+    /// `RuntimeService` is the pre-authorization layer and has no principal to
+    /// check against — the check lives one layer up, in
+    /// `AuthenticatedRuntime::resolve_command_evidence`
+    /// (`crate::interface`), which looks up each command's owning session via
+    /// `PageRuntime::command_session` and runs `require_owned_session` before
+    /// any evidence is read.
+    ///
+    /// Any authenticated surface must therefore reach checkpointing through
+    /// `AuthenticatedRuntime::checkpoint` (with evidence already resolved by
+    /// `AuthenticatedRuntime::resolve_command_evidence`), never by calling
+    /// this method with caller-supplied command ids.
     pub async fn checkpoint(
         &self,
         checkpoint: WorkflowCheckpoint,

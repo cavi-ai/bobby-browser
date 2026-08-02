@@ -2517,7 +2517,7 @@ fn tool_description(name: &str) -> &'static str {
         "a11y_snapshot" => "Capture a compact accessibility tree for a page, capped at 2048 nodes, with command-ready targets on actionable nodes. Requires browser:mutate. Start here: pass a node's target into an intent_* tool rather than guessing a selector.",
         "form_snapshot" => "Read a bounded, engine-neutral inventory of a page's form controls without exposing selectors or sensitive values. Requires page:read.",
         "screenshot" => "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
-        "events_read" => "Read retained runtime events for this principal after a cursor, bounded by a limit. Requires session:read.",
+        "events_read" => "Read retained runtime events for this principal after a cursor, bounded by a limit. Requires session:read. Long-polls: it blocks until an event past the cursor arrives or the request deadline expires (about 60s), so it is not a quick read. The notifications/bobby/event channel pushes the same frames without polling -- see bobby://failure-taxonomy.",
         "recovery_status" => "Read a workflow's checkpoint and recovery receipts without attempting recovery. Requires recovery:read.",
         "cookie_get" => "Read cookies visible to a page, optionally filtered by URL. Requires browser:mutate.",
         "checkpoint_save" => "Persist a verified workflow checkpoint. Requires recovery:write. Pass evidenceRefs -- the command ids whose evidence the runtime already recorded; it resolves them from the journal. On failure with a missing command id, confirm the command completed before checkpointing it.",

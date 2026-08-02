@@ -362,11 +362,16 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 /// For every tool but `command_execute` these are identical. For
 /// `command_execute`, `envelope.command` advertises as an opaque object
 /// instead of the full `PrimitiveCommand`/`IntentCommand` union — that union
-/// is 13,783 bytes across both enums and is redundant, since every branch
-/// already has a named tool. Validation is untouched: `tool_schema` (and the
-/// `definitions()` table it reads) keeps the full union, so a malformed
-/// nested command still fails with `-32602` before it reaches the runtime.
-/// Only what this tool *advertises on connect* narrows.
+/// is 13,783 bytes across both enums, and all eight `IntentCommand` variants
+/// plus all but four `PrimitiveCommand` variants have a named tool that builds
+/// the envelope for the caller. The four with no named tool
+/// (`clickAndWaitForPopup`, `clickAndWaitForDownload`, `setFocusEmulation`,
+/// `setEmulatedMedia`) stay reachable only through this tool, and are
+/// documented in the `bobby://primitives` resource (`crate::resources`) rather
+/// than paid for by every principal on every connect. Validation is untouched:
+/// `tool_schema` (and the `definitions()` table it reads) keeps the full union,
+/// so a malformed nested command still fails with `-32602` before it reaches
+/// the runtime. Only what this tool *advertises on connect* narrows.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     if name != "command_execute" {
         return tool_schema(name);
@@ -2302,6 +2307,14 @@ fn validate_string(schema: &Value, value: &str, pointer: &str) -> Validated {
     {
         return Err(SchemaViolation::at(pointer, "format"));
     }
+    // `pattern` does NOT evaluate the declared regex. There is no regex engine
+    // in this crate, and the only `pattern` any schema declares is `sha256()`'s
+    // `^[0-9a-f]{64}$` (the length half of which `minLength`/`maxLength` above
+    // already enforce), so this hardcodes that one expression's character
+    // class. Adding a second, different `pattern` anywhere would silently get
+    // this check instead of the one it declared —
+    // `budget.rs::the_only_declared_pattern_is_the_one_the_validator_implements`
+    // fails the build if that happens.
     if schema.get("pattern").is_some()
         && !value
             .bytes()

@@ -484,14 +484,26 @@ async fn every_definitions_table_entry_resolves_its_own_refs() {
     }
 }
 
+/// KNOWN DEVIATION FROM MCP, accepted deliberately.
+///
 /// `session_list`'s real `structuredContent` is a bare JSON array of
 /// `SessionState` (pinned by `runtime-tests/tests/interface_security.rs`'s
-/// `mcp_foreign_session_checks`) — the one tool this blanket "every
-/// outputSchema is `type: object`" check cannot hold for without declaring a
-/// false contract. Wrapping the payload in an object instead would fix the
-/// schema at the cost of changing that pinned wire behaviour, which is out of
-/// scope here — so this is the one named exception, checked for its own real
-/// (array) shape below instead.
+/// `mcp_foreign_session_checks`, which asserts `structuredContent.as_array()`).
+/// MCP types `CallToolResult.structuredContent` as an *object*; a bare array
+/// is not a valid value for that field, and a strict client — the official
+/// TypeScript SDK among them — rejects the whole result rather than reading
+/// it. So this is not merely "a schema that isn't `type: object`": the wire
+/// shape itself deviates from the protocol, and the `type: "array"`
+/// outputSchema below is an honest declaration of that deviation rather than
+/// a false `type: "object"` contract no real response would satisfy.
+///
+/// The fix, when a wire break is acceptable, is to wrap the payload as
+/// `{"sessions": [...]}` — object-shaped `structuredContent`, an
+/// object-shaped outputSchema, and this exception deleted. That changes the
+/// response body every existing `session_list` caller reads, so it is a
+/// breaking change to a shape that predates this work, not a schema edit.
+/// It was consciously not taken here; strict clients may reject
+/// `session_list` results until it is.
 const ARRAY_SHAPED_OUTPUT: &[&str] = &["session_list"];
 
 #[tokio::test]
@@ -776,4 +788,236 @@ async fn workflow_recover_resumed_evidence_round_trips_through_its_output_schema
         &value,
         "workflow_recover (resumed, with evidence)",
     );
+}
+
+/// The hand-rolled validator in `src/schema.rs` implements a *subset* of JSON
+/// Schema 2020-12. Keywords it does not implement are not rejected, they are
+/// ignored: `validate_at`/`validate_object`/`validate_string`/`validate_number`
+/// read the keywords they know by name and return `Ok` for everything else. So
+/// an author who reaches for `anyOf`, `allOf`, `not`, `if`/`then`/`else`,
+/// `patternProperties`, `dependentSchemas`, `dependentRequired`,
+/// `unevaluatedProperties`, `unevaluatedItems`, `prefixItems`, `contains`,
+/// `uniqueItems`, `minProperties`, `multipleOf`, or `exclusiveMaximum` gets a
+/// green build and a constraint that silently never runs — on
+/// `validate_tool_arguments`, which is the real input-validation boundary for
+/// every `tools/call`.
+///
+/// This test walks every schema the validator can reach and fails on any
+/// keyword it does not implement. The supported set is *derived from the
+/// validator's own source* rather than transcribed here: a hand-copied list
+/// would rot the moment someone adds or drops a `schema.get("…")` arm, which
+/// is exactly the drift the test exists to catch.
+const SCHEMA_SOURCE: &str = include_str!("../src/schema.rs");
+
+/// Where the validator starts and ends in `schema.rs`. Everything between is
+/// scanned for `.get("…")`; nothing outside it is (schema *construction* also
+/// calls `.get`, and those keys are not evidence of validator support).
+const VALIDATOR_REGION_START: &str = "\nfn validate_at(";
+const VALIDATOR_REGION_END: &str = "\nfn accessibility_node(";
+
+/// Keys that are annotations, not assertions: JSON Schema defines no
+/// validation behaviour for them, so a validator that ignores them is correct
+/// and their presence is not a silent-acceptance bug.
+const ANNOTATION_KEYWORDS: &[&str] = &["$schema", "description"];
+
+/// Keys whose value is data rather than a subschema. Their contents are not
+/// walked: an `enum` of objects would otherwise have its members' fields read
+/// as if they were keywords.
+const DATA_VALUED_KEYWORDS: &[&str] = &["const", "enum", "default", "examples"];
+
+/// Keys whose value is a *map of names to subschemas*. The immediate children
+/// are names chosen by the schema author, not keywords — `definitions()` has a
+/// `TextMatch` variant with a property literally named `contains`
+/// (`tagged_content("contains", …)`) — so the names are skipped and only the
+/// subschemas beneath them are walked.
+const NAMED_SUBSCHEMA_MAPS: &[&str] = &["properties", "$defs"];
+
+/// Every keyword the validator actually reads, scraped out of its own source.
+fn validator_supported_keywords() -> BTreeSet<String> {
+    let start = SCHEMA_SOURCE
+        .find(VALIDATOR_REGION_START)
+        .expect("validator region start not found — did validate_at get renamed?");
+    let end = SCHEMA_SOURCE
+        .find(VALIDATOR_REGION_END)
+        .expect("validator region end not found — did accessibility_node get renamed?");
+    assert!(
+        start < end,
+        "validator region is inverted; the anchors moved"
+    );
+    let region = &SCHEMA_SOURCE[start..end];
+    let mut keywords = BTreeSet::new();
+    let mut rest = region;
+    while let Some(offset) = rest.find(".get(\"") {
+        rest = &rest[offset + ".get(\"".len()..];
+        let Some(close) = rest.find('"') else { break };
+        keywords.insert(rest[..close].to_owned());
+        rest = &rest[close..];
+    }
+    // Sanity-check the scrape itself: if the extraction silently stopped
+    // matching, an empty or tiny set would make every assertion below pass
+    // vacuously.
+    for anchor in ["type", "properties", "required", "oneOf", "$ref", "items"] {
+        assert!(
+            keywords.contains(anchor),
+            "keyword scrape missed `{anchor}` — the extraction, not the validator, is broken"
+        );
+    }
+    assert!(
+        keywords.len() >= 15,
+        "keyword scrape found only {} keywords; the extraction is broken",
+        keywords.len()
+    );
+    keywords
+}
+
+fn assert_only_supported_keywords(
+    schema: &Value,
+    label: &str,
+    pointer: &str,
+    supported: &BTreeSet<String>,
+) {
+    match schema {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if DATA_VALUED_KEYWORDS.contains(&key.as_str()) {
+                    continue;
+                }
+                if NAMED_SUBSCHEMA_MAPS.contains(&key.as_str()) {
+                    if let Some(children) = value.as_object() {
+                        for (name, child) in children {
+                            assert_only_supported_keywords(
+                                child,
+                                label,
+                                &format!("{pointer}/{key}/{name}"),
+                                supported,
+                            );
+                        }
+                    }
+                    continue;
+                }
+                assert!(
+                    supported.contains(key) || ANNOTATION_KEYWORDS.contains(&key.as_str()),
+                    "{label} declares `{key}` at {pointer} — the validator in \
+                     crates/mcp-gateway/src/schema.rs does not implement it, so the \
+                     constraint would be silently ignored on every tools/call. \
+                     Implement it in validate_at/validate_object/validate_string/\
+                     validate_number, or express the same constraint with a keyword \
+                     the validator supports."
+                );
+                assert_only_supported_keywords(
+                    value,
+                    label,
+                    &format!("{pointer}/{key}"),
+                    supported,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                assert_only_supported_keywords(
+                    item,
+                    label,
+                    &format!("{pointer}/{index}"),
+                    supported,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn no_schema_uses_a_keyword_the_validator_does_not_implement() {
+    let supported = validator_supported_keywords();
+    // Both halves of the Task 2 split, for every tool: `schema_for_test` is
+    // `tool_schema`, what `validate_tool_arguments` actually enforces, and
+    // `inputSchema` is `advertised_tool_schema`, what an agent builds its
+    // arguments from. A keyword the validator ignores is a silent hole in the
+    // first and a false promise in the second.
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        assert_only_supported_keywords(
+            &tool["inputSchema"],
+            &format!("{name} advertised inputSchema"),
+            "",
+            &supported,
+        );
+        assert_only_supported_keywords(
+            &mcp_gateway::schema_for_test(&name),
+            &format!("{name} validation schema"),
+            "",
+            &supported,
+        );
+    }
+    // And the shared table both narrow from: an entry unreachable from any
+    // tool today is one edit away from being reachable, and `$ref` resolution
+    // walks it with the same validator.
+    let defs = mcp_gateway::definitions_for_test();
+    for (name, definition) in defs.as_object().expect("definitions() is an object") {
+        assert_only_supported_keywords(
+            definition,
+            &format!("definitions()[\"{name}\"]"),
+            "",
+            &supported,
+        );
+    }
+}
+
+/// `validate_string`'s `pattern` arm does not evaluate the declared regex —
+/// there is no regex engine here. It hardcodes the character class of the one
+/// pattern any schema declares, `sha256()`'s `^[0-9a-f]{64}$`. A second,
+/// different `pattern` anywhere would silently be checked against *that*
+/// expression instead of its own, which is worse than not checking it at all:
+/// it would reject valid values and accept invalid ones.
+#[tokio::test]
+async fn the_only_declared_pattern_is_the_one_the_validator_implements() {
+    const IMPLEMENTED_PATTERN: &str = "^[0-9a-f]{64}$";
+    fn assert_patterns(schema: &Value, label: &str, pointer: &str) {
+        match schema {
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if key == "pattern" {
+                        assert_eq!(
+                            value.as_str(),
+                            Some(IMPLEMENTED_PATTERN),
+                            "{label} declares pattern {value} at {pointer}, but \
+                             validate_string in crates/mcp-gateway/src/schema.rs \
+                             hardcodes {IMPLEMENTED_PATTERN} and would apply that \
+                             instead. Implement real regex evaluation, or express \
+                             the constraint another way."
+                        );
+                        continue;
+                    }
+                    if DATA_VALUED_KEYWORDS.contains(&key.as_str()) {
+                        continue;
+                    }
+                    assert_patterns(value, label, &format!("{pointer}/{key}"));
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    assert_patterns(item, label, &format!("{pointer}/{index}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        assert_patterns(
+            &tool["inputSchema"],
+            &format!("{name} advertised inputSchema"),
+            "",
+        );
+        assert_patterns(&tool["outputSchema"], &format!("{name} outputSchema"), "");
+        assert_patterns(
+            &mcp_gateway::schema_for_test(&name),
+            &format!("{name} validation schema"),
+            "",
+        );
+    }
+    let defs = mcp_gateway::definitions_for_test();
+    for (name, definition) in defs.as_object().expect("definitions() is an object") {
+        assert_patterns(definition, &format!("definitions()[\"{name}\"]"), "");
+    }
 }
