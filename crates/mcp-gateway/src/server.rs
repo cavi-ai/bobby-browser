@@ -28,6 +28,7 @@ use crate::protocol::{
     MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
     METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
 };
+use crate::resources::{static_resource_body, static_resources};
 use crate::schema::{advertised_tool_schema, tool_output_schema, validate_tool_arguments};
 use crate::ArtifactResources;
 
@@ -441,18 +442,18 @@ impl Server {
         if !valid_initial_list_params(&params) {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         }
-        let resources = self
-            .resources
-            .list()
-            .await
-            .into_iter()
-            .map(|artifact_id| {
+        let resources = static_resources()
+            .iter()
+            .map(
+                |(uri, name, description)| json!({"uri":uri,"name":name,"description":description}),
+            )
+            .chain(self.resources.list().await.into_iter().map(|artifact_id| {
                 json!({
                     "uri":format!("artifact://{artifact_id}"),
                     "name":format!("artifact-{artifact_id}"),
                     "description":"Authenticated runtime artifact"
                 })
-            })
+            }))
             .collect::<Vec<_>>();
         success(id, json!({"resources":resources}))
     }
@@ -469,6 +470,12 @@ impl Server {
             Ok(input) => input,
             Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
         };
+        if let Some(text) = static_resource_body(&input.uri) {
+            return success(
+                id,
+                json!({"contents":[{"uri":input.uri,"mimeType":"text/markdown","text":text}]}),
+            );
+        }
         let Some(artifact_id) = parse_artifact_uri(&input.uri) else {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         };

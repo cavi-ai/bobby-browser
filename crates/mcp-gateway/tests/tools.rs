@@ -2382,3 +2382,48 @@ async fn recovery_status_follows_recovery_read_capability() {
         .collect::<Vec<_>>();
     assert!(!names.contains(&"recovery_status".to_owned()), "{names:?}");
 }
+
+#[tokio::test]
+async fn static_resources_are_listed_and_readable() {
+    let server = fixture_server(vec![Capability::ArtifactRead]).await;
+    let listed = server
+        .handle_message(request(2, "resources/list", json!({})))
+        .await
+        .unwrap();
+    let uris: Vec<String> = listed["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["uri"].as_str().unwrap().to_owned())
+        .collect();
+    for expected in [
+        "bobby://capabilities",
+        "bobby://failure-taxonomy",
+        "bobby://intents",
+    ] {
+        assert!(uris.contains(&expected.to_owned()), "{expected} not listed");
+        let read = server
+            .handle_message(request(3, "resources/read", json!({"uri":expected})))
+            .await
+            .unwrap();
+        assert!(
+            read["result"]["contents"][0]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "{expected} read returned no text"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_bobby_uri_is_rejected() {
+    let server = fixture_server(vec![Capability::ArtifactRead]).await;
+    let read = server
+        .handle_message(request(2, "resources/read", json!({"uri":"bobby://nope"})))
+        .await
+        .unwrap();
+    assert!(
+        read["error"].is_object(),
+        "unknown bobby:// uri was accepted"
+    );
+}
