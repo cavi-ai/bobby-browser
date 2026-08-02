@@ -70,6 +70,14 @@ impl RuntimeInterface for FakeRuntime {
         unreachable!()
     }
 
+    async fn resolve_command_evidence(
+        &self,
+        _: RequestContext,
+        _: Vec<CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        unreachable!()
+    }
+
     async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {
         unreachable!()
     }
