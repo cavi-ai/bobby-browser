@@ -74,7 +74,7 @@ jobs:
       - name: Install Chrome
         uses: browser-actions/setup-chrome@latest
         with:
-          chrome-version: 150.0.7871.187
+          chrome-version: 150.0.7871.124
           install-dependencies: true
 
       - name: Locate Chrome
