@@ -385,7 +385,9 @@ async fn adaptive_http() {
     .await;
     assert!(
         inspection_text(&recovered).contains(&inspection_text(&recovered_chromium)),
-        "recovered direct HTTP and Chromium must observe coherent cookie state"
+        "recovered direct HTTP and Chromium must observe coherent cookie state: direct={:?} chromium={:?} evidence={recovered_chromium:?}",
+        inspection_text(&recovered),
+        inspection_text(&recovered_chromium),
     );
 
     println!(
