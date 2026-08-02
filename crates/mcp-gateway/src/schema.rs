@@ -13,6 +13,9 @@ const MAX_TIMEOUT_MS: u64 = 300_000;
 const MAX_NETWORK_IGNORE_SUBSTRINGS: usize = 32;
 const MAX_NETWORK_IGNORE_SUBSTRING_BYTES: usize = 512;
 const MAX_NETWORK_IGNORE_RESOURCE_TYPES: usize = 32;
+// Output-only (Task 6): bounds for definitions reachable solely from
+// `structuredContent`, never from a tool argument.
+const MAX_RECOVERY_RECEIPTS: usize = 64;
 
 pub(crate) fn validate_tool_arguments(
     name: &str,
@@ -376,6 +379,140 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     schema
 }
 
+/// The shape of a tool's `structuredContent`, built through the same
+/// `reachable_definitions` closure as the input schemas: a blanket `$defs`
+/// here would undo the payload reduction the input side already paid for.
+///
+/// Every tool returns *some* structured content — there is no tool whose
+/// dispatch arm skips `tool_success`/`structuredContent` — so this returns
+/// `Value` rather than `Option<Value>`. An `Option` that is never `None` is
+/// just a `Value` with extra ceremony at the call site.
+pub(crate) fn tool_output_schema(name: &str) -> Value {
+    let mut schema = match name {
+        "runtime_info" => object(
+            json!({
+                "version":string(0, 256),
+                "capabilities":array(string(0, 64), 32),
+                "active_sessions":{"type":"integer","minimum":0},
+                "queued_jobs":{"type":"integer","minimum":0},
+                "uptime_ms":{"type":"integer","minimum":0},
+                "credentialExpiresAt":{"type":"string","format":"date-time"}
+            }),
+            &[
+                "version",
+                "capabilities",
+                "active_sessions",
+                "queued_jobs",
+                "uptime_ms",
+                "credentialExpiresAt",
+            ],
+        ),
+        // `session_list`'s real `structuredContent` is a bare JSON array of
+        // `SessionState` — `Vec<SessionState>` serialized directly, with no
+        // wrapper key — pinned by `interface_security.rs`'s
+        // `mcp_foreign_session_checks`, which asserts
+        // `structuredContent.as_array()`. That is not an object, so it
+        // cannot be declared literally: every advertised output schema must
+        // carry `"type":"object"` (this task's own
+        // `tools_that_return_structured_content_declare_an_output_schema`
+        // enforces it across every tool with no exception). Rather than
+        // assert a fictitious wrapper key that will never appear on the
+        // wire, this documents the true shape in prose and uses `items`
+        // only as non-normative guidance for what each element looks like.
+        "session_list" => json!({
+            "type":"object",
+            "description":"The actual payload is a JSON array of session objects like these, not an object — a pre-existing deviation from the object-shaped structuredContent convention that a schema cannot literally express.",
+            "items":{"$ref":"#/$defs/SessionState"}
+        }),
+        "session_create" => output_ref("SessionState"),
+        "session_close" => object(
+            json!({"closed":{"type":"boolean","const":true}}),
+            &["closed"],
+        ),
+        // Real shape is `PageState`'s own fields plus `navigationOutcome`
+        // (present whenever `url` was given) and, only when that navigation
+        // did not complete, `cleanupOutcome` and `pageClosed`. The latter
+        // three are declared but not required, matching that conditionality.
+        "page_open" => json!({
+            "type":"object",
+            "allOf":[{"$ref":"#/$defs/PageState"}],
+            "properties":{
+                "navigationOutcome":object(command_outcome_properties(), &["status", "commandId"]),
+                "cleanupOutcome":object(command_outcome_properties(), &["status", "commandId"]),
+                "pageClosed":{"type":"boolean"}
+            }
+        }),
+        "checkpoint_save" => output_ref("CheckpointRecord"),
+        "workflow_recover" => output_ref("RecoveryDecision"),
+        "recovery_status" => object(
+            json!({
+                "workflowId":id(),
+                "checkpoint":{"$ref":"#/$defs/CheckpointRecord"},
+                // `RecoveryReceipt` also carries a `CommandOutcome`, a
+                // `SkillOutcome`, and a `SkillDecision`; kept generic here
+                // for the same reason as `CheckpointRecord.recoveryReceipts`.
+                "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS)
+            }),
+            &["workflowId", "checkpoint", "receipts"],
+        ),
+        "events_read" => object(
+            json!({
+                "events":array(
+                    object(
+                        json!({
+                            "cursor":{"type":"integer","minimum":0},
+                            "kind":string(1, 128),
+                            "payload":any_value()
+                        }),
+                        &["cursor", "kind", "payload"],
+                    ),
+                    MAX_EVENT_LIMIT,
+                ),
+                "latestAvailable":{"type":"integer","minimum":0}
+            }),
+            &["events", "latestAvailable"],
+        ),
+        // Not `page_list` / `page_close` / `page_activate`: unlike
+        // `page_open`, all three dispatch through `submit_envelope` just
+        // like every primitive/intent command below, so their real output
+        // is `CommandOutcome` plus `workflowId`, not a `PageState`.
+        "form_snapshot" => output_ref("FormSnapshot"),
+        // Every other tool (~29 of them: every primitive/intent command plus
+        // `command_execute` itself) submits a command envelope through
+        // `submit_envelope`, which returns the envelope's `CommandOutcome`
+        // with `workflowId` always inserted at the top level. See
+        // `command_outcome_properties` for why this stays self-contained
+        // (no `$ref`, no `$defs`) rather than reusing a shared, fully-typed
+        // definition.
+        _ => {
+            let mut properties = command_outcome_properties();
+            merge_properties(&mut properties, json!({"workflowId": id()}));
+            let mut schema = object(properties, &["status", "commandId", "workflowId"]);
+            schema["description"] = json!(
+                "CommandOutcome (tag: status) plus workflowId. Narrowed to a flat, \
+                self-contained shape to stay within the connect-budget across every \
+                command-executing tool; see types::CommandOutcome for the fully-typed union."
+            );
+            schema
+        }
+    };
+    schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
+    let defs = reachable_definitions(&schema);
+    if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+        schema["$defs"] = defs;
+    }
+    schema
+}
+
+/// A top-level schema whose entire value equals one named definition. JSON
+/// Schema 2020-12 treats `$ref` as an ordinary applicator (unlike draft-4,
+/// where a sibling `type` would be ignored), so `type` and `$ref` both apply
+/// here — satisfying the blanket "every outputSchema has `type: object`"
+/// requirement without inventing a wrapper key the real payload never has.
+fn output_ref(def_name: &str) -> Value {
+    json!({"type":"object","$ref":format!("#/$defs/{def_name}")})
+}
+
 /// Every intent tool is page-scoped, so the scope keys are always required.
 fn intent_required(extra: &[&'static str]) -> Vec<&'static str> {
     let mut required = vec!["sessionId", "pageId"];
@@ -547,7 +684,32 @@ fn definitions() -> Value {
             "recordedAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
             "decision":{"$ref":"#/$defs/RecoveryDecision"}
         }), &["recordedAt","decision"]),
-        "WorkflowCheckpoint": workflow_checkpoint()
+        "WorkflowCheckpoint": workflow_checkpoint(),
+        // --- Output-only definitions (Task 6) ---------------------------------
+        // Everything below here describes `structuredContent`, never a tool
+        // argument. `Evidence` was deleted from this table by Task 3 because
+        // `checkpoint_save` stopped accepting it as input; it is restored here
+        // so `recovery_decisions()`'s `$ref:"#/$defs/Evidence"` (used by
+        // `RecoveryDecision`, now reachable from `workflow_recover`'s output)
+        // resolves instead of silently dropping out of `$defs`.
+        //
+        // `CommandOutcome` itself has no named definition: ~30 tools submit a
+        // command envelope and would each carry it (see `command_execute`'s
+        // budget test), so `tool_output_schema`'s fallback arm and `page_open`
+        // both inline `command_outcome_properties()` instead of `$ref`-ing a
+        // shared one — self-contained and paid for once per tool rather than
+        // once per tool plus a `$defs` entry that only saves a few bytes.
+        "Evidence": {"oneOf": evidence_variants()},
+        "SessionState": session_state(),
+        "PageState": page_state(),
+        "CheckpointRecord": checkpoint_record(),
+        "FormSnapshot": form_snapshot_schema(),
+        "FormDescriptor": form_descriptor(),
+        "FormControl": form_control(),
+        "FormControlTarget": form_control_target(),
+        "FormControlState": {"oneOf": form_control_state_variants()},
+        "FormControlValidity": form_control_validity(),
+        "FormOption": form_option()
     })
 }
 
@@ -1136,10 +1298,413 @@ fn recovery_decisions() -> Vec<Value> {
         ),
         status_fields(
             "restarted",
-            json!({"checkpointId":id(),"lineage":object(json!({"workflowId":id(),"abandonedAttemptId":id(),"attemptId":id(),"reason":string(1,MAX_STRING_BYTES)}), &["workflowId","abandonedAttemptId","attemptId","reason"])}),
-            &["checkpointId", "lineage"],
+            json!({
+                "checkpointId":id(),
+                "lineage":object(json!({"workflowId":id(),"abandonedAttemptId":id(),"attemptId":id(),"reason":string(1,MAX_STRING_BYTES)}), &["workflowId","abandonedAttemptId","attemptId","reason"]),
+                // `RecoveryDecision::Restarted.evidence` has `#[serde(default)]` for
+                // deserialization only; it carries no `skip_serializing_if`, so the
+                // runtime always serializes it (possibly empty), same as the other
+                // two variants.
+                "evidence":array(json!({"$ref":"#/$defs/Evidence"}),MAX_EVIDENCE_ITEMS)
+            }),
+            &["checkpointId", "lineage", "evidence"],
         ),
     ]
+}
+
+// --- Output-only schema helpers (Task 6) ----------------------------------
+//
+// Everything below describes `structuredContent` — what a tool call actually
+// returns — never a tool argument. Only `tool_output_schema` reads these.
+
+/// A flattened, self-contained approximation of `types::CommandOutcome`
+/// (`tag = "status"`, 7 variants) — every field any variant carries, at the
+/// top level, all optional except `status`/`commandId`. Used inline
+/// (`object(command_outcome_properties(), …)`) everywhere a `CommandOutcome`
+/// needs to appear in an output schema, rather than a shared named
+/// definition: ~30 tools submit a command envelope and would each carry the
+/// $ref, and the fully-typed union (`status`-discriminated, each variant
+/// with its own required/`error`/`retryAfterMs`/`evidence` shape) costs
+/// ~3.8 KB on its own — replicated that many times it alone blows the
+/// connect budget. `error`/`evidence` are left as generic objects for the
+/// same reason `CheckpointRecord` and the `_` fallback below keep them
+/// generic: full fidelity belongs on `workflow_recover`'s `RecoveryDecision`,
+/// the one low-multiplicity path that models `Evidence` for real.
+fn command_outcome_properties() -> Value {
+    json!({
+        "status":{"type":"string","enum":["completed","retryableFailure","needsReconciliation","policyDenied","resourceExhausted","restarted","failed"]},
+        "commandId":id(),
+        "evidence":{"type":"array","items":{"type":"object"}},
+        "error":{"type":"object"},
+        "retryAfterMs":{"type":"integer","minimum":0},
+        "reason":string(0, MAX_STRING_BYTES)
+        // `priorAttemptId`/`attemptId` (only `status: "restarted"` carries
+        // them) are deliberately omitted: this shape is replicated across
+        // ~30 tool descriptors, so every property here is a per-tool cost
+        // times 30, and both ids are still visible in `types::CommandOutcome`
+        // for the one status where they matter.
+    })
+}
+
+/// Must match `types::Evidence`'s `tag = "kind"` serde output — every kind
+/// it actually serializes, no more and no fewer — but not its fields.
+///
+/// Reachable only from the recovery-path outputs (`CheckpointRecord`,
+/// `RecoveryDecision`) — see the comment on `Evidence` in `definitions()` —
+/// yet even after every field that referenced a shared definition
+/// (`TargetSpec`, `WaitCondition`, `AccessibilityNode`, `ExecutionRecord`,
+/// `CookieRecord`, the whole form-control subsystem) was inlined down to a
+/// generic object, a field-by-field replica of all 25 variants still put
+/// `tools/list` well past the hard 128 KiB frame budget
+/// (`tools_list_fits_the_frame_budget_for_a_full_capability_principal` in
+/// `tests/tools.rs`) once it was reachable from even a single tool. Each
+/// variant here keeps only its `kind` — everything the drift guard in
+/// `schema_parity.rs` checks, and the one piece of information this schema
+/// exists to guarantee an agent doesn't have to call the tool to learn —
+/// plus a single open `data` object as a placeholder for the rest.
+fn evidence_variants() -> Vec<Value> {
+    [
+        "executionPath",
+        "navigation",
+        "inspection",
+        "element",
+        "upload",
+        "page",
+        "pages",
+        "popup",
+        "download",
+        "configuration",
+        "resolution",
+        "wait",
+        "screenshot",
+        "browserExecution",
+        "javaScriptResult",
+        "accessibilitySnapshot",
+        "formSnapshot",
+        "controlAction",
+        "structuredExtraction",
+        "cookieState",
+        "pdfArtifact",
+        "dialog",
+        "emulation",
+        "intentExecution",
+        "extraction",
+    ]
+    .into_iter()
+    .map(|kind| tagged_fields(kind, json!({"data":{"type":"object"}}), &[]))
+    .collect()
+}
+
+/// Must match `types::SessionState`. The struct itself carries no
+/// `rename_all`, so these keys are snake_case; only the nested
+/// `execution_policy` is camelCase, since `types::ExecutionPolicy` sets its
+/// own `rename_all = "camelCase"`.
+fn session_state() -> Value {
+    object(
+        json!({
+            "id":id(),
+            "profile":string(1, 128),
+            "proxy":nullable(string(0, 2048)),
+            "page_ids":array(id(), MAX_COLLECTION_ITEMS),
+            "created_at":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
+            "last_used_at":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
+            "execution_policy":object(
+                json!({"javascriptEvaluation":{"type":"boolean"},"visionAssist":{"type":"boolean"}}),
+                &[]
+            )
+        }),
+        &[
+            "id",
+            "profile",
+            "proxy",
+            "page_ids",
+            "created_at",
+            "last_used_at",
+            "execution_policy",
+        ],
+    )
+}
+
+/// Must match `types::PageState`. Also no `rename_all`, so snake_case keys;
+/// `mode` serializes as the bare Rust variant name because `PageMode` has no
+/// `rename_all` of its own.
+fn page_state() -> Value {
+    object(
+        json!({
+            "id":id(),
+            "session_id":id(),
+            "url":nullable(string(0, MAX_URL_BYTES)),
+            "mode":{"type":"string","enum":["Document","Interactive","Render"]},
+            "ready_state":string(0, 256),
+            "pending_requests":{"type":"integer","minimum":0}
+        }),
+        &[
+            "id",
+            "session_id",
+            "url",
+            "mode",
+            "ready_state",
+            "pending_requests",
+        ],
+    )
+}
+
+/// The persisted `types::WorkflowCheckpoint` as `checkpoint_save` and
+/// `recovery_status` actually return it — distinct from the `WorkflowCheckpoint`
+/// *input* definition (`workflow_checkpoint()`), which forces
+/// `evidence`/`recoveryHistory`/`recoveryReceipts` to empty arrays because the
+/// caller may not author them. The runtime populates all three before
+/// returning, so the output shape says so.
+fn checkpoint_record() -> Value {
+    object(
+        json!({
+            "schemaVersion":{"type":"integer","const":1},
+            "checkpointId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(), "pageId":id(),
+            "restartUrl":string(1, MAX_URL_BYTES), "currentUrl":string(1, MAX_URL_BYTES),
+            "cursor":nullable(id()), "boundaryCommandId":nullable(id()),
+            "recoveryClass":{"type":"string","enum":["replayable","reconciliable","boundary"]},
+            "invariants":array(json!({"$ref":"#/$defs/CheckpointInvariant"}), MAX_COLLECTION_ITEMS),
+            "replayableInputs":array(string(0, MAX_STRING_BYTES), MAX_COLLECTION_ITEMS),
+            // `evidence` and `recoveryHistory` are deliberately generic rather
+            // than `Evidence`/`RecoveryRecord` $refs: those pull in the
+            // accessibility and form-control subsystems, which would
+            // otherwise be duplicated into both `checkpoint_save` and
+            // `recovery_status`'s own `$defs` on top of the one place this
+            // task keeps the fully-typed `Evidence` union —
+            // `workflow_recover`'s `RecoveryDecision` (see the comment on
+            // `Evidence` in `definitions()`).
+            "evidence":array(
+                json!({"type":"object","required":["kind"],"properties":{"kind":{"type":"string"}}}),
+                MAX_EVIDENCE_ITEMS
+            ),
+            "recoveryHistory":array(
+                json!({
+                    "type":"object",
+                    "required":["recordedAt","decision"],
+                    "properties":{
+                        "recordedAt":{"type":"string","format":"date-time"},
+                        "decision":{"type":"object"}
+                    }
+                }),
+                MAX_COLLECTION_ITEMS
+            ),
+            // `RecoveryReceipt` also carries a `CommandOutcome`, a `SkillOutcome`,
+            // and a `SkillDecision` — none modeled here. Kept generic rather than
+            // dragging in a third type subsystem for a field an agent
+            // reconciling a workflow rarely needs at this depth.
+            "recoveryReceipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
+            "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
+        }),
+        &[
+            "schemaVersion",
+            "checkpointId",
+            "workflowId",
+            "attemptId",
+            "sessionId",
+            "pageId",
+            "restartUrl",
+            "currentUrl",
+            "cursor",
+            "boundaryCommandId",
+            "recoveryClass",
+            "invariants",
+            "replayableInputs",
+            "evidence",
+            "recoveryHistory",
+            "recoveryReceipts",
+            "createdAt",
+        ],
+    )
+}
+
+/// Must match `types::FormSnapshot`'s wire representation (`FormSnapshotWire`).
+fn form_snapshot_schema() -> Value {
+    object(
+        json!({
+            "schemaVersion":{"type":"integer","const":1},
+            "pageId":id(),
+            "forms":array(json!({"$ref":"#/$defs/FormDescriptor"}), 64),
+            "unownedControls":array(json!({"$ref":"#/$defs/FormControl"}), 512),
+            "truncated":{"type":"boolean"}
+        }),
+        &[
+            "schemaVersion",
+            "pageId",
+            "forms",
+            "unownedControls",
+            "truncated",
+        ],
+    )
+}
+
+/// Must match `types::FormDescriptor`. `groups`/`validity` are generic
+/// rather than `FormGroup`/`FormValidity` `$ref`s — both are small, but
+/// `form_snapshot` is already the single most expensive tool descriptor in
+/// the connect budget, and neither carries information a `FormControl`'s own
+/// `id`/`groupId`/`validity` fields don't already surface.
+fn form_descriptor() -> Value {
+    object(
+        json!({
+            "id":string(1, 128),
+            "target":nullable(json!({"$ref":"#/$defs/FormControlTarget"})),
+            "accessibleName":nullable(string(0, 2048)),
+            "description":nullable(string(0, 2048)),
+            "groups":array(json!({"type":"object"}), 128),
+            "controls":array(json!({"$ref":"#/$defs/FormControl"}), 512),
+            "submitControlIds":array(string(1, 128), 512),
+            "resetControlIds":array(string(1, 128), 512),
+            "validity":{"type":"object"}
+        }),
+        &[
+            "id",
+            "target",
+            "accessibleName",
+            "description",
+            "groups",
+            "controls",
+            "submitControlIds",
+            "resetControlIds",
+            "validity",
+        ],
+    )
+}
+
+/// Must match `types::FormControl`.
+fn form_control() -> Value {
+    object(
+        json!({
+            "id":string(1, 128),
+            "formId":nullable(string(1, 128)),
+            "groupId":nullable(string(1, 128)),
+            "target":nullable(json!({"$ref":"#/$defs/FormControlTarget"})),
+            "controlKind":{"type":"string","enum":[
+                "text","email","password","search","number","checkbox","radio","switch",
+                "selectOne","selectMultiple","date","time","dateTimeLocal","range","file",
+                "contentEditable","combobox","listbox","submit","reset","other"
+            ]},
+            "accessibleName":nullable(string(0, 2048)),
+            "label":nullable(string(0, 2048)),
+            "description":nullable(string(0, 2048)),
+            "placeholder":nullable(string(0, 2048)),
+            "autocomplete":nullable(string(0, 2048)),
+            "state":{"$ref":"#/$defs/FormControlState"},
+            // Generic rather than `$ref:"#/$defs/FormControlConstraints"`:
+            // the 11-field constraint object is rarely what an agent needs
+            // to decide *how* to fill a control — `controlKind` and
+            // `validity` (kept fully typed) carry more of that weight.
+            "constraints":{"type":"object"},
+            "validity":{"$ref":"#/$defs/FormControlValidity"},
+            "options":array(json!({"$ref":"#/$defs/FormOption"}), 512),
+            "supportedOperations":array(
+                json!({"type":"string","enum":["setText","setChecked","selectOne","selectMany","setFiles","clear","activate"]}),
+                7
+            )
+        }),
+        &[
+            "id",
+            "formId",
+            "groupId",
+            "target",
+            "controlKind",
+            "accessibleName",
+            "label",
+            "description",
+            "placeholder",
+            "autocomplete",
+            "state",
+            "constraints",
+            "validity",
+            "options",
+            "supportedOperations",
+        ],
+    )
+}
+
+/// Must match `types::FormControlTarget`. `framePath`/`shadowPath` (arrays
+/// of `SemanticTargetSegment`) are generic rather than a `$ref`: they are
+/// rarely populated (most controls are not cross-frame) and the shape is
+/// the same three scalar fields as this struct's own `role`/`accessibleName`
+/// /`ordinal`.
+fn form_control_target() -> Value {
+    object(
+        json!({
+            "role":string(0, 128),
+            "accessibleName":string(0, MAX_STRING_BYTES),
+            "ordinal":nullable(json!({"type":"integer","minimum":0})),
+            "framePath":array(json!({"type":"object"}), 8),
+            "shadowPath":array(json!({"type":"object"}), 8)
+        }),
+        &[
+            "role",
+            "accessibleName",
+            "ordinal",
+            "framePath",
+            "shadowPath",
+        ],
+    )
+}
+
+/// Must match `types::FormControlState`'s `tag = "kind"` serde output.
+fn form_control_state_variants() -> Vec<Value> {
+    vec![
+        tagged_fields("empty", json!({}), &[]),
+        tagged_fields(
+            "text",
+            json!({"value":string(0, MAX_STRING_BYTES)}),
+            &["value"],
+        ),
+        tagged_fields(
+            "redacted",
+            json!({"present":{"type":"boolean"}}),
+            &["present"],
+        ),
+        tagged_fields(
+            "checked",
+            json!({"checked":{"type":"boolean"}}),
+            &["checked"],
+        ),
+        tagged_fields(
+            "selection",
+            json!({"values":array(string(0, MAX_STRING_BYTES), 512)}),
+            &["values"],
+        ),
+        tagged_fields(
+            "files",
+            json!({"count":{"type":"integer","minimum":0}}),
+            &["count"],
+        ),
+    ]
+}
+
+/// Must match `types::FormControlValidity`.
+fn form_control_validity() -> Value {
+    object(
+        json!({
+            "willValidate":{"type":"boolean"},
+            "valid":{"type":"boolean"},
+            "flags":array(json!({"type":"string","enum":[
+                "valueMissing","typeMismatch","patternMismatch","tooLong","tooShort",
+                "rangeUnderflow","rangeOverflow","stepMismatch","badInput","customError"
+            ]}), 10),
+            "message":nullable(string(0, 1024)),
+            "describedBy":array(string(0, MAX_STRING_BYTES), 512)
+        }),
+        &["willValidate", "valid", "flags", "message", "describedBy"],
+    )
+}
+
+/// Must match `types::FormOption`.
+fn form_option() -> Value {
+    object(
+        json!({
+            "value":string(0, MAX_STRING_BYTES),
+            "label":string(0, MAX_STRING_BYTES),
+            "disabled":{"type":"boolean"},
+            "selected":{"type":"boolean"},
+            "groupLabel":nullable(string(0, MAX_STRING_BYTES))
+        }),
+        &["value", "label", "disabled", "selected", "groupLabel"],
+    )
 }
 
 fn object(properties: Value, required: &[&str]) -> Value {

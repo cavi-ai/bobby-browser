@@ -28,7 +28,7 @@ use crate::protocol::{
     MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
     METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
 };
-use crate::schema::{advertised_tool_schema, validate_tool_arguments};
+use crate::schema::{advertised_tool_schema, tool_output_schema, validate_tool_arguments};
 use crate::ArtifactResources;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
@@ -421,6 +421,7 @@ impl Server {
                     "title": tool_title(name),
                     "description": tool_description(name),
                     "inputSchema": advertised_tool_schema(name),
+                    "outputSchema": tool_output_schema(name),
                     "annotations": tool_annotations(name)
                 }));
             }
