@@ -109,6 +109,17 @@ impl WorkerFactory for ChromiumWorkerFactory {
         if !self.config.headless {
             builder = builder.with_head();
         }
+        // Chrome's sandbox requires root or unprivileged user namespaces;
+        // hosted CI has neither. Honor an explicit opt-out rather than
+        // guessing from uid (runners are unprivileged but still blocked).
+        #[cfg(unix)]
+        {
+            let blocked = unsafe { libc::geteuid() } == 0
+                || std::env::var_os("BOBBY_CHROME_NO_SANDBOX").is_some();
+            if blocked {
+                builder = builder.no_sandbox();
+            }
+        }
         let config = builder
             .build()
             .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;

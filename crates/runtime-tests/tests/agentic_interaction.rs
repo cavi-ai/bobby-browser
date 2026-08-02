@@ -39,6 +39,14 @@ async fn completed(
     }
 }
 
+fn chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
@@ -57,9 +65,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )),
+            executable: Some(PathBuf::from(&chrome_executable())),
             profiles_dir: root.path().join("profiles"),
             headless: true,
             max_active: 1,
