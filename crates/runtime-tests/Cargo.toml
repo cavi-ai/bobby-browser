@@ -45,3 +45,4 @@ url.workspace = true
 uuid.workspace = true
 workflow-journal = { path = "../workflow-journal" }
 worker-pool = { path = "../worker-pool" }
+fingerprinting = { path = "../fingerprinting" }

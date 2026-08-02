@@ -27,5 +27,15 @@ and the [HTTP API reference](../surfaces/http-api.md).
 
 `bobby doctor` can probe `/healthz` after the server is up.
 
+With the server running, submit and inspect jobs via the broker HTTP API:
+
+```bash
+bobby jobs submit --name echo --payload '{"message":"hi"}'
+bobby jobs status <job_id>
+```
+
+Bootstrap needs `job:*` capabilities (`bobby init --force` if an older
+`bootstrap.env` lacks them). See [CLI reference](cli.md).
+
 Do not expose the runtime to untrusted networks; reach it over loopback or an
 operator-controlled boundary.

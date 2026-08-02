@@ -61,6 +61,37 @@ bootstrap presence, storage dirs, Firefox/Chromium on PATH, optional `/healthz`)
 
 Exit code `1` if any **fail** checks; warnings alone exit `0`.
 
+### `bobby jobs`
+
+HTTP client for the broker job API (`/v1/jobs`). The scheduler runs
+**in-process inside `bobby serve`** — the CLI does not start a second scheduler.
+
+Bootstrap credentials need `job:submit`, `job:read`, and `job:cancel`. New
+`bobby init` / loopback serve credentials include these by default. Existing
+`bootstrap.env` files are not migrated; run `bobby init --force` (or enroll a
+principal with `job:*`) before using these commands.
+
+```bash
+bobby jobs submit --name echo --payload '{"message":"hi"}'
+bobby jobs submit --name echo --payload-file ./job.json --priority high \
+  --idempotency-key run-1
+bobby jobs status <job_id>
+bobby jobs cancel <job_id>
+```
+
+Shared flags on all `jobs` subcommands:
+
+| Flag | Meaning |
+|---|---|
+| `--config <path>` | Same as `serve` |
+| `--bootstrap-env <path>` | Same as `serve` (bearer source if no token env) |
+| `--base-url <url>` | Override `http://{host}:{port}` from config |
+| `--token <bearer>` | Override `AUTOMATION_RUNTIME_TOKEN` / bootstrap bearer |
+
+`submit` flags: `--name` (required), `--payload` (JSON string, default `{}`),
+`--payload-file`, `--priority` (`low|normal|high|critical`, default `normal`),
+`--max-retries`, `--timeout-ms`, `--idempotency-key`.
+
 ### Firefox companion
 
 ```bash

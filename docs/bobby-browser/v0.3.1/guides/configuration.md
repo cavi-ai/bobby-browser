@@ -43,6 +43,7 @@ Engine choice is **not** a TOML field — use
 | Field | Default | Meaning |
 |---|---|---|
 | `journal_path` | `./data/storage/commands.jsonl` | Append-only command journal |
+| `scheduler_journal_path` | `./data/storage/scheduler-jobs.jsonl` | Append-only job scheduler journal |
 | `checkpoints_dir` | `./data/storage/checkpoints` | Journal checkpoints |
 | `authority_path` | `./data/storage/authority.json` | Authority storage |
 
