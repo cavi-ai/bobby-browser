@@ -48,8 +48,10 @@ test("builds deterministic safe archives with exact embedded identity and checks
     assert.equal((await readFile(first.checksumPath, "utf8")).trim(), `${first.artifactSha256}  ${first.artifactName}`);
 
     const entries = tarEntries(await readFile(first.artifactPath));
+    const docsPrefix = `docs/bobby-browser/v${RELEASE.version}/`;
     assert.ok(entries.length > 2);
-    assert.ok(entries.every(({ name }) => name === "cavi-release.json" || name.startsWith("docs/")));
+    assert.ok(entries.every(({ name }) => name === "cavi-release.json" || name.startsWith(docsPrefix)));
+    assert.ok(entries.some(({ name }) => name === `${docsPrefix}manifest.json`));
     assert.ok(entries.every(({ name }) => !name.includes("..") && !name.startsWith("/")));
     const release = JSON.parse(entries.find(({ name }) => name === "cavi-release.json").body.toString("utf8"));
     assert.deepEqual(release, {
