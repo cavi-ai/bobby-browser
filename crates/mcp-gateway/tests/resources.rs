@@ -447,7 +447,26 @@ async fn production_constructor_registers_runtime_artifact_then_lists_and_reads_
         .handle_message(request(5, "resources/list", json!({})))
         .await
         .unwrap();
-    assert_eq!(listed["result"]["resources"][0]["uri"], uri);
+    let listed_uris: Vec<String> = listed["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["uri"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        listed_uris.contains(&uri),
+        "captured artifact not listed: {listed_uris:?}"
+    );
+    for expected in [
+        "bobby://capabilities",
+        "bobby://failure-taxonomy",
+        "bobby://intents",
+    ] {
+        assert!(
+            listed_uris.contains(&expected.to_owned()),
+            "{expected} not listed alongside the captured artifact: {listed_uris:?}"
+        );
+    }
     let read = server
         .handle_message(request(6, "resources/read", json!({"uri":uri})))
         .await
