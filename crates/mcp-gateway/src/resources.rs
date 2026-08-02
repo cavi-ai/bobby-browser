@@ -507,37 +507,53 @@ tools most likely to produce it.
 - `invalidRequest` -- the call's own arguments are malformed or out of range
   (a disallowed URL scheme, an out-of-range scale or viewport, too many
   cookies in one call). Repair: fix the argument and resubmit; nothing ran.
-- `notFound` -- the session, page, or checkpoint id named in the call doesn't
-  resolve for this principal. Repair: re-list with `session_list` /
-  `page_list` and use a current id.
+- `notFound` -- a resource named inside an already-accepted command turns out
+  to be stale once the command actually runs -- most commonly a page id that
+  is no longer open (nearly every per-page primitive shares one "page not
+  found" check). Repair: re-list with `page_list` and use a current id. A
+  *session* this principal doesn't own, or that doesn't exist, is caught
+  earlier than that -- before any command outcome is produced -- and answers
+  as a top-level JSON-RPC error rather than inside a tool's structured
+  result; the wire code reads the same, but it isn't this per-command code.
+  Repair there is the same shape: re-list with `session_list` and use a
+  current id.
 - `deadlineExceeded` -- the command's own deadline elapsed before it
   finished. Repair: confirm the condition is actually reachable, then retry
   with a longer timeout or deadline.
-- `browserLaunchFailed` -- the browser engine process itself failed to start
-  for a session. Repair: this is an environment problem, not a bad call;
-  retry `session_create`, and escalate if it persists.
+- `browserLaunchFailed` -- launching a session's browser engine failed, at
+  any step: creating its profile or download directories, building the
+  launch configuration, or starting the engine process itself. Repair: this
+  is an environment problem, not a bad call; retry `session_create`, and
+  escalate if it persists.
 - `browserCommandFailed` -- the browser engine reported a driver-level
   failure executing an otherwise well-formed command. Repair: retry the same
   call; recreate the session or page if it keeps failing.
-- `verificationFailed` -- the action ran, but its result didn't verify (a
-  fill's value didn't hold against the browser's own constraint-validity
-  state, or no requests were captured yet for `network_log`). Repair: read
-  the returned validation detail, correct the specific thing that failed,
-  then retry only that step.
+- `verificationFailed` -- the action ran, but its result didn't verify: a
+  fill's committed value violates the browser's own constraint-validity
+  state, or a `type_text`/`click` call carrying an expected-URL guard finds
+  the page already navigated away from it. Repair: read the returned
+  validation detail, correct the specific thing that failed, then retry
+  only that step.
 - `journalFailed` -- the durable outcome journal failed to record a
   command's result. Repair: for the plain retryable form, resubmit with the
   same idempotency key; see `NeedsReconciliation` above for when it may have
   already executed.
-- `resourceExhausted` -- a configured limit was already at capacity when the
-  call was made (for example, this principal's session limit). Repair: free
-  capacity before retrying.
+- `resourceExhausted` -- the worker pool has no capacity for a command that
+  needs a browser lease (it is shutting down, or a launch/cleanup task
+  itself failed), or an engine-side per-page tracking cap was hit. Repair:
+  free capacity -- close an idle session, or an idle page if the engine
+  enforces a page cap -- before retrying.
 - `policyDenied` -- the runtime's own execution or upload policy forbids the
   requested action for this session. Repair: not retryable as-is; use an
   allowed path or policy, or a different tool.
 - `internal` -- an opaque runtime fault not attributable to caller input,
-  policy, or a specific target or browser condition (a missing workflow
-  checkpoint surfaces this way rather than as `notFound`). Repair: nothing
-  caller-side to fix; treat as non-retryable and escalate if it recurs.
+  policy, or a specific target or browser condition -- for example, HAR
+  serialization or artifact-store write failures inside `network_log`, or
+  the restart-recovery scan finding a non-Replayable command left mid-flight
+  with no proof the browser action never ran (that case carries this code
+  inside `NeedsReconciliation`, not a plain failure -- see above). Repair:
+  nothing caller-side to fix; treat as non-retryable and escalate if it
+  recurs.
 - `targetNotFound` -- the described element no longer resolves to anything on
   the page. Repair: take a fresh `a11y_snapshot` (or `form_snapshot` for
   typed controls) and pass the new target.
@@ -553,19 +569,30 @@ tools most likely to produce it.
 - `targetDetached` -- the element existed at resolution time but was no
   longer connected to the DOM by the time the engine acted on it. Repair:
   re-resolve the target -- the page changed underneath the call.
-- `targetObscured` -- the element is present and in the viewport, but another
-  element covers it at the point the engine would act. Repair: clear
-  whatever is on top (for example `intent_dismiss_obstruction`) or scroll the
-  element into the clear, then retry.
-- `targetOutOfBounds` -- the element has no clickable point inside the
-  current viewport. Repair: bring it into view (scroll, resize, or `emulate`
-  a larger viewport) before retrying.
+- `targetObscured` -- **Firefox-engine only.** The Firefox companion's
+  pointer preflight hit-tests the resolved element's center and finds a
+  different element on top of it there. There is no equivalent preflight in
+  the Chromium driver -- the identical situation on a Chromium session does
+  not produce this code; it surfaces as generic `browserCommandFailed`
+  instead (the click call itself fails at the driver level). Do not treat
+  the absence of this code as proof nothing is obscuring the target on a
+  Chromium session. Repair: clear whatever is on top (for example
+  `intent_dismiss_obstruction`) or scroll the element into the clear, then
+  retry.
+- `targetOutOfBounds` -- **Firefox-engine only**, same preflight: the
+  resolved element has no clickable point inside the current viewport. As
+  with `targetObscured`, Chromium has no equivalent preflight and the same
+  condition there surfaces as generic `browserCommandFailed`, not this code.
+  Repair: bring the element into view (scroll, resize, or `emulate` a larger
+  viewport) before retrying.
 - `waitConditionTimedOut` -- the awaited page condition didn't hold before
   the call's timeout. Repair: confirm the condition via `inspect`, then
   retry with a longer timeout.
-- `screenshotCaptureFailed` -- the underlying browser screenshot call failed
-  at the driver level. Repair: retry; if it persists, the page or engine may
-  be in a bad state.
+- `screenshotCaptureFailed` -- either the underlying browser capture call
+  (screenshot or PDF print) failed at the driver level, or the captured
+  bytes failed to write to the local artifact store afterward. Repair:
+  retry; if it persists, the page, engine, or artifact store may be in a
+  bad state.
 - `networkPolicyDenied` -- the requested URL failed the runtime's own network
   policy before any request was made (not http(s), missing host, or embedded
   credentials). Repair: use a plain http(s) URL with no userinfo.
@@ -596,15 +623,31 @@ tools most likely to produce it.
   but the target it expected to disappear was still present afterward.
   Repair: take a fresh `a11y_snapshot` -- there may be another dismissal
   control, or the wrong thing was dismissed.
-- `visionAssistDenied` -- the vision-assisted path was reached but the
-  deny-by-default double gate isn't fully open (capability, session policy,
-  and provider configuration must all be true). Repair: this is a
-  configuration or authorization gap, not a retry -- fall back to a
-  deterministic tool, or fix the gate.
-- `visionAssistFailed` -- the gate was open but the vision call itself
-  failed, including a proposal that didn't clear the engine's confidence
-  floor. Repair: retry once, or fall back to a deterministic tool if it
-  keeps failing.
+- `visionAssistDenied` -- the vision double gate is closed, but which
+  conditions count as "the gate" depends on the path, and the two paths
+  disagree about provider configuration. `extract_structured` folds
+  capability, session policy, *and* provider configuration into one combined
+  check and denies if any of the three is false. Every `intent_*` tool's
+  vision-fallback escalation instead computes its gate from only capability
+  and session policy; provider configuration is checked separately, so a
+  missing provider reached through an `intent_*` tool does **not** produce
+  this code -- see `visionAssistFailed`. Repair: this is a configuration or
+  authorization gap, not a retry -- fall back to a deterministic tool, or
+  grant the missing capability / session policy.
+- `visionAssistFailed` -- the gate the reached path checks was open, but the
+  vision path still didn't produce a usable result. Critically, on every
+  `intent_*` tool this includes a **provider that isn't configured at all**:
+  the `intent_*` gate only checks capability and session policy, so with
+  both of those satisfied and no provider configured, the escalation returns
+  this code, not `visionAssistDenied` -- the identical "no provider" cause
+  that `extract_structured` reports as `visionAssistDenied`. This code also
+  covers genuinely transient causes on any path: a screenshot capture error,
+  a vision response/transport error, or a proposal that didn't clear the
+  engine's confidence floor. **Repair is conditional, not "retry once":** if
+  a provider simply isn't configured, retrying will fail forever -- treat it
+  like `visionAssistDenied` and fall back to a deterministic tool or fix the
+  configuration. Only for the transient causes (capture error, response
+  error, low-confidence proposal) is a single retry reasonable.
 "#;
 
 const INTENTS_BODY: &str = r#"# Intent commands
