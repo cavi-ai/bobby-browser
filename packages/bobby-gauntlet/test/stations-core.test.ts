@@ -30,7 +30,7 @@ test("semantic form accepts required meaningfully named values and rejects a cla
   const controller = createFoundationController("course-v1", "seed-42", "foundation");
   const state = controller.stateFor("semantic-form");
 
-  assert.equal(controller.verify("semantic-form", { values: { [state.fields.name]: "Bobby", [state.fields.email]: "bobby@example.test", [state.fields.plan]: "pro" } }).passed, true);
+  assert.equal(controller.verify("semantic-form", { values: { [state.fields.name]: "Bobby", [state.fields.email]: "bobby@example.test", [state.fields.plan]: "pro", "accept-terms": true } }).passed, true);
   assert.equal(controller.verify("semantic-form", { claimedPass: true, values: {} }).passed, false);
 });
 
