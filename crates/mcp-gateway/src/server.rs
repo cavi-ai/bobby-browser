@@ -4,7 +4,7 @@ use std::{
     io,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration as StdDuration,
@@ -23,6 +23,7 @@ use tokio::{
 };
 
 use crate::annotations::{tool_annotations, tool_title};
+use crate::notify::{tools_list_changed_frame, NotificationSink};
 use crate::protocol::{
     error, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
     MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
@@ -34,6 +35,9 @@ use crate::ArtifactResources;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
 const MAX_PENDING_CANCELLATIONS: usize = 1024;
+/// How many notification frames `serve` may have queued for the writer before it
+/// stops pulling more off the subscription. See the comment at its use site.
+const MAX_PENDING_NOTIFICATION_WRITES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lifecycle {
@@ -48,6 +52,7 @@ pub struct Server {
     authorization: AuthorizationGuard,
     events: EventStore,
     resources: ArtifactResources,
+    notifications: NotificationSink,
     lifecycle: Mutex<Lifecycle>,
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
@@ -78,17 +83,41 @@ impl Server {
         events: EventStore,
         resources: ArtifactResources,
     ) -> Self {
+        // Built here, in the one constructor both `new`/`production` and the
+        // broker's per-principal path funnel through, so neither transport can
+        // end up with a `Server` whose notification fan-out was never wired.
+        let notifications = NotificationSink::new(events.clone(), handle.principal_id().clone());
         Self {
             runtime,
             handle: handle.clone(),
             authorization: AuthorizationGuard::new(handle),
             events,
             resources,
+            notifications,
             lifecycle: Mutex::new(Lifecycle::AwaitingInitialize),
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             shutting_down: AtomicBool::new(false),
         }
+    }
+
+    /// This principal's outbound notification fan-out. A transport subscribes
+    /// here to learn what to push to the client without being asked.
+    pub fn notifications(&self) -> &NotificationSink {
+        &self.notifications
+    }
+
+    /// Tells every subscribed client that this principal's capability set — and
+    /// therefore the tool list `tools/list` returns — has changed.
+    ///
+    /// The advertised `tools.listChanged` capability is a promise, so the only
+    /// caller is whoever actually observes the change: over streamable HTTP
+    /// that is `McpServers`, which detects a rotated `CapabilityHandle` and
+    /// rebuilds the `Server`. A stdio session's capabilities are frozen by its
+    /// bootstrap credential and cannot change, so nothing calls this there —
+    /// the promise holds vacuously.
+    pub fn notify_tools_list_changed(&self) {
+        self.notifications.publish(tools_list_changed_frame());
     }
 
     pub async fn handle_message(&self, message: Value) -> Option<Value> {
@@ -161,7 +190,7 @@ impl Server {
                     json!({
                         "protocolVersion": MCP_PROTOCOL_VERSION,
                         "capabilities": {
-                            "tools": {"listChanged": false},
+                            "tools": {"listChanged": true},
                             "resources": {"subscribe": false, "listChanged": false},
                             "prompts": {"listChanged": false}
                         },
@@ -297,12 +326,52 @@ impl Server {
         W: AsyncWrite + Unpin,
     {
         let mut input = BufReader::new(input);
+        // Every frame that reaches the client — responses and notifications
+        // alike — goes through `write_response`, which serializes the whole
+        // frame and its newline while holding this one lock. That is what keeps
+        // a notification from being interleaved into the middle of a response
+        // and killing the session with an unparseable line.
         let output = Arc::new(Mutex::new(output));
         let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> =
             FuturesUnordered::new();
+        let mut notifications = self.notifications.subscribe();
+        let mut notifications_open = true;
+        // Notification writes are queued rather than awaited inline, so a client
+        // that has stopped draining stdout cannot stall the read loop and
+        // deadlock the session against its own unread request pipe. Queueing is
+        // what needs the bound: responses are queued too, but the client's own
+        // request volume caps those, while notifications arrive whether or not
+        // it asks. Past the cap the branch is disabled and nothing is pulled off
+        // the subscription until a write lands, which is exactly the
+        // backpressure the queue itself cannot apply. Frames missed while
+        // stalled are not lost silently — the subscription resumes from its
+        // cursor and reports a gap if retention passed it.
+        let outstanding = Arc::new(AtomicUsize::new(0));
         let mut frame = Vec::new();
         loop {
             tokio::select! {
+                notification = notifications.recv(),
+                    if notifications_open
+                        && outstanding.load(Ordering::Acquire) < MAX_PENDING_NOTIFICATION_WRITES =>
+                {
+                    match notification {
+                        // `write_response`'s oversized-frame fallback is
+                        // unreachable here: an `EventStore` payload is
+                        // sanitized to 16 KiB and a kind to 128 B, three orders
+                        // of magnitude under `MAX_FRAME_BYTES`.
+                        Some(notification) => {
+                            let output = output.clone();
+                            let outstanding = outstanding.clone();
+                            outstanding.fetch_add(1, Ordering::Release);
+                            pending.push(Box::pin(async move {
+                                let result = write_response(&output, Some(notification)).await;
+                                outstanding.fetch_sub(1, Ordering::Release);
+                                result
+                            }));
+                        }
+                        None => notifications_open = false,
+                    }
+                }
                 status = read_bounded_frame(&mut input, &mut frame) => {
                     let response = match status? {
                         FrameStatus::Eof => break,

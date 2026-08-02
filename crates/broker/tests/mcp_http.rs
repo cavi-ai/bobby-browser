@@ -337,3 +337,227 @@ async fn checkpoint_save_resolves_evidence_refs_over_the_broker_http_transport()
          real runtime, not get rejected before dispatch: {response}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `GET /v1/mcp`: server-to-client notifications
+// ---------------------------------------------------------------------------
+
+/// A router whose `EventStore` the test also holds, so it can append through the
+/// same call the command route and the MCP tool surface both make. The MCP
+/// `Server` this router builds per principal shares that one store, exactly as
+/// production does.
+async fn app_with_events(
+    events: interface_core::EventStore,
+    principals: &[(uuid::Uuid, &[types::Capability])],
+) -> (axum::Router, Vec<String>) {
+    let authority = interface_core::AuthorityStore::in_memory();
+    let mut bearers = Vec::new();
+    for (principal, capabilities) in principals {
+        bearers.push(
+            authority
+                .issue(
+                    types::PrincipalId::from_uuid(*principal),
+                    capabilities.to_vec(),
+                    chrono::Utc::now() + chrono::Duration::minutes(5),
+                )
+                .await
+                .expect("bearer issues")
+                .expose_once(),
+        );
+    }
+    let runtime = sdk_core::RuntimeService::default();
+    let app = broker::router(
+        broker::AppState::new(
+            std::sync::Arc::new(authority),
+            move |handle| {
+                std::sync::Arc::new(sdk_core::AuthenticatedRuntime::new(runtime.clone(), handle))
+                    as std::sync::Arc<dyn interface_core::RuntimeInterface>
+            },
+            config::InterfaceConfig::default(),
+        )
+        .with_boundaries(events, broker::ArtifactCatalog::default()),
+    );
+    (app, bearers)
+}
+
+async fn open_mcp_stream(app: &axum::Router, bearer: &str) -> axum::body::BodyDataStream {
+    let request = Request::get("/v1/mcp")
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .expect("get request builds");
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router accepts get to /v1/mcp");
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().into_data_stream()
+}
+
+/// Reads SSE `data:` payloads off a live stream, skipping keep-alive comments.
+/// Returns `None` if nothing arrives within `within`.
+async fn next_mcp_frame(
+    stream: &mut axum::body::BodyDataStream,
+    within: Duration,
+) -> Option<Value> {
+    use futures_util::StreamExt;
+
+    let deadline = tokio::time::Instant::now() + within;
+    let mut buffer = String::new();
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .ok()??;
+        buffer
+            .push_str(std::str::from_utf8(&chunk.expect("sse chunk reads")).expect("sse is utf-8"));
+        while let Some(index) = buffer.find('\n') {
+            let line = buffer[..index].trim_end().to_owned();
+            buffer.drain(..=index);
+            if let Some(data) = line.strip_prefix("data:") {
+                return Some(
+                    serde_json::from_str(data.trim_start()).expect("sse data line is JSON"),
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_mcp_get_stream_pushes_the_principals_runtime_events() {
+    let events = interface_core::EventStore::new(64);
+    let (app, bearers) = app_with_events(
+        events.clone(),
+        &[(PRINCIPAL_A, &[types::Capability::SessionRead])],
+    )
+    .await;
+    let mut stream = open_mcp_stream(&app, &bearers[0]).await;
+
+    events
+        .append_for(
+            types::PrincipalId::from_uuid(PRINCIPAL_A),
+            interface_core::Event::new("command.outcome", json!({"commandId": "c-1"})),
+        )
+        .await;
+
+    let frame = next_mcp_frame(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("a notification frame arrives on the MCP stream");
+    assert_eq!(frame["jsonrpc"], "2.0", "{frame}");
+    assert_eq!(frame["method"], "notifications/bobby/event", "{frame}");
+    assert!(
+        frame.get("id").is_none(),
+        "a notification must carry no id: {frame}"
+    );
+    assert_eq!(frame["params"]["kind"], "command.outcome", "{frame}");
+    assert_eq!(frame["params"]["payload"]["commandId"], "c-1", "{frame}");
+}
+
+/// CRITICAL: `GET /v1/mcp` scopes its stream to the authenticated principal.
+/// A frame crossing principals here is a data leak, not a cosmetic defect.
+#[tokio::test]
+async fn the_mcp_get_stream_never_delivers_another_principals_events() {
+    let events = interface_core::EventStore::new(64);
+    let (app, bearers) = app_with_events(
+        events.clone(),
+        &[
+            (PRINCIPAL_A, &[types::Capability::SessionRead]),
+            (PRINCIPAL_B, &[types::Capability::SessionRead]),
+        ],
+    )
+    .await;
+    let mut stream_a = open_mcp_stream(&app, &bearers[0]).await;
+    let mut stream_b = open_mcp_stream(&app, &bearers[1]).await;
+
+    events
+        .append_for(
+            types::PrincipalId::from_uuid(PRINCIPAL_A),
+            interface_core::Event::new("command.outcome", json!({"audience": "a"})),
+        )
+        .await;
+
+    let frame = next_mcp_frame(&mut stream_a, Duration::from_secs(2))
+        .await
+        .expect("A receives its own event");
+    assert_eq!(frame["params"]["payload"]["audience"], "a", "{frame}");
+    assert!(
+        next_mcp_frame(&mut stream_b, Duration::from_millis(400))
+            .await
+            .is_none(),
+        "principal B's MCP stream must never carry principal A's events"
+    );
+}
+
+/// A principal that `GET /v1/events` and the `events_read` tool would both
+/// refuse must not be handed the same events through the notification stream.
+/// The channel still opens — MCP clients require it before they will POST.
+#[tokio::test]
+async fn the_mcp_get_stream_withholds_events_from_a_principal_without_subscribe_events() {
+    let events = interface_core::EventStore::new(64);
+    let (app, bearers) = app_with_events(
+        events.clone(),
+        &[(PRINCIPAL_A, &[types::Capability::ArtifactRead])],
+    )
+    .await;
+    let mut stream = open_mcp_stream(&app, &bearers[0]).await;
+
+    events
+        .append_for(
+            types::PrincipalId::from_uuid(PRINCIPAL_A),
+            interface_core::Event::new("command.outcome", json!({"commandId": "c-1"})),
+        )
+        .await;
+
+    assert!(
+        next_mcp_frame(&mut stream, Duration::from_millis(400))
+            .await
+            .is_none(),
+        "events reached a principal that lacks session:read"
+    );
+}
+
+/// The `tools.listChanged: true` the `initialize` result advertises is a
+/// promise, and this is the one thing in the process that can keep it: rotating
+/// a principal's capabilities rebuilds its cached `Server`, and the client
+/// streaming off the old one is told to re-list before that stream ends.
+#[tokio::test]
+async fn rotating_capabilities_notifies_the_open_mcp_stream_to_relist_tools() {
+    let (app, _authority, admin_bearer) = app_with_admin(4).await;
+    let bearer_one = issue_bearer(&app, &admin_bearer, PRINCIPAL_C, &["session:read"]).await;
+
+    // Establishes the cached `Server` this stream subscribes to.
+    let (status, body) = post_mcp(&app, &bearer_one, initialize_request(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["result"]["capabilities"]["tools"]["listChanged"], true,
+        "the server must advertise that its tool list can change: {body}"
+    );
+    let mut stream = open_mcp_stream(&app, &bearer_one).await;
+
+    let bearer_two = issue_bearer(
+        &app,
+        &admin_bearer,
+        PRINCIPAL_C,
+        &["session:read", "session:write"],
+    )
+    .await;
+    let (status, body) = post_mcp(&app, &bearer_two, initialize_request(2)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let frame = next_mcp_frame(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("the rotated capability set reaches the open stream");
+    assert_eq!(
+        frame["method"], "notifications/tools/list_changed",
+        "{frame}"
+    );
+    assert!(
+        frame.get("id").is_none(),
+        "a notification must carry no id: {frame}"
+    );
+    assert!(
+        next_mcp_frame(&mut stream, Duration::from_millis(400))
+            .await
+            .is_none(),
+        "the stream bound to the replaced Server must end, not keep serving a stale tool list"
+    );
+}
