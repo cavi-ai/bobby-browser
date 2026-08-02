@@ -180,5 +180,6 @@ async fn replaces_chrome_then_resumes_or_restarts_from_verified_state() {
         replacement.worker_id(),
         restart_checkpoint.attempt_id
     );
+    drop(replacement);
     pool.release_session(&session_id).await.unwrap();
 }
