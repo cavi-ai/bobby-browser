@@ -12,7 +12,11 @@ use tokio::sync::Mutex;
 
 #[test]
 fn job_new_has_pending_status() {
-    let job = Job::new("test".to_string(), serde_json::json!({}), JobPriority::Normal);
+    let job = Job::new(
+        "test".to_string(),
+        serde_json::json!({}),
+        JobPriority::Normal,
+    );
     assert_eq!(job.status, JobStatus::Pending);
     assert_eq!(job.retry_count, 0);
     assert!(job.started_at.is_none());
@@ -36,7 +40,11 @@ fn job_start_sets_running() {
 
 #[test]
 fn job_complete_sets_completed() {
-    let mut job = Job::new("test".to_string(), serde_json::json!({}), JobPriority::Normal);
+    let mut job = Job::new(
+        "test".to_string(),
+        serde_json::json!({}),
+        JobPriority::Normal,
+    );
     let result = JobResult {
         job_id: job.id.clone(),
         success: true,
@@ -70,23 +78,35 @@ fn job_cancel_sets_cancelled() {
 
 #[test]
 fn job_can_retry_when_failed_and_retries_remaining() {
-    let mut job = Job::new("test".to_string(), serde_json::json!({}), JobPriority::Normal)
-        .with_max_retries(3);
+    let mut job = Job::new(
+        "test".to_string(),
+        serde_json::json!({}),
+        JobPriority::Normal,
+    )
+    .with_max_retries(3);
     job.fail("error".to_string());
     assert!(job.can_retry());
 }
 
 #[test]
 fn job_cannot_retry_when_max_retries_exceeded() {
-    let mut job = Job::new("test".to_string(), serde_json::json!({}), JobPriority::Normal)
-        .with_max_retries(0);
+    let mut job = Job::new(
+        "test".to_string(),
+        serde_json::json!({}),
+        JobPriority::Normal,
+    )
+    .with_max_retries(0);
     job.fail("error".to_string());
     assert!(!job.can_retry());
 }
 
 #[test]
 fn job_increment_retry() {
-    let mut job = Job::new("test".to_string(), serde_json::json!({}), JobPriority::Normal);
+    let mut job = Job::new(
+        "test".to_string(),
+        serde_json::json!({}),
+        JobPriority::Normal,
+    );
     assert_eq!(job.retry_count, 0);
     job.increment_retry();
     assert_eq!(job.retry_count, 1);
@@ -96,8 +116,12 @@ fn job_increment_retry() {
 
 #[test]
 fn job_prepare_retry_resets_to_pending() {
-    let mut job = Job::new("test".to_string(), serde_json::json!({}), JobPriority::Normal)
-        .with_max_retries(3);
+    let mut job = Job::new(
+        "test".to_string(),
+        serde_json::json!({}),
+        JobPriority::Normal,
+    )
+    .with_max_retries(3);
     job.fail("error".to_string());
     job.prepare_retry();
     assert_eq!(job.status, JobStatus::Pending);
@@ -210,10 +234,7 @@ fn job_queue_complete_job() {
 fn job_queue_retry_job() {
     let mut queue = JobQueue::new(100);
     let job = queue
-        .submit(
-            JobConfig::new("test".to_string(), serde_json::json!({}))
-                .with_max_retries(3),
-        )
+        .submit(JobConfig::new("test".to_string(), serde_json::json!({})).with_max_retries(3))
         .unwrap();
     let id = job.id.clone();
 
@@ -459,10 +480,7 @@ fn scheduler_retries_then_succeeds() {
 
     rt.block_on(async {
         let id = scheduler
-            .submit(
-                JobConfig::new("flaky".to_string(), serde_json::json!({}))
-                    .with_max_retries(3),
-            )
+            .submit(JobConfig::new("flaky".to_string(), serde_json::json!({})).with_max_retries(3))
             .await
             .unwrap();
 
@@ -562,10 +580,7 @@ fn scheduler_times_out_hanging_job() {
 
     rt.block_on(async {
         let id = scheduler
-            .submit(
-                JobConfig::new("hang".to_string(), serde_json::json!({}))
-                    .with_max_retries(0),
-            )
+            .submit(JobConfig::new("hang".to_string(), serde_json::json!({})).with_max_retries(0))
             .await
             .unwrap();
 
@@ -585,11 +600,10 @@ fn scheduler_times_out_hanging_job() {
 
         let job = scheduler.get_job(&id).await.unwrap();
         assert_eq!(job.status, JobStatus::Failed);
-        assert!(
-            job.error
-                .as_deref()
-                .is_some_and(|e| e.contains("timeout") || e.contains("job timeout"))
-        );
+        assert!(job
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("timeout") || e.contains("job timeout")));
 
         scheduler.request_shutdown();
         runner.await.unwrap().unwrap();
@@ -609,8 +623,7 @@ fn scheduler_fails_without_handler() {
     rt.block_on(async {
         let id = scheduler
             .submit(
-                JobConfig::new("missing".to_string(), serde_json::json!({}))
-                    .with_max_retries(0),
+                JobConfig::new("missing".to_string(), serde_json::json!({})).with_max_retries(0),
             )
             .await
             .unwrap();
@@ -729,12 +742,10 @@ fn journal_survives_restart() {
     let rt = runtime();
 
     let id = rt.block_on(async {
-        let scheduler = JobScheduler::open_journal(
-            SchedulerConfig::default().with_backoff_range(1, 5),
-            &path,
-        )
-        .await
-        .unwrap();
+        let scheduler =
+            JobScheduler::open_journal(SchedulerConfig::default().with_backoff_range(1, 5), &path)
+                .await
+                .unwrap();
         scheduler
             .submit(JobConfig::new("test".to_string(), serde_json::json!({})))
             .await
@@ -870,10 +881,7 @@ fn retry_does_not_hold_permit() {
 
     rt.block_on(async {
         let flaky_id = scheduler
-            .submit(
-                JobConfig::new("flaky".to_string(), serde_json::json!({}))
-                    .with_max_retries(3),
-            )
+            .submit(JobConfig::new("flaky".to_string(), serde_json::json!({})).with_max_retries(3))
             .await
             .unwrap();
         let fast_id = scheduler
@@ -973,4 +981,3 @@ async fn multi_thread_smoke() {
     scheduler.request_shutdown();
     runner.await.unwrap().unwrap();
 }
-

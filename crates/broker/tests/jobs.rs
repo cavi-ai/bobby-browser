@@ -9,12 +9,9 @@ use uuid::Uuid;
 
 async fn wait_completed(app: &axum::Router, bearer: &str, job_id: &str) -> serde_json::Value {
     for _ in 0..50 {
-        let req = context_headers(
-            Request::get(format!("/v1/jobs/{job_id}")),
-            bearer,
-        )
-        .body(Body::empty())
-        .unwrap();
+        let req = context_headers(Request::get(format!("/v1/jobs/{job_id}")), bearer)
+            .body(Body::empty())
+            .unwrap();
         let response = app.clone().oneshot(req).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();

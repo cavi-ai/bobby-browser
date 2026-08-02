@@ -130,7 +130,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
             journal_path: root.join("commands.jsonl"),
             checkpoints_dir: root.join("checkpoints"),
             authority_path: root.join("authority.json"),
-        scheduler_journal_path: root.join("scheduler-jobs.jsonl"),
+            scheduler_journal_path: root.join("scheduler-jobs.jsonl"),
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

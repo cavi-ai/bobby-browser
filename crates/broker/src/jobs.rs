@@ -8,9 +8,7 @@ use chrono::Duration as ChronoDuration;
 use config::AppConfig;
 use interface_core::{IdempotencyStore, RetainedOutcome};
 use serde::{Deserialize, Serialize};
-use task_scheduler::{
-    Job, JobHandler, JobId, JobScheduler, JobStatus, SchedulerConfig,
-};
+use task_scheduler::{Job, JobHandler, JobId, JobScheduler, JobStatus, SchedulerConfig};
 use tracing::info;
 
 /// Retained submit response for idempotent `POST /v1/jobs`.
@@ -60,7 +58,9 @@ pub fn memory_scheduler() -> JobScheduler {
 }
 
 /// Journal-backed scheduler from app config.
-pub async fn journal_scheduler(config: &AppConfig) -> Result<JobScheduler, task_scheduler::JobError> {
+pub async fn journal_scheduler(
+    config: &AppConfig,
+) -> Result<JobScheduler, task_scheduler::JobError> {
     let mut scheduler = JobScheduler::from_config(scheduler_config_from_app(config)).await?;
     register_builtin_handlers(&mut scheduler);
     Ok(scheduler)

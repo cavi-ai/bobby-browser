@@ -645,10 +645,7 @@ async fn dispatch_submit_job(
         .await
         .map(|job| job.status)
         .unwrap_or(JobStatus::Pending);
-    Ok(JobSubmitOutcome {
-        job_id: id,
-        status,
-    })
+    Ok(JobSubmitOutcome { job_id: id, status })
 }
 
 async fn submit_job(

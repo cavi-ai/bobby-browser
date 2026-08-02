@@ -238,14 +238,26 @@ impl BezierMouseSimulator {
         let distance = (dx * dx + dy * dy).sqrt().max(1.0);
 
         let max_offset = (distance * self.config.control_point_variance).max(50.0);
-        let cp1_x =
-            self.clamp_control(start_x + dx * 0.3 + random.offset(max_offset), start_x, land_x);
-        let cp1_y =
-            self.clamp_control(start_y + dy * 0.3 + random.offset(max_offset), start_y, land_y);
-        let cp2_x =
-            self.clamp_control(start_x + dx * 0.7 + random.offset(max_offset), start_x, land_x);
-        let cp2_y =
-            self.clamp_control(start_y + dy * 0.7 + random.offset(max_offset), start_y, land_y);
+        let cp1_x = self.clamp_control(
+            start_x + dx * 0.3 + random.offset(max_offset),
+            start_x,
+            land_x,
+        );
+        let cp1_y = self.clamp_control(
+            start_y + dy * 0.3 + random.offset(max_offset),
+            start_y,
+            land_y,
+        );
+        let cp2_x = self.clamp_control(
+            start_x + dx * 0.7 + random.offset(max_offset),
+            start_x,
+            land_x,
+        );
+        let cp2_y = self.clamp_control(
+            start_y + dy * 0.7 + random.offset(max_offset),
+            start_y,
+            land_y,
+        );
 
         let (min_ms, max_ms) = order_u64(self.config.min_duration_ms, self.config.max_duration_ms);
         let span = (max_ms - min_ms) as f64;
@@ -264,7 +276,11 @@ impl BezierMouseSimulator {
                 let t = i as f64 / samples as f64;
                 let accel_t = self.accelerate(t, acceleration);
                 let (mut x, mut y) = self.bezier_point(
-                    start_x, start_y, cp1_x, cp1_y, cp2_x, cp2_y, land_x, land_y, accel_t,
+                    (start_x, start_y),
+                    (cp1_x, cp1_y),
+                    (cp2_x, cp2_y),
+                    (land_x, land_y),
+                    accel_t,
                 );
                 // Keep endpoints exact; add tremor only on intermediate samples.
                 if i > 0 && i < samples && noise > 0.0 {
@@ -272,11 +288,7 @@ impl BezierMouseSimulator {
                     y += random.offset(noise);
                 }
                 let timestamp_ms = (t * duration.as_millis() as f64) as u64;
-                MousePoint {
-                    x,
-                    y,
-                    timestamp_ms,
-                }
+                MousePoint { x, y, timestamp_ms }
             })
             .collect();
 
@@ -317,7 +329,11 @@ impl BezierMouseSimulator {
             random
                 .next_duration(
                     Duration::from_millis(self.config.hover_dwell_min_ms),
-                    Duration::from_millis(self.config.hover_dwell_max_ms.max(self.config.hover_dwell_min_ms + 1)),
+                    Duration::from_millis(
+                        self.config
+                            .hover_dwell_max_ms
+                            .max(self.config.hover_dwell_min_ms + 1),
+                    ),
                 )
                 .as_millis() as u64
         };
@@ -357,14 +373,10 @@ impl BezierMouseSimulator {
 
     fn bezier_point(
         &self,
-        x0: f64,
-        y0: f64,
-        x1: f64,
-        y1: f64,
-        x2: f64,
-        y2: f64,
-        x3: f64,
-        y3: f64,
+        (x0, y0): (f64, f64),
+        (x1, y1): (f64, f64),
+        (x2, y2): (f64, f64),
+        (x3, y3): (f64, f64),
         t: f64,
     ) -> (f64, f64) {
         let u = 1.0 - t;

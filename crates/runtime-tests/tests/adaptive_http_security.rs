@@ -46,7 +46,7 @@ fn config(root: &tempfile::TempDir, max_download_bytes: usize) -> AppConfig {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
-        scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
         },
         http: HttpConfig {
             allow_loopback: true,

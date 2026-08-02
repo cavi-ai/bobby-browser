@@ -31,18 +31,13 @@ impl Default for JobId {
 }
 
 /// Job priority levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum JobPriority {
     Low,
+    #[default]
     Normal,
     High,
     Critical,
-}
-
-impl Default for JobPriority {
-    fn default() -> Self {
-        JobPriority::Normal
-    }
 }
 
 /// Job execution status.
@@ -176,11 +171,7 @@ impl Job {
 
 impl fmt::Display for Job {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Job({} [{}] - {})",
-            self.id.0, self.status, self.name
-        )
+        write!(f, "Job({} [{}] - {})", self.id.0, self.status, self.name)
     }
 }
 

@@ -120,17 +120,9 @@ impl ScrollConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScrollAction {
-    Scroll {
-        delta_y: i64,
-        duration_ms: u64,
-    },
-    Pause {
-        duration_ms: u64,
-    },
-    Bounce {
-        delta_y: i64,
-        duration_ms: u64,
-    },
+    Scroll { delta_y: i64, duration_ms: u64 },
+    Pause { duration_ms: u64 },
+    Bounce { delta_y: i64, duration_ms: u64 },
 }
 
 /// Scrolling simulator that generates human-like scroll patterns.
@@ -239,7 +231,7 @@ impl ScrollSimulator {
         let viewport_height = viewport_height.max(1.0);
         let chunk_size = (viewport_height * 0.8) as i64;
         let abs_delta = delta.abs();
-        let sign = delta.signum() as i64;
+        let sign = delta.signum();
         const MAX_CHUNKS: usize = 64;
 
         if abs_delta > chunk_size && chunk_size > 0 {
