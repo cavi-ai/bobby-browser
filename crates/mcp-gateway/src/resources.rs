@@ -451,12 +451,12 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   (+ `file:upload`), `control_action` with a `setFiles` action
   (+ `file:upload`), `evaluate_javascript` (+ `javascript:evaluate`), and all
   eight `intent_*` tools (+ `intent:execute`).
-- `command_execute` -- advertised in `tools/list` on `browser:mutate` alone,
-  but it is not a way around the gates above. Whatever extra capability the
-  *wrapped* command needs is enforced at call time, before the command is
-  submitted (`command_extra_capabilities`,
-  `crates/sdk-core/src/interface.rs`), and the check is exhaustive by command
-  variant:
+- Note: `command_execute` is a tool name, not a capability string -- it is
+  advertised in `tools/list` on `browser:mutate` alone, but that is not a way
+  around the gates above. Whatever extra capability the *wrapped* command
+  needs is enforced at call time, before the command is submitted
+  (`command_extra_capabilities`, `crates/sdk-core/src/interface.rs`), and the
+  check is exhaustive by command variant:
   - `uploadFiles`, and `controlAction` with a `setFiles` action:
     `file:upload`.
   - `downloadUrl` and `clickAndWaitForDownload`: `file:download`.
@@ -465,8 +465,12 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   - every intent: `intent:execute`; a `fill` whose value is `files`, or a
     `completeForm` with any `files` field, additionally needs `file:upload`.
   - every other primitive: nothing beyond `browser:mutate`.
-- `file:upload` -- gates `upload_files` (with `browser:mutate`).
-- `file:download` -- gates `download_url` (with `browser:mutate`).
+- `file:upload` -- gates `upload_files` (with `browser:mutate`), among
+  others: `control_action` with a `setFiles` action and file-carrying intent
+  fields need it too -- see above.
+- `file:download` -- gates `download_url` (with `browser:mutate`), among
+  others: `clickAndWaitForDownload` (reachable via `command_execute`, see
+  `bobby://primitives`) needs it too.
 - `javascript:evaluate` -- gates `evaluate_javascript` (with `browser:mutate`).
 - `intent:execute` -- gates `intent_locate`, `intent_fill`,
   `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`,
@@ -741,12 +745,12 @@ rather than as a frame, with `reason` one of `historyLost` (the cursor fell
 behind retention) or `invalidCursor` (the cursor is ahead of anything the
 store holds).
 
-Subscribing to the push channel needs the same `session:read` that
-`events_read` does (`InterfaceOperation::SubscribeEvents`,
-`crates/types/src/interface.rs`). Over the streamable-HTTP transport a
-connection whose principal lacks it still receives
-`notifications/tools/list_changed`, but no event frames at all
-(`crates/broker/src/mcp_http.rs`).
+Over the streamable-HTTP transport, subscribing to the push channel needs the
+same `session:read` that `events_read` does (`InterfaceOperation::SubscribeEvents`,
+`crates/types/src/interface.rs`); a connection whose principal lacks it still
+receives `notifications/tools/list_changed`, but no event frames at all
+(`crates/broker/src/mcp_http.rs`). The stdio transport (`Server::serve`,
+`crates/mcp-gateway/src/server.rs`) applies no such gate on subscription.
 "#;
 
 const INTENTS_BODY: &str = r#"# Intent commands
