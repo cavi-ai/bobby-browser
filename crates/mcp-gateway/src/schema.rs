@@ -420,17 +420,17 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         // `SessionState` — `Vec<SessionState>` serialized directly, with no
         // wrapper key — pinned by `interface_security.rs`'s
         // `mcp_foreign_session_checks`, which asserts
-        // `structuredContent.as_array()`. That is not an object, so it
-        // cannot be declared literally: every advertised output schema must
-        // carry `"type":"object"` (this task's own
-        // `tools_that_return_structured_content_declare_an_output_schema`
-        // enforces it across every tool with no exception). Rather than
-        // assert a fictitious wrapper key that will never appear on the
-        // wire, this documents the true shape in prose and uses `items`
-        // only as non-normative guidance for what each element looks like.
+        // `structuredContent.as_array()`. Declaring `"type":"object"` here
+        // (to satisfy this task's own blanket
+        // `tools_that_return_structured_content_declare_an_output_schema`)
+        // would be a false contract: an agent validating a real response
+        // against it would reject every one. `session_list` is the one
+        // documented exception to that blanket assertion (see its `budget.rs`
+        // test) rather than wrapping the payload in an object, which would
+        // mean changing the actual wire contract `interface_security.rs`
+        // pins, not just its schema.
         "session_list" => json!({
-            "type":"object",
-            "description":"The actual payload is a JSON array of session objects like these, not an object — a pre-existing deviation from the object-shaped structuredContent convention that a schema cannot literally express.",
+            "type":"array",
             "items":{"$ref":"#/$defs/SessionState"}
         }),
         "session_create" => output_ref("SessionState"),
@@ -442,15 +442,29 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         // (present whenever `url` was given) and, only when that navigation
         // did not complete, `cleanupOutcome` and `pageClosed`. The latter
         // three are declared but not required, matching that conditionality.
-        "page_open" => json!({
-            "type":"object",
-            "allOf":[{"$ref":"#/$defs/PageState"}],
-            "properties":{
-                "navigationOutcome":object(command_outcome_properties(), &["status", "commandId"]),
-                "cleanupOutcome":object(command_outcome_properties(), &["status", "commandId"]),
-                "pageClosed":{"type":"boolean"}
-            }
-        }),
+        //
+        // Inlined into `page_state()`'s own `properties` map rather than
+        // `allOf`-ing a `$ref` to it: in JSON Schema 2020-12,
+        // `additionalProperties` is not annotation-aware across `allOf` —
+        // `PageState`'s own `additionalProperties:false` only ever sees its
+        // own `properties`, never a sibling schema's, so a `$ref`'d
+        // `PageState` next to these three properties would reject
+        // `navigationOutcome` on every navigated open even though the
+        // dispatch (`server.rs`) always inserts it when a URL is given.
+        // `page_state()` has no nested `$ref` of its own, so inlining costs
+        // nothing extra in `$defs`.
+        "page_open" => {
+            let mut schema = page_state();
+            merge_properties(
+                &mut schema["properties"],
+                json!({
+                    "navigationOutcome":object(command_outcome_properties(), &["status", "commandId"]),
+                    "cleanupOutcome":object(command_outcome_properties(), &["status", "commandId"]),
+                    "pageClosed":{"type":"boolean"}
+                }),
+            );
+            schema
+        }
         "checkpoint_save" => output_ref("CheckpointRecord"),
         "workflow_recover" => output_ref("RecoveryDecision"),
         "recovery_status" => object(
@@ -493,17 +507,22 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         // `command_outcome_properties` for why this stays self-contained
         // (no `$ref`, no `$defs`) rather than reusing a shared, fully-typed
         // definition.
-        _ => {
-            let mut properties = command_outcome_properties();
-            merge_properties(&mut properties, json!({"workflowId": id()}));
-            let mut schema = object(properties, &["status", "commandId", "workflowId"]);
-            schema["description"] = json!(
-                "CommandOutcome (tag: status) plus workflowId. Narrowed to a flat, \
-                self-contained shape to stay within the connect-budget across every \
-                command-executing tool; see types::CommandOutcome for the fully-typed union."
-            );
-            schema
-        }
+        //
+        // No per-schema `description` here (there used to be one): it was
+        // identical, byte-for-byte, across all ~31 of these tools' own
+        // self-contained output schemas — nothing MCP requires and nothing
+        // any test reads, just 210 bytes replicated 31 times. The tool-level
+        // `description` (`tool_description`, `server.rs`) already explains
+        // the behaviour in prose; this comment carries the schema-level
+        // rationale instead.
+        _ => object(
+            {
+                let mut properties = command_outcome_properties();
+                merge_properties(&mut properties, json!({"workflowId": id()}));
+                properties
+            },
+            &["status", "commandId", "workflowId"],
+        ),
     };
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
     // `definitions()`'s `Evidence` keeps the full, fully-fielded union so
@@ -636,6 +655,12 @@ fn collect_refs(value: &Value, found: &mut BTreeSet<String>) {
         }
         _ => {}
     }
+}
+
+/// Test-only accessor for the full `definitions()` table — see
+/// `mcp_gateway::definitions_for_test`.
+pub(crate) fn definitions_for_test() -> Value {
+    definitions()
 }
 
 fn definitions() -> Value {
@@ -1578,6 +1603,22 @@ fn recovery_decisions() -> Vec<Value> {
 /// same reason `CheckpointRecord` and the `_` fallback below keep them
 /// generic: full fidelity belongs on `workflow_recover`'s `RecoveryDecision`,
 /// the one low-multiplicity path that models `Evidence` for real.
+///
+/// `object()` always closes the schema (`additionalProperties:false`), so
+/// every field a real `CommandOutcome` can carry has to be declared here —
+/// `priorAttemptId`/`attemptId` (only `status: "restarted"` carries them)
+/// used to be left out to save bytes, which meant a closed schema rejecting
+/// the one real value it exists to describe. Declared now; still optional,
+/// since only one status carries them.
+///
+/// `artifactRegistration` is a separate top-level key `submit_envelope`
+/// (`server.rs`) inserts via `ArtifactAdmission::apply_to_mcp_value`
+/// (`resources.rs`) whenever screenshot/download evidence was attempted and
+/// did not fully admit — not part of `types::CommandOutcome` itself, but
+/// still a real field on the wire for any of these ~31 tools. Left generic
+/// (`{"type":"object"}`) for the exact same reason `error`/`evidence` are:
+/// its full 7-property shape, inlined and closed, costs real bytes times 31
+/// tools for a field most calls never carry at all.
 fn command_outcome_properties() -> Value {
     json!({
         "status":{"type":"string","enum":["completed","retryableFailure","needsReconciliation","policyDenied","resourceExhausted","restarted","failed"]},
@@ -1585,12 +1626,10 @@ fn command_outcome_properties() -> Value {
         "evidence":{"type":"array","items":{"type":"object"}},
         "error":{"type":"object"},
         "retryAfterMs":{"type":"integer","minimum":0},
-        "reason":string(0, MAX_STRING_BYTES)
-        // `priorAttemptId`/`attemptId` (only `status: "restarted"` carries
-        // them) are deliberately omitted: this shape is replicated across
-        // ~31 tool descriptors, so every property here is a per-tool cost
-        // times 31, and both ids are still visible in `types::CommandOutcome`
-        // for the one status where they matter.
+        "reason":string(0, MAX_STRING_BYTES),
+        "priorAttemptId":id(),
+        "attemptId":id(),
+        "artifactRegistration":{"type":"object"}
     })
 }
 
@@ -1610,8 +1649,18 @@ fn command_outcome_properties() -> Value {
 /// its `kind` — everything the drift guard in `tests/budget.rs`
 /// (`evidence_variants_match_the_wire_type`) checks, and the one piece of
 /// information this schema exists to guarantee an agent doesn't have to call
-/// the tool to learn — plus a single open `data` object as a placeholder for
-/// the rest.
+/// the tool to learn.
+///
+/// `types::Evidence` is `#[serde(tag = "kind", rename_all_fields =
+/// "camelCase")]` — an internally tagged enum, so every real field
+/// (`url`/`title`/…) sits FLAT at the top level next to `kind`, never
+/// wrapped in a `data` key. A closed, `tagged_fields`-built `{kind, data}`
+/// shape (the original version of this function) would reject every real
+/// evidence object twice over — `data` absent, every real field
+/// "additional" — so this builds a plain, OPEN object schema instead: only
+/// `kind` is declared and required, `additionalProperties` is left unset
+/// (permissive), so whatever fields the real variant carries pass through
+/// unvalidated. That is also smaller than the old `{kind, data:{}}` shape.
 ///
 /// Built by transforming [`evidence_variants()`] rather than a second
 /// hand-written tag list: a hand-maintained second list is exactly the drift
@@ -1626,7 +1675,11 @@ fn evidence_variant_tags() -> Vec<Value> {
                 .as_str()
                 .expect("evidence variant pins a kind const")
                 .to_owned();
-            tagged_fields(&kind, json!({"data":{"type":"object"}}), &[])
+            json!({
+                "type":"object",
+                "properties":{"kind":{"const":kind}},
+                "required":["kind"]
+            })
         })
         .collect()
 }

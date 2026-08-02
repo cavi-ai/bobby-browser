@@ -1962,6 +1962,7 @@ dependencies = [
  "config",
  "futures-util",
  "interface-core",
+ "jsonschema",
  "page-runtime",
  "schemars",
  "sdk-core",
