@@ -1683,6 +1683,7 @@ version = "0.3.1"
 dependencies = [
  "artifact-store",
  "async-trait",
+ "axum",
  "broker",
  "chrono",
  "config",
@@ -1695,6 +1696,7 @@ dependencies = [
  "tempfile",
  "test-site",
  "tokio",
+ "tower",
  "types",
  "uuid",
 ]

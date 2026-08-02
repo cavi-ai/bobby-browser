@@ -277,7 +277,14 @@ export type RecoveryDecision =
   | { status: "resumed"; checkpointId: Id; attemptId: Id; evidence: Evidence[] }
   | { status: "needsReconciliation"; checkpointId: Id; attemptId: Id; reason: string; evidence: Evidence[] }
   | { status: "restarted"; checkpointId: Id; lineage: { workflowId: Id; abandonedAttemptId: Id; attemptId: Id; reason: string }; evidence: Evidence[] };
-export interface CheckpointRequest { checkpoint: WorkflowCheckpoint; evidence?: Evidence[]; }
+/**
+ * A checkpoint plus the command ids whose evidence the runtime already
+ * recorded. The runtime resolves each id against its own journal; a caller
+ * cannot hand in evidence for work it did not perform, and an id with no
+ * terminal journal record fails the checkpoint. Same contract as the MCP
+ * `checkpoint_save` tool.
+ */
+export interface CheckpointRequest { checkpoint: WorkflowCheckpoint; evidenceRefs?: Id[]; }
 
 /** The /v1/events batch envelope, matching interface_core::Event rather than an invented schema. */
 export interface InterfaceEvent { cursor: number; kind: string; payload: unknown; }
