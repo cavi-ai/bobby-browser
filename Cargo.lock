@@ -2783,6 +2783,7 @@ dependencies = [
  "chrono",
  "companion-protocol",
  "config",
+ "fingerprinting",
  "firefox-companion",
  "futures-util",
  "intent-engine",

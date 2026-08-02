@@ -29,6 +29,9 @@ pub(crate) const DEFAULT_CAPABILITIES: &[Capability] = &[
     Capability::ArtifactCapture,
     Capability::RecoveryRead,
     Capability::RecoveryWrite,
+    Capability::JobSubmit,
+    Capability::JobRead,
+    Capability::JobCancel,
     Capability::AuthorityAdmin,
 ];
 
@@ -118,50 +121,26 @@ pub fn write_bootstrap_env(path: &Path, material: &BootstrapMaterial, force: boo
 }
 
 pub fn load_startup_from_env_file(path: &Path) -> Result<StartupCredential> {
-    let contents = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read bootstrap env from {}", path.display()))?;
-    let mut token = None;
-    let mut principal = None;
-    let mut capabilities = None;
-    let mut expires_at = None;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(anyhow!(
-                "invalid bootstrap env line in {}: {line}",
-                path.display()
-            ));
-        };
-        match key {
-            ENV_TOKEN => token = Some(value.to_owned()),
-            ENV_PRINCIPAL => principal = Some(value.to_owned()),
-            ENV_CAPABILITIES => capabilities = Some(value.to_owned()),
-            ENV_EXPIRES_AT => expires_at = Some(value.to_owned()),
-            _ => {}
-        }
-    }
-    let bearer = token.with_context(|| {
+    let fields = read_bootstrap_env_fields(path)?;
+    let bearer = fields.token.with_context(|| {
         format!(
             "bootstrap env {} missing required key {ENV_TOKEN}",
             path.display()
         )
     })?;
-    let principal = principal.with_context(|| {
+    let principal = fields.principal.with_context(|| {
         format!(
             "bootstrap env {} missing required key {ENV_PRINCIPAL}",
             path.display()
         )
     })?;
-    let capabilities = capabilities.with_context(|| {
+    let capabilities = fields.capabilities.with_context(|| {
         format!(
             "bootstrap env {} missing required key {ENV_CAPABILITIES}",
             path.display()
         )
     })?;
-    let expires_at = expires_at.with_context(|| {
+    let expires_at = fields.expires_at.with_context(|| {
         format!(
             "bootstrap env {} missing required key {ENV_EXPIRES_AT}",
             path.display()
@@ -270,9 +249,73 @@ fn parse_capability(value: &str) -> Result<Capability> {
         "artifact:capture" => Ok(Capability::ArtifactCapture),
         "recovery:read" => Ok(Capability::RecoveryRead),
         "recovery:write" => Ok(Capability::RecoveryWrite),
+        "job:submit" => Ok(Capability::JobSubmit),
+        "job:read" => Ok(Capability::JobRead),
+        "job:cancel" => Ok(Capability::JobCancel),
         "authority:admin" => Ok(Capability::AuthorityAdmin),
         _ => Err(anyhow!("unknown capability: {value}")),
     }
+}
+
+/// Read the plaintext bootstrap bearer from a dotenv file (for CLI HTTP clients).
+/// Never log or print the returned value.
+pub fn load_bootstrap_bearer(path: &Path) -> Result<String> {
+    let fields = read_bootstrap_env_fields(path)?;
+    fields.token.with_context(|| {
+        format!(
+            "bootstrap env {} missing required key {ENV_TOKEN}",
+            path.display()
+        )
+    })
+}
+
+/// Read the capabilities CSV from a bootstrap dotenv (for doctor checks).
+pub fn load_bootstrap_capabilities_csv(path: &Path) -> Result<String> {
+    let fields = read_bootstrap_env_fields(path)?;
+    fields.capabilities.with_context(|| {
+        format!(
+            "bootstrap env {} missing required key {ENV_CAPABILITIES}",
+            path.display()
+        )
+    })
+}
+
+struct BootstrapEnvFields {
+    token: Option<String>,
+    principal: Option<String>,
+    capabilities: Option<String>,
+    expires_at: Option<String>,
+}
+
+fn read_bootstrap_env_fields(path: &Path) -> Result<BootstrapEnvFields> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read bootstrap env from {}", path.display()))?;
+    let mut fields = BootstrapEnvFields {
+        token: None,
+        principal: None,
+        capabilities: None,
+        expires_at: None,
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!(
+                "invalid bootstrap env line in {}: {line}",
+                path.display()
+            ));
+        };
+        match key {
+            ENV_TOKEN => fields.token = Some(value.to_owned()),
+            ENV_PRINCIPAL => fields.principal = Some(value.to_owned()),
+            ENV_CAPABILITIES => fields.capabilities = Some(value.to_owned()),
+            ENV_EXPIRES_AT => fields.expires_at = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    Ok(fields)
 }
 
 fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -307,6 +350,29 @@ mod tests {
         assert!(material.bearer().len() >= 32);
         assert!(material.capabilities_csv().contains("authority:admin"));
         assert!(material.capabilities_csv().contains("session:read"));
+        assert!(material.capabilities_csv().contains("job:submit"));
+        assert!(material.capabilities_csv().contains("job:read"));
+        assert!(material.capabilities_csv().contains("job:cancel"));
+    }
+
+    #[test]
+    fn default_capabilities_include_job_ops() {
+        let caps: Vec<_> = DEFAULT_CAPABILITIES
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect();
+        assert!(caps.contains(&"job:submit"));
+        assert!(caps.contains(&"job:read"));
+        assert!(caps.contains(&"job:cancel"));
+        assert_eq!(
+            parse_capability("job:submit").unwrap(),
+            Capability::JobSubmit
+        );
+        assert_eq!(parse_capability("job:read").unwrap(), Capability::JobRead);
+        assert_eq!(
+            parse_capability("job:cancel").unwrap(),
+            Capability::JobCancel
+        );
     }
 
     #[test]
