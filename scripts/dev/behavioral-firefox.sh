@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Live Firefox behavioral dogfood — same env contract as scripts/dev/firefox-companion.sh.
 for variable in BOBBY_FIREFOX_BIN BOBBY_FIREFOX_PROFILE BOBBY_COMPANION_EXTENSION; do
   if [[ -z "${!variable:-}" ]]; then
     echo "missing required variable: ${variable}" >&2
@@ -52,7 +53,7 @@ manifest_path="$native_messaging_dir/com.bobby_browser.companion.json"
   --cli "$repo_root/target/debug/bobby" \
   --descriptor "$descriptor_path"
 
-echo "Starting the loopback-only companion proof. Pairing material remains in owner-only files."
-cargo test -p runtime-tests --test firefox_companion \
-  installed_firefox_completes_verified_native_input_workflow \
+echo "Starting Firefox behavioral dogfood (same BOBBY_FIREFOX_* / native-host setup as firefox-companion.sh)."
+cargo test -p runtime-tests --test behavioral_firefox \
+  installed_firefox_behavioral_dogfood_passes \
   -- --ignored --exact --nocapture

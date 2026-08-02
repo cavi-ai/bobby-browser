@@ -26,6 +26,9 @@ pub struct ScrollConfig {
     pub fast_scroll_probability: f64,
     #[serde(default = "default_bounce_probability")]
     pub bounce_probability: f64,
+    /// Always append a post-scroll settle/read pause.
+    #[serde(default = "default_trailing_read_pause")]
+    pub trailing_read_pause: bool,
 }
 
 impl Default for ScrollConfig {
@@ -38,6 +41,7 @@ impl Default for ScrollConfig {
             read_pause_max_ms: default_read_pause_max_ms(),
             fast_scroll_probability: default_fast_scroll_probability(),
             bounce_probability: default_bounce_probability(),
+            trailing_read_pause: default_trailing_read_pause(),
         }
     }
 }
@@ -70,6 +74,10 @@ fn default_bounce_probability() -> f64 {
     0.05
 }
 
+fn default_trailing_read_pause() -> bool {
+    true
+}
+
 impl ScrollConfig {
     pub fn with_min_duration(mut self, ms: u64) -> Self {
         self.min_scroll_duration_ms = ms;
@@ -99,6 +107,11 @@ impl ScrollConfig {
 
     pub fn with_bounce_probability(mut self, prob: f64) -> Self {
         self.bounce_probability = prob;
+        self
+    }
+
+    pub fn with_trailing_read_pause(mut self, enabled: bool) -> Self {
+        self.trailing_read_pause = enabled;
         self
     }
 
@@ -149,7 +162,12 @@ impl ScrollSimulator {
         delta_y: i64,
         page_height: f64,
     ) -> Vec<ScrollAction> {
-        self.generate_actions_inner(random, delta_y, page_height, true)
+        self.generate_actions_inner(
+            random,
+            delta_y,
+            page_height,
+            self.config.trailing_read_pause,
+        )
     }
 
     fn generate_actions_inner(
@@ -259,6 +277,13 @@ impl ScrollSimulator {
             }
         } else {
             actions.extend(self.generate_actions_inner(random, delta, viewport_height, false));
+        }
+
+        // Doc contract: exactly one settle pause at the end. A final chunk may
+        // still have emitted a probabilistic read pause — drop trailing pauses
+        // so we do not stack settle on top of them.
+        while matches!(actions.last(), Some(ScrollAction::Pause { .. })) {
+            actions.pop();
         }
 
         let settle = (viewport_height * 8.0) as u64;
