@@ -78,6 +78,7 @@ pub(crate) fn tool_title(name: &str) -> &'static str {
         "intent_submit_and_verify" => "Submit and verify",
         "intent_wait_for_state" => "Wait for state",
         "navigate" => "Navigate",
+        "network_log" => "Read network log",
         "page_activate" => "Activate page",
         "page_close" => "Close page",
         "page_list" => "List pages",

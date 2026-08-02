@@ -392,6 +392,7 @@ impl Server {
             "events_read",
             "inspect",
             "navigate",
+            "network_log",
             "a11y_snapshot",
             "extract_structured",
             "form_snapshot",
@@ -1087,6 +1088,24 @@ impl Server {
                         target: input.target,
                         action: input.action,
                     }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "network_log" => {
+                let input: NetworkLogArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::NetworkLog(
+                        types::NetworkLogCommand {
+                            clear: input.clear.unwrap_or(true),
+                        },
+                    )),
                 );
                 self.submit_envelope(context, envelope).await
             }
@@ -1964,6 +1983,15 @@ struct A11ySnapshotArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkLogArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    clear: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EmulateArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
@@ -2278,8 +2306,8 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
         "command_execute" | "control_action" | "navigate" | "click" | "type_text" | "inspect"
         | "screenshot" | "wait_for" | "page_list" | "page_close" | "page_activate"
-        | "a11y_snapshot" | "pdf" | "dialog" | "emulate" | "cookie_get" | "cookie_set"
-        | "cookie_delete" => Some(&[types::Capability::BrowserMutate]),
+        | "a11y_snapshot" | "pdf" | "dialog" | "emulate" | "network_log" | "cookie_get"
+        | "cookie_set" | "cookie_delete" => Some(&[types::Capability::BrowserMutate]),
         "extract_structured" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::VisionAssist,
@@ -2335,6 +2363,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "pdf"
         | "dialog"
         | "emulate"
+        | "network_log"
         | "cookie_get"
         | "cookie_set"
         | "cookie_delete"
@@ -2403,6 +2432,7 @@ fn tool_description(name: &str) -> &'static str {
         "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and destination evidence. On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
+        "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure with verificationFailed, no requests were captured yet -- trigger network activity on the page, then retry.",
         _ => "Runtime operation.",
     }
 }

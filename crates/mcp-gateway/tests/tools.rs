@@ -369,7 +369,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             .as_array()
             .unwrap()
             .len(),
-        26
+        27
     );
     let runtime_command = &validation_schema["$defs"]["RuntimeCommand"]["oneOf"];
     assert_eq!(
@@ -437,6 +437,44 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     // Together this drops the `Evidence` union (and `RecoveryDecision`/
     // `RecoveryRecord`) out of this tool's reachable `$defs` entirely; see
     // `checkpoint_save_does_not_advertise_the_evidence_union` in `budget.rs`.
+    //
+    // The variant-for-variant guarantee that a `checkpoint_save`-side check
+    // used to carry (must match `crates/types/src/outcomes.rs`'s `Evidence`
+    // enum variant-for-variant: a hand-listed schema that silently drops a
+    // variant, as `Configuration`, `BrowserExecution`, and `JavaScriptResult`
+    // each previously were, would let `checkpoint_save` reject a real
+    // recovered evidence item with `INVALID_PARAMS` even though the type
+    // itself round-trips fine) still matters — it just lives on
+    // `workflow_recover`'s *output* schema now, the one place `Evidence` is
+    // reachable at all post-Task-3 (see the comment on `Evidence` in
+    // `definitions()`).
+    let recover_schema = tools
+        .iter()
+        .find(|tool| tool["name"] == "workflow_recover")
+        .unwrap();
+    let evidence_variants = recover_schema["outputSchema"]["$defs"]["Evidence"]["oneOf"]
+        .as_array()
+        .unwrap();
+    assert_eq!(evidence_variants.len(), 26, "{evidence_variants:?}");
+    let evidence_kinds = evidence_variants
+        .iter()
+        .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        evidence_kinds.contains(&"javaScriptResult"),
+        "{evidence_kinds:?}"
+    );
+    assert!(
+        evidence_kinds.contains(&"intentExecution"),
+        "{evidence_kinds:?}"
+    );
+    assert!(
+        evidence_kinds.contains(&"controlAction"),
+        "{evidence_kinds:?}"
+    );
+    assert!(evidence_kinds.contains(&"emulation"), "{evidence_kinds:?}");
+    assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
+
     assert_eq!(
         checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]["evidence"]
             ["maxItems"],

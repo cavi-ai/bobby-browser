@@ -86,6 +86,7 @@ pub(super) fn expected_postcondition(command: &RuntimeCommand) -> &'static str {
         PrimitiveCommand::PrintToPdf(_) => "PDF artifact is observed",
         PrimitiveCommand::HandleDialog(_) => "dialog handling is observed",
         PrimitiveCommand::Emulate(_) => "emulation is observed",
+        PrimitiveCommand::NetworkLog(_) => "network log artifact is observed",
         PrimitiveCommand::SetCookies(_) | PrimitiveCommand::DeleteCookies(_) => {
             "cookie mutation is observed"
         }

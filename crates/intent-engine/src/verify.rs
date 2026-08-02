@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use dom_engine::Candidate;
-use types::{CandidateEvidence, Evidence, ExecutionRecord, FillValue, IntentResolutionPath};
+use types::{
+    CandidateEvidence, Evidence, ExecutionRecord, FillValue, FormControlOperation,
+    FormControlState, IntentResolutionPath,
+};
 
 /// How an intent reached its target, and the artifacts that prove it.
 pub struct ResolutionDetails {
@@ -82,7 +85,7 @@ pub fn summarize_target(target: &types::TargetSpec) -> String {
 /// Whether `value` can act on `candidate` without silent coercion.
 ///
 /// Rules follow Chromium worker candidate extraction in `worker-pool` targeting:
-/// - native `<input type="file">` is emitted as `role=textbox` with `attributes["type"]=file`
+/// - native `<input type="file">` is emitted as `role=button` with `attributes["type"]=file`
 /// - text-like controls use `textbox` / `searchbox` / `spinbutton` without `type=file`
 /// - native `<select>` is emitted as `role=combobox` (also accept `listbox`)
 /// - there is no dedicated select primitive; Select fills via `TypeTextCommand`
@@ -109,9 +112,69 @@ pub fn compatible(value: &FillValue, candidate: &Candidate) -> bool {
 pub fn verify_fill(value: &FillValue, evidence: &[Evidence]) -> Result<(), String> {
     match value {
         FillValue::Text { text, .. } => verify_typed_value(text, evidence),
-        FillValue::Select { option } => verify_typed_value(option, evidence),
-        FillValue::Checked { checked } => verify_typed_value(&checked.to_string(), evidence),
+        FillValue::Select { option } => verify_selected_value(option, evidence),
+        FillValue::Checked { checked } => verify_checked_state(*checked, evidence),
         FillValue::Files { paths } => verify_upload_paths(paths, evidence),
+    }
+}
+
+fn verify_selected_value(expected: &str, evidence: &[Evidence]) -> Result<(), String> {
+    let action = evidence.iter().find_map(|item| match item {
+        Evidence::ControlAction { action }
+            if action.operation == FormControlOperation::SelectOne =>
+        {
+            Some(action)
+        }
+        _ => None,
+    });
+    let Some(action) = action else {
+        return Err("missing typed select evidence".into());
+    };
+    if !action.validity.valid {
+        return Err(action
+            .validity
+            .message
+            .clone()
+            .unwrap_or_else(|| "browser rejected the selected value".into()));
+    }
+    match &action.state {
+        FormControlState::Selection { values } if values == &[expected.to_owned()] => Ok(()),
+        FormControlState::Selection { values } => Err(format!(
+            "selected value mismatch: expected {expected:?}, observed {values:?}"
+        )),
+        state => Err(format!(
+            "typed select evidence had incompatible state: {state:?}"
+        )),
+    }
+}
+
+fn verify_checked_state(expected: bool, evidence: &[Evidence]) -> Result<(), String> {
+    let action = evidence.iter().find_map(|item| match item {
+        Evidence::ControlAction { action }
+            if action.operation == FormControlOperation::SetChecked =>
+        {
+            Some(action)
+        }
+        _ => None,
+    });
+    let Some(action) = action else {
+        return Err("missing typed checked-state evidence".into());
+    };
+    if !action.validity.valid {
+        return Err(action
+            .validity
+            .message
+            .clone()
+            .unwrap_or_else(|| "browser rejected the checked state".into()));
+    }
+    match action.state {
+        FormControlState::Checked { checked } if checked == expected => Ok(()),
+        FormControlState::Checked { checked } => Err(format!(
+            "checked-state mismatch: expected {expected}, observed {checked}"
+        )),
+        ref state => Err(format!(
+            "typed checked-state evidence had incompatible state: {state:?}"
+        )),
     }
 }
 

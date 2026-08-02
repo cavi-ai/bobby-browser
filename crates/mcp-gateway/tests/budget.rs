@@ -19,10 +19,13 @@ use uuid::uuid;
 
 /// The `tools/list` payload an agent downloads on connect, in bytes.
 ///
-/// Measured at 105,800 on `6ba4a15`. Three merges on a single day added
-/// 8,131 bytes without any reviewer seeing the number, which is what this
-/// gate exists to stop.
-const TOOLS_LIST_MAX_BYTES: usize = 160_000;
+/// There used to be a second, looser cap here (`TOOLS_LIST_MAX_BYTES`,
+/// 160,000) alongside `tests/tools.rs`'s pre-existing
+/// `TOOLS_LIST_BYTE_BUDGET` (128 * 1024 = 131,072, "an eighth of the 1 MiB
+/// frame cap"). Two caps on the same quantity never both bind — the looser
+/// one is dead weight — so this asserts against the tighter, pre-existing
+/// number directly rather than defining a second constant.
+const TOOLS_LIST_MAX_BYTES: usize = 128 * 1024;
 
 pub fn all_capabilities() -> Vec<Capability> {
     vec![

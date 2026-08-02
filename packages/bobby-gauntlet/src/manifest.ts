@@ -17,7 +17,7 @@ export interface GauntletManifest {
 export const FOUNDATION_STATION_MANIFEST: readonly ManifestStation[] = Object.freeze([
   Object.freeze({ id: "route", version: "1", capabilities: Object.freeze(["navigation"]), mutationVersion: "1" }),
   Object.freeze({ id: "dom-drift", version: "1", capabilities: Object.freeze(["dom-observation"]), mutationVersion: "1" }),
-  Object.freeze({ id: "semantic-form", version: "1", capabilities: Object.freeze(["form-fill"]), mutationVersion: "1" }),
+  Object.freeze({ id: "semantic-form", version: "1", capabilities: Object.freeze(["form-fill"]), mutationVersion: "2" }),
   Object.freeze({ id: "validation", version: "1", capabilities: Object.freeze(["form-fill", "validation"]), mutationVersion: "1" }),
 ]);
 
@@ -82,4 +82,3 @@ function deepFreeze<T>(value: T): Readonly<T> {
   }
   return value;
 }
-
