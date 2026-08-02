@@ -1,5 +1,5 @@
 use behavioral_engine::{
-    compose_typed_text, generate_session_seed, BezierMouseSimulator, BehavioralConfig, MouseConfig,
+    compose_typed_text, generate_session_seed, BehavioralConfig, BezierMouseSimulator, MouseConfig,
     ScrollConfig, ScrollSimulator, SessionRandom, TextConfig, TypingSimulator,
 };
 
@@ -33,7 +33,10 @@ fn session_random_f64_range() {
     let mut r = SessionRandom::new(99);
     for _ in 0..50 {
         let val = r.next_f64(10.0, 20.0);
-        assert!((10.0..20.0).contains(&val), "value {val} out of range [10, 20)");
+        assert!(
+            (10.0..20.0).contains(&val),
+            "value {val} out of range [10, 20)"
+        );
     }
 }
 
@@ -149,7 +152,10 @@ fn bezier_rejects_non_finite_inputs() {
     let sim = BezierMouseSimulator::new(MouseConfig::default());
     let mut random = SessionRandom::new(402);
     let path = sim.generate_path(&mut random, f64::NAN, f64::INFINITY, 10.0, 10.0);
-    assert!(path.points.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+    assert!(path
+        .points
+        .iter()
+        .all(|p| p.x.is_finite() && p.y.is_finite()));
 }
 
 #[test]
@@ -184,7 +190,8 @@ fn typing_select_all_clears_prior_buffer_in_compose() {
 #[test]
 fn session_pause_respects_jitter_band() {
     use behavioral_engine::session_pause;
-    let config = BehavioralConfig::default().with_session_jitter(std::time::Duration::from_millis(500));
+    let config =
+        BehavioralConfig::default().with_session_jitter(std::time::Duration::from_millis(500));
     let mut random = SessionRandom::new(7);
     for _ in 0..20 {
         let pause = session_pause(&mut random, &config);
@@ -227,10 +234,9 @@ fn typing_corrections_preserve_final_text() {
     let text = "correctness";
     let actions = sim.generate_actions(&mut random, text);
     assert_eq!(compose_typed_text(&actions), text);
-    assert!(actions.iter().any(|a| matches!(
-        a,
-        behavioral_engine::TypingAction::Backspace { .. }
-    )));
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, behavioral_engine::TypingAction::Backspace { .. })));
 }
 
 #[test]
@@ -240,10 +246,9 @@ fn typing_simulator_clear_first() {
 
     let actions = sim.generate_with_clear(&mut random, "value", true);
 
-    assert!(actions.iter().any(|a| matches!(
-        a,
-        behavioral_engine::TypingAction::SelectAll { .. }
-    )));
+    assert!(actions
+        .iter()
+        .any(|a| matches!(a, behavioral_engine::TypingAction::SelectAll { .. })));
     assert!(actions.len() > 5);
     assert_eq!(compose_typed_text(&actions), "value");
 }

@@ -1602,11 +1602,7 @@ mod tests {
 
     #[test]
     fn extension_template_matches_rust_template() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/firefox-companion/src/init-script-template.ts"
-        );
-        let ts = std::fs::read_to_string(path).expect("read extension template");
+        let ts = include_str!("../../../packages/firefox-companion/src/init-script-template.ts");
         let marker = "export const INIT_SCRIPT_TEMPLATE = ";
         let start = ts.find(marker).expect("template export") + marker.len();
         let end = ts[start..].find(";\n").expect("template terminator") + start;

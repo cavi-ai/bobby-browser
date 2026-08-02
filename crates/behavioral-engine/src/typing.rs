@@ -160,11 +160,7 @@ impl TypingSimulator {
     ///
     /// Guarantees the composed key/paste stream yields `text` after execution
     /// (mistypes are always corrected before continuing).
-    pub fn generate_actions(
-        &self,
-        random: &mut SessionRandom,
-        text: &str,
-    ) -> Vec<TypingAction> {
+    pub fn generate_actions(&self, random: &mut SessionRandom, text: &str) -> Vec<TypingAction> {
         let mut actions = Vec::new();
         let chars: Vec<char> = text.chars().collect();
         if chars.is_empty() {
@@ -298,7 +294,7 @@ fn nearby_typo(ch: char, random: &mut SessionRandom) -> char {
             }
             candidates.retain(|c| *c != lower);
             if let Some(&typo) = candidates
-                .get(random.gen_usize(0, candidates.len().saturating_sub(1).max(0)))
+                .get(random.gen_usize(0, candidates.len().saturating_sub(1)))
                 .or_else(|| candidates.first())
             {
                 return if ch.is_ascii_uppercase() {

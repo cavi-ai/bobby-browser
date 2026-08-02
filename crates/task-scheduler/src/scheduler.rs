@@ -91,9 +91,7 @@ impl JobScheduler {
         config: SchedulerConfig,
         path: impl AsRef<Path>,
     ) -> Result<Self, crate::JobError> {
-        let store = JournalJobStore::open(path)
-            .await
-            .map_err(store_err)?;
+        let store = JournalJobStore::open(path).await.map_err(store_err)?;
         let scheduler = Self::with_store(config, Arc::new(store));
         scheduler.hydrate().await?;
         Ok(scheduler)
@@ -129,7 +127,7 @@ impl JobScheduler {
                 JobStatus::Pending | JobStatus::Running | JobStatus::Cancelled => {}
             }
             if is_pending {
-                queue.requeue(job).map_err(|e| e)?;
+                queue.requeue(job)?;
             }
         }
         Ok(())
@@ -292,9 +290,7 @@ impl JobScheduler {
 
             let scheduler = self.clone();
             let job_clone = job.clone();
-            let timeout_ms = job
-                .timeout_ms
-                .unwrap_or(self.config.job_timeout_ms);
+            let timeout_ms = job.timeout_ms.unwrap_or(self.config.job_timeout_ms);
 
             let job_id_for_map = job_id.clone();
             let abort_handle = in_flight.spawn(async move {
@@ -355,10 +351,7 @@ impl JobScheduler {
 
     async fn abort_all_running(&self) {
         let handles: Vec<_> = {
-            let mut map = self
-                .abort_handles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut map = self.abort_handles.lock().unwrap_or_else(|e| e.into_inner());
             map.drain().map(|(_, h)| h).collect()
         };
         for handle in handles {
@@ -442,10 +435,7 @@ impl JobScheduler {
         let requeue_job = job.clone();
         drop(registry);
 
-        let _ = self
-            .store
-            .update(&requeue_job, JobEvent::Retried)
-            .await;
+        let _ = self.store.update(&requeue_job, JobEvent::Retried).await;
         let backoff = {
             let queue = self.queue.lock().await;
             queue.retry_config().calculate_backoff(retry_count_after)
@@ -623,9 +613,7 @@ struct PermitGuard {
 impl Drop for PermitGuard {
     fn drop(&mut self) {
         self.permit.take();
-        self.scheduler
-            .active_jobs
-            .fetch_sub(1, Ordering::Relaxed);
+        self.scheduler.active_jobs.fetch_sub(1, Ordering::Relaxed);
         self.scheduler
             .abort_handles
             .lock()
