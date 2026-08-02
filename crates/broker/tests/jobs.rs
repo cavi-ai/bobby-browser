@@ -53,10 +53,7 @@ async fn submit_echo_job_completes() {
 #[tokio::test]
 async fn cancel_pending_job() {
     let (app, _, admin) = app_with_admin(8).await;
-    // Unknown handler stays pending/fails quickly; submit then cancel before run picks it
-    // Use a name that will fail when run — cancel while pending by submitting many and canceling one
-    // that hasn't started: max concurrent is high so better submit hang-like via missing and cancel immediately.
-    let body = json!({ "name": "missing-handler", "payload": {} });
+    let body = json!({ "name": "sleep", "payload": {"ms": 5000}, "maxRetries": 0 });
     let req = context_headers(Request::post("/v1/jobs"), &admin)
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -67,23 +64,21 @@ async fn cancel_pending_job() {
     let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let job_id = created["jobId"].as_str().unwrap().to_string();
 
-    // Cancel — may already be failed if runner was fast; accept cancelled or failed-finished error
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     let cancel = context_headers(Request::delete(format!("/v1/jobs/{job_id}")), &admin)
         .body(Body::empty())
         .unwrap();
     let response = app.clone().oneshot(cancel).await.unwrap();
-    if response.status() == StatusCode::NO_CONTENT {
-        let get = context_headers(Request::get(format!("/v1/jobs/{job_id}")), &admin)
-            .body(Body::empty())
-            .unwrap();
-        let response = app.clone().oneshot(get).await.unwrap();
-        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-        let job: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(job["status"], "cancelled");
-    } else {
-        // Already finished (failed no-handler) — not cancellable
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let get = context_headers(Request::get(format!("/v1/jobs/{job_id}")), &admin)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(get).await.unwrap();
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let job: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(job["status"], "cancelled");
 }
 
 #[tokio::test]

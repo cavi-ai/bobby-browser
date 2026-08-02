@@ -39,8 +39,27 @@ impl JobHandler for EchoHandler {
     }
 }
 
+/// Sleep handler: waits `payload.ms` milliseconds (default 1000, capped at 30s).
+/// Used by operator probes and e2e cancel coverage.
+pub struct SleepHandler;
+
+#[async_trait]
+impl JobHandler for SleepHandler {
+    async fn execute(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let ms = job
+            .payload
+            .get("ms")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(1_000)
+            .min(30_000);
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        Ok(serde_json::json!({ "sleptMs": ms }))
+    }
+}
+
 pub fn register_builtin_handlers(scheduler: &mut JobScheduler) {
     scheduler.register_handler("echo".to_string(), Arc::new(EchoHandler));
+    scheduler.register_handler("sleep".to_string(), Arc::new(SleepHandler));
 }
 
 /// Build scheduler config from app storage + server drain settings.
