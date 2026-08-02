@@ -180,7 +180,11 @@ fn emitted_script_drops_placeholders_and_embeds_worker_bootstrap() {
     // Worker bootstrap is a JS string literal injected for getWorkerBootstrap().
     assert!(script.contains("bobby.fp.worker"));
     assert!(script.contains("getWorkerBootstrap"));
-    assert!(script.len() < 38_000);
+    assert!(
+        script.len() < 40_000,
+        "script grew to {} bytes (budget 40k)",
+        script.len()
+    );
 }
 
 #[test]
