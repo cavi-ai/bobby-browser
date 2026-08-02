@@ -7,11 +7,10 @@ use serde_json::{json, Value};
 use crate::bidi::BidiTransport;
 
 /// Applies a fingerprint plan through WebDriver BiDi preload scripts and
-/// optional UA / viewport overrides. Works for any context created after
-/// the preload script is registered.
+/// UA / locale / timezone / viewport overrides.
 pub struct FirefoxBidiHost<'a> {
     pub transport: &'a dyn BidiTransport,
-    /// Optional browsing context for viewport override.
+    /// Optional browsing context for per-context overrides.
     pub context: Option<&'a str>,
 }
 
@@ -41,30 +40,55 @@ impl FirefoxBidiHost<'_> {
             })
     }
 
-    pub async fn remove_preload_script(&self, script_id: &str) -> Result<(), FingerprintApplyError> {
+    pub async fn remove_preload_script(
+        &self,
+        script_id: &str,
+    ) -> Result<(), FingerprintApplyError> {
         self.transport
             .send("script.removePreloadScript", json!({ "script": script_id }))
             .await
             .map_err(|error| FingerprintApplyError::Host(format!("{error:?}")))?;
         Ok(())
     }
-}
 
-#[async_trait]
-impl FingerprintHost for FirefoxBidiHost<'_> {
-    async fn apply_fingerprint(
+    fn context_params(&self) -> Value {
+        match self.context {
+            Some(context) => json!({ "contexts": [context] }),
+            None => json!({}),
+        }
+    }
+
+    /// UA / locale / timezone / viewport. Best-effort: older Firefox builds may
+    /// lack individual emulation commands (min gecko is still below all of them).
+    pub async fn apply_emulation_overrides(
         &self,
         plan: &FingerprintApplyPlan,
     ) -> Result<(), FingerprintApplyError> {
-        let _script_id = self.add_preload_script(plan).await?;
-
-        // Best-effort: newer Firefox builds expose these emulation commands.
+        let mut ua_params = self.context_params();
+        if let Some(obj) = ua_params.as_object_mut() {
+            obj.insert("userAgent".into(), json!(plan.user_agent));
+        }
         let _ = self
             .transport
-            .send(
-                "emulation.setUserAgentOverride",
-                json!({ "userAgent": plan.user_agent }),
-            )
+            .send("emulation.setUserAgentOverride", ua_params)
+            .await;
+
+        let mut locale_params = self.context_params();
+        if let Some(obj) = locale_params.as_object_mut() {
+            obj.insert("locale".into(), json!(plan.locale));
+        }
+        let _ = self
+            .transport
+            .send("emulation.setLocaleOverride", locale_params)
+            .await;
+
+        let mut tz_params = self.context_params();
+        if let Some(obj) = tz_params.as_object_mut() {
+            obj.insert("timezone".into(), json!(plan.timezone_id));
+        }
+        let _ = self
+            .transport
+            .send("emulation.setTimezoneOverride", tz_params)
             .await;
 
         if let Some(context) = self.context {
@@ -84,6 +108,18 @@ impl FingerprintHost for FirefoxBidiHost<'_> {
                 .await;
         }
 
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl FingerprintHost for FirefoxBidiHost<'_> {
+    async fn apply_fingerprint(
+        &self,
+        plan: &FingerprintApplyPlan,
+    ) -> Result<(), FingerprintApplyError> {
+        let _script_id = self.add_preload_script(plan).await?;
+        self.apply_emulation_overrides(plan).await?;
         Ok(())
     }
 }

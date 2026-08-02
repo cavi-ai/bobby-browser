@@ -12,8 +12,8 @@ pub use worker::{
 };
 
 pub use behavioral_engine::{
-    compose_typed_text, generate_session_seed, session_pause, BezierMouseSimulator,
-    BehavioralConfig, MouseConfig, MousePath, MousePoint, ScrollAction, ScrollConfig,
+    compose_typed_text, generate_session_seed, session_pause, BehavioralConfig,
+    BezierMouseSimulator, MouseConfig, MousePath, MousePoint, ScrollAction, ScrollConfig,
     ScrollSimulator, SessionRandom, TextConfig, TypingAction, TypingSimulator,
 };
 pub use fingerprinting::{FingerprintApplyPlan, FingerprintConfig, FingerprintHost};

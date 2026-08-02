@@ -168,8 +168,11 @@ fn policy_error(message: impl Into<String>) -> CommandError {
 pub trait BrowserWorker: Send + Sync {
     fn worker_id(&self) -> WorkerId;
     fn profile_dir(&self) -> &Path;
-    /// Toggle fingerprint spoofing for subsequently opened pages.
-    fn set_fingerprint_enabled(&self, _enabled: bool) {}
+    /// Toggle fingerprint spoofing. Implementations that register preload
+    /// scripts should apply/remove them immediately (not only on next page).
+    async fn set_fingerprint_enabled(&self, _enabled: bool) -> Result<(), CommandError> {
+        Ok(())
+    }
     /// Whether fingerprint spoofing is currently enabled.
     fn fingerprint_enabled(&self) -> bool {
         false

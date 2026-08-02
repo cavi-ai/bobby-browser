@@ -1,8 +1,3 @@
-import {
-  applyFingerprintProfile,
-  getFingerprintEnabled,
-  getFingerprintProfile,
-} from "./fingerprint.js";
 import { MAX_COMPANION_PAYLOAD_BYTES } from "./protocol.js";
 
 export const MAX_VISIBLE_TEXT_LENGTH = 64 * 1024;
@@ -996,15 +991,6 @@ export function executeContentAction(
   }
 }
 
-type FingerprintBrowserApi = {
-  storage: {
-    local: {
-      get(keys: readonly string[]): Promise<Record<string, unknown>>;
-      set(values: Record<string, unknown>): Promise<void>;
-    };
-  };
-};
-
 type ContentBrowserApi = {
   runtime: {
     sendMessage(message: unknown): Promise<unknown>;
@@ -1014,21 +1000,11 @@ type ContentBrowserApi = {
   };
 };
 
-declare const browser: (ContentBrowserApi & FingerprintBrowserApi) | undefined;
+declare const browser: ContentBrowserApi | undefined;
 
-/** Apply fingerprint spoofing at document_start when the extension toggle is on. */
-async function bootstrapFingerprint(): Promise<void> {
-  if (typeof browser === "undefined") return;
-  try {
-    if (!(await getFingerprintEnabled(browser.storage))) return;
-    const profile = await getFingerprintProfile(browser.storage);
-    applyFingerprintProfile(profile);
-  } catch {
-    /* ignore — pages must still load if storage is unavailable */
-  }
-}
-
-void bootstrapFingerprint();
+// Fingerprint spoofing is applied via BiDi preload (worker) or a registered
+// document_start content script (extension toggle) — not here — to avoid the
+// isolated-world + async-storage race at document_start.
 
 if (typeof browser !== "undefined") {
   void browser.runtime.sendMessage({ type: "companionFrameReady" }).catch(() => undefined);

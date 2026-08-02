@@ -12,6 +12,12 @@ import {
   type CompanionCapabilities,
   type CompanionEvent,
 } from "./protocol.js";
+import { syncFingerprintRegistration } from "./fingerprint-registration.js";
+import {
+  claimFingerprintHostOwnership,
+  releaseFingerprintHostOwnership,
+  type FingerprintProfile,
+} from "./fingerprint.js";
 
 export const MAX_PAGE_LEASES = 256;
 export const PAGE_LEASE_TTL_MS = 60_000;
@@ -71,6 +77,11 @@ export type BackgroundDependencies = {
   navigateTab(tabId: number, url: string): Promise<void>;
   createTargetId?: (target: DiscoveredTarget) => string;
   now?: () => number;
+  /** When true, Bobby worker owns fingerprint apply; extension registration clears. */
+  setFingerprintManagedByHost?: (
+    managed: boolean,
+    profile?: FingerprintProfile,
+  ) => Promise<void>;
 };
 
 function routeKey(attachmentId: string, pageId: string): string {
@@ -193,6 +204,7 @@ export class CompanionBackground {
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
     this.#tabLifecycles.clear();
+    void this.#setFingerprintManagedByHost(false);
     const request: NativePairRequest = {
       kind: "pair",
       input: {
@@ -212,6 +224,7 @@ export class CompanionBackground {
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
     this.#tabLifecycles.clear();
+    void this.#setFingerprintManagedByHost(false);
     this.#dependencies.transport.stop();
   }
 
@@ -470,12 +483,26 @@ export class CompanionBackground {
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
     this.#tabLifecycles.clear();
+    await this.#setFingerprintManagedByHost(true, undefined);
     const targets = (await this.#dependencies.discoverTargets?.()) ?? [];
     for (const target of targets) {
       if (this.#targets.size >= MAX_PAGE_LEASES) break;
       this.#registerTarget(target);
     }
     this.#sendDiscovery();
+  }
+
+  async #setFingerprintManagedByHost(
+    managed: boolean,
+    profile?: FingerprintProfile,
+  ): Promise<void> {
+    const hook = this.#dependencies.setFingerprintManagedByHost;
+    if (!hook) return;
+    try {
+      await hook(managed, profile);
+    } catch {
+      /* fingerprint ownership is best-effort relative to pairing */
+    }
   }
 
   #registerTarget(target: DiscoveredTarget): boolean {
@@ -578,11 +605,6 @@ export class CompanionBackground {
   }
 }
 
-type StoredIdentity = {
-  companionId?: unknown;
-  profileId?: unknown;
-};
-
 export type ProductionBrowserApi = {
   runtime: {
     id: string;
@@ -595,9 +617,18 @@ export type ProductionBrowserApi = {
   };
   storage: {
     local: {
-      get(keys: readonly string[]): Promise<StoredIdentity>;
-      set(values: { companionId: string; profileId: string }): Promise<void>;
+      get(keys: readonly string[]): Promise<Record<string, unknown>>;
+      set(values: Record<string, unknown>): Promise<void>;
     };
+  };
+  contentScripts?: {
+    register(options: {
+      matches: string[];
+      js: Array<{ code: string }>;
+      runAt: "document_start";
+      allFrames: boolean;
+      matchAboutBlank: boolean;
+    }): Promise<{ unregister(): Promise<void> | void }>;
   };
   tabs: {
     onUpdated: {
@@ -703,12 +734,14 @@ export async function startProductionBackground(
     navigateTab: async (tabId, url) => {
       await browserApi.tabs.update(tabId, { url });
     },
-  });
-  browserApi.runtime.onMessage.addListener((message, sender) => {
-    void background
-      .receiveRuntimeMessage(message, sender, browserApi.runtime.id)
-      .catch(() => undefined);
-    return undefined;
+    setFingerprintManagedByHost: async (managed, profile) => {
+      if (managed) {
+        await claimFingerprintHostOwnership(browserApi.storage, profile);
+      } else {
+        await releaseFingerprintHostOwnership(browserApi.storage);
+      }
+      await syncFingerprintRegistration(browserApi);
+    },
   });
   browserApi.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     background.receiveTabUpdate(tabId, changeInfo, tab);
@@ -719,9 +752,24 @@ export async function startProductionBackground(
   browserApi.webNavigation.onCommitted.addListener((details) => {
     void background.reconcileTab(details.tabId).catch(() => undefined);
   });
+  browserApi.runtime.onMessage.addListener((message, _sender) => {
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === "fingerprintSync"
+    ) {
+      return syncFingerprintRegistration(browserApi);
+    }
+    void background
+      .receiveRuntimeMessage(message, _sender, browserApi.runtime.id)
+      .catch(() => undefined);
+    return undefined;
+  });
+  void syncFingerprintRegistration(browserApi).catch(() => undefined);
   background.connect({
-    companionId: stored.companionId,
-    profileId: stored.profileId,
+    companionId: String(stored.companionId),
+    profileId: String(stored.profileId),
     identity: {
       engine: "firefox",
       browserName: browserInfo.name,

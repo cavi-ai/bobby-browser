@@ -12,6 +12,7 @@ mod error;
 mod fonts;
 mod screen;
 mod script;
+mod ua_ch;
 mod webgl;
 
 pub use apply::{DeviceMetrics, FingerprintApplyPlan, FingerprintHost};
@@ -20,7 +21,11 @@ pub use canvas::{CanvasConfig, CanvasMasker};
 pub use error::FingerprintApplyError;
 pub use fonts::{FontConfig, FontMasker};
 pub use screen::{ScreenConfig, ScreenMasker};
-pub use script::{build_init_script, build_probe_script};
+pub use script::{
+    build_collector_probe_script, build_font_probe_script, build_init_script, build_probe_script,
+    build_worker_probe_script, INIT_SCRIPT_TEMPLATE, PROFILE_PLACEHOLDER,
+};
+pub use ua_ch::{BrandVersion, ClientHintsProfile};
 pub use webgl::{WebGlConfig, WebGlProfile};
 
 use rand::rngs::StdRng;
@@ -55,6 +60,9 @@ pub struct FingerprintConfig {
     pub max_touch_points: u32,
     #[serde(default = "default_chrome_major")]
     pub chrome_major: u32,
+    /// When true, init script injects a minimal `window.chrome` object (Chromium only).
+    #[serde(default = "default_inject_chrome")]
+    pub inject_chrome: bool,
     #[serde(default = "default_session_seed")]
     pub session_seed: u64,
 }
@@ -75,6 +83,7 @@ impl Default for FingerprintConfig {
             device_memory: default_device_memory(),
             max_touch_points: default_max_touch_points(),
             chrome_major: default_chrome_major(),
+            inject_chrome: default_inject_chrome(),
             session_seed: default_session_seed(),
         }
     }
@@ -110,6 +119,10 @@ fn default_max_touch_points() -> u32 {
 
 fn default_chrome_major() -> u32 {
     131
+}
+
+fn default_inject_chrome() -> bool {
+    true
 }
 
 fn default_session_seed() -> u64 {
@@ -166,6 +179,16 @@ impl FingerprintConfig {
         self.chrome_major = major;
         self
     }
+
+    pub fn with_inject_chrome(mut self, inject_chrome: bool) -> Self {
+        self.inject_chrome = inject_chrome;
+        self
+    }
+
+    pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = platform.into();
+        self
+    }
 }
 
 /// A complete fingerprint session with consistent masks.
@@ -188,16 +211,178 @@ pub struct FingerprintSession {
     pub hardware_concurrency: u32,
     pub device_memory: u32,
     pub max_touch_points: u32,
+    pub inject_chrome: bool,
+    pub client_hints: ClientHintsProfile,
+}
+
+fn is_lowercase_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+fn parse_chrome_major_from_ua(user_agent: &str) -> Option<u32> {
+    user_agent
+        .split("Chrome/")
+        .nth(1)?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn parse_chrome_major_from_full_version(full_version: &str) -> Option<u32> {
+    full_version.split('.').next()?.parse().ok()
+}
+
+fn expected_ch_platform(navigator_platform: &str) -> Option<&'static str> {
+    match navigator_platform {
+        "Win32" => Some("Windows"),
+        "MacIntel" => Some("macOS"),
+        "Linux x86_64" => Some("Linux"),
+        _ => None,
+    }
 }
 
 impl FingerprintSession {
     /// Fail closed when cross-signal profile fields contradict each other.
     pub fn validate_consistency(&self) -> Result<(), FingerprintApplyError> {
-        if self.user_agent.contains("Windows") && self.platform != "Win32" {
+        match self.platform.as_str() {
+            "Win32" => {
+                if !self.user_agent.contains("Windows") {
+                    return Err(FingerprintApplyError::Inconsistent(
+                        "Win32 platform requires Windows in user-agent".into(),
+                    ));
+                }
+                if self.user_agent.contains("Macintosh") {
+                    return Err(FingerprintApplyError::Inconsistent(
+                        "Win32 platform must not use Macintosh user-agent".into(),
+                    ));
+                }
+            }
+            "MacIntel" => {
+                if !self.user_agent.contains("Macintosh") {
+                    return Err(FingerprintApplyError::Inconsistent(
+                        "MacIntel platform requires Macintosh in user-agent".into(),
+                    ));
+                }
+                if self.user_agent.contains("Windows NT") {
+                    return Err(FingerprintApplyError::Inconsistent(
+                        "MacIntel platform must not use Windows NT user-agent".into(),
+                    ));
+                }
+            }
+            "Linux x86_64" => {
+                if !self.user_agent.contains("Linux") {
+                    return Err(FingerprintApplyError::Inconsistent(
+                        "Linux x86_64 platform requires Linux in user-agent".into(),
+                    ));
+                }
+            }
+            other => {
+                return Err(FingerprintApplyError::Inconsistent(format!(
+                    "unsupported navigator platform: {other}"
+                )));
+            }
+        }
+
+        if let Some(expected) = expected_ch_platform(&self.platform) {
+            if self.client_hints.platform != expected {
+                return Err(FingerprintApplyError::Inconsistent(format!(
+                    "client_hints.platform {expected} required for navigator platform {}",
+                    self.platform
+                )));
+            }
+        }
+
+        if self.client_hints.brands.is_empty() {
             return Err(FingerprintApplyError::Inconsistent(
-                "Windows user-agent requires platform Win32".into(),
+                "client_hints.brands must be non-empty".into(),
             ));
         }
+        if self.client_hints.full_version_list.is_empty() {
+            return Err(FingerprintApplyError::Inconsistent(
+                "client_hints.full_version_list must be non-empty".into(),
+            ));
+        }
+        if self.client_hints.full_version.is_empty() {
+            return Err(FingerprintApplyError::Inconsistent(
+                "client_hints.full_version must be non-empty".into(),
+            ));
+        }
+
+        let ua_major = parse_chrome_major_from_ua(&self.user_agent).ok_or_else(|| {
+            FingerprintApplyError::Inconsistent("user-agent must contain Chrome/{major}".into())
+        })?;
+        let ch_major = parse_chrome_major_from_full_version(&self.client_hints.full_version)
+            .ok_or_else(|| {
+                FingerprintApplyError::Inconsistent(
+                    "client_hints.full_version must start with a Chrome major".into(),
+                )
+            })?;
+        if ua_major != ch_major {
+            return Err(FingerprintApplyError::Inconsistent(format!(
+                "Chrome major mismatch: user-agent {ua_major} vs client_hints {ch_major}"
+            )));
+        }
+
+        let brands_include_major = |brand: &str| {
+            self.client_hints.brands.iter().any(|entry| {
+                entry.brand == brand && entry.version.parse::<u32>().ok() == Some(ua_major)
+            })
+        };
+        if !brands_include_major("Chromium") || !brands_include_major("Google Chrome") {
+            return Err(FingerprintApplyError::Inconsistent(
+                "client_hints.brands must include Chromium and Google Chrome with matching major"
+                    .into(),
+            ));
+        }
+
+        if self.max_touch_points == 0 && self.client_hints.mobile {
+            return Err(FingerprintApplyError::Inconsistent(
+                "desktop profile (max_touch_points=0) requires client_hints.mobile=false".into(),
+            ));
+        }
+
+        if self.webgl.vendor.is_empty() || self.webgl.renderer.is_empty() {
+            return Err(FingerprintApplyError::Inconsistent(
+                "WebGL vendor and renderer must be non-empty".into(),
+            ));
+        }
+        if !(1024..=32768).contains(&self.webgl.max_texture_size) {
+            return Err(FingerprintApplyError::Inconsistent(
+                "webgl.max_texture_size must be in 1024..=32768".into(),
+            ));
+        }
+
+        if !(1..=256).contains(&self.hardware_concurrency) {
+            return Err(FingerprintApplyError::Inconsistent(
+                "hardware_concurrency must be in 1..=256".into(),
+            ));
+        }
+        if !(1..=128).contains(&self.device_memory) {
+            return Err(FingerprintApplyError::Inconsistent(
+                "device_memory must be in 1..=128".into(),
+            ));
+        }
+
+        if self.locale.is_empty() {
+            return Err(FingerprintApplyError::Inconsistent(
+                "locale must be non-empty".into(),
+            ));
+        }
+        if self.timezone_id.is_empty() {
+            return Err(FingerprintApplyError::Inconsistent(
+                "timezone_id must be non-empty".into(),
+            ));
+        }
+        if self.timezone_id != "UTC" && !self.timezone_id.contains('/') {
+            return Err(FingerprintApplyError::Inconsistent(
+                "timezone_id must be IANA-style (contain '/') or UTC".into(),
+            ));
+        }
+
         if self.user_agent.contains("Windows")
             && self
                 .font_list
@@ -208,21 +393,63 @@ impl FingerprintSession {
                 "Windows profile must not advertise macOS-only fonts".into(),
             ));
         }
-        if self.screen_resolution.width == 0 || self.screen_resolution.height == 0 {
+
+        let screen = &self.screen_resolution;
+        if screen.width == 0 || screen.height == 0 {
             return Err(FingerprintApplyError::Inconsistent(
                 "screen dimensions must be non-zero".into(),
             ));
         }
-        if self.screen_resolution.pixel_ratio <= 0.0 {
+        if screen.available_width > screen.width {
+            return Err(FingerprintApplyError::Inconsistent(
+                "available_width must not exceed width".into(),
+            ));
+        }
+        if screen.available_height > screen.height {
+            return Err(FingerprintApplyError::Inconsistent(
+                "available_height must not exceed height".into(),
+            ));
+        }
+        let color_depth_ok = matches!(screen.color_depth, 24 | 30 | 32) || screen.color_depth >= 15;
+        if !color_depth_ok {
+            return Err(FingerprintApplyError::Inconsistent(
+                "color_depth must be 24, 30, 32, or at least 15".into(),
+            ));
+        }
+        if screen.pixel_ratio <= 0.0 {
             return Err(FingerprintApplyError::Inconsistent(
                 "pixel ratio must be positive".into(),
             ));
         }
+
         if !(1..=3).contains(&self.canvas_noise_amplitude) {
             return Err(FingerprintApplyError::Inconsistent(
                 "canvas noise amplitude out of range".into(),
             ));
         }
+
+        if !is_lowercase_hex64(&self.canvas_hash) {
+            return Err(FingerprintApplyError::Inconsistent(
+                "canvas_hash must be 64-char lowercase hex".into(),
+            ));
+        }
+        if !is_lowercase_hex64(&self.audio_hash) {
+            return Err(FingerprintApplyError::Inconsistent(
+                "audio_hash must be 64-char lowercase hex".into(),
+            ));
+        }
+        if !is_lowercase_hex64(&self.webgl.hash) {
+            return Err(FingerprintApplyError::Inconsistent(
+                "webgl.hash must be 64-char lowercase hex".into(),
+            ));
+        }
+
+        if self.inject_chrome && !self.user_agent.contains("Chrome/") {
+            return Err(FingerprintApplyError::Inconsistent(
+                "inject_chrome requires Chrome user-agent".into(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -263,8 +490,7 @@ pub fn create_session(config: &FingerprintConfig) -> FingerprintSession {
 
     let audio_masker = AudioMasker::new(config.audio.clone());
     let audio_hash = audio_masker.generate_hash(StdRng::seed_from_u64(seed.wrapping_add(2)));
-    let audio_noise_scale =
-        audio_masker.noise_scale(StdRng::seed_from_u64(seed.wrapping_add(11)));
+    let audio_noise_scale = audio_masker.noise_scale(StdRng::seed_from_u64(seed.wrapping_add(11)));
 
     let font_masker = FontMasker::new(config.fonts.clone());
     let font_list = font_masker.get_standard_fonts();
@@ -272,6 +498,7 @@ pub fn create_session(config: &FingerprintConfig) -> FingerprintSession {
     let screen_masker = ScreenMasker::new(config.screen.clone());
     let screen_res = screen_masker.get_spoofed_resolution();
     let user_agent = generate_user_agent(config.chrome_major, &config.platform);
+    let client_hints = ua_ch::build_client_hints(config.chrome_major, &config.platform);
 
     FingerprintSession {
         session_id: format!("fp_{seed}"),
@@ -290,18 +517,22 @@ pub fn create_session(config: &FingerprintConfig) -> FingerprintSession {
         hardware_concurrency: config.hardware_concurrency,
         device_memory: config.device_memory,
         max_touch_points: config.max_touch_points,
+        inject_chrome: config.inject_chrome,
+        client_hints,
     }
 }
 
 fn generate_user_agent(chrome_major: u32, platform: &str) -> String {
     let major = chrome_major.max(100);
-    if platform == "MacIntel" {
-        format!(
+    match platform {
+        "MacIntel" => format!(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
-        )
-    } else {
-        format!(
+        ),
+        "Linux x86_64" => format!(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        ),
+        _ => format!(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
-        )
+        ),
     }
 }

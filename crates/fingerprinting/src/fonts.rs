@@ -20,15 +20,17 @@ impl Default for FontConfig {
 
 fn default_standard_fonts() -> Vec<String> {
     vec![
+        // Cross-platform / core Windows
         "Arial".to_string(),
         "Arial Black".to_string(),
         "Calibri".to_string(),
         "Cambria".to_string(),
+        "Cambria Math".to_string(), // Win7 marker (CreepJS)
         "Comic Sans MS".to_string(),
         "Courier New".to_string(),
         "Georgia".to_string(),
         "Impact".to_string(),
-        "Lucida Console".to_string(),
+        "Lucida Console".to_string(), // Win7 marker (CreepJS)
         "Lucida Sans Unicode".to_string(),
         "Microsoft Sans Serif".to_string(),
         "Palatino Linotype".to_string(),
@@ -37,6 +39,19 @@ fn default_standard_fonts() -> Vec<String> {
         "Times New Roman".to_string(),
         "Trebuchet MS".to_string(),
         "Verdana".to_string(),
+        // Win8
+        "Gadugi".to_string(),
+        "Nirmala UI".to_string(),
+        // Win8.1
+        "Segoe UI Emoji".to_string(),
+        "Leelawadee UI".to_string(),
+        // Win10
+        "Bahnschrift".to_string(),
+        "Ink Free".to_string(),
+        "Segoe MDL2 Assets".to_string(),
+        "HoloLens MDL2 Assets".to_string(),
+        // Win11
+        "Segoe Fluent Icons".to_string(),
     ]
 }
 

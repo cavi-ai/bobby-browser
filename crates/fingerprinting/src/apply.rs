@@ -28,6 +28,13 @@ impl From<&ScreenResolution> for DeviceMetrics {
     }
 }
 
+impl DeviceMetrics {
+    pub fn with_mobile(mut self, mobile: bool) -> Self {
+        self.mobile = mobile;
+        self
+    }
+}
+
 /// Engine-agnostic fingerprint apply payload.
 ///
 /// Chromium, Firefox, and future hosts consume the same plan: inject
@@ -52,14 +59,15 @@ impl FingerprintApplyPlan {
         }
         let session = create_session(config);
         session.validate_consistency()?;
-        Ok(Some(Self::from_session(session)))
+        Ok(Some(Self::from_session(session)?))
     }
 
-    pub fn from_session(session: FingerprintSession) -> Self {
-        let init_script = build_init_script(&session);
+    pub fn from_session(session: FingerprintSession) -> Result<Self, FingerprintApplyError> {
+        let init_script = build_init_script(&session)?;
         let probe_script = build_probe_script();
-        let device_metrics = DeviceMetrics::from(&session.screen_resolution);
-        Self {
+        let device_metrics = DeviceMetrics::from(&session.screen_resolution)
+            .with_mobile(session.client_hints.mobile);
+        Ok(Self {
             user_agent: session.user_agent.clone(),
             locale: session.locale.clone(),
             timezone_id: session.timezone_id.clone(),
@@ -67,7 +75,7 @@ impl FingerprintApplyPlan {
             init_script,
             probe_script,
             session,
-        }
+        })
     }
 }
 

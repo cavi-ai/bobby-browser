@@ -2,7 +2,7 @@ SHELL := /bin/bash
 REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 
-.PHONY: help build reload verify status fmt lint test
+.PHONY: help build reload verify status fmt lint test fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed
 
 help:
 	@echo "build   - cargo build --release -p bobby-browser (produces ./target/release/bobby)"
@@ -12,6 +12,9 @@ help:
 	@echo "fmt     - cargo fmt --all"
 	@echo "lint    - cargo clippy --workspace --all-targets -- -D warnings"
 	@echo "test    - cargo test --workspace"
+	@echo "fingerprint-dogfood - live Chromium collector probe (requires Chrome; --ignored)"
+	@echo "fingerprint-collectors - production site dogfood (BrowserLeaks/CreepJS/FingerprintJS; --ignored)"
+	@echo "fingerprint-collectors-headed - same as collectors but headed Chrome (requires GUI display)"
 	@echo
 	@echo "Set BOBBY_BROWSER_TOKEN to include the MCP handshake check in reload/verify."
 	@echo
@@ -40,3 +43,12 @@ lint:
 
 test:
 	cargo test --manifest-path $(REPO_ROOT)Cargo.toml --workspace
+
+fingerprint-dogfood:
+	cargo test -p worker-pool --test fingerprint_conformance -- --ignored --nocapture
+
+fingerprint-collectors:
+	cargo test -p worker-pool --test fingerprint_conformance chromium_production_collector_dogfood -- --ignored --nocapture
+
+fingerprint-collectors-headed:
+	BOBBY_FP_HEADED=1 cargo test -p worker-pool --test fingerprint_conformance chromium_production_collector_dogfood -- --ignored --nocapture
