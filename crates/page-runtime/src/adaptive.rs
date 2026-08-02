@@ -22,18 +22,85 @@ pub struct VisionGate {
     pub capability_ok: bool,
 }
 
-/// Everything `ExecutionPolicy` decides that the executor has to apply to a
-/// leased worker, resolved once per command by the layer that can see the
-/// session (`sdk_core::RuntimeService`).
+/// Everything `ExecutionPolicy` decides that the executor has to apply, resolved
+/// once per command by the layer that can see the session
+/// (`sdk_core::RuntimeService`).
 ///
-/// `Default` is all-off, which is what every caller that does not resolve a
-/// session gets. That is the deny-by-default direction: a caller that cannot
-/// prove the session opted in does not get fingerprinting or humanization.
-#[derive(Debug, Clone, Copy, Default)]
+/// `Default` is all-off with no provider, which is what every caller that does
+/// not resolve a session gets. That is the deny-by-default direction: a caller
+/// that cannot prove the session opted in gets no fingerprinting, no
+/// humanization, and no node.
+#[derive(Clone, Default)]
 pub struct SessionGate {
     pub vision: VisionGate,
     pub fingerprint: bool,
     pub humanize: bool,
+    /// The outcome of resolving this session's named vision node.
+    pub vision_node: NodeSelection,
+}
+
+/// What resolving a session's `visionNode` produced.
+///
+/// The three states are deliberately distinct. Collapsing `Unresolved` into
+/// `NotRequested` — the obvious `Option<Arc<dyn VisionAssist>>` shape — means a
+/// session that named a local node and mistyped it silently escalates to
+/// whatever provider the process was built with, which is the exact
+/// substitution a named registry exists to prevent.
+#[derive(Clone, Default)]
+pub enum NodeSelection {
+    /// The session named no node. An embedder-installed provider, if any,
+    /// applies: nothing was chosen, so nothing was overridden.
+    #[default]
+    NotRequested,
+    /// The session named a node and it resolved.
+    Resolved(Arc<dyn VisionAssist>),
+    /// The session named a node that did not resolve. No provider runs, and
+    /// no other provider stands in for it.
+    Unresolved,
+}
+
+impl NodeSelection {
+    /// Same as the private `provider`, exposed so the three states can be
+    /// asserted apart. The distinction is a security property, and a property
+    /// only checked through a live browser escalation is a property nothing
+    /// checks.
+    pub fn provider_for_test(
+        &self,
+        installed: Option<Arc<dyn VisionAssist>>,
+    ) -> Option<Arc<dyn VisionAssist>> {
+        self.provider(installed)
+    }
+
+    /// The provider to escalate to, given the process-wide default.
+    fn provider(&self, installed: Option<Arc<dyn VisionAssist>>) -> Option<Arc<dyn VisionAssist>> {
+        match self {
+            Self::NotRequested => installed,
+            Self::Resolved(provider) => Some(Arc::clone(provider)),
+            Self::Unresolved => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for NodeSelection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotRequested => "NotRequested",
+            Self::Resolved(_) => "Resolved",
+            Self::Unresolved => "Unresolved",
+        })
+    }
+}
+
+impl std::fmt::Debug for SessionGate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionGate")
+            .field("vision", &self.vision)
+            .field("fingerprint", &self.fingerprint)
+            .field("humanize", &self.humanize)
+            .field("vision_node", &self.vision_node)
+            .finish()
+    }
 }
 
 impl From<VisionGate> for SessionGate {
@@ -237,15 +304,16 @@ impl AdaptivePageEngine {
         envelope: &CommandEnvelope,
         lease: &WorkerLease,
         page: Option<PageState>,
-        vision_gate: VisionGate,
+        gate: &SessionGate,
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
+        let vision_gate = gate.vision;
         if let RuntimeCommand::Intent(intent) = &envelope.command {
             return execute_intent(
                 envelope,
                 lease,
                 intent,
                 vision_gate,
-                self.vision_assist.clone(),
+                gate.vision_node.provider(self.vision_assist.clone()),
             )
             .await;
         }

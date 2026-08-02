@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Add a `[nodes.<name>]` config table: named, separately addressable nodes with `kind` (`vision` or `context`), `endpoint_url`, optional `token_env`, and `timeout_ms`.
+- Add `executionPolicy.visionNode`, naming which registered node a session escalates to.
+- A named node that is unknown, or configured with the wrong kind, declines the escalation and never falls back to another node or to a process-wide provider.
+- A `[vision]` endpoint with no `[nodes]` table is reachable as a node named `vision`; when both are set `[nodes]` wins and `[vision]` is ignored.
+- Node locality is derived from the node's address, so a session bound to a loopback node keeps page material on the machine.
 - Add `executionPolicy.fingerprint` and `executionPolicy.humanize`, both deny-by-default. Fingerprint spoofing was a process-wide worker-factory setting; it is now per session. Humanized input timing was unconditional on the Firefox path; it is now per session.
 - `PageRuntime` writes both flags to the worker on every lease, so a pooled worker never carries one session's opt-in into another's.
 - Add `Evidence::Humanization` (`engine`, `actions`, `synthesizedMs`), emitted only when the session opted into `humanize`.

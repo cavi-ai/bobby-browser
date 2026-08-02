@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use config::AppConfig;
-use page_runtime::{ExecutionPhaseObserver, PageRuntime, SessionGate, VisionAssist, VisionGate};
+use node_registry::NodeRegistry;
+use page_runtime::{
+    ExecutionPhaseObserver, NodeSelection, PageRuntime, SessionGate, VisionAssist, VisionGate,
+};
 use page_runtime::{RecoveryCoordinator, RecoveryError};
 use session_manager::SessionManager;
 use types::{
@@ -34,6 +37,9 @@ pub struct RuntimeService {
     recovery: Option<RecoveryCoordinator>,
     started_at: std::time::Instant,
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Nodes this runtime can reach. Empty by default, so a `RuntimeService`
+    /// built without configuration resolves no node for any session.
+    nodes: Arc<NodeRegistry>,
 }
 
 impl Default for RuntimeService {
@@ -48,6 +54,7 @@ impl RuntimeService {
             sessions,
             pages,
             recovery: None,
+            nodes: Arc::new(NodeRegistry::default()),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -62,9 +69,21 @@ impl RuntimeService {
             sessions,
             pages,
             recovery: Some(recovery),
+            nodes: Arc::new(NodeRegistry::default()),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Installs the node registry a session's `visionNode` resolves against.
+    pub fn with_nodes(mut self, nodes: Arc<NodeRegistry>) -> Self {
+        self.nodes = nodes;
+        self
+    }
+
+    /// Names of the nodes this runtime can reach.
+    pub fn node_names(&self) -> Vec<String> {
+        self.nodes.names().map(str::to_owned).collect()
     }
 
     pub async fn build(config: &AppConfig) -> Result<Self, RuntimeError> {
@@ -162,13 +181,14 @@ impl RuntimeService {
         if let Some(extractor) = provider {
             adaptive = adaptive.with_structured_extractor(extractor);
         }
+        let nodes = Arc::new(NodeRegistry::from_config(config));
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
         if let Some(observer) = observer {
             pages = pages.with_execution_phase_observer(observer);
         }
         let sessions = SessionManager::new(workers);
-        Ok(Self::with_recovery(sessions, pages, recovery))
+        Ok(Self::with_recovery(sessions, pages, recovery).with_nodes(nodes))
     }
 
     pub async fn runtime_info(&self) -> RuntimeInfo {
@@ -285,10 +305,26 @@ impl RuntimeService {
             },
             RuntimeCommand::Primitive(_) => VisionGate::default(),
         };
+        // Resolve the session's node here, where the session is visible, and
+        // fail closed on every negative path: no name, an unknown name, or a
+        // name of the wrong kind all produce `None`, and `None` means the
+        // intent engine declines the escalation. There is no branch that
+        // substitutes a different node for the one the session asked for.
+        let vision_node = match policy.vision_node.as_deref() {
+            None => NodeSelection::NotRequested,
+            Some(name) => match self.nodes.vision(name) {
+                Ok(provider) => NodeSelection::Resolved(provider),
+                Err(error) => {
+                    tracing::warn!(node = %name, %error, "node.vision.unresolved");
+                    NodeSelection::Unresolved
+                }
+            },
+        };
         let gate = SessionGate {
             vision,
             fingerprint: policy.fingerprint,
             humanize: policy.humanize,
+            vision_node,
         };
         self.in_flight
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);

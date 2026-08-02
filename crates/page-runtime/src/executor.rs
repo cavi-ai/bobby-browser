@@ -230,7 +230,7 @@ impl PageRuntime {
         };
         let mut execution = match self
             .adaptive
-            .execute(&envelope, &lease, page_state, gate.vision)
+            .execute(&envelope, &lease, page_state, &gate)
             .await
         {
             Ok(execution) => execution,
