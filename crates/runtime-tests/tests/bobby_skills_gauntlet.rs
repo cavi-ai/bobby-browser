@@ -30,10 +30,11 @@ use types::{
     AttemptId, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
     ClickAndWaitForPopupCommand, ClickCommand, CommandEnvelope, CommandId, CommandOutcome,
     CompleteFormField, CompleteFormIntent, ElementState, ErrorCode, Evidence, FillIntent,
-    FillValue, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId,
-    PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SkillBrowserEngine,
-    SkillCapability, SkillFailure, SkillOutcome, SkillProfileRequest, SkillSessionState,
-    TargetSpec, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    FillValue, FormControl, FormControlKind, FormControlOperation, FormControlTarget,
+    InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, SessionId, SkillBrowserEngine, SkillCapability, SkillFailure,
+    SkillOutcome, SkillProfileRequest, SkillSessionState, TargetSpec, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 use worker_pool::{
@@ -56,6 +57,14 @@ const STATIONS: [&str; 10] = [
     "download",
     "championship",
 ];
+
+fn station_mutation_version(station_id: &str) -> &'static str {
+    if station_id == "semantic-form" {
+        "2"
+    } else {
+        "1"
+    }
+}
 
 #[derive(Clone)]
 struct GauntletTarget {
@@ -133,7 +142,7 @@ fn validated_championship_stations(
         .map(|(station, expected_id)| {
             if station.id != expected_id
                 || station.version != "1"
-                || station.mutation_version != "1"
+                || station.mutation_version != station_mutation_version(expected_id)
                 || !station.passed
             {
                 return Err(test_error(
@@ -236,7 +245,7 @@ impl ReleaseScorecard {
                 .any(|(station, expected)| {
                     station.id != expected
                         || station.version != "1"
-                        || station.mutation_version != "1"
+                        || station.mutation_version != station_mutation_version(expected)
                         || !station.passed
                         || station.evidence.is_empty()
                 })
@@ -697,50 +706,105 @@ impl ProductionBobby {
                     .await?;
             }
             "semantic-form" => {
-                let field =
-                    |name: &str, label: &str, role: &str, value: FillValue| CompleteFormField {
+                let snapshot = self
+                    .runtime
+                    .form_snapshot(&self.session_id, page_id, Some(32))
+                    .await?;
+                let semantic_forms = snapshot
+                    .forms
+                    .iter()
+                    .filter(|form| {
+                        ["name", "email"].iter().all(|token| {
+                            form.controls
+                                .iter()
+                                .any(|control| control.autocomplete.as_deref() == Some(*token))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let [semantic_form] = semantic_forms.as_slice() else {
+                    return Err(test_error(format!(
+                        "expected one autocomplete-identified semantic form, found {}",
+                        semantic_forms.len()
+                    )));
+                };
+                let controls = semantic_form.controls.iter().collect::<Vec<_>>();
+                let unique_control = |description: &str,
+                                      predicate: &dyn Fn(&FormControl) -> bool|
+                 -> TestResult<&FormControl> {
+                    let matches = controls
+                        .iter()
+                        .copied()
+                        .filter(|control| predicate(control))
+                        .collect::<Vec<_>>();
+                    match matches.as_slice() {
+                        [control] => Ok(*control),
+                        _ => Err(test_error(format!(
+                            "expected one semantic {description} control, found {}",
+                            matches.len()
+                        ))),
+                    }
+                };
+                let name = unique_control("name", &|control| {
+                    control.autocomplete.as_deref() == Some("name")
+                })?;
+                let email = unique_control("email", &|control| {
+                    control.autocomplete.as_deref() == Some("email")
+                })?;
+                let plan = unique_control("single select", &|control| {
+                    control.control_kind == FormControlKind::SelectOne
+                })?;
+                let terms = unique_control("checkbox", &|control| {
+                    control.control_kind == FormControlKind::Checkbox
+                })?;
+                let submit = unique_control("submit", &|control| {
+                    control.control_kind == FormControlKind::Submit
+                })?;
+                let field = |name: &str,
+                             control: &FormControl,
+                             value: FillValue|
+                 -> TestResult<CompleteFormField> {
+                    let target = control.target.as_ref().ok_or_else(|| {
+                        test_error(format!("semantic {name} control has no stable target"))
+                    })?;
+                    Ok(CompleteFormField {
                         name: name.into(),
-                        purpose: format!("fill {label}"),
+                        purpose: format!("fill {name}"),
                         hints: IntentHints {
-                            role: Some(role.into()),
-                            near_text: Some(types::TextMatch::Exact(label.into())),
+                            role: Some(target.role.clone()),
+                            near_text: Some(types::TextMatch::Exact(
+                                target.accessible_name.clone(),
+                            )),
+                            ordinal: target.ordinal,
                             ..Default::default()
                         },
                         value,
-                    };
+                    })
+                };
                 let fields = vec![
                     field(
                         "name",
-                        "Full name",
-                        "textbox",
+                        name,
                         FillValue::Text {
                             text: "Ada Lovelace".into(),
                             clear_first: true,
                         },
-                    ),
+                    )?,
                     field(
                         "email",
-                        "Email address",
-                        "textbox",
+                        email,
                         FillValue::Text {
                             text: "ada@example.test".into(),
                             clear_first: true,
                         },
-                    ),
+                    )?,
                     field(
                         "plan",
-                        "Plan",
-                        "combobox",
+                        plan,
                         FillValue::Select {
                             option: "pro".into(),
                         },
-                    ),
-                    field(
-                        "terms",
-                        "Accept terms",
-                        "checkbox",
-                        FillValue::Checked { checked: true },
-                    ),
+                    )?,
+                    field("terms", terms, FillValue::Checked { checked: true })?,
                 ];
                 let outcome = self
                     .runtime
@@ -760,11 +824,33 @@ impl ProductionBobby {
                         )),
                     })
                     .await;
-                if !matches!(outcome, CommandOutcome::Completed { .. }) {
-                    return Err(test_error(format!("complete form failed: {outcome:?}")));
+                let evidence = match outcome {
+                    CommandOutcome::Completed { evidence, .. } => evidence,
+                    other => return Err(test_error(format!("complete form failed: {other:?}"))),
+                };
+                for operation in [
+                    FormControlOperation::SelectOne,
+                    FormControlOperation::SetChecked,
+                ] {
+                    if !evidence.iter().any(|item| {
+                        matches!(
+                            item,
+                            Evidence::ControlAction { action } if action.operation == operation
+                        )
+                    }) {
+                        return Err(test_error(format!(
+                            "complete form omitted typed {operation:?} evidence"
+                        )));
+                    }
                 }
-                self.click(page_id, target_test_id("semantic-submit"), true)
-                    .await?;
+                self.click(
+                    page_id,
+                    target_spec_from_form_control(submit.target.as_ref().ok_or_else(|| {
+                        test_error("semantic submit control has no stable target")
+                    })?),
+                    true,
+                )
+                .await?;
             }
             "validation" => {
                 let rejected = self
@@ -1393,6 +1479,25 @@ fn target_test_id(test_id: &str) -> TargetSpec {
     }
 }
 
+fn target_spec_from_form_control(target: &FormControlTarget) -> TargetSpec {
+    let segment = |segment: &types::SemanticTargetSegment| {
+        Box::new(TargetSpec {
+            role: Some(segment.role.clone()),
+            accessible_name: Some(segment.accessible_name.clone()),
+            ordinal: segment.ordinal,
+            ..TargetSpec::default()
+        })
+    };
+    TargetSpec {
+        role: Some(target.role.clone()),
+        accessible_name: Some(target.accessible_name.clone()),
+        ordinal: target.ordinal,
+        frame_path: target.frame_path.iter().map(segment).collect(),
+        shadow_path: target.shadow_path.iter().map(segment).collect(),
+        ..TargetSpec::default()
+    }
+}
+
 fn configured_engine() -> TestResult<SkillBrowserEngine> {
     match std::env::var("BOBBY_CHAMPIONSHIP_ENGINE")
         .unwrap_or_else(|_| "firefox".into())
@@ -1540,7 +1645,7 @@ fn manifest_digest(seed: &str) -> String {
         .map(|(id, capabilities)| DigestStation {
             id,
             version: "1",
-            mutation_version: "1",
+            mutation_version: station_mutation_version(id),
             capabilities,
         })
         .collect();
@@ -1734,7 +1839,7 @@ mod replay_contracts {
                 stations: vec![AppStationReceipt {
                     id: (*station).into(),
                     version: "1".into(),
-                    mutation_version: "1".into(),
+                    mutation_version: station_mutation_version(station).into(),
                     passed: true,
                     evidence: Vec::new(),
                 }],
