@@ -228,3 +228,74 @@ async fn checkpoint_save_does_not_advertise_the_evidence_union() {
         "checkpoint_save is {bytes} bytes, expected under 13000"
     );
 }
+
+const READ_ONLY: &[&str] = &[
+    "runtime_info",
+    "session_list",
+    "page_list",
+    "inspect",
+    "a11y_snapshot",
+    "form_snapshot",
+    "screenshot",
+    "events_read",
+    "recovery_status",
+    "cookie_get",
+];
+
+const DESTRUCTIVE: &[&str] = &["session_close", "page_close", "cookie_delete"];
+
+const OPEN_WORLD: &[&str] = &["navigate", "download_url", "extract_structured"];
+
+#[tokio::test]
+async fn every_tool_carries_a_title_and_annotations() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        assert!(tool["title"].is_string(), "{name} has no title");
+        assert!(tool["annotations"].is_object(), "{name} has no annotations");
+    }
+}
+
+#[tokio::test]
+async fn read_only_tools_are_marked_read_only() {
+    let tools = list_tools(all_capabilities()).await;
+    for tool in &tools {
+        let name = tool["name"].as_str().unwrap();
+        let read_only = tool["annotations"]["readOnlyHint"] == serde_json::json!(true);
+        assert_eq!(
+            read_only,
+            READ_ONLY.contains(&name),
+            "{name} readOnlyHint disagrees with the spec table"
+        );
+    }
+}
+
+#[tokio::test]
+async fn destructive_and_open_world_hints_match_the_spec_table() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap();
+        assert_eq!(
+            tool["annotations"]["destructiveHint"] == serde_json::json!(true),
+            DESTRUCTIVE.contains(&name),
+            "{name} destructiveHint disagrees with the spec table"
+        );
+        assert_eq!(
+            tool["annotations"]["openWorldHint"] == serde_json::json!(true),
+            OPEN_WORLD.contains(&name),
+            "{name} openWorldHint disagrees with the spec table"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_read_only_tool_is_never_also_destructive() {
+    for tool in list_tools(all_capabilities()).await {
+        let annotations = &tool["annotations"];
+        let read_only = annotations["readOnlyHint"] == serde_json::json!(true);
+        let destructive = annotations["destructiveHint"] == serde_json::json!(true);
+        assert!(
+            !(read_only && destructive),
+            "{} is both read-only and destructive",
+            tool["name"]
+        );
+    }
+}

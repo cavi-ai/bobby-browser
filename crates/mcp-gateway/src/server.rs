@@ -22,6 +22,7 @@ use tokio::{
     sync::{Mutex, Notify},
 };
 
+use crate::annotations::{tool_annotations, tool_title};
 use crate::protocol::{
     error, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
     MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
@@ -417,8 +418,10 @@ impl Server {
             {
                 tools.push(json!({
                     "name": name,
+                    "title": tool_title(name),
                     "description": tool_description(name),
-                    "inputSchema": advertised_tool_schema(name)
+                    "inputSchema": advertised_tool_schema(name),
+                    "annotations": tool_annotations(name)
                 }));
             }
         }

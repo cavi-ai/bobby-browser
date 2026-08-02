@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+mod annotations;
 pub mod protocol;
 mod resources;
 mod schema;
