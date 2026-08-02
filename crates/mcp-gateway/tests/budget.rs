@@ -12,8 +12,9 @@ use mcp_gateway::Server;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use types::{
-    AttemptId, Capability, CommandEnvelope, CommandId, Evidence, IntentCommand, IntentHints,
-    LocateIntent, PrincipalId, RuntimeCommand, SessionId, WorkflowId,
+    AttemptId, Capability, CheckpointId, CommandEnvelope, CommandId, CommandOutcome, Evidence,
+    ExecutionPolicy, IntentCommand, IntentHints, LocateIntent, PageId, PageMode, PageState,
+    PrincipalId, RecoveryDecision, RuntimeCommand, SessionId, SessionState, WorkflowId,
 };
 use uuid::uuid;
 
@@ -393,6 +394,11 @@ async fn mutating_tools_describe_a_repair_action() {
 
 // --- Task 6: output schemas -------------------------------------------------
 
+/// Only matches refs literally prefixed `#/$defs/` — the one form every
+/// schema in this codebase ever emits (`schema.rs` has no external-file or
+/// non-`$defs` pointer anywhere). Documented rather than widened: there is
+/// nothing here yet for a wider match to catch, and a wider match would just
+/// be unreachable generality.
 fn collect_refs(value: &Value, found: &mut BTreeSet<String>) {
     match value {
         Value::Object(fields) => {
@@ -446,6 +452,48 @@ async fn no_schema_carries_a_ref_to_a_missing_definition() {
     }
 }
 
+/// Table-level counterpart to `no_schema_carries_a_ref_to_a_missing_definition`,
+/// which only ever walks *emitted* schemas (a tool's `inputSchema`,
+/// `outputSchema`, or `schema_for_test` validation schema). Task 3's original
+/// breakage — `recovery_decisions()` left a `$ref:"#/$defs/Evidence"` behind
+/// after `Evidence` was deleted from `definitions()` — lived entirely inside
+/// the shared `definitions()` table, reachable from *no* emitted schema at
+/// the time, so that guard was blind to it by construction. Today the same
+/// shape of gap still exists: the full, fully-fielded `Evidence` entry in
+/// `definitions()` (kept there so validation and this file's drift guard see
+/// the truth — see the comment on `Evidence` in `schema.rs`'s `definitions()`)
+/// is reachable from zero input schemas and zero *advertised* output schemas
+/// (every output narrows it to `evidence_variant_tags()` instead), so its own
+/// internal refs are unguarded by the emitted-schema walk above. This test
+/// closes that gap by checking `definitions()` against itself, independent
+/// of what is or isn't currently reachable from any one tool.
+#[tokio::test]
+async fn every_definitions_table_entry_resolves_its_own_refs() {
+    let defs = mcp_gateway::definitions_for_test();
+    let defs = defs.as_object().expect("definitions() is an object");
+    for (name, definition) in defs {
+        let mut refs = BTreeSet::new();
+        collect_refs(definition, &mut refs);
+        for referenced in &refs {
+            assert!(
+                defs.contains_key(referenced),
+                "definitions()[\"{name}\"] references #/$defs/{referenced}, \
+                 which definitions() itself does not define"
+            );
+        }
+    }
+}
+
+/// `session_list`'s real `structuredContent` is a bare JSON array of
+/// `SessionState` (pinned by `runtime-tests/tests/interface_security.rs`'s
+/// `mcp_foreign_session_checks`) — the one tool this blanket "every
+/// outputSchema is `type: object`" check cannot hold for without declaring a
+/// false contract. Wrapping the payload in an object instead would fix the
+/// schema at the cost of changing that pinned wire behaviour, which is out of
+/// scope here — so this is the one named exception, checked for its own real
+/// (array) shape below instead.
+const ARRAY_SHAPED_OUTPUT: &[&str] = &["session_list"];
+
 #[tokio::test]
 async fn tools_that_return_structured_content_declare_an_output_schema() {
     for tool in list_tools(all_capabilities()).await {
@@ -454,10 +502,17 @@ async fn tools_that_return_structured_content_declare_an_output_schema() {
             tool["outputSchema"].is_object(),
             "{name} returns structuredContent but declares no outputSchema"
         );
-        assert_eq!(
-            tool["outputSchema"]["type"], "object",
-            "{name} outputSchema is not an object schema"
-        );
+        if ARRAY_SHAPED_OUTPUT.contains(&name) {
+            assert_eq!(
+                tool["outputSchema"]["type"], "array",
+                "{name} is in ARRAY_SHAPED_OUTPUT but its outputSchema type disagrees"
+            );
+        } else {
+            assert_eq!(
+                tool["outputSchema"]["type"], "object",
+                "{name} outputSchema is not an object schema"
+            );
+        }
     }
 }
 
@@ -497,6 +552,14 @@ async fn output_schemas_carry_only_reachable_definitions() {
 /// genuine advertised `outputSchema`. Without it, the same drift that once
 /// let `Configuration`, `BrowserExecution`, and `JavaScriptResult` silently
 /// fall out of the hand-written union could recur unnoticed.
+///
+/// **Limit**: this compares `kind` tags only (a `BTreeSet<String>`), because
+/// the advertised `Evidence` is itself a tag-only projection (see
+/// `evidence_variant_tags` in `schema.rs`) — it does not and cannot catch
+/// field-level drift within a variant (a wrong type, a missing property, a
+/// stray one). The round-trip tests below (`*_round_trips_through_*`) are
+/// what catch that class of bug, by validating a real constructed value
+/// against the live advertised schema instead of comparing tag sets.
 #[tokio::test]
 async fn evidence_variants_match_the_wire_type() {
     let generated_schema = serde_json::to_value(schemars::schema_for!(Evidence)).unwrap();
@@ -530,4 +593,187 @@ async fn evidence_variants_match_the_wire_type() {
         .collect();
 
     assert_eq!(generated, hand_written);
+}
+
+// --- Task 6 fix round 1: output schemas must accept real responses --------
+//
+// Everything above this point checks *shape*: presence, `type`, `$defs`
+// reachability, tag-set membership. None of it ever instantiates a real
+// `structuredContent` value and validates it against the schema that
+// supposedly describes it — which is exactly how four declared output
+// schemas ended up rejecting the real responses they exist to describe (the
+// fallback `CommandOutcome` shape closing off fields a real `restarted`
+// outcome and a real partial-artifact-admission outcome both carry; the
+// advertised `Evidence` wrapping every real, flat evidence object in a
+// nonexistent `data` key; `page_open`'s `allOf`-`$ref`'d `PageState`
+// rejecting the sibling `navigationOutcome` every navigated open actually
+// carries; `session_list` declaring `type: object` for a payload that is
+// actually a bare array). Each test below builds a real value the runtime
+// would actually emit and validates it against that tool's own live,
+// advertised `outputSchema`.
+//
+// This deliberately uses the `jsonschema` crate (already a workspace
+// dependency, already used the same way in `page-runtime/src/adaptive.rs`
+// for `extract_structured`'s caller-provided schema) rather than this
+// crate's own hand-rolled `validate`/`validate_at`. That engine was tried
+// first and does not implement `allOf` at all — it silently ignores the
+// keyword — so it could not reproduce the `page_open` bug this round is
+// fixing: a real spec-compliant validator rejects a `$ref`'d `PageState`
+// (closed) sitting in `allOf` next to sibling properties, but the
+// hand-rolled one let it through both before and after the fix, since
+// `additionalProperties` on the *outer* schema was simply never set either
+// way. A round-trip guard that can't see the bug it exists to catch is
+// worse than none, so this uses the real thing instead.
+fn find_tool<'a>(tools: &'a [Value], name: &str) -> &'a Value {
+    tools
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .unwrap_or_else(|| panic!("{name} is not advertised"))
+}
+
+fn assert_validates(schema: &Value, value: &Value, label: &str) {
+    let validator = jsonschema::validator_for(schema)
+        .unwrap_or_else(|error| panic!("{label}'s outputSchema is not a valid schema: {error}"));
+    if let Err(error) = validator.validate(value) {
+        panic!(
+            "{label}'s real response does not validate against its own \
+             outputSchema: {error}\nvalue: {value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn restarted_outcome_round_trips_through_the_fallback_output_schema() {
+    let tools = list_tools(all_capabilities()).await;
+    let click = find_tool(&tools, "click");
+    let mut value = serde_json::to_value(CommandOutcome::Restarted {
+        command_id: CommandId::new(),
+        prior_attempt_id: AttemptId::new(),
+        attempt_id: AttemptId::new(),
+        reason: "boundary command re-run after a worker restart".to_owned(),
+        evidence: vec![],
+    })
+    .unwrap();
+    // `submit_envelope` (server.rs) always inserts this at the top level.
+    value["workflowId"] = json!(WorkflowId::new());
+    assert_validates(&click["outputSchema"], &value, "click (restarted outcome)");
+}
+
+#[tokio::test]
+async fn completed_outcome_with_evidence_round_trips_through_the_fallback_output_schema() {
+    let tools = list_tools(all_capabilities()).await;
+    let navigate = find_tool(&tools, "navigate");
+    let mut value = serde_json::to_value(CommandOutcome::Completed {
+        command_id: CommandId::new(),
+        evidence: vec![Evidence::Navigation {
+            url: "https://example.test/".to_owned(),
+            title: "Example".to_owned(),
+        }],
+    })
+    .unwrap();
+    value["workflowId"] = json!(WorkflowId::new());
+    assert_validates(
+        &navigate["outputSchema"],
+        &value,
+        "navigate (completed outcome with evidence)",
+    );
+}
+
+#[tokio::test]
+async fn artifact_registration_round_trips_through_the_fallback_output_schema() {
+    let tools = list_tools(all_capabilities()).await;
+    let screenshot = find_tool(&tools, "screenshot");
+    let mut value = serde_json::to_value(CommandOutcome::Completed {
+        command_id: CommandId::new(),
+        evidence: vec![Evidence::Screenshot {
+            artifact_id: "artifact-1".to_owned(),
+            media_type: "image/png".to_owned(),
+            width: 1024,
+            height: 768,
+            bytes: 4096,
+            sha256: "a".repeat(64),
+        }],
+    })
+    .unwrap();
+    // Mirrors `ArtifactAdmission::apply_to_mcp_value` (resources.rs): a
+    // partial admission inserts this top-level key alongside the outcome.
+    value["artifactRegistration"] = json!({
+        "status": "partial",
+        "commandId": CommandId::new(),
+        "attempted": 1,
+        "admitted": 0,
+        "failures": [{"kind": "screenshot", "code": "resourceExhausted"}],
+        "retryable": false,
+        "reconciliationRequired": true
+    });
+    value["workflowId"] = json!(WorkflowId::new());
+    assert_validates(
+        &screenshot["outputSchema"],
+        &value,
+        "screenshot (with artifactRegistration)",
+    );
+}
+
+#[tokio::test]
+async fn page_open_navigation_round_trips_through_its_output_schema() {
+    let tools = list_tools(all_capabilities()).await;
+    let page_open = find_tool(&tools, "page_open");
+    let mut value = serde_json::to_value(PageState {
+        id: PageId::new(),
+        session_id: SessionId::new(),
+        url: Some("https://example.test/".to_owned()),
+        mode: PageMode::Interactive,
+        ready_state: "complete".to_owned(),
+        pending_requests: 0,
+    })
+    .unwrap();
+    // Mirrors the `page_open` dispatch (server.rs): inserted whenever a URL
+    // was given, regardless of whether navigation itself completed.
+    value["navigationOutcome"] = serde_json::to_value(CommandOutcome::Completed {
+        command_id: CommandId::new(),
+        evidence: vec![],
+    })
+    .unwrap();
+    assert_validates(&page_open["outputSchema"], &value, "page_open (navigated)");
+}
+
+#[tokio::test]
+async fn session_list_round_trips_through_its_output_schema() {
+    let tools = list_tools(all_capabilities()).await;
+    let session_list = find_tool(&tools, "session_list");
+    let value = serde_json::to_value(vec![SessionState {
+        id: SessionId::new(),
+        profile: "default".to_owned(),
+        proxy: None,
+        page_ids: vec![PageId::new()],
+        created_at: Utc::now(),
+        last_used_at: Utc::now(),
+        execution_policy: ExecutionPolicy::default(),
+    }])
+    .unwrap();
+    assert!(
+        value.is_array(),
+        "session_list's real structuredContent is a bare array"
+    );
+    assert_validates(&session_list["outputSchema"], &value, "session_list");
+}
+
+#[tokio::test]
+async fn workflow_recover_resumed_evidence_round_trips_through_its_output_schema() {
+    let tools = list_tools(all_capabilities()).await;
+    let workflow_recover = find_tool(&tools, "workflow_recover");
+    let value = serde_json::to_value(RecoveryDecision::Resumed {
+        checkpoint_id: CheckpointId::new(),
+        attempt_id: AttemptId::new(),
+        evidence: vec![Evidence::Navigation {
+            url: "https://example.test/".to_owned(),
+            title: "Example".to_owned(),
+        }],
+    })
+    .unwrap();
+    assert_validates(
+        &workflow_recover["outputSchema"],
+        &value,
+        "workflow_recover (resumed, with evidence)",
+    );
 }
