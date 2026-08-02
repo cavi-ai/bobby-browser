@@ -244,14 +244,52 @@ const READ_ONLY: &[&str] = &[
 
 const DESTRUCTIVE: &[&str] = &["session_close", "page_close", "cookie_delete"];
 
-const OPEN_WORLD: &[&str] = &["navigate", "download_url", "extract_structured"];
+// `command_execute` accepts an arbitrary `RuntimeCommand`, which can itself be
+// `Navigate` or `DownloadUrl` — envelope-mediated navigation reaches the
+// network exactly like the standalone tools below.
+const OPEN_WORLD: &[&str] = &[
+    "navigate",
+    "download_url",
+    "extract_structured",
+    "command_execute",
+];
+
+// `idempotentHint` is unconditional under MCP: repeating the call with the
+// same arguments must have no additional effect. An optional
+// `idempotencyKey` does not establish that (without one, `session_create`
+// mints a second session and `intent_fill`/`command_execute` have no dedupe
+// at all), so only tools that converge regardless of any key belong here.
+const IDEMPOTENT: &[&str] = &["checkpoint_save", "emulate"];
+
+/// `tool_title`'s wildcard arm (`annotations.rs`) returns this exact string
+/// for any name with no explicit arm. It has to compile as a total match, but
+/// it must never actually fire for an advertised tool — see
+/// `every_tool_carries_a_title_and_annotations` below.
+const UNTITLED_FALLBACK: &str = "Untitled tool";
 
 #[tokio::test]
 async fn every_tool_carries_a_title_and_annotations() {
     for tool in list_tools(all_capabilities()).await {
         let name = tool["name"].as_str().unwrap().to_owned();
         assert!(tool["title"].is_string(), "{name} has no title");
+        assert_ne!(
+            tool["title"],
+            serde_json::json!(UNTITLED_FALLBACK),
+            "{name} fell through to tool_title's fallback arm — add a real title in annotations.rs"
+        );
         assert!(tool["annotations"].is_object(), "{name} has no annotations");
+    }
+}
+
+#[tokio::test]
+async fn idempotent_hints_match_the_spec_table() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap();
+        assert_eq!(
+            tool["annotations"]["idempotentHint"] == serde_json::json!(true),
+            IDEMPOTENT.contains(&name),
+            "{name} idempotentHint disagrees with the spec table"
+        );
     }
 }
 
