@@ -1,0 +1,96 @@
+{
+  "sessionId": "fp_185294621",
+  "sessionSeed": 185294621,
+  "canvasHash": "29ba67ca639d52dd95c5cedc791883e97646d435c3b777157e9ea42968fc94df",
+  "canvasNoiseAmplitude": 2,
+  "webgl": {
+    "vendor": "Google Inc. (NVIDIA)",
+    "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Super Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "hash": "53204ac9aa18cefefd945779ccb0e985b277fce4bb5d469866126766580ff39a",
+    "maxTextureSize": 16384
+  },
+  "audioHash": "af4915f2cb8eef2d2afa2f5fc271a69e39d6adf4b9e0fe1209299461c22ecaaf",
+  "audioNoiseScale": 1.230953055331563e-07,
+  "fontList": [
+    "Arial",
+    "Arial Black",
+    "Calibri",
+    "Cambria",
+    "Cambria Math",
+    "Comic Sans MS",
+    "Courier New",
+    "Georgia",
+    "Impact",
+    "Lucida Console",
+    "Lucida Sans Unicode",
+    "Microsoft Sans Serif",
+    "Palatino Linotype",
+    "Segoe UI",
+    "Tahoma",
+    "Times New Roman",
+    "Trebuchet MS",
+    "Verdana",
+    "Gadugi",
+    "Nirmala UI",
+    "Segoe UI Emoji",
+    "Leelawadee UI",
+    "Bahnschrift",
+    "Ink Free",
+    "Segoe MDL2 Assets",
+    "HoloLens MDL2 Assets",
+    "Segoe Fluent Icons"
+  ],
+  "screenResolution": {
+    "width": 1920,
+    "height": 1080,
+    "availableWidth": 1920,
+    "availableHeight": 1040,
+    "colorDepth": 24,
+    "pixelRatio": 1.0
+  },
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "platform": "Win32",
+  "locale": "en-US",
+  "timezoneId": "America/New_York",
+  "hardwareConcurrency": 8,
+  "deviceMemory": 8,
+  "maxTouchPoints": 0,
+  "injectChrome": false,
+  "clientHints": {
+    "brands": [
+      {
+        "brand": "Not A(Brand",
+        "version": "8"
+      },
+      {
+        "brand": "Chromium",
+        "version": "131"
+      },
+      {
+        "brand": "Google Chrome",
+        "version": "131"
+      }
+    ],
+    "fullVersionList": [
+      {
+        "brand": "Not A(Brand",
+        "version": "8.0.0.0"
+      },
+      {
+        "brand": "Chromium",
+        "version": "131.0.0.0"
+      },
+      {
+        "brand": "Google Chrome",
+        "version": "131.0.0.0"
+      }
+    ],
+    "platform": "Windows",
+    "platformVersion": "15.0.0",
+    "architecture": "x86",
+    "bitness": "64",
+    "model": "",
+    "mobile": false,
+    "fullVersion": "131.0.0.0"
+  }
+}

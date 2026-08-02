@@ -197,6 +197,21 @@ impl BidiTransport for FakeBidi {
             }
             return Ok(self.subscribe_response.lock().await.clone());
         }
+        if method == "script.addPreloadScript" {
+            return Ok(json!({"script": format!("preload-{call_number}")}));
+        }
+        if method == "script.removePreloadScript" {
+            return Ok(json!({}));
+        }
+        if matches!(
+            method,
+            "emulation.setUserAgentOverride"
+                | "emulation.setLocaleOverride"
+                | "emulation.setTimezoneOverride"
+                | "browsingContext.setViewport"
+        ) {
+            return Ok(json!({}));
+        }
         if method == "script.evaluate" && params["expression"] == "document.title" {
             let context = params["target"]["context"].as_str().unwrap();
             let title = self
@@ -233,6 +248,17 @@ impl BidiTransport for FakeBidi {
             );
         }
         if method == "script.callFunction" {
+            if params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+            {
+                return Ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": "{\"needed\":false,\"currentY\":0,\"targetY\":0,\"viewportHeight\":800,\"pageHeight\":800}"
+                    }
+                }));
+            }
             if let Some(response) = self.preflight.lock().await.pop_front() {
                 return response;
             }
@@ -658,6 +684,17 @@ fn assert_engine_native(evidence: &[Evidence]) {
     )));
 }
 
+fn is_fingerprint_setup_method(method: &str) -> bool {
+    matches!(
+        method,
+        "script.addPreloadScript"
+            | "emulation.setUserAgentOverride"
+            | "emulation.setLocaleOverride"
+            | "emulation.setTimezoneOverride"
+            | "browsingContext.setViewport"
+    )
+}
+
 #[tokio::test]
 async fn worker_subscribes_to_context_destruction_before_exposure_and_propagates_failure() {
     let subscribe_error = CommandError {
@@ -825,21 +862,28 @@ async fn open_page_uses_a_transient_binding_title_and_restores_the_exact_origina
     assert_eq!(observer.bindings.lock().await.len(), 1);
     let calls = bidi.calls().await;
     assert_eq!(calls[0].method, "session.subscribe");
-    assert_eq!(calls[1].method, "browsingContext.create");
-    assert_eq!(calls[2].method, "script.evaluate");
-    assert_eq!(calls[2].params["expression"], "document.title");
-    assert_eq!(calls[3].method, "script.evaluate");
-    assert_eq!(calls[3].params["target"]["context"], "context-bound");
+    let create_idx = calls
+        .iter()
+        .position(|call| call.method == "browsingContext.create")
+        .expect("open_page must create a browsing context");
+    assert_eq!(calls[create_idx].method, "browsingContext.create");
+    assert_eq!(calls[create_idx + 1].method, "script.evaluate");
+    assert_eq!(calls[create_idx + 1].params["expression"], "document.title");
+    assert_eq!(calls[create_idx + 2].method, "script.evaluate");
     assert_eq!(
-        calls[3].params["target"]["sandbox"],
+        calls[create_idx + 2].params["target"]["context"],
+        "context-bound"
+    );
+    assert_eq!(
+        calls[create_idx + 2].params["target"]["sandbox"],
         "automation-runtime-companion"
     );
-    let marker = calls[3].params["expression"].as_str().unwrap();
+    let marker = calls[create_idx + 2].params["expression"].as_str().unwrap();
     assert!(!marker.contains("data-automation-runtime-binding"));
     assert!(marker.contains("automation-runtime-binding:"));
     assert!(marker.contains("b5f6319a-6b36-43cb-9464-d337fc9d8201"));
-    assert_eq!(calls[4].method, "script.evaluate");
-    let restore = calls[4].params["expression"].as_str().unwrap();
+    assert_eq!(calls[create_idx + 3].method, "script.evaluate");
+    let restore = calls[create_idx + 3].params["expression"].as_str().unwrap();
     assert!(restore.contains("Original tab title"));
     assert!(!restore.contains("automation-runtime-binding:"));
     assert!(evidence.iter().any(|item| matches!(
@@ -1226,25 +1270,21 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(
-        calls[1],
-        BidiCall {
-            method: "browsingContext.create".into(),
-            params: json!({"type": "tab"}),
-        }
-    );
-    assert_eq!(
-        calls[5],
-        BidiCall {
-            method: "browsingContext.navigate".into(),
-            params: json!({
-                "context": "context-1",
-                "url": "https://example.test/final",
-                "wait": "complete"
-            }),
-        }
-    );
-    assert_eq!(calls[6].params["wait"], "interactive");
+    assert!(calls.iter().any(|call| {
+        call.method == "browsingContext.create" && call.params == json!({"type": "tab"})
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "browsingContext.navigate"
+            && call.params
+                == json!({
+                    "context": "context-1",
+                    "url": "https://example.test/final",
+                    "wait": "complete"
+                })
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "browsingContext.navigate" && call.params["wait"] == "interactive"
+    }));
     assert_engine_native(&complete);
     assert_engine_native(&interactive);
 }
@@ -1295,10 +1335,16 @@ async fn inspect_evaluates_in_isolated_realm_and_uses_extension_observation() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[5].method, "script.evaluate");
-    assert_eq!(calls[5].params["target"]["context"], "context-1");
+    let isolated_evaluation = calls
+        .iter()
+        .find(|call| {
+            call.method == "script.evaluate"
+                && call.params["target"]["sandbox"] == "automation-runtime-companion"
+        })
+        .expect("isolated inspection evaluation");
+    assert_eq!(isolated_evaluation.params["target"]["context"], "context-1");
     assert_eq!(
-        calls[5].params["target"]["sandbox"],
+        isolated_evaluation.params["target"]["sandbox"],
         "automation-runtime-companion"
     );
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
@@ -1365,12 +1411,37 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[6].method, "script.callFunction");
-    assert_eq!(calls[7].method, "input.performActions");
-    assert_eq!(calls[7].params["context"], "context-1");
-    assert_eq!(calls[7].params["actions"][0]["type"], "pointer");
+    let preflight = calls
+        .iter()
+        .find(|call| {
+            call.method == "script.callFunction"
+                && call.params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+        })
+        .expect("native click must preflight the live element");
     assert_eq!(
-        calls[7].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        calls
+            .iter()
+            .find(|call| {
+                call.method == "script.callFunction"
+                    && call.params["functionDeclaration"]
+                        .as_str()
+                        .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+            })
+            .expect("native click must measure scroll before pointer input")
+            .params["arguments"][0]["sharedId"],
+        "element-1"
+    );
+    assert_eq!(preflight.params["arguments"][0]["sharedId"], "element-1");
+    let pointer = calls
+        .iter()
+        .find(|call| call.method == "input.performActions")
+        .expect("native click must emit pointer actions");
+    assert_eq!(pointer.params["context"], "context-1");
+    assert_eq!(pointer.params["actions"][0]["type"], "pointer");
+    assert_eq!(
+        pointer.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
         "element-1"
     );
     assert_engine_native(&evidence);
@@ -1408,13 +1479,20 @@ async fn native_click_scrolls_and_revalidates_a_below_fold_element_before_pointe
     let calls = bidi.calls().await;
     let preflight = calls
         .iter()
-        .find(|call| call.method == "script.callFunction")
+        .find(|call| {
+            call.method == "script.callFunction"
+                && call.params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+        })
         .expect("native click must preflight the live element");
     assert_eq!(preflight.params["arguments"][0]["sharedId"], "below-fold");
-    assert!(preflight.params["functionDeclaration"]
-        .as_str()
-        .unwrap()
-        .contains("scrollIntoView"));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+    }));
     let pointer = calls
         .iter()
         .find(|call| call.method == "input.performActions")
@@ -1530,12 +1608,27 @@ async fn semantic_click_resolves_test_id_to_verified_css_before_native_input() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert!(calls[5].params["expression"]
-        .as_str()
-        .unwrap()
-        .contains("[data-testid=\\\"confirm\\\"]"));
-    assert_eq!(calls[6].method, "script.callFunction");
-    assert_eq!(calls[7].method, "input.performActions");
+    assert!(calls.iter().any(|call| {
+        call.method == "script.evaluate"
+            && call.params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("[data-testid=\\\"confirm\\\"]"))
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+    }));
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "input.performActions"));
 }
 
 #[tokio::test]
@@ -2114,12 +2207,21 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert!(calls[5].params["expression"]
-        .as_str()
-        .unwrap()
-        .contains("#confirm"));
-    assert_eq!(calls[7].method, "script.callFunction");
-    assert_eq!(calls[8].method, "input.performActions");
+    assert!(calls.iter().any(|call| {
+        call.method == "script.evaluate"
+            && call.params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("#confirm"))
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+    }));
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "input.performActions"));
 }
 
 #[tokio::test]
@@ -2250,12 +2352,26 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[7].method, "script.callFunction");
-    assert_eq!(calls[8].method, "input.performActions");
-    assert_eq!(calls[8].params["actions"][0]["type"], "pointer");
-    assert_eq!(calls[9].method, "input.performActions");
-    assert_eq!(calls[9].params["actions"][0]["type"], "key");
-    let keys = calls[9].params["actions"][0]["actions"].as_array().unwrap();
+    let pointer = calls
+        .iter()
+        .find(|call| {
+            call.method == "input.performActions" && call.params["actions"][0]["type"] == "pointer"
+        })
+        .expect("type_text must focus with pointer actions");
+    let keys = calls
+        .iter()
+        .find(|call| {
+            call.method == "input.performActions" && call.params["actions"][0]["type"] == "key"
+        })
+        .expect("type_text must emit key actions");
+    assert!(calls.iter().any(|call| {
+        call.method == "script.callFunction"
+            && call.params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+    }));
+    assert_eq!(pointer.params["actions"][0]["type"], "pointer");
+    let keys = keys.params["actions"][0]["actions"].as_array().unwrap();
     assert!(keys.iter().any(|action| action["value"] == "a"));
     assert!(keys.iter().any(|action| action["value"] == "\u{e003}"));
     assert!(keys.iter().any(|action| action["value"] == "H"));
@@ -2374,6 +2490,7 @@ async fn missing_page_context_is_not_found_without_transport_calls() {
             .await
             .iter()
             .map(|call| call.method.as_str())
+            .filter(|method| !is_fingerprint_setup_method(method))
             .collect::<Vec<_>>(),
         vec!["session.subscribe"]
     );
@@ -2415,6 +2532,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
         calls
             .iter()
             .map(|call| call.method.as_str())
+            .filter(|method| !is_fingerprint_setup_method(method))
             .collect::<Vec<_>>(),
         vec![
             "session.subscribe",
@@ -2423,6 +2541,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
             "script.evaluate",
             "script.evaluate",
             "script.evaluate",
+            "script.callFunction",
             "script.callFunction",
             "input.performActions"
         ]
@@ -2971,4 +3090,63 @@ async fn handle_dialog_waits_for_and_accepts_a_user_prompt() {
         call.method == "browsingContext.handleUserPrompt"
             && call.params.get("accept") == Some(&json!(true))
     }));
+}
+
+#[tokio::test]
+async fn fingerprint_toggle_adds_and_removes_preload_script() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-fp-toggle"}))]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+
+    let calls = bidi.calls().await;
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.method == "script.addPreloadScript"),
+        "worker init must register fingerprint preload script"
+    );
+    assert!(
+        calls.iter().any(|call| {
+            call.method == "emulation.setUserAgentOverride"
+                || call.method == "emulation.setLocaleOverride"
+                || call.method == "emulation.setTimezoneOverride"
+        }),
+        "worker init must attempt emulation overrides"
+    );
+
+    worker.set_fingerprint_enabled(false).await.unwrap();
+    assert!(
+        bidi.calls()
+            .await
+            .iter()
+            .any(|call| call.method == "script.removePreloadScript"),
+        "disable must remove preload script"
+    );
+
+    worker.set_fingerprint_enabled(true).await.unwrap();
+    let add_count = bidi
+        .calls()
+        .await
+        .iter()
+        .filter(|call| call.method == "script.addPreloadScript")
+        .count();
+    assert_eq!(add_count, 2, "re-enable must add preload script again");
+
+    let calls_before_open = bidi.calls().await.len();
+    worker.open_page(PageId::new()).await.unwrap();
+    let new_calls = &bidi.calls().await[calls_before_open..];
+    let new_adds = new_calls
+        .iter()
+        .filter(|call| call.method == "script.addPreloadScript")
+        .count();
+    assert_eq!(
+        new_adds, 0,
+        "open_page must not double-add when preload already synced"
+    );
+    assert!(
+        new_calls.iter().any(|call| {
+            call.method == "browsingContext.setViewport"
+                && call.params.get("context") == Some(&json!("context-fp-toggle"))
+        }),
+        "open_page must re-apply viewport with the new browsing context"
+    );
 }

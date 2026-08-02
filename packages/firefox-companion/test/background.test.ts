@@ -1039,3 +1039,28 @@ test("production startup pairs, discovers tabs and frames, leases, and routes", 
     "trusted tab removal events must reclaim target capacity across the browser lifetime",
   );
 });
+
+test("pairing claims host fingerprint ownership and stop releases it", async () => {
+  const transport = new FakeTransport();
+  const ownership: boolean[] = [];
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+    async setFingerprintManagedByHost(managed) {
+      ownership.push(managed);
+    },
+  });
+
+  background.connect(CONNECT_OPTIONS);
+  assert.deepEqual(ownership, [false]);
+
+  await pair(background);
+  assert.deepEqual(ownership, [false, true]);
+
+  background.stop();
+  assert.deepEqual(ownership, [false, true, false]);
+});
