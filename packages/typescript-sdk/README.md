@@ -100,6 +100,7 @@ role/name pairs.
 | `runtimeInfo` | Runtime capability and health information |
 | `createSession` / `listSessions` / `deleteSession` | Session lifecycle |
 | `openPage` | Open a page in an owned session |
+| `formSnapshot` | Read a page's form controls without mutating it |
 | `submit` | Submit a `CommandEnvelope`, primitive or intent |
 | `checkpoint` / `recoveryStatus` / `recover` | Workflow checkpoint and recovery |
 | `events` | Async-iterate retained events from a cursor |
