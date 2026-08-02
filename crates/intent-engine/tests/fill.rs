@@ -6,8 +6,10 @@ use dom_engine::{Candidate, CandidateState};
 use intent_engine::{compatible, IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, CompleteFormField, CompleteFormIntent,
-    ErrorCode, Evidence, FillIntent, FillValue, IntentCommand, IntentHints, IntentResolutionPath,
-    PageId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    ControlAction, ControlActionCommand, ControlActionEvidence, ErrorCode, Evidence, FillIntent,
+    FillValue, FormControlOperation, FormControlState, FormControlValidity, IntentCommand,
+    IntentHints, IntentResolutionPath, PageId, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand,
 };
 
 #[tokio::test]
@@ -51,6 +53,7 @@ async fn complete_form_fills_fields_in_order_without_submitting() {
 
 #[derive(Default)]
 struct CallLog {
+    control_action: Vec<ControlActionCommand>,
     type_text: Vec<TypeTextCommand>,
     upload_files: Vec<UploadFilesCommand>,
 }
@@ -113,6 +116,46 @@ impl IntentBrowser for FakeBrowser {
             .upload_files
             .push(command.clone());
         Ok(self.upload_evidence.clone())
+    }
+
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.calls
+            .lock()
+            .expect("call log")
+            .control_action
+            .push(command.clone());
+        let (operation, state) = match &command.action {
+            ControlAction::SelectOne { value } => (
+                FormControlOperation::SelectOne,
+                FormControlState::Selection {
+                    values: vec![value.clone()],
+                },
+            ),
+            ControlAction::SetChecked { checked } => (
+                FormControlOperation::SetChecked,
+                FormControlState::Checked { checked: *checked },
+            ),
+            _ => return Err(unsupported("control_action")),
+        };
+        Ok(vec![Evidence::ControlAction {
+            action: ControlActionEvidence {
+                operation,
+                target: command.target.clone(),
+                state,
+                validity: FormControlValidity {
+                    will_validate: true,
+                    valid: true,
+                    flags: Vec::new(),
+                    message: None,
+                    described_by: Vec::new(),
+                },
+                node_replaced: false,
+            },
+        }])
     }
 
     async fn wait_for(
@@ -295,8 +338,7 @@ async fn fill_text_types_and_verifies() {
 }
 
 #[tokio::test]
-async fn fill_select_types_option_via_type_text() {
-    // Chromium worker has no select primitive; Select uses TypeTextCommand.
+async fn fill_select_dispatches_a_typed_control_action_instead_of_text_input() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = FakeBrowser {
         candidates: Arc::new(vec![combobox("State")]),
@@ -327,13 +369,55 @@ async fn fill_select_types_option_via_type_text() {
     };
     {
         let log = calls.lock().expect("call log");
-        assert_eq!(log.type_text.len(), 1);
-        assert_eq!(log.type_text[0].value, "CA");
+        assert!(log.type_text.is_empty());
+        assert_eq!(log.control_action.len(), 1);
     }
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::IntentExecution { record } if record.verification == "filled"
     )));
+}
+
+#[tokio::test]
+async fn fill_checked_dispatches_a_typed_control_action_instead_of_text_input() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![candidate(
+            "updates",
+            Some("checkbox"),
+            "Updates",
+            BTreeMap::new(),
+        )]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: vec![Evidence::Element {
+            selector: "#updates".into(),
+            text: Some("true".into()),
+        }],
+        upload_evidence: Vec::new(),
+    };
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Updates",
+            Some("checkbox"),
+            FillValue::Checked { checked: true },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    let log = calls.lock().expect("call log");
+    assert!(log.type_text.is_empty());
+    assert!(matches!(
+        log.control_action.as_slice(),
+        [ControlActionCommand {
+            action: ControlAction::SetChecked { checked: true },
+            ..
+        }]
+    ));
 }
 
 #[tokio::test]

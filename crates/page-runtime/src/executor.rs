@@ -534,6 +534,16 @@ impl PageRuntime {
                     ))
                 }
             }
+            PrimitiveCommand::NetworkLog(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::HarArtifact { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("network log returned no HAR artifact"))
+                }
+            }
             PrimitiveCommand::Emulate(_) => {
                 if evidence
                     .iter()

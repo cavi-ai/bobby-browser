@@ -13,6 +13,7 @@ const MAX_TIMEOUT_MS: u64 = 300_000;
 const MAX_NETWORK_IGNORE_SUBSTRINGS: usize = 32;
 const MAX_NETWORK_IGNORE_SUBSTRING_BYTES: usize = 512;
 const MAX_NETWORK_IGNORE_RESOURCE_TYPES: usize = 32;
+const MAX_EXCLUDED_CLASSES: usize = 64;
 // Output-only (Task 6): bounds for definitions reachable solely from
 // `structuredContent`, never from a tool argument.
 const MAX_RECOVERY_RECEIPTS: usize = 64;
@@ -95,6 +96,14 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 ]}
             }),
             vec!["sessionId", "pageId", "target", "action"],
+        ),
+        "network_log" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "clear": {"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId"],
         ),
         "emulate" => (
             json!({
@@ -477,7 +486,7 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         // like every primitive/intent command below, so their real output
         // is `CommandOutcome` plus `workflowId`, not a `PageState`.
         "form_snapshot" => output_ref("FormSnapshot"),
-        // Every other tool (~29 of them: every primitive/intent command plus
+        // Every other tool (~30 of them: every primitive/intent command plus
         // `command_execute` itself) submits a command envelope through
         // `submit_envelope`, which returns the envelope's `CommandOutcome`
         // with `workflowId` always inserted at the top level. See
@@ -497,7 +506,20 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         }
     };
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
-    let defs = reachable_definitions(&schema);
+    // `definitions()`'s `Evidence` keeps the full, fully-fielded union so
+    // validation and the drift guard see the truth (see the comment there),
+    // but that fidelity alone blows the connect budget once reached from an
+    // output schema — see `evidence_variant_tags`. Patch a copy of the table
+    // down to the tag-only projection before resolving what this output
+    // schema can reach, the same technique `advertised_tool_schema` uses to
+    // narrow `command_execute` without disturbing `definitions()` itself.
+    let mut patched = definitions();
+    let patched = patched.as_object_mut().expect("definitions is an object");
+    patched.insert(
+        "Evidence".to_owned(),
+        json!({"oneOf": evidence_variant_tags()}),
+    );
+    let defs = reachable_definitions_from(&schema, patched);
     if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
         schema["$defs"] = defs;
     }
@@ -688,12 +710,18 @@ fn definitions() -> Value {
         // --- Output-only definitions (Task 6) ---------------------------------
         // Everything below here describes `structuredContent`, never a tool
         // argument. `Evidence` was deleted from this table by Task 3 because
-        // `checkpoint_save` stopped accepting it as input; it is restored here
-        // so `recovery_decisions()`'s `$ref:"#/$defs/Evidence"` (used by
+        // `checkpoint_save` stopped accepting it as input; it is restored here,
+        // full and fully-fielded (`types::Evidence` field-for-field), so
+        // validation and the drift guard both see the truth, and so
+        // `recovery_decisions()`'s `$ref:"#/$defs/Evidence"` (used by
         // `RecoveryDecision`, now reachable from `workflow_recover`'s output)
-        // resolves instead of silently dropping out of `$defs`.
+        // resolves instead of silently dropping out of `$defs`. Every
+        // *advertised* output schema resolves a byte-frugal, tag-only
+        // projection instead — see `evidence_variant_tags` and
+        // `tool_output_schema`'s patched copy of this table — so this full
+        // union itself never reaches an actual `tools/list` payload.
         //
-        // `CommandOutcome` itself has no named definition: ~30 tools submit a
+        // `CommandOutcome` itself has no named definition: ~31 tools submit a
         // command envelope and would each carry it (see `command_execute`'s
         // budget test), so `tool_output_schema`'s fallback arm and `page_open`
         // both inline `command_outcome_properties()` instead of `$ref`-ing a
@@ -1076,6 +1104,10 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input("activatePage", object(json!({"pageId":id()}), &["pageId"])),
         tagged_input(
+            "networkLog",
+            object(json!({"clear":{"type":"boolean"}}), &[]),
+        ),
+        tagged_input(
             "emulate",
             object(
                 json!({
@@ -1284,6 +1316,222 @@ fn screenshot_modes() -> Vec<Value> {
     ]
 }
 
+fn evidence_variants() -> Vec<Value> {
+    vec![
+        tagged_fields(
+            "executionPath",
+            json!({
+                "path":{"type":"string","enum":["directHttp","chromium","chromiumFallback"]},
+                "reason":{"type":"string","enum":["eligibleStaticDocument","eligibleExplicitDownload","ineligibleCommand","semanticTargetRequired","javascriptRequired","unsupportedContentType","stateConflict","policyRequired"]},
+                "stateVersion":{"type":"integer","minimum":0},"elapsedMs":{"type":"integer","minimum":0},
+                "bytes":nullable(json!({"type":"integer","minimum":0})),"sha256":nullable(sha256()),
+                "finalUrl":nullable(string(0, MAX_URL_BYTES)),"contentType":nullable(string(0,256)),
+                "status":nullable(json!({"type":"integer","minimum":100,"maximum":599})),
+                "redirectChain":array(string(0, MAX_URL_BYTES), 32)
+            }),
+            &[
+                "path",
+                "reason",
+                "stateVersion",
+                "elapsedMs",
+                "bytes",
+                "sha256",
+            ],
+        ),
+        tagged_fields(
+            "navigation",
+            json!({"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES)}),
+            &["url", "title"],
+        ),
+        tagged_fields(
+            "inspection",
+            json!({"selector":nullable(string(0,MAX_STRING_BYTES)),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES),"text":string(0,MAX_STRING_BYTES),"html":nullable(string(0,MAX_HTML_BYTES))}),
+            &["selector", "url", "title", "text", "html"],
+        ),
+        tagged_fields(
+            "element",
+            json!({"selector":string(0,MAX_STRING_BYTES),"text":nullable(string(0,MAX_STRING_BYTES))}),
+            &["selector", "text"],
+        ),
+        tagged_fields(
+            "upload",
+            json!({"selector":string(0,MAX_STRING_BYTES),"paths":array(string(1,MAX_STRING_BYTES),64)}),
+            &["selector", "paths"],
+        ),
+        tagged_fields(
+            "page",
+            page_evidence_properties(),
+            &["pageId", "url", "title"],
+        ),
+        tagged_fields(
+            "pages",
+            json!({"pages":array(object(page_evidence_properties(), &["pageId","url","title"]),MAX_COLLECTION_ITEMS)}),
+            &["pages"],
+        ),
+        tagged_fields(
+            "popup",
+            json!({"openerPageId":id(),"pageId":id(),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES)}),
+            &["openerPageId", "pageId", "url", "title"],
+        ),
+        tagged_fields(
+            "download",
+            json!({"filename":string(1,MAX_STRING_BYTES),"path":string(1,MAX_STRING_BYTES),"bytes":{"type":"integer","minimum":0},"sha256":sha256()}),
+            &["filename", "path", "bytes", "sha256"],
+        ),
+        tagged_fields(
+            "resolution",
+            json!({
+                "target":{"$ref":"#/$defs/TargetSpec"},
+                "fingerprint":object(json!({"pageId":id(),"frame":nullable(string(0,MAX_STRING_BYTES)),"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"stableAttributes":{"type":"object","maxProperties":64,"propertyNames":{"maxLength":128},"additionalProperties":string(0,MAX_STRING_BYTES)}}), &["pageId","frame","role","name","stableAttributes"]),
+                "candidates":array(object(json!({"role":nullable(string(0,256)),"name":nullable(string(0,MAX_STRING_BYTES)),"score":{"type":"integer","minimum":-1000000,"maximum":1000000},"reasons":array(string(0,MAX_STRING_BYTES),64)}), &["role","name","score","reasons"]),64),
+                "bestMatchAuthorized":{"type":"boolean"}
+            }),
+            &["target", "fingerprint", "candidates", "bestMatchAuthorized"],
+        ),
+        tagged_fields(
+            "wait",
+            json!({
+                "condition":{"$ref":"#/$defs/WaitCondition"},
+                "elapsedMs":{"type":"integer","minimum":0},
+                "observations":{"type":"integer","minimum":0},
+                "excludedClasses":array(string(1, MAX_STRING_BYTES), MAX_EXCLUDED_CLASSES)
+            }),
+            &["condition", "elapsedMs", "observations"],
+        ),
+        tagged_fields(
+            "screenshot",
+            json!({"artifactId":string(1,128),"mediaType":string(1,256),"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384},"bytes":{"type":"integer","minimum":1,"maximum":1073741824u64},"sha256":sha256()}),
+            &[
+                "artifactId",
+                "mediaType",
+                "width",
+                "height",
+                "bytes",
+                "sha256",
+            ],
+        ),
+        tagged_fields(
+            "configuration",
+            json!({"name":string(0,MAX_STRING_BYTES),"value":string(0,MAX_STRING_BYTES)}),
+            &["name", "value"],
+        ),
+        tagged_fields(
+            "browserExecution",
+            json!({
+                "engine":string(0,MAX_STRING_BYTES),
+                "browserVersion":string(0,MAX_STRING_BYTES),
+                "profileId":string(0,MAX_STRING_BYTES),
+                "interactionPath":string(0,MAX_STRING_BYTES)
+            }),
+            &["engine", "browserVersion", "profileId", "interactionPath"],
+        ),
+        tagged_fields(
+            "javaScriptResult",
+            json!({"value":any_value(),"truncated":{"type":"boolean"}}),
+            &["value", "truncated"],
+        ),
+        tagged_fields(
+            "accessibilitySnapshot",
+            json!({
+                "pageId":id(),
+                "nodes":array(json!({"$ref":"#/$defs/AccessibilityNode"}), 2048),
+                "truncated":{"type":"boolean"}
+            }),
+            &["pageId", "nodes", "truncated"],
+        ),
+        tagged_fields(
+            "formSnapshot",
+            json!({"snapshot":any_value()}),
+            &["snapshot"],
+        ),
+        tagged_fields("controlAction", json!({"action":any_value()}), &["action"]),
+        tagged_fields(
+            "emulation",
+            json!({
+                "viewport":nullable(json!({"$ref":"#/$defs/ViewportSize"})),
+                "geolocation":nullable(json!({"$ref":"#/$defs/GeolocationCoordinates"}))
+            }),
+            &[],
+        ),
+        tagged_fields(
+            "dialog",
+            json!({
+                "dialogType":string(1, 64),
+                "message":string(0, MAX_STRING_BYTES),
+                "action":{"type":"string","enum":["accept","dismiss"]}
+            }),
+            &["dialogType", "message", "action"],
+        ),
+        tagged_fields(
+            "harArtifact",
+            json!({
+                "artifactId":string(1, 128),
+                "mediaType":string(1, 256),
+                "bytes":{"type":"integer","minimum":1,"maximum":16777216},
+                "sha256":sha256(),
+                "entries":{"type":"integer","minimum":0,"maximum":512}
+            }),
+            &["artifactId", "mediaType", "bytes", "sha256", "entries"],
+        ),
+        tagged_fields(
+            "pdfArtifact",
+            json!({
+                "artifactId":string(1, 128),
+                "mediaType":string(1, 256),
+                "bytes":{"type":"integer","minimum":1,"maximum":16777216},
+                "sha256":sha256()
+            }),
+            &["artifactId", "mediaType", "bytes", "sha256"],
+        ),
+        tagged_fields(
+            "cookieState",
+            json!({
+                "pageId":nullable(id()),
+                "cookies":array(json!({"$ref":"#/$defs/CookieRecord"}), 2048)
+            }),
+            &["pageId", "cookies"],
+        ),
+        tagged_fields(
+            "structuredExtraction",
+            json!({"pageId":id(),"value":any_value(),"truncated":{"type":"boolean"}}),
+            &["pageId", "value", "truncated"],
+        ),
+        tagged_fields(
+            "intentExecution",
+            json!({"record":{"$ref":"#/$defs/ExecutionRecord"}}),
+            &["record"],
+        ),
+        tagged_fields(
+            "extraction",
+            json!({
+                "field":string(1, 256),
+                "value":nullable(string(0, MAX_STRING_BYTES)),
+                "resolutionPath":{"type":"string","enum":["deterministic","visionFallback"]},
+                "errorCode":nullable(error_code())
+            }),
+            &["field", "value", "resolutionPath", "errorCode"],
+        ),
+    ]
+}
+
+/// Must match `types::ErrorCode`'s camelCase serde output variant-for-variant.
+fn error_code() -> Value {
+    json!({"type":"string","enum":[
+        "invalidRequest","notFound","deadlineExceeded","browserLaunchFailed",
+        "browserCommandFailed","verificationFailed","journalFailed","resourceExhausted",
+        "policyDenied","internal","targetNotFound","targetAmbiguous","frameNotFound",
+        "shadowRootUnavailable","targetDetached","waitConditionTimedOut",
+        "screenshotCaptureFailed","networkPolicyDenied","httpResponseTooLarge",
+        "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
+        "intentCompileFailed","intentActionMismatch","obstructionSuspected",
+        "visionAssistDenied","visionAssistFailed"
+    ]})
+}
+
+fn page_evidence_properties() -> Value {
+    json!({"pageId":id(),"url":string(0,MAX_URL_BYTES),"title":string(0,MAX_STRING_BYTES)})
+}
+
 fn recovery_decisions() -> Vec<Value> {
     vec![
         status_fields(
@@ -1322,7 +1570,7 @@ fn recovery_decisions() -> Vec<Value> {
 /// top level, all optional except `status`/`commandId`. Used inline
 /// (`object(command_outcome_properties(), …)`) everywhere a `CommandOutcome`
 /// needs to appear in an output schema, rather than a shared named
-/// definition: ~30 tools submit a command envelope and would each carry the
+/// definition: ~31 tools submit a command envelope and would each carry the
 /// $ref, and the fully-typed union (`status`-discriminated, each variant
 /// with its own required/`error`/`retryAfterMs`/`evidence` shape) costs
 /// ~3.8 KB on its own — replicated that many times it alone blows the
@@ -1340,59 +1588,47 @@ fn command_outcome_properties() -> Value {
         "reason":string(0, MAX_STRING_BYTES)
         // `priorAttemptId`/`attemptId` (only `status: "restarted"` carries
         // them) are deliberately omitted: this shape is replicated across
-        // ~30 tool descriptors, so every property here is a per-tool cost
-        // times 30, and both ids are still visible in `types::CommandOutcome`
+        // ~31 tool descriptors, so every property here is a per-tool cost
+        // times 31, and both ids are still visible in `types::CommandOutcome`
         // for the one status where they matter.
     })
 }
 
-/// Must match `types::Evidence`'s `tag = "kind"` serde output — every kind
-/// it actually serializes, no more and no fewer — but not its fields.
+/// A byte-frugal projection of [`evidence_variants()`]'s full, fully-fielded
+/// union: every `kind` tag it actually serializes, no more and no fewer, but
+/// none of its fields.
 ///
 /// Reachable only from the recovery-path outputs (`CheckpointRecord`,
 /// `RecoveryDecision`) — see the comment on `Evidence` in `definitions()` —
 /// yet even after every field that referenced a shared definition
 /// (`TargetSpec`, `WaitCondition`, `AccessibilityNode`, `ExecutionRecord`,
 /// `CookieRecord`, the whole form-control subsystem) was inlined down to a
-/// generic object, a field-by-field replica of all 25 variants still put
+/// generic object, a field-by-field replica of every variant still put
 /// `tools/list` well past the hard 128 KiB frame budget
-/// (`tools_list_fits_the_frame_budget_for_a_full_capability_principal` in
-/// `tests/tools.rs`) once it was reachable from even a single tool. Each
-/// variant here keeps only its `kind` — everything the drift guard in
-/// `schema_parity.rs` checks, and the one piece of information this schema
-/// exists to guarantee an agent doesn't have to call the tool to learn —
-/// plus a single open `data` object as a placeholder for the rest.
-fn evidence_variants() -> Vec<Value> {
-    [
-        "executionPath",
-        "navigation",
-        "inspection",
-        "element",
-        "upload",
-        "page",
-        "pages",
-        "popup",
-        "download",
-        "configuration",
-        "resolution",
-        "wait",
-        "screenshot",
-        "browserExecution",
-        "javaScriptResult",
-        "accessibilitySnapshot",
-        "formSnapshot",
-        "controlAction",
-        "structuredExtraction",
-        "cookieState",
-        "pdfArtifact",
-        "dialog",
-        "emulation",
-        "intentExecution",
-        "extraction",
-    ]
-    .into_iter()
-    .map(|kind| tagged_fields(kind, json!({"data":{"type":"object"}}), &[]))
-    .collect()
+/// (`tools_list_stays_within_the_connect_budget` in `tests/budget.rs`) once
+/// it was reachable from even a single tool. Each variant here keeps only
+/// its `kind` — everything the drift guard in `tests/budget.rs`
+/// (`evidence_variants_match_the_wire_type`) checks, and the one piece of
+/// information this schema exists to guarantee an agent doesn't have to call
+/// the tool to learn — plus a single open `data` object as a placeholder for
+/// the rest.
+///
+/// Built by transforming [`evidence_variants()`] rather than a second
+/// hand-written tag list: a hand-maintained second list is exactly the drift
+/// this schema has already paid for twice (`Configuration`,
+/// `BrowserExecution`, and `JavaScriptResult` each silently fell out of one
+/// before; `harArtifact` would have been a third).
+fn evidence_variant_tags() -> Vec<Value> {
+    evidence_variants()
+        .into_iter()
+        .map(|variant| {
+            let kind = variant["properties"]["kind"]["const"]
+                .as_str()
+                .expect("evidence variant pins a kind const")
+                .to_owned();
+            tagged_fields(&kind, json!({"data":{"type":"object"}}), &[])
+        })
+        .collect()
 }
 
 /// Must match `types::SessionState`. The struct itself carries no
