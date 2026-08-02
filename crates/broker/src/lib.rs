@@ -864,6 +864,9 @@ pub mod testing {
                 Capability::PageRead,
                 Capability::PageWrite,
                 Capability::BrowserMutate,
+                Capability::JobSubmit,
+                Capability::JobRead,
+                Capability::JobCancel,
             ],
             Utc::now() + Duration::minutes(30),
         )
@@ -897,7 +900,7 @@ pub mod testing {
         // or not, so `last_bound_principal` reflects the true caller of the most recent
         // request regardless of caching.
         let bindings = crate::RuntimeBindingCache::new();
-        let app = router(AppState::new(
+        let state = AppState::new(
             persistent_authority as Arc<dyn Authority>,
             move |handle| {
                 record_bound_principal(handle.principal_id());
@@ -910,7 +913,12 @@ pub mod testing {
                 }) as Arc<dyn RuntimeInterface>
             },
             interface,
-        ));
+        );
+        let scheduler = Arc::clone(&state.scheduler);
+        tokio::spawn(async move {
+            let _ = scheduler.run().await;
+        });
+        let app = router(state);
         (app, authority, ADMIN_BEARER.to_owned())
     }
 

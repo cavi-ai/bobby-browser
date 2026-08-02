@@ -6,7 +6,7 @@ use axum::{
         HeaderMap, HeaderValue, Method, StatusCode,
     },
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -479,7 +479,7 @@ async fn issue_principal(
         .into_response())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SubmitJobRequest {
     name: String,
@@ -496,7 +496,7 @@ fn default_max_retries() -> u32 {
     3
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum JobPriorityDto {
     Low,
@@ -591,7 +591,7 @@ fn job_status_response(job: Job) -> JobStatusResponse {
     }
 }
 
-fn job_error(err: JobError, correlation_id: Option<CorrelationId>) -> ProtocolError {
+fn job_error(err: JobError, correlation_id: CorrelationId) -> ProtocolError {
     match err {
         JobError::NotFound(_) => ProtocolError::from(interface_error(
             InterfaceErrorCode::InvalidRequest,
@@ -607,15 +607,15 @@ fn job_error(err: JobError, correlation_id: Option<CorrelationId>) -> ProtocolEr
         )),
         JobError::Execution(message) if message.contains("already finished") => {
             ProtocolError::from(interface_error(
-                InterfaceErrorCode::Conflict,
-                message,
+                InterfaceErrorCode::InvalidRequest,
+                &message,
                 correlation_id,
                 None,
             ))
         }
         other => ProtocolError::from(interface_error(
             InterfaceErrorCode::InvalidRequest,
-            other.to_string(),
+            &other.to_string(),
             correlation_id,
             None,
         )),
@@ -633,9 +633,7 @@ async fn dispatch_submit_job(
     if let Some(timeout_ms) = input.timeout_ms {
         config = config.with_timeout(std::time::Duration::from_millis(timeout_ms));
     }
-    if let Some(correlation_id) = &request.context.correlation_id {
-        config = config.with_correlation_id(correlation_id.to_string());
-    }
+    config = config.with_correlation_id(request.context.correlation_id.as_uuid().to_string());
     let id = state
         .scheduler
         .submit(config)
@@ -697,11 +695,7 @@ async fn submit_job(
                 digest,
                 Utc::now(),
                 request.context.deadline,
-                request
-                    .context
-                    .correlation_id
-                    .clone()
-                    .unwrap_or_else(CorrelationId::new),
+                request.context.correlation_id.clone(),
             )
             .await
             .map_err(ProtocolError::from)?;

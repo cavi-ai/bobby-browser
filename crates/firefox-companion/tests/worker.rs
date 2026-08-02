@@ -197,6 +197,12 @@ impl BidiTransport for FakeBidi {
             }
             return Ok(self.subscribe_response.lock().await.clone());
         }
+        if method == "script.addPreloadScript" {
+            return Ok(json!({"script": format!("preload-{call_number}")}));
+        }
+        if method == "script.removePreloadScript" {
+            return Ok(json!({}));
+        }
         if method == "script.evaluate" && params["expression"] == "document.title" {
             let context = params["target"]["context"].as_str().unwrap();
             let title = self
@@ -836,21 +842,28 @@ async fn open_page_uses_a_transient_binding_title_and_restores_the_exact_origina
     assert_eq!(observer.bindings.lock().await.len(), 1);
     let calls = bidi.calls().await;
     assert_eq!(calls[0].method, "session.subscribe");
-    assert_eq!(calls[1].method, "browsingContext.create");
-    assert_eq!(calls[2].method, "script.evaluate");
-    assert_eq!(calls[2].params["expression"], "document.title");
-    assert_eq!(calls[3].method, "script.evaluate");
-    assert_eq!(calls[3].params["target"]["context"], "context-bound");
+    let create_idx = calls
+        .iter()
+        .position(|call| call.method == "browsingContext.create")
+        .expect("open_page must create a browsing context");
+    assert_eq!(calls[create_idx].method, "browsingContext.create");
+    assert_eq!(calls[create_idx + 1].method, "script.evaluate");
+    assert_eq!(calls[create_idx + 1].params["expression"], "document.title");
+    assert_eq!(calls[create_idx + 2].method, "script.evaluate");
     assert_eq!(
-        calls[3].params["target"]["sandbox"],
+        calls[create_idx + 2].params["target"]["context"],
+        "context-bound"
+    );
+    assert_eq!(
+        calls[create_idx + 2].params["target"]["sandbox"],
         "automation-runtime-companion"
     );
-    let marker = calls[3].params["expression"].as_str().unwrap();
+    let marker = calls[create_idx + 2].params["expression"].as_str().unwrap();
     assert!(!marker.contains("data-automation-runtime-binding"));
     assert!(marker.contains("automation-runtime-binding:"));
     assert!(marker.contains("b5f6319a-6b36-43cb-9464-d337fc9d8201"));
-    assert_eq!(calls[4].method, "script.evaluate");
-    let restore = calls[4].params["expression"].as_str().unwrap();
+    assert_eq!(calls[create_idx + 3].method, "script.evaluate");
+    let restore = calls[create_idx + 3].params["expression"].as_str().unwrap();
     assert!(restore.contains("Original tab title"));
     assert!(!restore.contains("automation-runtime-binding:"));
     assert!(evidence.iter().any(|item| matches!(
@@ -1237,25 +1250,21 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(
-        calls[1],
-        BidiCall {
-            method: "browsingContext.create".into(),
-            params: json!({"type": "tab"}),
-        }
-    );
-    assert_eq!(
-        calls[5],
-        BidiCall {
-            method: "browsingContext.navigate".into(),
-            params: json!({
-                "context": "context-1",
-                "url": "https://example.test/final",
-                "wait": "complete"
-            }),
-        }
-    );
-    assert_eq!(calls[6].params["wait"], "interactive");
+    assert!(calls.iter().any(|call| {
+        call.method == "browsingContext.create" && call.params == json!({"type": "tab"})
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "browsingContext.navigate"
+            && call.params
+                == json!({
+                    "context": "context-1",
+                    "url": "https://example.test/final",
+                    "wait": "complete"
+                })
+    }));
+    assert!(calls.iter().any(|call| {
+        call.method == "browsingContext.navigate" && call.params["wait"] == "interactive"
+    }));
     assert_engine_native(&complete);
     assert_engine_native(&interactive);
 }
@@ -1573,10 +1582,12 @@ async fn semantic_click_resolves_test_id_to_verified_css_before_native_input() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert!(calls[5].params["expression"]
-        .as_str()
-        .unwrap()
-        .contains("[data-testid=\\\"confirm\\\"]"));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.evaluate"
+            && call.params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("[data-testid=\\\"confirm\\\"]"))
+    }));
     assert!(calls.iter().any(|call| {
         call.method == "script.callFunction"
             && call.params["functionDeclaration"]
@@ -2170,10 +2181,12 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert!(calls[5].params["expression"]
-        .as_str()
-        .unwrap()
-        .contains("#confirm"));
+    assert!(calls.iter().any(|call| {
+        call.method == "script.evaluate"
+            && call.params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("#confirm"))
+    }));
     assert!(calls.iter().any(|call| {
         call.method == "script.callFunction"
             && call.params["functionDeclaration"]
@@ -2451,6 +2464,7 @@ async fn missing_page_context_is_not_found_without_transport_calls() {
             .await
             .iter()
             .map(|call| call.method.as_str())
+            .filter(|method| *method != "script.addPreloadScript")
             .collect::<Vec<_>>(),
         vec!["session.subscribe"]
     );
@@ -2492,6 +2506,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
         calls
             .iter()
             .map(|call| call.method.as_str())
+            .filter(|method| *method != "script.addPreloadScript")
             .collect::<Vec<_>>(),
         vec![
             "session.subscribe",
