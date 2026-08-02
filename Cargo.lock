@@ -1957,6 +1957,7 @@ dependencies = [
  "artifact-store",
  "async-trait",
  "base64 0.23.0",
+ "checkpoint-store",
  "chrono",
  "config",
  "futures-util",

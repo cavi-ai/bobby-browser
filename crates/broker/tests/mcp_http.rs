@@ -41,6 +41,15 @@ fn tools_list_request(id: i64) -> Value {
     })
 }
 
+fn tool_call_request(id: i64, name: &str, arguments: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    })
+}
+
 /// Sends one JSON-RPC message to `POST /v1/mcp` and returns the HTTP status plus the
 /// parsed JSON body (empty object for a 202/empty body).
 async fn post_mcp(app: &axum::Router, bearer: &str, body: Value) -> (StatusCode, Value) {
@@ -234,5 +243,97 @@ async fn mcp_server_cache_rebuilds_for_rotated_handle() {
     assert!(
         body.get("error").is_none(),
         "expected a fresh initialize success, got a duplicate-initialize style error: {body}"
+    );
+}
+
+/// CRITICAL regression: `checkpoint_save`'s `evidenceRefs` resolution used to run
+/// through a `mcp_gateway::Server` field only its stdio constructor populated.
+/// `POST /v1/mcp` — the only network MCP transport, what `bobby serve` mounts — builds
+/// every principal's `Server` through `Server::for_interface` (see
+/// `McpServers::get_or_create`), which left that field unset, so `checkpoint_save`
+/// rejected every HTTP call with `-32602`/`evidenceRefsUnresolvable` unconditionally,
+/// before the request ever reached the runtime — regardless of what `evidenceRefs`
+/// named. This is the coverage that gap needed: `crates/broker/tests/mcp_http.rs` had
+/// no `checkpoint_save` coverage over `POST /v1/mcp` at all before this test.
+///
+/// Naming a command id here that does not exist must reach real resolution against the
+/// runtime and come back as a `notFound` interface error, not the old hardcoded
+/// schema-style rejection — proving both that the HTTP path now runs the same
+/// `RuntimeInterface::resolve_command_evidence` the stdio transport does, and that an
+/// unresolvable reference still fails closed rather than silently contributing nothing.
+#[tokio::test]
+async fn checkpoint_save_resolves_evidence_refs_over_the_broker_http_transport() {
+    let (app, _authority, admin_bearer) = app_with_admin(4).await;
+    let bearer = issue_bearer(
+        &app,
+        &admin_bearer,
+        PRINCIPAL_A,
+        &[
+            "session:read",
+            "session:write",
+            "page:write",
+            "browser:mutate",
+            "recovery:write",
+        ],
+    )
+    .await;
+
+    let (status, body) = post_mcp(&app, &bearer, initialize_request(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _body) = post_mcp(&app, &bearer, initialized_notification()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (status, session) = post_mcp(
+        &app,
+        &bearer,
+        tool_call_request(2, "session_create", json!({"profile": "http-checkpoint"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let session_id = session["result"]["structuredContent"]["id"]
+        .as_str()
+        .expect("session_create returns an id")
+        .to_owned();
+
+    let checkpoint = types::WorkflowCheckpoint {
+        schema_version: types::WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: types::CheckpointId::new(),
+        workflow_id: types::WorkflowId::new(),
+        attempt_id: types::AttemptId::new(),
+        session_id: types::SessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
+        page_id: types::PageId::new(),
+        restart_url: "https://example.test/".to_owned(),
+        current_url: "https://example.test/".to_owned(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: types::CommandClass::Replayable,
+        invariants: vec![],
+        replayable_inputs: vec![],
+        evidence: vec![],
+        recovery_history: vec![],
+        recovery_receipts: vec![],
+        created_at: chrono::Utc::now(),
+    };
+    let unowned_command_id = types::CommandId::new();
+    let (status, response) = post_mcp(
+        &app,
+        &bearer,
+        tool_call_request(
+            3,
+            "checkpoint_save",
+            json!({"checkpoint": checkpoint, "evidenceRefs": [unowned_command_id]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_ne!(
+        response["error"]["code"], -32602,
+        "checkpoint_save over POST /v1/mcp must not fail with the old hardcoded \
+         evidenceRefsUnresolvable rejection: {response}"
+    );
+    assert_eq!(
+        response["error"]["data"]["interfaceError"]["code"], "notFound",
+        "an evidenceRefs id with no journal record must resolve (and fail) against the \
+         real runtime, not get rejected before dispatch: {response}"
     );
 }

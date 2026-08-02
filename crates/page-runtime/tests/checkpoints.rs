@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use types::{
-    AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandError,
-    CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PageId,
+    AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandEnvelope,
+    CommandError, CommandId, CommandOutcome, Evidence, InspectCommand, NavigateCommand, PageId,
     RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt, RecoveryReceiptState, SessionId,
     SkillDecision, SkillFailure, SkillOutcome, SkillTactic, TypeTextCommand, WorkerId,
     WorkflowCheckpoint, WorkflowId,
@@ -477,4 +477,74 @@ async fn evidence_for_command_rejects_a_command_with_no_journal_record() {
         .evidence_for_command(CommandId::new())
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn command_session_returns_the_envelope_session_for_a_recorded_command() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let runtime = PageRuntime::new(journal.clone(), no_op_worker_pool());
+
+    let command_id = CommandId::new();
+    let session_id = SessionId::new();
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: command_id.clone(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: session_id.clone(),
+        page_id: None,
+        deadline: Utc::now() + chrono::Duration::seconds(30),
+        command: types::RuntimeCommand::Primitive(types::PrimitiveCommand::Inspect(
+            InspectCommand::default(),
+        )),
+    };
+    // Mirrors `executor.rs`'s `execute_with_vision_gate`: the `Accepted` phase
+    // record carries the envelope; later phases (here, the terminal one) do not.
+    journal
+        .append(workflow_journal::JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: types::CommandPhase::Accepted,
+            envelope: Some(envelope),
+            outcome: None,
+            prepared_result: None,
+        })
+        .await
+        .unwrap();
+    journal
+        .append(workflow_journal::JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: types::CommandPhase::Completed,
+            envelope: None,
+            outcome: Some(CommandOutcome::Completed {
+                command_id: command_id.clone(),
+                evidence: Vec::new(),
+            }),
+            prepared_result: None,
+        })
+        .await
+        .unwrap();
+
+    let resolved = runtime.command_session(&command_id).await.unwrap();
+    assert_eq!(resolved, session_id);
+}
+
+#[tokio::test]
+async fn command_session_rejects_a_command_with_no_journal_record() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let runtime = PageRuntime::new(journal, no_op_worker_pool());
+    assert!(runtime.command_session(&CommandId::new()).await.is_err());
 }

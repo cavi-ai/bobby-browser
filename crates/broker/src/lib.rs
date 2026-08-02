@@ -840,6 +840,8 @@ pub mod testing {
                 Capability::PageRead,
                 Capability::PageWrite,
                 Capability::BrowserMutate,
+                Capability::RecoveryRead,
+                Capability::RecoveryWrite,
             ],
             Utc::now() + Duration::minutes(30),
         )
