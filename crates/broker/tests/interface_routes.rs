@@ -124,6 +124,15 @@ impl RuntimeInterface for CountingRuntime {
         self.inner.checkpoint(ctx, checkpoint, evidence).await
     }
 
+    async fn resolve_command_evidence(
+        &self,
+        ctx: RequestContext,
+        command_ids: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        self.count();
+        self.inner.resolve_command_evidence(ctx, command_ids).await
+    }
+
     async fn recover(
         &self,
         ctx: RequestContext,

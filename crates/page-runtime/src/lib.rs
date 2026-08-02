@@ -135,6 +135,42 @@ impl PageRuntime {
             .ok_or(RecoveryError::CommandOutcomeMissing(command_id))
     }
 
+    /// The session a command was submitted under, per the runtime's own
+    /// journal.
+    ///
+    /// Every command's first journal record (`CommandPhase::Accepted`) always
+    /// stores its `CommandEnvelope` — see `executor.rs`'s `execute_with_vision_gate`,
+    /// which journals it before anything else can fail — so this is available
+    /// for any command that has a journal record at all. Callers use this to
+    /// verify a command referenced only by id (e.g. `checkpoint_save`'s
+    /// `evidenceRefs`) belongs to a session they are authorized to see,
+    /// before its evidence is ever resolved or trusted: the journal itself
+    /// has no notion of principal, so that check has to happen here, keyed
+    /// on the session the command actually ran under, not on which session
+    /// the caller merely claims.
+    pub async fn command_session(
+        &self,
+        command_id: &CommandId,
+    ) -> Result<SessionId, RecoveryError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        let scan = journal
+            .history(command_id.clone())
+            .await
+            .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        scan.records
+            .iter()
+            .find_map(|record| {
+                record
+                    .envelope
+                    .as_ref()
+                    .map(|envelope| envelope.session_id.clone())
+            })
+            .ok_or_else(|| RecoveryError::CommandOutcomeMissing(command_id.clone()))
+    }
+
     pub async fn open_browser(&self, session_id: SessionId) -> Result<PageState, RuntimeError> {
         let workers = self
             .workers

@@ -535,7 +535,21 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         ))
         .await
         .unwrap();
+    // Asserting only the top-level `-32602` here would not distinguish "the
+    // schema's `maxItems` bound rejected this" from "resolution failed for an
+    // unrelated reason" (this fixture's `RuntimeService::default()` has no
+    // journal, so an in-bounds `evidenceRefs` would fail too, just with a
+    // different error shape) — pin the violation payload so deleting
+    // `MAX_EVIDENCE_ITEMS` from the schema arm would actually fail this test.
     assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    assert_eq!(
+        rejected["error"]["data"]["pointer"], "/evidenceRefs",
+        "{rejected}"
+    );
+    assert_eq!(
+        rejected["error"]["data"]["constraint"], "maxItems",
+        "{rejected}"
+    );
     assert_eq!(runtime.checkpoint_dispatch_count(), 0);
 }
 
@@ -687,6 +701,34 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
             truncated: false,
         },
     ];
+    // Mirrors `executor.rs`'s `execute_with_vision_gate`: the `Accepted` phase
+    // record carries the envelope (and therefore the owning session), the
+    // terminal one carries the outcome. `resolve_command_evidence` needs
+    // both — the envelope to verify ownership, the outcome for the evidence
+    // itself.
+    journal
+        .append(JournalRecord {
+            sequence: 0,
+            recorded_at: Utc::now(),
+            command_id: command_id.clone(),
+            phase: types::CommandPhase::Accepted,
+            envelope: Some(CommandEnvelope {
+                schema_version: CommandEnvelope::SCHEMA_VERSION,
+                command_id: command_id.clone(),
+                workflow_id: checkpoint.workflow_id.clone(),
+                attempt_id: checkpoint.attempt_id.clone(),
+                session_id: checkpoint.session_id.clone(),
+                page_id: Some(checkpoint.page_id.clone()),
+                deadline: Utc::now() + Duration::seconds(30),
+                command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
+                    types::InspectCommand::default(),
+                )),
+            }),
+            outcome: None,
+            prepared_result: None,
+        })
+        .await
+        .unwrap();
     journal
         .append(JournalRecord {
             sequence: 0,
@@ -726,6 +768,270 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
         1,
         "evidenceRefs must resolve JavaScript and actionable accessibility evidence from the \
          journal and reach dispatch: {response}"
+    );
+}
+
+/// A worker that actually succeeds, unlike `UnusedFactory` — needed here because
+/// this test submits a real command (`command_execute`) for one principal and
+/// must observe its evidence land in the shared journal.
+struct MinimalWorker {
+    profile: std::path::PathBuf,
+}
+
+#[async_trait]
+impl BrowserWorker for MinimalWorker {
+    fn worker_id(&self) -> types::WorkerId {
+        types::WorkerId::new()
+    }
+    fn profile_dir(&self) -> &std::path::Path {
+        &self.profile
+    }
+    async fn open_page(&self, _: types::PageId) -> Result<(), types::CommandError> {
+        Ok(())
+    }
+    async fn navigate(
+        &self,
+        _: &types::PageId,
+        _: &types::NavigateCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
+    }
+    async fn inspect(
+        &self,
+        _: &types::PageId,
+        _: &types::InspectCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
+    }
+    async fn click(
+        &self,
+        _: &types::PageId,
+        _: &types::ClickCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
+    }
+    async fn type_text(
+        &self,
+        _: &types::PageId,
+        _: &types::TypeTextCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
+    }
+    // Overridden (the trait default is `Err(unsupported)`): this is the
+    // primitive the test submits, and its "evidence" here stands in for
+    // whatever a real worker would have observed — the point under test is
+    // whether a DIFFERENT principal can read it back, not what it contains.
+    // `executor.rs` requires a `ListPages` outcome to carry `Evidence::Pages`
+    // specifically to verify as completed, so the marker lives in that
+    // variant's `url`/`title` fields rather than a freer-form one.
+    async fn list_pages(
+        &self,
+        _: &types::ListPagesCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(vec![Evidence::Pages {
+            pages: vec![types::PageEvidence {
+                page_id: types::PageId::new(),
+                url: "https://victim.example.test/classified-only-b-should-ever-read-this"
+                    .to_owned(),
+                title: "principal-b-secret".to_owned(),
+            }],
+        }])
+    }
+    async fn close(&self) -> Result<(), types::CommandError> {
+        Ok(())
+    }
+}
+
+struct MinimalFactory;
+
+#[async_trait]
+impl WorkerFactory for MinimalFactory {
+    async fn launch(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<dyn BrowserWorker>, types::CommandError> {
+        Ok(Arc::new(MinimalWorker {
+            profile: std::path::PathBuf::from(format!("/profiles/{}", session_id.0)),
+        }))
+    }
+}
+
+fn session_id_from_structured_content(response: &Value) -> SessionId {
+    SessionId(
+        uuid::Uuid::parse_str(
+            response["result"]["structuredContent"]["id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+// CRITICAL: the journal `evidenceRefs` resolves against is one `PageRuntime`
+// shared across every authenticated principal (`broker::bootstrap_listener_with`
+// clones one `RuntimeService` into every principal's `AuthenticatedRuntime`), so
+// a command id is not itself proof of ownership. Without a check, principal A
+// could name a command principal B ran — a UUIDv4 being hard to guess is the
+// only thing standing in the way — and read B's evidence back inside its own
+// checkpoint. This proves the cross-principal path is closed: A's
+// `checkpoint_save` naming B's command must be rejected, and B's evidence must
+// never appear anywhere in the response A receives.
+#[tokio::test]
+async fn checkpoint_save_rejects_evidence_refs_for_a_command_another_principal_owns() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let workers = Arc::new(WorkerPool::new(4, Arc::new(MinimalFactory)));
+    // A REAL `RecoveryCoordinator`, unlike the other checkpoint_save tests in
+    // this file: without one, `checkpoint_with_evidence` fails regardless of
+    // what evidence resolved (`RecoveryError::WorkersUnavailable`), which
+    // would make this test pass even with the ownership check removed —
+    // exactly the false confidence a security regression test must not give.
+    let checkpoint_store = checkpoint_store::CheckpointStore::open(root.path().join("checkpoints"))
+        .await
+        .unwrap();
+    let recovery = page_runtime::RecoveryCoordinator::new(checkpoint_store);
+    let runtime_service = RuntimeService::with_recovery(
+        SessionManager::new(workers.clone()),
+        PageRuntime::new(journal, workers),
+        recovery,
+    );
+
+    let authority = AuthorityStore::with_capacity(2);
+    let (_ownership, recorder) = interface_core::SessionOwnershipRegistry::bounded(4);
+    let capabilities = [
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::RecoveryWrite,
+    ];
+
+    let token_a = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000a1")),
+            capabilities,
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle_a = authority.verify(&token_a.expose_once()).await.unwrap();
+    let server_a = Server::new(Arc::new(AuthenticatedRuntime::with_session_ownership(
+        runtime_service.clone(),
+        handle_a,
+        recorder.clone(),
+    )));
+    initialize(&server_a).await;
+
+    let token_b = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000b2")),
+            capabilities,
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle_b = authority.verify(&token_b.expose_once()).await.unwrap();
+    let server_b = Server::new(Arc::new(AuthenticatedRuntime::with_session_ownership(
+        runtime_service,
+        handle_b,
+        recorder,
+    )));
+    initialize(&server_b).await;
+
+    // B creates its own session and runs a command whose evidence only B
+    // should ever be able to read.
+    let session_b = server_b
+        .handle_message(request(
+            1,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"victim"}}),
+        ))
+        .await
+        .unwrap();
+    let session_b_id = session_id_from_structured_content(&session_b);
+
+    let secret_command_id = CommandId::new();
+    let envelope = CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: secret_command_id.clone(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: session_b_id,
+        page_id: None,
+        deadline: Utc::now() + Duration::seconds(30),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::ListPages(types::ListPagesCommand)),
+    };
+    let submitted = server_b
+        .handle_message(request(
+            2,
+            "tools/call",
+            json!({"name":"command_execute","arguments":{"envelope":envelope}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        submitted["result"]["structuredContent"]["status"], "completed",
+        "{submitted}"
+    );
+
+    // A creates its own, unrelated session, then tries to checkpoint by
+    // naming B's command as evidenceRefs.
+    let session_a = server_a
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"attacker"}}),
+        ))
+        .await
+        .unwrap();
+    let session_a_id = session_id_from_structured_content(&session_a);
+
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id: session_a_id,
+        page_id: types::PageId::new(),
+        restart_url: "https://attacker.example.test/".to_owned(),
+        current_url: "https://attacker.example.test/".to_owned(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Replayable,
+        invariants: vec![],
+        replayable_inputs: vec![],
+        evidence: vec![],
+        recovery_history: vec![],
+        recovery_receipts: vec![],
+        created_at: Utc::now(),
+    };
+    let response = server_a
+        .handle_message(request(
+            4,
+            "tools/call",
+            json!({
+                "name":"checkpoint_save",
+                "arguments":{"checkpoint":checkpoint,"evidenceRefs":[secret_command_id]}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        response.get("result").is_none(),
+        "principal A must not be able to checkpoint using principal B's command: {response}"
+    );
+    assert_ne!(
+        response["error"]["code"], -32602,
+        "must be rejected as an ownership/authorization failure, not a schema violation: {response}"
+    );
+    let body = response.to_string();
+    assert!(
+        !body.contains("principal-b-secret") && !body.contains("classified"),
+        "principal B's evidence must never appear in principal A's response: {response}"
     );
 }
 

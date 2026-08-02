@@ -64,6 +64,13 @@ impl RuntimeInterface for RecordingRuntime {
     ) -> InterfaceResult<WorkflowCheckpoint> {
         panic!("not needed")
     }
+    async fn resolve_command_evidence(
+        &self,
+        _: RequestContext,
+        _: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        panic!("not needed")
+    }
     async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {
         panic!("not needed")
     }
