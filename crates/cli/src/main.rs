@@ -1,4 +1,5 @@
 mod bootstrap_local;
+mod jobs_client;
 
 use anyhow::{Context, Result};
 use artifact_store::ArtifactStore;
@@ -779,6 +780,71 @@ enum CliCommand {
         #[arg(long)]
         skip_health: bool,
     },
+    /// Submit / inspect / cancel broker jobs (`/v1/jobs`)
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum JobsCommand {
+    /// POST /v1/jobs
+    Submit {
+        #[command(flatten)]
+        common: JobsCommonArgs,
+        /// Job handler name (e.g. echo)
+        #[arg(long)]
+        name: String,
+        /// JSON payload string
+        #[arg(long, default_value = "{}")]
+        payload: String,
+        /// Path to a JSON payload file (overrides --payload)
+        #[arg(long)]
+        payload_file: Option<PathBuf>,
+        /// Job priority
+        #[arg(long, value_enum, default_value_t = jobs_client::JobPriorityArg::Normal)]
+        priority: jobs_client::JobPriorityArg,
+        /// Max retries before permanent failure
+        #[arg(long, default_value_t = 3)]
+        max_retries: u32,
+        /// Optional per-job timeout in milliseconds
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        /// Optional idempotency key header
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// GET /v1/jobs/{id}
+    Status {
+        #[command(flatten)]
+        common: JobsCommonArgs,
+        /// Job id
+        job_id: String,
+    },
+    /// DELETE /v1/jobs/{id}
+    Cancel {
+        #[command(flatten)]
+        common: JobsCommonArgs,
+        /// Job id
+        job_id: String,
+    },
+}
+
+#[derive(clap::Args)]
+struct JobsCommonArgs {
+    /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+    #[arg(long)]
+    bootstrap_env: Option<PathBuf>,
+    /// Broker base URL (else http://{config.server.host}:{config.server.port})
+    #[arg(long)]
+    base_url: Option<String>,
+    /// Bearer token override (else AUTOMATION_RUNTIME_TOKEN, else bootstrap.env)
+    #[arg(long)]
+    token: Option<String>,
 }
 
 pub async fn run() -> Result<()> {
@@ -860,12 +926,60 @@ pub async fn run() -> Result<()> {
             bootstrap_env,
             skip_health,
         } => run_doctor(config, bootstrap_env, !skip_health)?,
+        CliCommand::Jobs { command } => run_jobs(command)?,
     }
 
     Ok(())
 }
 
-fn resolve_config_path(cli: Option<PathBuf>) -> PathBuf {
+fn run_jobs(command: JobsCommand) -> Result<()> {
+    match command {
+        JobsCommand::Submit {
+            common,
+            name,
+            payload,
+            payload_file,
+            priority,
+            max_retries,
+            timeout_ms,
+            idempotency_key,
+        } => {
+            let (base_url, bearer) = prepare_jobs_client(&common)?;
+            let payload = jobs_client::resolve_submit_payload(&payload, payload_file.as_deref())?;
+            jobs_client::submit_job(
+                &base_url,
+                bearer,
+                jobs_client::SubmitJobOptions {
+                    name: &name,
+                    payload,
+                    priority,
+                    max_retries,
+                    timeout_ms,
+                    idempotency_key,
+                },
+            )?;
+        }
+        JobsCommand::Status { common, job_id } => {
+            let (base_url, bearer) = prepare_jobs_client(&common)?;
+            jobs_client::job_status(&base_url, bearer, &job_id)?;
+        }
+        JobsCommand::Cancel { common, job_id } => {
+            let (base_url, bearer) = prepare_jobs_client(&common)?;
+            jobs_client::cancel_job(&base_url, bearer, &job_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_jobs_client(common: &JobsCommonArgs) -> Result<(String, String)> {
+    let config = jobs_client::load_config_for_jobs(common.config.clone())?;
+    let bootstrap_path = resolve_bootstrap_path(common.bootstrap_env.clone())?;
+    let bearer = jobs_client::resolve_jobs_auth(common.token.clone(), &bootstrap_path)?;
+    let base_url = jobs_client::resolve_jobs_base_url(common.base_url.clone(), &config);
+    Ok((base_url, bearer))
+}
+
+pub(crate) fn resolve_config_path(cli: Option<PathBuf>) -> PathBuf {
     cli.or_else(|| std::env::var_os("BOBBY_BROWSER_CONFIG").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("./config.toml"))
 }
@@ -1111,7 +1225,29 @@ fn run_doctor(
                     format!("credential file at {}", path.display()),
                 );
                 match bootstrap_local::load_startup_from_env_file(&path) {
-                    Ok(credential) => report_expiry(credential.expires_at()),
+                    Ok(credential) => {
+                        report_expiry(credential.expires_at());
+                        match bootstrap_local::load_bootstrap_capabilities_csv(&path) {
+                            Ok(caps) if !caps.split(',').any(|c| c.trim() == "job:submit") => {
+                                warnings += 1;
+                                report(
+                                    "warn",
+                                    "bootstrap-job-caps",
+                                    "bootstrap lacks job:submit; run `bobby init --force` for job:* capabilities"
+                                        .to_string(),
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                warnings += 1;
+                                report(
+                                    "warn",
+                                    "bootstrap-job-caps",
+                                    format!("could not read capabilities ({error:#})"),
+                                );
+                            }
+                        }
+                    }
                     Err(error) => {
                         failures += 1;
                         report("fail", "bootstrap-expiry", format!("{error:#}"));
@@ -1143,6 +1279,15 @@ fn run_doctor(
                 config
                     .storage
                     .journal_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            ),
+            (
+                "storage-scheduler-journal-dir",
+                config
+                    .storage
+                    .scheduler_journal_path
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from(".")),
@@ -1223,8 +1368,17 @@ fn run_doctor(
 }
 
 fn probe_healthz(url: &str) -> Result<()> {
+    let url = url.to_owned();
+    match std::thread::spawn(move || probe_healthz_blocking(&url)).join() {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("healthz probe thread panicked"),
+    }
+}
+
+fn probe_healthz_blocking(url: &str) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
+        .no_proxy()
         .build()
         .context("failed to build healthz HTTP client")?;
     let response = client
@@ -2079,5 +2233,69 @@ mod tests {
         drop(publication);
         assert!(!path.exists());
         assert!(!pending.exists());
+    }
+
+    #[test]
+    fn jobs_submit_clap_parses_required_name() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "bobby",
+            "jobs",
+            "submit",
+            "--name",
+            "echo",
+            "--payload",
+            r#"{"ok":true}"#,
+            "--priority",
+            "high",
+            "--max-retries",
+            "1",
+            "--timeout-ms",
+            "5000",
+            "--idempotency-key",
+            "k1",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::Jobs {
+                command:
+                    JobsCommand::Submit {
+                        name,
+                        payload,
+                        priority,
+                        max_retries,
+                        timeout_ms,
+                        idempotency_key,
+                        ..
+                    },
+            }) => {
+                assert_eq!(name, "echo");
+                assert_eq!(payload, r#"{"ok":true}"#);
+                assert_eq!(priority, jobs_client::JobPriorityArg::High);
+                assert_eq!(max_retries, 1);
+                assert_eq!(timeout_ms, Some(5000));
+                assert_eq!(idempotency_key.as_deref(), Some("k1"));
+            }
+            _ => panic!("unexpected jobs submit parse"),
+        }
+    }
+
+    #[test]
+    fn jobs_status_and_cancel_clap_parse_job_id() {
+        use clap::Parser;
+        let status = Cli::try_parse_from(["bobby", "jobs", "status", "job-123"]).unwrap();
+        match status.command {
+            Some(CliCommand::Jobs {
+                command: JobsCommand::Status { job_id, .. },
+            }) => assert_eq!(job_id, "job-123"),
+            _ => panic!("unexpected status parse"),
+        }
+        let cancel = Cli::try_parse_from(["bobby", "jobs", "cancel", "job-456"]).unwrap();
+        match cancel.command {
+            Some(CliCommand::Jobs {
+                command: JobsCommand::Cancel { job_id, .. },
+            }) => assert_eq!(job_id, "job-456"),
+            _ => panic!("unexpected cancel parse"),
+        }
     }
 }

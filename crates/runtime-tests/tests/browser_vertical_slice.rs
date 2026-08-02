@@ -177,6 +177,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             journal_path: journal_path.clone(),
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),

@@ -1,4 +1,5 @@
 mod chromium;
+mod fingerprint_host;
 mod form_snapshot;
 mod har;
 mod network_quiet;
@@ -24,6 +25,7 @@ use types::{
 };
 
 pub use chromium::ChromiumWorkerFactory;
+pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_snapshot, form_snapshot_expression,
     form_snapshot_expression_with_limit, validate_control_action,
@@ -166,6 +168,15 @@ fn policy_error(message: impl Into<String>) -> CommandError {
 pub trait BrowserWorker: Send + Sync {
     fn worker_id(&self) -> WorkerId;
     fn profile_dir(&self) -> &Path;
+    /// Toggle fingerprint spoofing. Implementations that register preload
+    /// scripts should apply/remove them immediately (not only on next page).
+    async fn set_fingerprint_enabled(&self, _enabled: bool) -> Result<(), CommandError> {
+        Ok(())
+    }
+    /// Whether fingerprint spoofing is currently enabled.
+    fn fingerprint_enabled(&self) -> bool {
+        false
+    }
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError>;
     async fn navigate(
         &self,
