@@ -112,7 +112,10 @@ impl WorkerFactory for ChromiumWorkerFactory {
 
         let mut builder = ChromiumConfig::builder()
             .user_data_dir(profile_dir.clone())
-            .launch_timeout(Duration::from_secs(20));
+            .launch_timeout(Duration::from_secs(20))
+            // Strip --enable-automation + disable AutomationControlled so
+            // navigator.webdriver is natively false (CreepJS webDriverIsOn).
+            .hide();
         if let Some(executable) = &self.config.executable {
             builder = builder.chrome_executable(executable);
         }

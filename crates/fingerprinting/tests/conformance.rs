@@ -2,7 +2,7 @@
 
 use fingerprinting::{
     build_collector_probe_script, build_probe_script, create_session, FingerprintApplyPlan,
-    FingerprintConfig, ScreenConfig, INIT_SCRIPT_TEMPLATE,
+    FingerprintConfig, ScreenConfig, INIT_SCRIPT_TEMPLATE, WORKER_BOOTSTRAP_TEMPLATE,
 };
 use serde_json::Value;
 
@@ -27,7 +27,7 @@ fn probe_script_is_async_iife() {
 fn collector_probe_script_contains_detection_tells() {
     let script = build_collector_probe_script();
     assert!(script.contains("failCount"));
-    assert!(script.contains("toStringNativeWebdriver"));
+    assert!(script.contains("toStringNativeProto"));
     assert!(script.contains("pdfViewerEnabled"));
     assert!(script.contains("vendorGoogle"));
     assert!(script.contains("canvasStable"));
@@ -37,9 +37,10 @@ fn collector_probe_script_contains_detection_tells() {
 fn init_script_contains_worker_wrappers() {
     assert!(INIT_SCRIPT_TEMPLATE.contains("importScripts"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("SharedWorker"));
-    assert!(INIT_SCRIPT_TEMPLATE.contains("workerBootstrap"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("getWorkerBootstrap"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("wrapWorkerScriptUrl"));
-    assert!(INIT_SCRIPT_TEMPLATE.contains("bobby.fp.worker"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("__BOBBY_WORKER_BOOTSTRAP__"));
+    assert!(WORKER_BOOTSTRAP_TEMPLATE.contains("bobby.fp.worker"));
 }
 
 #[test]
@@ -52,12 +53,17 @@ fn init_script_contains_niche_surface_markers() {
     assert!(INIT_SCRIPT_TEMPLATE.contains("ActiveText"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("getComputedStyle"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("chrome.app"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("BarcodeDetector"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("Segoe UI"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("message-box"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("rewriteFontFamilyList"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("patchMeasureText"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("FontFace.prototype.load"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("TouchEvent"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("--any-pointer"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("CSSStyleDeclaration"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("prefers-color-scheme:dark"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("prefers-color-scheme:light"));
 }
 
 #[test]
@@ -111,15 +117,30 @@ fn apply_plan_matches_session_cross_signals() {
 fn session_json_embeds_in_init_script() {
     let session = create_session(&FingerprintConfig::default().with_session_seed(7));
     let plan = FingerprintApplyPlan::from_session(session.clone()).unwrap();
-    let embedded = plan
+    let marker = "const P=";
+    let start = plan
         .init_script
-        .find("const P = ")
-        .and_then(|idx| {
-            let rest = &plan.init_script[idx + "const P = ".len()..];
-            let end = rest.find(";\n")?;
-            Some(&rest[..end])
-        })
-        .expect("embedded profile JSON");
+        .find(marker)
+        .expect("embedded profile marker")
+        + marker.len();
+    let rest = &plan.init_script[start..];
+    assert_eq!(rest.as_bytes()[0], b'{');
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let embedded = &rest[..end.expect("profile JSON object")];
     let value: Value = serde_json::from_str(embedded).expect("valid JSON profile");
     assert_eq!(value["sessionSeed"], session.session_seed);
     assert_eq!(value["userAgent"], session.user_agent);
@@ -142,4 +163,44 @@ fn toggle_off_skips_plan() {
     assert!(FingerprintApplyPlan::from_config(&config)
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn emitted_script_drops_placeholders_and_embeds_worker_bootstrap() {
+    use fingerprinting::build_init_script;
+    let session = create_session(
+        &FingerprintConfig::default()
+            .with_session_seed(99)
+            .with_platform("Win32"),
+    );
+    let script = build_init_script(&session).unwrap();
+    assert!(!script.contains("__BOBBY_FP_PROFILE__"));
+    assert!(!script.contains("__BOBBY_WORKER_BOOTSTRAP__"));
+    assert!(!script.contains("__BOBBY_FP_WORKER_PROFILE__"));
+    // Worker bootstrap is a JS string literal injected for getWorkerBootstrap().
+    assert!(script.contains("bobby.fp.worker"));
+    assert!(script.contains("getWorkerBootstrap"));
+    assert!(script.len() < 38_000);
+}
+
+#[test]
+fn win_vs_mac_session_platform_coherence() {
+    let win = create_session(
+        &FingerprintConfig::default()
+            .with_session_seed(3)
+            .with_platform("Win32"),
+    );
+    let mac = create_session(
+        &FingerprintConfig::default()
+            .with_session_seed(4)
+            .with_platform("MacIntel"),
+    );
+    assert_eq!(win.client_hints.platform, "Windows");
+    assert_eq!(mac.client_hints.platform, "macOS");
+    assert!(win.max_touch_points == 0);
+    assert!(mac.max_touch_points == 0);
+    let win_plan = FingerprintApplyPlan::from_session(win).unwrap();
+    let mac_plan = FingerprintApplyPlan::from_session(mac).unwrap();
+    assert!(win_plan.init_script.contains("Windows") || win_plan.init_script.contains("Win32"));
+    assert!(mac_plan.init_script.contains("macOS") || mac_plan.init_script.contains("MacIntel"));
 }

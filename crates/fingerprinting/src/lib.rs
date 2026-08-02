@@ -24,6 +24,7 @@ pub use screen::{ScreenConfig, ScreenMasker};
 pub use script::{
     build_collector_probe_script, build_font_probe_script, build_init_script, build_probe_script,
     build_worker_probe_script, INIT_SCRIPT_TEMPLATE, PROFILE_PLACEHOLDER,
+    WORKER_BOOTSTRAP_PLACEHOLDER, WORKER_BOOTSTRAP_TEMPLATE, WORKER_PROFILE_PLACEHOLDER,
 };
 pub use ua_ch::{BrandVersion, ClientHintsProfile};
 pub use webgl::{WebGlConfig, WebGlProfile};

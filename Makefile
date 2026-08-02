@@ -2,7 +2,7 @@ SHELL := /bin/bash
 REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 
-.PHONY: help build reload verify status fmt lint test fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed
+.PHONY: help build reload verify status fmt lint test fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox behavioral-benchmark behavioral-e2e behavioral-dogfood
 
 help:
 	@echo "build   - cargo build --release -p bobby-browser (produces ./target/release/bobby)"
@@ -15,6 +15,10 @@ help:
 	@echo "fingerprint-dogfood - live Chromium collector probe (requires Chrome; --ignored)"
 	@echo "fingerprint-collectors - production site dogfood (BrowserLeaks/CreepJS/FingerprintJS; --ignored)"
 	@echo "fingerprint-collectors-headed - same as collectors but headed Chrome (requires GUI display)"
+	@echo "fingerprint-collectors-firefox - live Firefox collectors (requires BOBBY_FIREFOX_*; --ignored)"
+	@echo "behavioral-benchmark - offline interaction biometric scores (CreepJS-analogue for behavior)"
+	@echo "behavioral-e2e - multi-seed gates + Firefox companion BiDi wiring (FakeBidi; no browser)"
+	@echo "behavioral-dogfood - live Firefox behavioral probe (requires BOBBY_FIREFOX_*; --ignored)"
 	@echo
 	@echo "Set BOBBY_BROWSER_TOKEN to include the MCP handshake check in reload/verify."
 	@echo
@@ -52,3 +56,16 @@ fingerprint-collectors:
 
 fingerprint-collectors-headed:
 	BOBBY_FP_HEADED=1 cargo test -p worker-pool --test fingerprint_conformance chromium_production_collector_dogfood -- --ignored --nocapture
+
+fingerprint-collectors-firefox:
+	@$(REPO_ROOT)scripts/dev/fingerprint-firefox.sh
+
+behavioral-benchmark:
+	cargo test -p behavioral-engine --test benchmark -- --nocapture
+
+behavioral-e2e:
+	cargo test -p behavioral-engine --test e2e -- --nocapture
+	cargo test -p firefox-companion --test behavioral_e2e -- --nocapture
+
+behavioral-dogfood:
+	@$(REPO_ROOT)scripts/dev/behavioral-firefox.sh
