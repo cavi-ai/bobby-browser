@@ -1002,6 +1002,10 @@ type ContentBrowserApi = {
 
 declare const browser: ContentBrowserApi | undefined;
 
+// Fingerprint spoofing is applied via BiDi preload (worker) or a registered
+// document_start content script (extension toggle) — not here — to avoid the
+// isolated-world + async-storage race at document_start.
+
 if (typeof browser !== "undefined") {
   void browser.runtime.sendMessage({ type: "companionFrameReady" }).catch(() => undefined);
   browser.runtime.onMessage.addListener((message) => {
