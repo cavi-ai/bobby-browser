@@ -10,6 +10,7 @@ test("same version seed and difficulty produce the same immutable manifest", () 
   const b = createManifest("course-v1", "seed-42", "foundation");
 
   assert.deepEqual(a, b);
+  assert.equal(a.stations.find((station) => station.id === "semantic-form")?.mutationVersion, "2");
   assert.ok(Object.isFrozen(a));
   assert.ok(Object.isFrozen(a.stations));
   assert.throws(() => {
@@ -26,7 +27,7 @@ test("controller rejects a station whose manifest capability or mutation version
   const manifest = createManifest("course-v1", "seed-42", "foundation", [
     { id: "route", version: "1", mutationVersion: "unexpected", capabilities: ["navigation"] },
     { id: "dom-drift", version: "1", mutationVersion: "1", capabilities: ["dom-observation"] },
-    { id: "semantic-form", version: "1", mutationVersion: "1", capabilities: ["form-fill"] },
+    { id: "semantic-form", version: "1", mutationVersion: "2", capabilities: ["form-fill"] },
     { id: "validation", version: "1", mutationVersion: "1", capabilities: ["form-fill", "validation"] },
   ]);
 
@@ -35,7 +36,7 @@ test("controller rejects a station whose manifest capability or mutation version
   const capabilityMismatch = createManifest("course-v1", "seed-42", "foundation", [
     { id: "route", version: "1", mutationVersion: "1", capabilities: ["redirect"] },
     { id: "dom-drift", version: "1", mutationVersion: "1", capabilities: ["dom-observation"] },
-    { id: "semantic-form", version: "1", mutationVersion: "1", capabilities: ["form-fill"] },
+    { id: "semantic-form", version: "1", mutationVersion: "2", capabilities: ["form-fill"] },
     { id: "validation", version: "1", mutationVersion: "1", capabilities: ["form-fill", "validation"] },
   ]);
   assert.throws(() => new GauntletController<FoundationStates>(capabilityMismatch, FOUNDATION_STATIONS), /manifest/i);
@@ -52,4 +53,3 @@ test("foundation controller fails closed for unsupported difficulty and replays 
     createFoundationController("course-v1", "seed-42", "foundation").manifest,
   );
 });
-
