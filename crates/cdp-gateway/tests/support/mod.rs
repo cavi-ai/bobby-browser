@@ -77,6 +77,13 @@ impl RuntimeInterface for PageCreatingRuntime {
     ) -> InterfaceResult<WorkflowCheckpoint> {
         unreachable!()
     }
+    async fn resolve_command_evidence(
+        &self,
+        _: RequestContext,
+        _: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        unreachable!()
+    }
     async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {
         unreachable!()
     }
@@ -171,6 +178,13 @@ impl RuntimeInterface for StaticRuntime {
     ) -> InterfaceResult<WorkflowCheckpoint> {
         unreachable!()
     }
+    async fn resolve_command_evidence(
+        &self,
+        _: RequestContext,
+        _: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        unreachable!()
+    }
     async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {
         unreachable!()
     }
@@ -218,6 +232,13 @@ impl RuntimeInterface for BlockingRuntime {
         _: WorkflowCheckpoint,
         _: Vec<Evidence>,
     ) -> InterfaceResult<WorkflowCheckpoint> {
+        unreachable!()
+    }
+    async fn resolve_command_evidence(
+        &self,
+        _: RequestContext,
+        _: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
         unreachable!()
     }
     async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {

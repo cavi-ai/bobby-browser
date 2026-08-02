@@ -3,8 +3,8 @@ use chrono::Utc;
 use std::sync::Arc;
 use thiserror::Error;
 use types::{
-    AttemptId, CheckpointInvariant, CommandClass, CommandError, Evidence, InspectCommand,
-    NavigateCommand, RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt,
+    AttemptId, CheckpointInvariant, CommandClass, CommandError, CommandId, Evidence,
+    InspectCommand, NavigateCommand, RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt,
     RecoveryReceiptState, RecoveryRecord, RestartLineage, SessionId, SkillIssuedDecision,
     WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
@@ -79,6 +79,15 @@ pub enum RecoveryError {
     Browser(String),
     #[error("checkpoint session does not match the authorized recovery session")]
     SessionMismatch,
+    /// The journal has no record of this command, or the command never
+    /// reached a terminal outcome (`Completed` / `NeedsReconciliation`).
+    /// Distinct from `WorkersUnavailable`: this is not a configuration
+    /// problem, it means the caller named work the runtime never finished —
+    /// exactly the case `evidence_for_command` must fail closed on rather
+    /// than return an empty (and easily mistaken for "no evidence exists")
+    /// vector.
+    #[error("command {0:?} has no recorded terminal outcome in the journal")]
+    CommandOutcomeMissing(CommandId),
 }
 
 #[derive(Clone)]
