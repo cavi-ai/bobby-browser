@@ -1,14 +1,16 @@
 use config::BrowserConfig;
+use std::path::PathBuf;
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| chrome_executable())
+        .unwrap_or_else(|_| {
+            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
 }
 
 use network_engine::state::{HttpCookie, ResponseStateDelta};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use types::{
     AccessibilityNode, AccessibilitySnapshotCommand, CaptureScreenshotCommand,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
@@ -1092,6 +1094,7 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
             .path()
             .join("artifacts")
             .join(session_id.0.to_string())
+            .join(artifact_id)
             .join(format!("{artifact_id}.png"))
             .is_file());
     }
