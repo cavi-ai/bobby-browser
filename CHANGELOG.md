@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Add MCP `toolset_select`: narrows `tools/list` to `explore`, `act`, `intent`, `verify`, or `full`. Default stays `full`, byte-for-byte the previous surface.
+- Narrow phases cut the connect payload from ~130 KB to 42–74 KB; selecting a phase emits `notifications/tools/list_changed`.
+- A phase changes what is advertised, never what is permitted: a hidden tool stays callable and capability gates remain the only authority.
+- Add MCP `context_ask` (`page:read`): asks the retained page context where a described control is, returning a bound target and confidence, or nothing.
 - Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.
 - The graph invalidates on any command not on an explicit read-only allowlist, including `navigate` and `emulate`, which are `CommandClass::Replayable` yet change the page.
 - A failed non-read-only command invalidates too, since a command that failed is not a command that did nothing.

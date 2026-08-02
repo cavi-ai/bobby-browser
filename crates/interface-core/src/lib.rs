@@ -48,6 +48,31 @@ pub trait RuntimeInterface: Send + Sync {
         ctx: RequestContext,
         req: OpenPageRequest,
     ) -> InterfaceResult<PageState>;
+    /// Where the retained page context says a described control is.
+    ///
+    /// `Ok(None)` is a real answer: the context does not know, and the caller
+    /// should snapshot. It is deliberately not an error — an agent that cannot
+    /// distinguish "no answer" from "call failed" will retry the wrong thing.
+    async fn context_ask(
+        &self,
+        _ctx: RequestContext,
+        _session: SessionId,
+        _page: types::PageId,
+        _description: String,
+    ) -> InterfaceResult<Option<types::ContextAnswer>> {
+        Err(InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: "context questions are not supported".into(),
+            correlation_id: _ctx.correlation_id,
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
+
     async fn form_snapshot(
         &self,
         _ctx: RequestContext,

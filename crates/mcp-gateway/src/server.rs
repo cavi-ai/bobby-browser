@@ -57,6 +57,14 @@ pub struct Server {
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
     shutting_down: AtomicBool,
+    /// The phase this connection's `tools/list` is scoped to. Per connection,
+    /// not per principal: two agents holding the same bearer can be in
+    /// different phases, and the phase is a view over the surface rather than
+    /// anything the authority knows about.
+    /// `std::sync::Mutex`, not the async one the rest of this struct uses:
+    /// `list_tools` is a sync fn on the hot path and the critical section is a
+    /// single enum copy, so an await point here would buy nothing.
+    toolset: std::sync::Mutex<crate::toolset::Toolset>,
 }
 
 impl Server {
@@ -98,6 +106,7 @@ impl Server {
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             shutting_down: AtomicBool::new(false),
+            toolset: std::sync::Mutex::new(crate::toolset::Toolset::default()),
         }
     }
 
@@ -429,6 +438,24 @@ impl Server {
         result
     }
 
+    /// The phase this connection's `tools/list` is currently scoped to.
+    fn current_toolset(&self) -> crate::toolset::Toolset {
+        *self
+            .toolset
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_toolset(&self, toolset: crate::toolset::Toolset) -> bool {
+        let mut current = self
+            .toolset
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let changed = *current != toolset;
+        *current = toolset;
+        changed
+    }
+
     fn list_tools(&self, id: Value, params: Value) -> Value {
         let context = self.request_context();
         if let Err(interface_error) = self.authorization.validate(&context) {
@@ -445,6 +472,7 @@ impl Server {
         for name in [
             "checkpoint_save",
             "click",
+            "context_ask",
             "cookie_delete",
             "cookie_get",
             "cookie_set",
@@ -480,12 +508,16 @@ impl Server {
             "session_close",
             "session_create",
             "session_list",
+            "toolset_select",
             "type_text",
             "upload_files",
             "wait_for",
             "workflow_recover",
         ] {
             let required = required_capabilities(name).expect("registered tool");
+            if !self.current_toolset().advertises(name) {
+                continue;
+            }
             if required
                 .iter()
                 .all(|capability| capabilities.contains(*capability))
@@ -499,6 +531,15 @@ impl Server {
                     "annotations": tool_annotations(name)
                 }));
             }
+        }
+        // `toolset_select` needs no capability, so on its own it would be the
+        // one tool a principal holding nothing still sees. That would break a
+        // property the conformance suite pins: a principal with no
+        // capabilities is shown no surface at all. It is also useless to such
+        // a principal — there is nothing to narrow — so drop it rather than
+        // leak the shape of the server to an unauthorized caller.
+        if tools.len() == 1 && tools[0]["name"] == "toolset_select" {
+            tools.clear();
         }
         success(id, json!({"tools":tools}))
     }
@@ -650,6 +691,32 @@ impl Server {
         };
         if call.name.len() > 64 || !self.tool_available(&call.name) {
             return error(id, METHOD_NOT_FOUND, "Method not found", None);
+        }
+        // `toolset_select` is the one tool with no `InterfaceOperation`,
+        // because it authorizes nothing: it changes which tools this
+        // connection is shown. Handled before the operation lookup rather than
+        // by loosening that lookup — a `required_operation` that tolerates
+        // `None` would silently un-gate any tool someone forgets to map.
+        if call.name == "toolset_select" {
+            if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
+                return invalid_params(id, Some(violation));
+            }
+            let input: ToolsetSelectArgs = match bounded_parse(call.arguments) {
+                Ok(input) => input,
+                Err(()) => return invalid_params_reason(id, "malformedArguments"),
+            };
+            let Some(toolset) = crate::toolset::Toolset::parse(&input.toolset) else {
+                return invalid_params_reason(id, "malformedArguments");
+            };
+            // Only notify on a real change: a client re-selecting the phase it
+            // is already in should not be told to re-read an unchanged list.
+            if self.set_toolset(toolset) {
+                self.notify_tools_list_changed();
+            }
+            return match to_json(json!({"toolset": toolset.as_str()})) {
+                Ok(value) => self.tool_success(id, value).await,
+                Err(interface_error) => interface_error_response(id, interface_error),
+            };
         }
         let mut context = self.handle.context(Utc::now() + Duration::minutes(1), None);
         let operation = required_operation(&call.name).expect("availability checked above");
@@ -1162,6 +1229,20 @@ impl Server {
                     ),
                 );
                 self.submit_envelope(context, envelope).await
+            }
+            "context_ask" => {
+                let input: ContextAskArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                self.runtime
+                    .context_ask(context, input.session_id, input.page_id, input.description)
+                    .await
+                    // `None` is an answer, not a failure: the context does not
+                    // know, and the repair is to snapshot. Returning an error
+                    // would make "ask again after a snapshot" and "this call is
+                    // broken" the same signal.
+                    .and_then(|answer| to_json(json!({"answer": answer})))
             }
             "form_snapshot" => {
                 let input: FormSnapshotArgs = match bounded_parse(call.arguments) {
@@ -1906,6 +1987,20 @@ struct CheckpointSaveArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextAskArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    description: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ToolsetSelectArgs {
+    toolset: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkflowRecoverArgs {
     workflow_id: types::WorkflowId,
 }
@@ -2454,6 +2549,12 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
             types::Capability::IntentExecute,
         ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
+        "context_ask" => Some(&[types::Capability::PageRead]),
+        // Choosing which tools you can see grants nothing, so it requires
+        // nothing beyond an authenticated connection. Gating it on a
+        // capability would let a principal narrow into a phase and then lack
+        // the capability to leave it.
+        "toolset_select" => Some(&[]),
         "form_snapshot" => Some(&[types::Capability::PageRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),
         "session_close" | "session_create" => Some(&[types::Capability::SessionWrite]),
@@ -2497,6 +2598,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "intent_submit_and_verify"
         | "intent_wait_for_state" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
+        "context_ask" => Some(types::InterfaceOperation::ReadPage),
         "form_snapshot" => Some(types::InterfaceOperation::ReadPage),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
@@ -2510,6 +2612,8 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
 
 fn tool_description(name: &str) -> &'static str {
     match name {
+        "context_ask" => "Ask the retained page context where a described control is, instead of pulling a whole accessibility tree into your context. Requires page:read. Returns a bound target and a confidence score, or nothing. On no answer, take an a11y_snapshot -- the context is invalidated by every command that may have changed the page.",
+        "toolset_select" => "Narrow tools/list to one phase: explore, act, intent, verify, or full. Requires no capability. Emits notifications/tools/list_changed, so re-read tools/list after calling it. Hidden tools stay callable; this changes what is advertised, not what is permitted.",
         "runtime_info" => "Runtime version, granted capabilities, active session count, uptime, and credential expiry. Requires session:read.",
         "session_list" => "List browser sessions visible to this principal, each with its profile and open-page count. Requires session:read.",
         "page_list" => "List open pages in an owned session, each with its id, URL, and title. Requires browser:mutate.",

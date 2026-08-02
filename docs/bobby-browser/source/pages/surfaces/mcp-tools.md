@@ -54,6 +54,8 @@ Tools are advertised only when the principal holds the required capability.
 | `intent_extract` | `browser:mutate` + `intent:execute` | Read named fields without mutating (Replayable) |
 | `events_read` | `session:read` | Read retained events after a cursor |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
+| `context_ask` | `page:read` | Ask the retained page context where a described control is |
+| `toolset_select` | none | Narrow `tools/list` to one phase |
 | `recovery_status` | `recovery:read` | Read a workflow checkpoint and recovery receipts |
 | `cookie_get` | `browser:mutate` | Read cookies (all origins or filtered) |
 | `pdf` | `browser:mutate` | Print the page to a PDF artifact |
@@ -141,3 +143,42 @@ compare hand-bounded `kind` variant sets to schemars output from the
 - [First browser session](../introduction/first-session.md)
 - [Intent commands](../guides/intents.md)
 - [Events and recovery](../guides/events-recovery.md)
+
+## Toolset phases
+
+`tools/list` for a principal holding every capability is ~130,000 bytes. An
+agent that only needs part of the surface can narrow it with `toolset_select`:
+
+| Phase | Contains | Payload |
+|---|---|---|
+| `full` | everything the principal's capabilities allow (default) | ~130 KB |
+| `explore` | read the page, navigate, wait | ~42 KB |
+| `act` | raw primitives and `command_execute` | ~54 KB |
+| `intent` | the `intent_*` family and `extract_structured` | ~74 KB |
+| `verify` | evidence, checkpoints, recovery | ~49 KB |
+
+Session and page lifecycle, `runtime_info`, and `toolset_select` itself appear
+in every phase.
+
+Selecting a phase emits `notifications/tools/list_changed`; re-read
+`tools/list` after calling it. Selecting the phase already in effect emits
+nothing.
+
+A phase changes what is **advertised**, never what is **permitted**. A tool
+hidden by the current phase is still callable, and capability gates remain the
+only authority over what a principal may do.
+
+## Context questions
+
+`context_ask` answers "where is the control described as X" from accessibility
+snapshots the runtime already recorded, instead of returning a whole tree.
+
+It returns a bound target and a confidence score, or nothing. Nothing is a real
+answer, not an error: the retained context is invalidated by every command that
+may have changed the page — including `navigate` and `emulate`, which are
+replayable yet replace or reflow it — and by any non-read-only command that
+failed. The repair is to take an `a11y_snapshot`, which re-populates it.
+
+Ambiguous descriptions (two controls with the same accessible name), partial
+matches, and anything below the confidence floor answer nothing rather than
+guessing.

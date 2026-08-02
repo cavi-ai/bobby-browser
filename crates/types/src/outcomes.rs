@@ -26,6 +26,19 @@ pub struct AccessibilityTarget {
     pub ordinal: Option<usize>,
 }
 
+/// Where the retained page context says a described control is.
+///
+/// Lives in `types` rather than beside the graph because it crosses the wire:
+/// the crate-boundary guard requires every advertised shape to be a `types::`
+/// one so the schema parity guard covers it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextAnswer {
+    pub target: AccessibilityTarget,
+    pub confidence: f32,
+}
+
 /// One node of a compact accessibility tree as returned by the
 /// `accessibilitySnapshot` primitive on any engine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

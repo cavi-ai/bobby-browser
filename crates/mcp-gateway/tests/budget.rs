@@ -272,6 +272,11 @@ const READ_ONLY: &[&str] = &[
     "events_read",
     "recovery_status",
     "cookie_get",
+    // Reads the retained page context; touches no page.
+    "context_ask",
+    // Changes what `tools/list` advertises to this connection. Nothing about
+    // the runtime, the session, or the page moves.
+    "toolset_select",
 ];
 
 const DESTRUCTIVE: &[&str] = &["session_close", "page_close", "cookie_delete"];
