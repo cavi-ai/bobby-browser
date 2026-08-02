@@ -4,7 +4,8 @@ use chrono::Utc;
 use thiserror::Error;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
-    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand, RuntimeCommand,
+    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand, RuntimeCommand, TextMatch,
+    WaitCondition, WaitForCommand,
 };
 use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
@@ -515,12 +516,22 @@ impl PageRuntime {
             }
             PrimitiveCommand::Click(command) => {
                 if let Some(expected_url) = &command.expected_url {
+                    let page_id = page_id.expect("validated page id");
+                    let _ = lease
+                        .worker()
+                        .wait_for(
+                            page_id,
+                            &WaitForCommand {
+                                condition: WaitCondition::Url {
+                                    matcher: TextMatch::Exact(expected_url.clone()),
+                                },
+                                timeout_ms: 5_000,
+                            },
+                        )
+                        .await;
                     let verification = lease
                         .worker()
-                        .inspect(
-                            page_id.expect("validated page id"),
-                            &InspectCommand::default(),
-                        )
+                        .inspect(page_id, &InspectCommand::default())
                         .await?;
                     let matches = verification.iter().any(|item| {
                         matches!(item, Evidence::Inspection { url, .. } if url == expected_url)
