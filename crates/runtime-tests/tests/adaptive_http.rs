@@ -94,12 +94,27 @@ async fn submit(
     workflow_id: &WorkflowId,
     command: PrimitiveCommand,
 ) -> Vec<Evidence> {
-    let command_debug = format!("{command:?}");
-    match runtime
-        .submit(envelope(session_id, page_id, workflow_id, command))
+    submit_with_id(runtime, session_id, page_id, workflow_id, command)
         .await
-    {
-        CommandOutcome::Completed { evidence, .. } => evidence,
+        .1
+}
+
+/// Same as [`submit`], but also returns the command id the runtime journaled
+/// the outcome under — needed wherever a caller must later reference this
+/// command's evidence by id (`RuntimeService::checkpoint`'s `evidence_refs`)
+/// rather than supplying the evidence directly.
+async fn submit_with_id(
+    runtime: &RuntimeService,
+    session_id: &types::SessionId,
+    page_id: &PageId,
+    workflow_id: &WorkflowId,
+    command: PrimitiveCommand,
+) -> (CommandId, Vec<Evidence>) {
+    let command_debug = format!("{command:?}");
+    let envelope = envelope(session_id, page_id, workflow_id, command);
+    let command_id = envelope.command_id.clone();
+    match runtime.submit(envelope).await {
+        CommandOutcome::Completed { evidence, .. } => (command_id, evidence),
         outcome => panic!("command {command_debug} did not complete: {outcome:?}"),
     }
 }
@@ -314,7 +329,7 @@ async fn adaptive_http() {
         }),
     )
     .await;
-    let cookie = submit(
+    let (cookie_command_id, cookie) = submit_with_id(
         &runtime,
         &session.id,
         &page.id,
@@ -352,7 +367,10 @@ async fn adaptive_http() {
         recovery_receipts: Vec::new(),
         created_at: Utc::now(),
     };
-    runtime.checkpoint(checkpoint, cookie).await.unwrap();
+    runtime
+        .checkpoint(checkpoint, vec![cookie_command_id])
+        .await
+        .unwrap();
     let pre_recovery_worker = workers.lease(session.id.clone()).await.unwrap().worker_id();
     assert!(matches!(
         runtime.recover(&workflow).await.unwrap(),
