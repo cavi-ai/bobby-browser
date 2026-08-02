@@ -20,9 +20,10 @@ function assertSafePath(relativePath) {
   return portable;
 }
 
-async function collectFiles(root) {
+async function collectFiles(root, archiveRoot) {
   const resolvedRoot = await realpath(root);
   if (!(await lstat(resolvedRoot)).isDirectory()) throw new Error("docs root must be a directory");
+  const safeArchiveRoot = assertSafePath(archiveRoot);
   const files = [];
   async function visit(directory, relativeDirectory = "") {
     const entries = await readdir(directory, { withFileTypes: true });
@@ -33,7 +34,7 @@ async function collectFiles(root) {
       const info = await lstat(absolute);
       if (info.isSymbolicLink()) throw new Error(`documentation archive rejects symlink: ${relativePath}`);
       if (info.isDirectory()) await visit(absolute, relativePath);
-      else if (info.isFile()) files.push({ name: `docs/${relativePath}`, contents: await readFile(absolute) });
+      else if (info.isFile()) files.push({ name: `${safeArchiveRoot}/${relativePath}`, contents: await readFile(absolute) });
       else throw new Error(`documentation archive rejects non-file: ${relativePath}`);
     }
   }
@@ -125,7 +126,7 @@ export async function createProductDocsReleaseArtifact(input) {
     repository: input.repository,
     commit: release.commit,
   };
-  const files = await collectFiles(input.docsRoot);
+  const files = await collectFiles(input.docsRoot, `docs/bobby-browser/v${release.version}`);
   const releaseBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
   const entries = [{ name: "cavi-release.json", contents: releaseBytes }, ...files]
     .sort((left, right) => left.name.localeCompare(right.name));
