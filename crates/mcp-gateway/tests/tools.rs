@@ -281,6 +281,12 @@ async fn revocation_after_initialize_denies_every_enumeration_and_dispatch_bound
         ),
         (33, "resources/list", json!({})),
         (34, "resources/read", json!({"uri":"artifact://deadbeef"})),
+        (35, "prompts/list", json!({})),
+        (
+            36,
+            "prompts/get",
+            json!({"name":"fill_and_submit_form","arguments":{"sessionId":"s-1","pageId":"p-1"}}),
+        ),
     ] {
         let response = server
             .handle_message(request(id, method, params))
@@ -2426,4 +2432,193 @@ async fn an_unknown_bobby_uri_is_rejected() {
         read["error"].is_object(),
         "unknown bobby:// uri was accepted"
     );
+}
+
+#[tokio::test]
+async fn prompts_are_advertised_in_initialize() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(
+            9,
+            "initialize",
+            json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"test","version":"1"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        response["result"]["capabilities"]["prompts"].is_object(),
+        "prompts capability is not advertised"
+    );
+}
+
+#[tokio::test]
+async fn the_form_prompt_binds_its_arguments() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let listed = server
+        .handle_message(request(2, "prompts/list", json!({})))
+        .await
+        .unwrap();
+    let names: Vec<String> = listed["result"]["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|prompt| prompt["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(names.contains(&"fill_and_submit_form".to_owned()));
+
+    let got = server
+        .handle_message(request(
+            3,
+            "prompts/get",
+            json!({
+                "name":"fill_and_submit_form",
+                "arguments":{"sessionId":"s-1","pageId":"p-1"}
+            }),
+        ))
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&got["result"]["messages"]).unwrap();
+    assert!(
+        text.contains("s-1") && text.contains("p-1"),
+        "arguments not bound"
+    );
+    assert!(
+        text.contains("a11y_snapshot"),
+        "loop does not start at a11y_snapshot"
+    );
+    assert!(
+        text.contains("intent_submit_and_verify"),
+        "loop never submits"
+    );
+    assert!(text.contains("checkpoint_save"), "loop never checkpoints");
+    assert!(
+        text.contains("needsReconciliation") && text.contains("NOT retry"),
+        "boundary submit doesn't warn against retrying on needsReconciliation"
+    );
+    assert!(
+        text.contains("evidenceRefs"),
+        "checkpoint step doesn't name evidenceRefs"
+    );
+}
+
+#[tokio::test]
+async fn the_extract_prompt_binds_its_arguments_and_skips_the_checkpoint() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let listed = server
+        .handle_message(request(2, "prompts/list", json!({})))
+        .await
+        .unwrap();
+    let names: Vec<String> = listed["result"]["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|prompt| prompt["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(names.contains(&"extract_from_page".to_owned()));
+
+    let got = server
+        .handle_message(request(
+            3,
+            "prompts/get",
+            json!({
+                "name":"extract_from_page",
+                "arguments":{"sessionId":"s-2","pageId":"p-2"}
+            }),
+        ))
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&got["result"]["messages"]).unwrap();
+    assert!(
+        text.contains("s-2") && text.contains("p-2"),
+        "arguments not bound"
+    );
+    assert!(
+        text.contains("a11y_snapshot"),
+        "loop does not start at a11y_snapshot"
+    );
+    assert!(text.contains("intent_extract"), "loop never extracts");
+    // Extraction never mutates the page (Replayable), so there is nothing
+    // for a checkpoint to protect -- the loop must not invent one.
+    assert!(
+        !text.contains("checkpoint_save"),
+        "read-only loop should not checkpoint"
+    );
+    assert!(
+        !text.contains("intent_submit_and_verify"),
+        "read-only loop should not submit"
+    );
+}
+
+#[tokio::test]
+async fn the_recover_prompt_binds_its_workflow_id() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let listed = server
+        .handle_message(request(2, "prompts/list", json!({})))
+        .await
+        .unwrap();
+    let names: Vec<String> = listed["result"]["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|prompt| prompt["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(names.contains(&"recover_workflow".to_owned()));
+
+    let got = server
+        .handle_message(request(
+            3,
+            "prompts/get",
+            json!({
+                "name":"recover_workflow",
+                "arguments":{"sessionId":"s-3","pageId":"p-3","workflowId":"w-3"}
+            }),
+        ))
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&got["result"]["messages"]).unwrap();
+    assert!(
+        text.contains("s-3") && text.contains("p-3") && text.contains("w-3"),
+        "arguments not bound"
+    );
+    assert!(text.contains("recovery_status"), "loop never reads status");
+    assert!(text.contains("workflow_recover"), "loop never recovers");
+    assert!(
+        text.contains("needsReconciliation"),
+        "loop doesn't name the reconciliation decision"
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_missing_a_required_argument_is_rejected() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let got = server
+        .handle_message(request(
+            2,
+            "prompts/get",
+            json!({"name":"fill_and_submit_form","arguments":{"sessionId":"s-1"}}),
+        ))
+        .await
+        .unwrap();
+    assert!(got["error"].is_object(), "missing pageId was accepted");
+}
+
+#[tokio::test]
+async fn an_unknown_prompt_name_is_rejected() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let got = server
+        .handle_message(request(
+            2,
+            "prompts/get",
+            json!({
+                "name":"does_not_exist",
+                "arguments":{"sessionId":"s-1","pageId":"p-1"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(got["error"].is_object(), "unknown prompt name was accepted");
 }

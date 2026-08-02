@@ -162,7 +162,8 @@ impl Server {
                         "protocolVersion": MCP_PROTOCOL_VERSION,
                         "capabilities": {
                             "tools": {"listChanged": false},
-                            "resources": {"subscribe": false, "listChanged": false}
+                            "resources": {"subscribe": false, "listChanged": false},
+                            "prompts": {"listChanged": false}
                         },
                         "serverInfo": {
                             "name": "automation-runtime",
@@ -254,6 +255,8 @@ impl Server {
             "tools/call" => self.call_tool(id, params).await,
             "resources/list" => self.list_resources(id, params).await,
             "resources/read" => self.read_resource(id, params).await,
+            "prompts/list" => self.list_prompts(id, params),
+            "prompts/get" => self.get_prompt(id, params),
             "resources/templates/list" if valid_initial_list_params(&params) => {
                 match self.authorize_response(id.clone(), types::InterfaceOperation::ReadArtifact) {
                     Ok(()) => success(id, json!({"resourceTemplates": []})),
@@ -429,6 +432,35 @@ impl Server {
             }
         }
         success(id, json!({"tools":tools}))
+    }
+
+    fn list_prompts(&self, id: Value, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&context) {
+            return interface_error_response(id, interface_error);
+        }
+        if !valid_initial_list_params(&params) {
+            return error(id, INVALID_PARAMS, "Invalid params", None);
+        }
+        success(id, crate::prompts::list_prompts())
+    }
+
+    fn get_prompt(&self, id: Value, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&context) {
+            return interface_error_response(id, interface_error);
+        }
+        let input: PromptGetArgs = match bounded_parse(params) {
+            Ok(input) => input,
+            Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+        };
+        match crate::prompts::get_prompt(&input.name, &input.arguments) {
+            Some(result) => success(id, result),
+            // An unknown name and a known name missing a required argument
+            // both collapse here rather than falling through to a prompt
+            // with placeholder text an agent would then execute verbatim.
+            None => error(id, INVALID_PARAMS, "Invalid params", None),
+        }
     }
 
     async fn list_resources(&self, id: Value, params: Value) -> Value {
@@ -2099,6 +2131,16 @@ struct EventsReadArgs {
 #[serde(deny_unknown_fields)]
 struct ResourceReadArgs {
     uri: String,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptGetArgs {
+    name: String,
+    #[serde(default = "empty_arguments")]
+    arguments: Value,
     #[serde(default, rename = "_meta")]
     _meta: Option<Value>,
 }
