@@ -420,6 +420,7 @@ impl std::error::Error for ArtifactCatalogFull {}
 const CAPABILITIES_URI: &str = "bobby://capabilities";
 const FAILURE_TAXONOMY_URI: &str = "bobby://failure-taxonomy";
 const INTENTS_URI: &str = "bobby://intents";
+const PRIMITIVES_URI: &str = "bobby://primitives";
 
 /// Static reference resources: pullable on demand instead of billed to every
 /// `tools/list`. Every claim here must trace back to source -- see the
@@ -441,14 +442,29 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   `page_open` also requires `browser:mutate`, checked only at call time, when
   the same call navigates the new page to a URL.
 - `browser:mutate` -- the base capability for acting on or reading a page.
-  Gates on its own: `command_execute`, `control_action`, `navigate`, `click`,
-  `type_text`, `inspect`, `screenshot`, `wait_for`, `page_list`, `page_close`,
-  `page_activate`, `a11y_snapshot`, `pdf`, `dialog`, `emulate`, `network_log`,
-  `cookie_get`, `cookie_set`, `cookie_delete`. Required alongside one more
-  capability for `extract_structured` (+ `vision:assist`), `download_url`
-  (+ `file:download`), `upload_files` (+ `file:upload`), `evaluate_javascript`
-  (+ `javascript:evaluate`), and all eight `intent_*` tools
-  (+ `intent:execute`).
+  Gates on its own: `navigate`, `click`, `type_text`, `inspect`, `screenshot`,
+  `wait_for`, `page_list`, `page_close`, `page_activate`, `a11y_snapshot`,
+  `pdf`, `dialog`, `emulate`, `network_log`, `cookie_get`, `cookie_set`,
+  `cookie_delete`, and `control_action` for every action except `setFiles`.
+  Required alongside one more capability for `extract_structured`
+  (+ `vision:assist`), `download_url` (+ `file:download`), `upload_files`
+  (+ `file:upload`), `control_action` with a `setFiles` action
+  (+ `file:upload`), `evaluate_javascript` (+ `javascript:evaluate`), and all
+  eight `intent_*` tools (+ `intent:execute`).
+- `command_execute` -- advertised in `tools/list` on `browser:mutate` alone,
+  but it is not a way around the gates above. Whatever extra capability the
+  *wrapped* command needs is enforced at call time, before the command is
+  submitted (`command_extra_capabilities`,
+  `crates/sdk-core/src/interface.rs`), and the check is exhaustive by command
+  variant:
+  - `uploadFiles`, and `controlAction` with a `setFiles` action:
+    `file:upload`.
+  - `downloadUrl` and `clickAndWaitForDownload`: `file:download`.
+  - `evaluateJavaScript`: `javascript:evaluate`.
+  - `extractStructured`: `vision:assist`.
+  - every intent: `intent:execute`; a `fill` whose value is `files`, or a
+    `completeForm` with any `files` field, additionally needs `file:upload`.
+  - every other primitive: nothing beyond `browser:mutate`.
 - `file:upload` -- gates `upload_files` (with `browser:mutate`).
 - `file:download` -- gates `download_url` (with `browser:mutate`).
 - `javascript:evaluate` -- gates `evaluate_javascript` (with `browser:mutate`).
@@ -478,7 +494,19 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
 
 const FAILURE_TAXONOMY_BODY: &str = r#"# Failure taxonomy
 
-Every runtime command failure carries one `ErrorCode` (`crates/types/src/outcomes.rs`).
+Every runtime *command* failure carries one `ErrorCode`
+(`crates/types/src/outcomes.rs`); those are the "Error codes" section below.
+They are not the only way a call fails, so do not read that list as the whole
+vocabulary:
+
+- A request the MCP layer rejects before any command exists carries a
+  protocol-layer reason string instead of an `ErrorCode` -- see "Protocol-layer
+  rejections".
+- `InterfaceErrorCode` (`crates/types/src/interface.rs`) is a separate,
+  RPC-layer enum whose names overlap this one. Where the same name means two
+  different things, the entry below says so -- see `notFound` and
+  `resourceExhausted`.
+
 Repair actions below are the general pattern for each code; where a specific
 tool's own description gives a more precise repair, that tool description
 wins for that tool.
@@ -542,7 +570,15 @@ tools most likely to produce it.
   needs a browser lease (it is shutting down, or a launch/cleanup task
   itself failed), or an engine-side per-page tracking cap was hit. Repair:
   free capacity -- close an idle session, or an idle page if the engine
-  enforces a page cap -- before retrying.
+  enforces a page cap -- before retrying. As with `notFound`, an
+  `InterfaceErrorCode` of the same name exists and is a different condition:
+  `session_create`'s "this principal already holds its session limit" is
+  `InterfaceErrorCode::ResourceExhausted`, raised while reserving session
+  ownership before any command is built
+  (`crates/sdk-core/src/interface.rs`), and it answers as a top-level
+  JSON-RPC error rather than inside a tool's structured result. The wire
+  code reads the same; it is not this per-command code. Repair there is to
+  close an idle session first -- `session_list`, then `session_close`.
 - `policyDenied` -- the runtime's own execution or upload policy forbids the
   requested action for this session. Repair: not retryable as-is; use an
   allowed path or policy, or a different tool.
@@ -648,6 +684,69 @@ tools most likely to produce it.
   like `visionAssistDenied` and fall back to a deterministic tool or fix the
   configuration. Only for the transient causes (capture error, response
   error, low-confidence proposal) is a single retry reasonable.
+
+## Protocol-layer rejections
+
+Not every failed call produces an `ErrorCode`. A call the MCP layer refuses
+before it builds a command answers with JSON-RPC `-32602` ("Invalid params")
+and a reason string under `error.data.reason`
+(`crates/mcp-gateway/src/server.rs`). These are protocol-layer rejections, not
+per-command codes: they never appear inside a tool result, they carry no
+`commandId`, and nothing ran, so the repair is always "fix the request and
+resubmit" -- never reconciliation.
+
+- `schemaViolation` -- the arguments failed the tool's declared input schema.
+  Unlike the other three this one is specific: `error.data.pointer` is a JSON
+  pointer to the offending value and `error.data.constraint` names the keyword
+  it violated (`maxLength`, `required`, `oneOf`, ...). Repair: fix that one
+  value.
+- `malformedArguments` -- the arguments passed the schema but the server could
+  not turn them into the tool's own argument type, or a bound checked outside
+  the schema failed (`events_read`'s `limit`, which must be 1..=256). Repair:
+  re-read the tool's `inputSchema` and description, and check any documented
+  numeric bound.
+- `deadlineOutOfRange` -- `command_execute` only: the envelope's `deadline` is
+  already in the past, or more than 300,000 ms in the future. Repair: set the
+  deadline inside that window and resubmit.
+- `invalidIdempotencyKey` -- the supplied `idempotencyKey` is not a well-formed
+  key. Repair: send a valid key, or omit the field entirely.
+
+## Pushed events, and what a gap frame means
+
+`events_read` is not the only way to see runtime events. The server also
+pushes two JSON-RPC *notifications* (no `id`, no response expected) over the
+same MCP connection (`crates/mcp-gateway/src/notify.rs`):
+
+- `notifications/bobby/event` -- one runtime event. `params` is `{cursor,
+  kind, payload}`, exactly the shape `events_read` returns in its `events`
+  array. Frames are scoped to the connected principal: the only read path the
+  notification stream can reach is `EventStore::read_after_for`, filtered to
+  that principal's audience, and the subscription is built from the server's
+  own capability handle. Delivery starts at the store's tail when the
+  connection subscribes -- history before that point is not replayed, so use
+  `events_read` with a cursor to read backwards.
+- `notifications/tools/list_changed` -- this principal's capability set
+  changed, so the tool list already downloaded is stale. Re-run `tools/list`.
+
+A frame whose `kind` is `event.gap` is not an event: it means retention
+evicted events this connection had not yet been sent, and they are gone from
+the push channel. Its `cursor` is the last cursor actually delivered and its
+`payload` is `{reason, earliestAvailable}`. **A gap is a catch-up signal, not
+a stream failure** -- the subscription re-arms from the store's tail
+immediately afterwards and keeps delivering. To recover what was missed, call
+`events_read` with `cursor` set to `earliestAvailable - 1`, which is the
+oldest position that still reads clean; anything before that is unrecoverable.
+`events_read` reports the same shape for itself, under `error.data.eventGap`
+rather than as a frame, with `reason` one of `historyLost` (the cursor fell
+behind retention) or `invalidCursor` (the cursor is ahead of anything the
+store holds).
+
+Subscribing to the push channel needs the same `session:read` that
+`events_read` does (`InterfaceOperation::SubscribeEvents`,
+`crates/types/src/interface.rs`). Over the streamable-HTTP transport a
+connection whose principal lacks it still receives
+`notifications/tools/list_changed`, but no event frames at all
+(`crates/broker/src/mcp_http.rs`).
 "#;
 
 const INTENTS_BODY: &str = r#"# Intent commands
@@ -708,6 +807,117 @@ and verified, and the caller only wants the plain action without intent-style
 resolution or verification overhead.
 "#;
 
+const PRIMITIVES_BODY: &str = r#"# Primitives with no named tool
+
+Every `IntentCommand` variant, and every `PrimitiveCommand` variant but four,
+has a named MCP tool that builds the command envelope for you. These four do
+not (`PrimitiveCommand`, `crates/types/src/commands.rs`). They are fully
+executable -- validation, capability gating, and evidence are identical to any
+named tool -- but they are reachable only through `command_execute`, and
+`command_execute` advertises `envelope.command` as an opaque object, so
+nothing in `tools/list` describes their shape. This document is that
+description.
+
+## Calling one
+
+`command_execute` takes `{envelope, idempotencyKey?}`. Inside the envelope,
+`command` is `{"kind":"primitive","input":{"kind":<name>,"input":{...}}}`,
+where `<name>` is one of the four below. The envelope's own required fields
+(`schemaVersion` 2, `commandId`, `workflowId`, `attemptId`, `sessionId`,
+`deadline`) are unchanged. All four are per-page commands: `pageId` is
+optional in the envelope schema but required by the runtime, and omitting it
+fails with `invalidRequest` ("pageId is required for page commands",
+`crates/page-runtime/src/executor.rs`) before anything runs. The envelope
+schema is validated in full before dispatch even though it advertises narrow
+-- a malformed `input` fails with `-32602` (`schemaViolation`) and never
+reaches the runtime.
+
+`deadline` must be in the future and no more than 300,000 ms out, or the call
+is rejected with `deadlineOutOfRange` -- see `bobby://failure-taxonomy`.
+
+## `clickAndWaitForPopup`
+
+Clicks the resolved element and waits for the popup it opens, then registers
+that popup as a new page in the session so later calls can address it.
+
+    "input": {
+      "selector": string,          // required, may be ""
+      "target": TargetSpec | null, // required key; null to use the selector
+      "timeoutMs": integer         // required, 1..=300000
+    }
+
+Capabilities: `browser:mutate` only. **Boundary class** -- like
+`intent_submit_and_verify`, it needs a verified pre-action checkpoint whose
+`attemptId`, `sessionId`, `pageId` all match the envelope, whose
+`recoveryClass` is `boundary`, and whose `boundaryCommandId` is this
+envelope's `commandId`; otherwise it fails with `invalidRequest` before
+clicking. Produces `Evidence::Popup` (`openerPageId`, the new `pageId`, `url`,
+`title`); a run that produces no popup evidence fails with
+`verificationFailed`. A timeout waiting for the popup is `deadlineExceeded`.
+
+## `clickAndWaitForDownload`
+
+Clicks the resolved element and waits for the download it starts, then admits
+the downloaded file as an artifact.
+
+    "input": {
+      "selector": string,          // required, may be ""
+      "target": TargetSpec | null, // required key; null to use the selector
+      "timeoutMs": integer         // required, 1..=300000
+    }
+
+Capabilities: `browser:mutate` **and `file:download`**
+(`command_extra_capabilities`, `crates/sdk-core/src/interface.rs`) -- the same
+pair `download_url` requires. **Boundary class**, with the same pre-action
+checkpoint requirement as `clickAndWaitForPopup`. Produces
+`Evidence::Download`; no download evidence means `verificationFailed`, and a
+timeout is `deadlineExceeded`. The download's local filesystem path is never
+returned: it is replaced by an `artifact://` URI readable through
+`resources/read` when the artifact was admitted, and by a redaction marker
+when it was not. Admitting it needs `artifact:capture`; reading it back needs
+`artifact:read`.
+
+## `setFocusEmulation`
+
+Turns page focus emulation on or off, so the page keeps behaving as focused
+while it is not actually foregrounded.
+
+    "input": { "enabled": boolean }   // required
+
+Capabilities: `browser:mutate` only. Reconciliable. Produces
+`Evidence::Configuration` with `name` `"focusEmulation"` and `value` the
+boolean rendered as a string; anything else fails `verificationFailed`.
+
+## `setEmulatedMedia`
+
+Overrides the page's CSS media type and media features -- printing a page's
+print stylesheet, or forcing `prefers-color-scheme`, without changing the
+real environment.
+
+    "input": {
+      "media": string,             // required, 0..=256 bytes, e.g. "print", "screen"
+      "features": {                // required, object of string -> string
+        "<name>": "<value>"        // <=64 entries, name <=128 bytes, value <=4096 bytes
+      }                            // e.g. {"prefers-color-scheme":"dark"}
+    }
+
+Capabilities: `browser:mutate` only. Reconciliable. Produces
+`Evidence::Configuration` with `name` `"emulatedMedia"` and `value` the
+serialized command; anything else fails `verificationFailed`.
+
+## Engine support
+
+`setFocusEmulation` and `setEmulatedMedia` are implemented by the Chromium
+worker only (`crates/worker-pool/src/chromium.rs`). Every other worker keeps
+the `BrowserWorker` default, which refuses with `browserCommandFailed`
+("browser primitive is not supported by this worker",
+`crates/worker-pool/src/lib.rs`), so on a Firefox session neither is a
+retryable failure -- use a named tool instead. `clickAndWaitForPopup` and
+`clickAndWaitForDownload` are implemented on both Chromium
+(`crates/worker-pool/src/chromium.rs`) and Firefox
+(`crates/firefox-companion/src/worker.rs`).
+"#;
+
 pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'static str)] {
     &[
         (
@@ -718,12 +928,17 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
         (
             FAILURE_TAXONOMY_URI,
             "Failure taxonomy",
-            "Every runtime error code and the NeedsReconciliation outcome, with cause and repair action.",
+            "Every runtime error code, the protocol-layer rejections, the NeedsReconciliation outcome, and the pushed-event channel.",
         ),
         (
             INTENTS_URI,
             "Intents",
             "The eight intent commands, their execution class, and when to reach for one over a primitive.",
+        ),
+        (
+            PRIMITIVES_URI,
+            "Primitives without a tool",
+            "The four executable primitives that have no named tool, their argument shape, and how to reach them via command_execute.",
         ),
     ]
 }
@@ -733,6 +948,7 @@ pub(crate) fn static_resource_body(uri: &str) -> Option<&'static str> {
         CAPABILITIES_URI => Some(CAPABILITIES_BODY),
         FAILURE_TAXONOMY_URI => Some(FAILURE_TAXONOMY_BODY),
         INTENTS_URI => Some(INTENTS_BODY),
+        PRIMITIVES_URI => Some(PRIMITIVES_BODY),
         _ => None,
     }
 }

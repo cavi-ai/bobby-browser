@@ -461,6 +461,7 @@ async fn production_constructor_registers_runtime_artifact_then_lists_and_reads_
         "bobby://capabilities",
         "bobby://failure-taxonomy",
         "bobby://intents",
+        "bobby://primitives",
     ] {
         assert!(
             listed_uris.contains(&expected.to_owned()),

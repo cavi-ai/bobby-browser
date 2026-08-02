@@ -2406,6 +2406,7 @@ async fn static_resources_are_listed_and_readable() {
         "bobby://capabilities",
         "bobby://failure-taxonomy",
         "bobby://intents",
+        "bobby://primitives",
     ] {
         assert!(uris.contains(&expected.to_owned()), "{expected} not listed");
         let read = server
@@ -2417,6 +2418,120 @@ async fn static_resources_are_listed_and_readable() {
                 .as_str()
                 .is_some_and(|text| !text.is_empty()),
             "{expected} read returned no text"
+        );
+    }
+}
+
+/// The four `PrimitiveCommand` variants with no named tool are reachable only
+/// through `command_execute`, whose advertised `envelope.command` is opaque —
+/// so `bobby://primitives` is the only in-band description of their shape. If
+/// one is renamed or dropped from the union, this document silently starts
+/// telling agents to build an envelope the validator rejects.
+#[tokio::test]
+async fn the_primitives_resource_documents_real_toolless_primitive_kinds() {
+    const TOOLLESS_KINDS: &[&str] = &[
+        "clickAndWaitForPopup",
+        "clickAndWaitForDownload",
+        "setFocusEmulation",
+        "setEmulatedMedia",
+    ];
+    let definitions = mcp_gateway::definitions_for_test();
+    let union_kinds: Vec<String> = definitions["PrimitiveCommand"]["oneOf"]
+        .as_array()
+        .expect("PrimitiveCommand is a oneOf union")
+        .iter()
+        .filter_map(|variant| variant["properties"]["kind"]["const"].as_str())
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        union_kinds.len() > TOOLLESS_KINDS.len(),
+        "PrimitiveCommand union looks wrong: {union_kinds:?}"
+    );
+
+    let server = fixture_server(vec![Capability::ArtifactRead]).await;
+    let read = server
+        .handle_message(request(
+            2,
+            "resources/read",
+            json!({"uri":"bobby://primitives"}),
+        ))
+        .await
+        .unwrap();
+    let body = read["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("bobby://primitives has a body")
+        .to_owned();
+
+    for kind in TOOLLESS_KINDS {
+        assert!(
+            union_kinds.iter().any(|existing| existing == kind),
+            "bobby://primitives documents `{kind}`, which is no longer a \
+             PrimitiveCommand variant: {union_kinds:?}"
+        );
+        assert!(
+            body.contains(kind),
+            "bobby://primitives does not describe `{kind}`"
+        );
+    }
+    assert!(
+        body.contains("command_execute"),
+        "bobby://primitives does not say how these primitives are reached"
+    );
+}
+
+/// The push channel is only useful if an agent can find out it exists. It is
+/// advertised nowhere in `initialize` — a notification method is not a
+/// declared capability — so the only in-band pointers are `events_read`'s
+/// description (the tool an agent reaches for instead) and the failure
+/// taxonomy. The method names come from `notify`'s own constants rather than
+/// string literals, so renaming a method breaks this instead of silently
+/// stranding the documentation.
+#[tokio::test]
+async fn the_pushed_event_channel_is_discoverable_in_band() {
+    let server = fixture_server(vec![Capability::SessionRead, Capability::ArtifactRead]).await;
+    let listed = server
+        .handle_message(request(2, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let events_read = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "events_read")
+        .expect("events_read is advertised")
+        .clone();
+    let description = events_read["description"].as_str().unwrap();
+    assert!(
+        description.contains(mcp_gateway::notify::EVENT_METHOD),
+        "events_read still teaches only the poll: {description}"
+    );
+    assert!(
+        description.contains("block"),
+        "events_read does not say it blocks, but is marked readOnlyHint: {description}"
+    );
+    assert_eq!(
+        events_read["annotations"]["readOnlyHint"],
+        json!(true),
+        "events_read stopped being read-only; revisit the blocking warning"
+    );
+
+    let read = server
+        .handle_message(request(
+            3,
+            "resources/read",
+            json!({"uri":"bobby://failure-taxonomy"}),
+        ))
+        .await
+        .unwrap();
+    let taxonomy = read["result"]["contents"][0]["text"].as_str().unwrap();
+    for expected in [
+        mcp_gateway::notify::EVENT_METHOD,
+        mcp_gateway::notify::TOOLS_LIST_CHANGED_METHOD,
+        mcp_gateway::notify::GAP_KIND,
+    ] {
+        assert!(
+            taxonomy.contains(expected),
+            "bobby://failure-taxonomy does not mention {expected}"
         );
     }
 }

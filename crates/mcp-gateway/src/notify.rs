@@ -152,12 +152,14 @@ impl NotificationStream {
     /// The next frame to write to the client, or `None` once the owning
     /// `Server` is gone.
     ///
-    /// Cancel-safe: every `await` inside is a cancel-safe primitive
-    /// (`broadcast::Receiver::recv` and a cursor-addressed `EventStore` read
-    /// that is re-issued from the same cursor), and frames already decoded are
-    /// parked in `queued` rather than held across an await. Dropping the future
-    /// mid-poll — which both transports do, one in a `select!` and one in a
-    /// keep-alive `timeout` — loses nothing.
+    /// Cancel-safe: all three `await`s inside are cancel-safe primitives —
+    /// `broadcast::Receiver::recv`, a cursor-addressed `EventStore` read that
+    /// is re-issued from the same cursor, and `EventStore::latest_cursor`,
+    /// which only reads the tail and is re-issued while `reseek` stays set —
+    /// and frames already decoded are parked in `queued` rather than held
+    /// across an await. Dropping the future mid-poll — which both transports
+    /// do, one in a `select!` and one in a keep-alive `timeout` — loses
+    /// nothing.
     pub async fn recv(&mut self) -> Option<Value> {
         loop {
             // Ahead of the queue drain, not after it: the gap frame queued below
