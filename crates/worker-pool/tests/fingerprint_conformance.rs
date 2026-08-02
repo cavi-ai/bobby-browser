@@ -4,6 +4,7 @@ use fingerprinting::{
     build_collector_probe_script, build_font_probe_script, build_probe_script,
     build_worker_probe_script, FingerprintConfig,
 };
+use serde_json::json;
 use std::path::PathBuf;
 use types::{
     EvaluateJavaScriptCommand, Evidence, NavigateCommand, OpenPageCommand, SessionId, WaitUntil,
@@ -413,17 +414,27 @@ async fn eval_json(
     expression: &str,
     timeout_ms: u64,
 ) -> serde_json::Value {
+    eval_json_ex(worker, page_id, expression, timeout_ms, true).await
+}
+
+async fn eval_json_ex(
+    worker: &dyn BrowserWorker,
+    page_id: &types::PageId,
+    expression: &str,
+    timeout_ms: u64,
+    await_promise: bool,
+) -> serde_json::Value {
     let result = worker
         .evaluate_javascript(
             page_id,
             &EvaluateJavaScriptCommand {
                 expression: expression.into(),
                 timeout_ms,
-                await_promise: true,
+                await_promise,
             },
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|e| panic!("eval_json failed: {e:?}"));
 
     match result.as_slice() {
         [Evidence::JavaScriptResult { value, .. }] => value.clone(),
@@ -467,7 +478,7 @@ async fn wait_for_body_text(
 ) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
-        let ready = eval_json(worker, page_id, predicate_js, 5_000).await;
+        let ready = eval_json_ex(worker, page_id, predicate_js, 5_000, false).await;
         if ready.as_bool() == Some(true) {
             return;
         }
@@ -597,19 +608,122 @@ async fn chromium_production_collector_dogfood() {
         let mut report = eval_json(
             worker.as_ref(),
             &page_id,
-            r#"({
-  site: "creepjs",
-  webdriver: navigator.webdriver,
-  fingerprintApplied: !!globalThis[Symbol.for("bobby.fp.applied")],
-  bodyText: document.body?.innerText?.slice(0, 8000) || "",
-  lieHints: (document.body?.innerText || "").match(/lie[s]?|headless|webdriver|stealth|inconsistenc|bot|worker|sharedworker/gi)?.slice(0, 40) || [],
-  workerHeadlessLeak: (document.body?.innerText || "").toLowerCase().includes("headlesschrome"),
-  headlessScores: {
-    like: (document.body?.innerText || "").match(/(\d+)%\s*like headless/i)?.[1] || null,
-    headless: (document.body?.innerText || "").match(/(\d+)%\s*headless/i)?.[1] || null,
-    stealth: (document.body?.innerText || "").match(/(\d+)%\s*stealth/i)?.[1] || null,
-  }
-})"#,
+            r#"(async () => {
+  const text = document.body?.innerText || "";
+  let hasBadChromeRuntime = false;
+  try {
+    if ('chrome' in window && chrome.runtime) {
+      try {
+        if ('prototype' in chrome.runtime.sendMessage || 'prototype' in chrome.runtime.connect) {
+          hasBadChromeRuntime = true;
+        } else {
+          try { new chrome.runtime.sendMessage; hasBadChromeRuntime = true; } catch (err) {
+            if (err?.constructor?.name !== 'TypeError') hasBadChromeRuntime = true;
+          }
+        }
+      } catch (_) { hasBadChromeRuntime = true; }
+    }
+  } catch (_) {}
+  const hasToStringProxy = (() => {
+    try {
+      return Function.prototype.toString.toString().indexOf('[native code]') < 0;
+    } catch (_) { return true; }
+  })();
+  // Approximate CreepJS webDriverIsOn without lieProps: true webdriver OR
+  // a non-native prototype getter (our old redefine).
+  let webdriverGetterNative = true;
+  try {
+    const desc = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
+    if (desc && desc.get) {
+      webdriverGetterNative = Function.prototype.toString.call(desc.get).indexOf('[native code]') >= 0;
+    }
+  } catch (_) {}
+  const webDriverIsOn = (
+    (CSS.supports('border-end-end-radius: initial') && navigator.webdriver === undefined) ||
+    !!navigator.webdriver ||
+    !webdriverGetterNative
+  );
+  // Mirror CreepJS getPlatformEstimate BarcodeDetector split (Win vs Mac).
+  const hasBarcodeDetector = 'BarcodeDetector' in window;
+  const platformHint = (() => {
+    const hasTouch = 'ontouchstart' in window && typeof TouchEvent !== 'undefined';
+    const hasAppBadge = 'setAppBadge' in Navigator.prototype;
+    const hasSharedWorker = 'SharedWorker' in window;
+    const hasEyeDropper = 'EyeDropper' in window;
+    const hasFsw = 'FileSystemWritableFileStream' in window;
+    const hasHid = 'HID' in window && 'HIDDevice' in window;
+    const hasSerial = 'SerialPort' in window && 'Serial' in window;
+    const noDownlinkMax = !('downlinkMax' in (navigator.connection || {}));
+    const v88 = CSS.supports('aspect-ratio: initial');
+    const win = [
+      v88 ? !hasBarcodeDetector : null,
+      noDownlinkMax,
+      hasEyeDropper,
+      hasFsw,
+      hasHid,
+      hasSerial,
+      hasSharedWorker,
+      true,
+      hasAppBadge,
+    ].filter((x) => x !== null);
+    const mac = [
+      v88 ? hasBarcodeDetector : null,
+      noDownlinkMax,
+      hasEyeDropper,
+      hasFsw,
+      hasHid,
+      hasSerial,
+      hasSharedWorker,
+      !hasTouch,
+      hasAppBadge,
+    ].filter((x) => x !== null);
+    const score = (arr) => +(arr.filter(Boolean).length / arr.length).toFixed(2);
+    return {
+      hasBarcodeDetector,
+      windows: score(win),
+      mac: score(mac),
+    };
+  })();
+  return {
+    site: "creepjs",
+    webdriver: navigator.webdriver,
+    fingerprintApplied: !!globalThis[Symbol.for("bobby.fp.applied")],
+    bodyText: text.slice(0, 8000),
+    lieHints: text.match(/lie[s]?|headless|webdriver|stealth|inconsistenc|bot|worker|sharedworker/gi)?.slice(0, 40) || [],
+    workerHeadlessLeak: text.toLowerCase().includes("headlesschrome"),
+    headlessScores: {
+      like: text.match(/(\d+)%\s*like headless/i)?.[1] || null,
+      headless: text.match(/(\d+)%\s*headless/i)?.[1] || null,
+      stealth: text.match(/(\d+)%\s*stealth/i)?.[1] || null,
+    },
+    headlessFlags: {
+      webDriverIsOn,
+      hasHeadlessUA: /HeadlessChrome/.test(navigator.userAgent) || /HeadlessChrome/.test(navigator.appVersion),
+      webdriverGetterNative,
+      prefersLightColor: matchMedia('(prefers-color-scheme: light)').matches,
+    },
+    stealthFlags: {
+      hasToStringProxy,
+      hasBadChromeRuntime,
+    },
+    platformHint,
+    systemFonts: (() => {
+      try {
+        const el = document.createElement("div");
+        document.body.appendChild(el);
+        const families = new Set();
+        ["caption", "icon", "menu", "message-box", "small-caption", "status-bar"].forEach((font) => {
+          el.setAttribute("style", "font: " + font + " !important");
+          families.add(getComputedStyle(el).fontFamily);
+        });
+        document.body.removeChild(el);
+        return Array.from(families);
+      } catch (_) {
+        return [];
+      }
+    })(),
+  };
+})()"#,
             15_000,
         )
         .await;
@@ -625,7 +739,7 @@ async fn chromium_production_collector_dogfood() {
             serde_json::to_string_pretty(&worker_probe).unwrap()
         );
         if let Some(obj) = report.as_object_mut() {
-            obj.insert("workerProbe".to_string(), worker_probe);
+            obj.insert("workerProbe".to_string(), worker_probe.clone());
         }
         if let Some(scores) = report.get("headlessScores") {
             eprintln!(
@@ -636,11 +750,70 @@ async fn chromium_production_collector_dogfood() {
             );
         }
         eprintln!(
+            "=== CreepJS flags ===\n{}",
+            serde_json::to_string_pretty(&json!({
+                "headlessFlags": report.get("headlessFlags"),
+                "stealthFlags": report.get("stealthFlags"),
+            }))
+            .unwrap()
+        );
+        eprintln!(
             "=== CreepJS ===\n{}",
             serde_json::to_string_pretty(&report).unwrap()
         );
         soft_findings.extend(collect_soft_findings(&report));
-        reports.push(report);
+        reports.push(report.clone());
+
+        assert_eq!(
+            report["headlessFlags"]["webDriverIsOn"], false,
+            "CreepJS webDriverIsOn must be false"
+        );
+        assert_eq!(
+            report["headlessFlags"]["hasHeadlessUA"], false,
+            "CreepJS hasHeadlessUA must be false"
+        );
+        assert_eq!(
+            report["stealthFlags"]["hasToStringProxy"], false,
+            "CreepJS hasToStringProxy must be false"
+        );
+        assert_eq!(
+            report["stealthFlags"]["hasBadChromeRuntime"], false,
+            "CreepJS hasBadChromeRuntime must be false"
+        );
+        eprintln!(
+            "=== CreepJS platform hint ===\n{}",
+            serde_json::to_string_pretty(&report["platformHint"]).unwrap()
+        );
+        assert_eq!(
+            report["platformHint"]["hasBarcodeDetector"], false,
+            "Windows persona must hide BarcodeDetector"
+        );
+        let win = report["platformHint"]["windows"].as_f64().unwrap_or(0.0);
+        let mac = report["platformHint"]["mac"].as_f64().unwrap_or(0.0);
+        assert!(
+            win >= mac,
+            "Windows platform estimate ({win}) must beat or tie Mac ({mac})"
+        );
+        let system_fonts = report["systemFonts"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        eprintln!("=== CreepJS systemFonts probe ===\n{system_fonts:?}");
+        assert!(
+            system_fonts.iter().any(|f| f.contains("Segoe UI")),
+            "system UI fonts must resolve to Segoe UI on Windows persona, got {system_fonts:?}"
+        );
+        assert!(
+            !system_fonts
+                .iter()
+                .any(|f| *f == "Arial" || f.starts_with("Arial,")),
+            "system UI fonts must not collapse to Arial, got {system_fonts:?}"
+        );
+        let worker_ua = worker_probe["worker"]["ua"].as_str().unwrap_or("");
+        assert!(
+            !worker_ua.to_ascii_lowercase().contains("headless"),
+            "creepjs worker UA leaked headless: {worker_ua}"
+        );
     }
 
     // C. FingerprintJS demo
@@ -699,10 +872,8 @@ async fn chromium_production_collector_dogfood() {
         .find(|r| r["site"] == "browserleaks-js")
         .expect("browserleaks report");
     assert_eq!(browserleaks["chrome"], true, "chrome object missing");
-    assert_eq!(
-        browserleaks["chromeRuntime"], true,
-        "chrome.runtime missing"
-    );
+    // Real Chrome may omit chrome.runtime under CDP; we intentionally do not
+    // inject a runtime stub (CreepJS hasBadChromeRuntime).
 
     let creepjs = reports
         .iter()

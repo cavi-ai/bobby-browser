@@ -38,9 +38,10 @@ use types::ProfileId;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, CommandId, ControlAction, ControlActionCommand,
-    ErrorCode, ErrorLayer, Evidence, FormControl, FormControlTarget, InspectCommand,
-    NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
+    InspectCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId,
+    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    WaitUntil, WorkerId,
 };
 use url::Url;
 use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
@@ -64,6 +65,8 @@ const PAGE_BINDING_TITLE_PREFIX: &str = "automation-runtime-binding:";
 pub const MAX_TRACKED_PAGES: usize = 256;
 const PAGE_BINDING_RELEASE_ATTEMPTS: usize = 3;
 const MAX_FRAME_PATH_DEPTH: usize = 8;
+const MAX_JS_RESULT_BYTES: usize = 256 * 1024;
+const MAX_JS_TIMEOUT_MS: u64 = 30_000;
 
 fn form_control_target_spec(target: &FormControlTarget) -> TargetSpec {
     fn segment(value: &types::SemanticTargetSegment) -> Box<TargetSpec> {
@@ -1108,11 +1111,50 @@ impl FirefoxCompanionWorker {
         let script_id = host.add_preload_script(&plan).await.map_err(|error| {
             driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
         })?;
+        // Session-level UA/locale/tz (no browsing context yet). Viewport/DPR
+        // require a context — see apply_fingerprint_emulation_for_context.
         let _ = host.apply_emulation_overrides(&plan).await;
         *self
             .fingerprint_preload_script
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(script_id);
+        Ok(())
+    }
+
+    /// Re-apply UA/locale/tz plus `browsingContext.setViewport` for a tab.
+    /// Session preload uses `context: None` so viewport never runs until here.
+    async fn apply_fingerprint_emulation_for_context(
+        &self,
+        context: &str,
+    ) -> Result<(), CommandError> {
+        if !self.fingerprint_enabled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let config = {
+            let mut config = self
+                .fingerprint
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            config.enabled = true;
+            config
+        };
+        let plan = match FingerprintApplyPlan::from_config(&config) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    error.to_string(),
+                    false,
+                ))
+            }
+        };
+        let host = crate::fingerprint_host::FirefoxBidiHost {
+            transport: self.transport.as_ref(),
+            context: Some(context),
+        };
+        let _ = host.apply_emulation_overrides(&plan).await;
         Ok(())
     }
 
@@ -2501,8 +2543,83 @@ impl BrowserWorker for FirefoxCompanionWorker {
 
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         self.sync_fingerprint_preload().await?;
-        let guard = self.open_page_owned(page_id).await?;
-        guard.disarm().await
+        let guard = self.open_page_owned(page_id.clone()).await?;
+        guard.disarm().await?;
+        // Viewport/DPR need a browsing context id (session preload has none).
+        if let Ok(context) = self.context(&page_id).await {
+            self.apply_fingerprint_emulation_for_context(&context)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn evaluate_javascript(
+        &self,
+        page_id: &PageId,
+        command: &EvaluateJavaScriptCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        let timeout_ms = command.timeout_ms.clamp(1, MAX_JS_TIMEOUT_MS);
+        // Page realm (no companion sandbox) so fingerprint preload patches are visible.
+        // JSON.stringify avoids BiDi RemoteValue object graphs for collector probes.
+        let wrapped = format!(
+            "(async () => {{\n  const __bobby_v = await ({expr});\n  return JSON.stringify(__bobby_v === undefined ? null : __bobby_v);\n}})()",
+            expr = command.expression
+        );
+        let response = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            self.transport.send(
+                "script.evaluate",
+                json!({
+                    "expression": wrapped,
+                    "target": {"context": context},
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                }),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            driver_error(
+                ErrorCode::DeadlineExceeded,
+                format!("Firefox JavaScript evaluation exceeded {timeout_ms} ms"),
+                true,
+            )
+        })??;
+        if let Some(exception) = response.get("exceptionDetails") {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox JavaScript evaluation failed: {exception}"),
+                false,
+            ));
+        }
+        let raw = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox JavaScript evaluation did not return a JSON string",
+                    false,
+                )
+            })?;
+        let truncated = raw.len() > MAX_JS_RESULT_BYTES;
+        let slice = if truncated {
+            &raw[..MAX_JS_RESULT_BYTES]
+        } else {
+            raw
+        };
+        let value: Value = serde_json::from_str(slice).map_err(|error| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox JavaScript result was not valid JSON: {error}"),
+                false,
+            )
+        })?;
+        Ok(vec![
+            Evidence::JavaScriptResult { value, truncated },
+            self.evidence(InteractionPath::EngineNative),
+        ])
     }
 
     async fn navigate(

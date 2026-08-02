@@ -203,6 +203,15 @@ impl BidiTransport for FakeBidi {
         if method == "script.removePreloadScript" {
             return Ok(json!({}));
         }
+        if matches!(
+            method,
+            "emulation.setUserAgentOverride"
+                | "emulation.setLocaleOverride"
+                | "emulation.setTimezoneOverride"
+                | "browsingContext.setViewport"
+        ) {
+            return Ok(json!({}));
+        }
         if method == "script.evaluate" && params["expression"] == "document.title" {
             let context = params["target"]["context"].as_str().unwrap();
             let title = self
@@ -673,6 +682,17 @@ fn assert_engine_native(evidence: &[Evidence]) {
         item,
         Evidence::BrowserExecution { interaction_path, .. } if interaction_path == &expected
     )));
+}
+
+fn is_fingerprint_setup_method(method: &str) -> bool {
+    matches!(
+        method,
+        "script.addPreloadScript"
+            | "emulation.setUserAgentOverride"
+            | "emulation.setLocaleOverride"
+            | "emulation.setTimezoneOverride"
+            | "browsingContext.setViewport"
+    )
 }
 
 #[tokio::test]
@@ -1315,10 +1335,16 @@ async fn inspect_evaluates_in_isolated_realm_and_uses_extension_observation() {
         .unwrap();
 
     let calls = bidi.calls().await;
-    assert_eq!(calls[5].method, "script.evaluate");
-    assert_eq!(calls[5].params["target"]["context"], "context-1");
+    let isolated_evaluation = calls
+        .iter()
+        .find(|call| {
+            call.method == "script.evaluate"
+                && call.params["target"]["sandbox"] == "automation-runtime-companion"
+        })
+        .expect("isolated inspection evaluation");
+    assert_eq!(isolated_evaluation.params["target"]["context"], "context-1");
     assert_eq!(
-        calls[5].params["target"]["sandbox"],
+        isolated_evaluation.params["target"]["sandbox"],
         "automation-runtime-companion"
     );
     assert_eq!(observer.calls.load(Ordering::SeqCst), 1);
@@ -2464,7 +2490,7 @@ async fn missing_page_context_is_not_found_without_transport_calls() {
             .await
             .iter()
             .map(|call| call.method.as_str())
-            .filter(|method| *method != "script.addPreloadScript")
+            .filter(|method| !is_fingerprint_setup_method(method))
             .collect::<Vec<_>>(),
         vec!["session.subscribe"]
     );
@@ -2506,7 +2532,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
         calls
             .iter()
             .map(|call| call.method.as_str())
-            .filter(|method| *method != "script.addPreloadScript")
+            .filter(|method| !is_fingerprint_setup_method(method))
             .collect::<Vec<_>>(),
         vec![
             "session.subscribe",
@@ -3107,12 +3133,20 @@ async fn fingerprint_toggle_adds_and_removes_preload_script() {
 
     let calls_before_open = bidi.calls().await.len();
     worker.open_page(PageId::new()).await.unwrap();
-    let new_adds = bidi.calls().await[calls_before_open..]
+    let new_calls = &bidi.calls().await[calls_before_open..];
+    let new_adds = new_calls
         .iter()
         .filter(|call| call.method == "script.addPreloadScript")
         .count();
     assert_eq!(
         new_adds, 0,
         "open_page must not double-add when preload already synced"
+    );
+    assert!(
+        new_calls.iter().any(|call| {
+            call.method == "browsingContext.setViewport"
+                && call.params.get("context") == Some(&json!("context-fp-toggle"))
+        }),
+        "open_page must re-apply viewport with the new browsing context"
     );
 }

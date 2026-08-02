@@ -44,13 +44,23 @@ mkdir -p "$PROFILE/extensions"
 cat > "$PROFILE/user.js" <<'EOF'
 user_pref("xpinstall.signatures.required", false);
 user_pref("extensions.autoDisableScopes", 14);
+// Fingerprint stack: RFP fights UA/locale/tz spoof; dark theme matches persona.
+user_pref("privacy.resistFingerprinting", false);
+user_pref("ui.systemUsesDarkTheme", 1);
 EOF
 (cd dist && zip -r "$PROFILE/extensions/firefox-companion@bobby-browser.local.xpi" .)
 ```
 
-Both prefs are required: the first permits unsigned extensions, the second
+Both extension prefs are required: the first permits unsigned extensions, the second
 auto-enables sideloaded ones (otherwise the extension installs disabled
-pending a consent click).
+pending a consent click). The fingerprint prefs keep Resist Fingerprinting from
+clobbering the BiDi/init-script persona and lean `prefers-color-scheme` toward
+dark (init script also forces the matchMedia result).
+
+BiDi sessions set `navigator.webdriver === true`. The init script proxies the
+native getter so the value is `false` while `Function.prototype.toString` still
+reports `[native code]` (required for CreepJS `webDriverIsOn` / lieProps).
+Do not expect a preference alone to clear webdriver under an active BiDi session.
 
 ### 3. Install the native messaging host
 

@@ -29,6 +29,12 @@ impl ArgsBuilder {
         self
     }
 
+    /// Drop a previously registered flag (e.g. omit `--enable-automation` when hidden).
+    pub fn remove(&mut self, key: &str) -> &mut Self {
+        self.0.remove(key);
+        self
+    }
+
     pub fn into_iter(self) -> impl Iterator<Item = String> {
         self.0.into_iter().map(|(key, values)| {
             if values.is_empty() {

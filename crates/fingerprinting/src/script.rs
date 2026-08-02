@@ -6,8 +6,18 @@ use crate::FingerprintSession;
 /// Placeholder replaced with session JSON inside [`INIT_SCRIPT_TEMPLATE`].
 pub const PROFILE_PLACEHOLDER: &str = "__BOBBY_FP_PROFILE__";
 
+/// Placeholder replaced with a JS string literal of the worker bootstrap.
+pub const WORKER_BOOTSTRAP_PLACEHOLDER: &str = "__BOBBY_WORKER_BOOTSTRAP__";
+
+/// Placeholder replaced with worker profile JSON inside [`WORKER_BOOTSTRAP_TEMPLATE`].
+pub const WORKER_PROFILE_PLACEHOLDER: &str = "__BOBBY_FP_WORKER_PROFILE__";
+
+/// Worker-scope apply script (injected into Worker/SharedWorker blob wrappers).
+pub const WORKER_BOOTSTRAP_TEMPLATE: &str = include_str!("worker_bootstrap_template.js");
+
 /// Engine-agnostic apply script template. Hosts and the companion extension
 /// must use this exact source so masks cannot drift.
+/// Source stays readable; [`build_init_script`] minifies at emit time.
 pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   "use strict";
   var APPLIED = Symbol.for("bobby.fp.applied");
@@ -24,22 +34,46 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   const UNMASKED_VENDOR_WEBGL = 0x9245;
   const UNMASKED_RENDERER_WEBGL = 0x9246;
 
-  const nativeFns = new WeakSet();
-  function cloak(fn) { try { nativeFns.add(fn); } catch (_) {} return fn; }
-  const _toString = Function.prototype.toString;
-  Function.prototype.toString = cloak(function () {
-    if (nativeFns.has(this)) {
-      const n = this.name ? this.name : "";
-      return "function " + n + "() { [native code] }";
-    }
-    return _toString.call(this);
-  });
+  // Identity only — do not patch Function.prototype.toString (CreepJS stealth.hasToStringProxy).
+  function cloak(fn) { return fn; }
 
   try {
-    Object.defineProperty(Navigator.prototype, "webdriver", {
-      get: cloak(function webdriver() { return false; }),
-      configurable: true,
-    });
+    // Only intervene when automation is actually on. A false→false redefine is a
+    // prototype lie that CreepJS scores as webDriverIsOn via lieProps.
+    // Proxy the *native* getter so Function.prototype.toString.call stays
+    // `[native code]` (and CreepJS queryLies still sees illegal-invocation throws).
+    // Gecko: do NOT install a prototype Proxy — CreepJS sync getPrototypeLies calls
+    // Object.setPrototypeOf on getter functions and deadlocks the page script
+    // (FP ID stuck on Computing…). Use an instance override instead.
+    if (navigator.webdriver === true) {
+      const gecko = typeof InstallTrigger !== "undefined";
+      if (gecko) {
+        try {
+          Object.defineProperty(navigator, "webdriver", {
+            configurable: true,
+            enumerable: true,
+            get: function () { return false; },
+          });
+        } catch (_) {}
+      } else {
+        const desc = Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver");
+        const nativeGet = desc && desc.get;
+        if (typeof nativeGet === "function") {
+          const proxiedGet = new Proxy(nativeGet, {
+            apply: function (target, thisArg, args) {
+              // Preserve TypeError on illegal invocation for CreepJS queryLies.
+              target.apply(thisArg, args);
+              return false;
+            },
+          });
+          Object.defineProperty(Navigator.prototype, "webdriver", {
+            get: proxiedGet,
+            configurable: true,
+            enumerable: !!(desc && desc.enumerable),
+          });
+        }
+      }
+    }
   } catch (_) {}
 
   try {
@@ -78,11 +112,8 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       if (!globalThis.chrome) {
         globalThis.chrome = {};
       }
-      globalThis.chrome.runtime = {
-        id: undefined,
-        connect: cloak(function connect() {}),
-        sendMessage: cloak(function sendMessage() {}),
-      };
+      // Never inject chrome.runtime stubs — CreepJS hasBadChromeRuntime checks
+      // `new chrome.runtime.sendMessage` TypeError shape.
       if (!globalThis.chrome.app) {
         globalThis.chrome.app = {
           isInstalled: false,
@@ -94,6 +125,17 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       }
     } catch (_) {}
   }
+
+  try {
+    // CreepJS platform estimate: Windows expects no BarcodeDetector; Mac has it.
+    // Hide on Windows personas so Mac hosts don't win the Bayes lean.
+    const winPersona = P.platform === "Win32"
+      || (P.clientHints && P.clientHints.platform === "Windows");
+    if (winPersona && typeof window !== "undefined" && "BarcodeDetector" in window) {
+      try { delete window.BarcodeDetector; } catch (_) {}
+      try { delete globalThis.BarcodeDetector; } catch (_) {}
+    }
+  } catch (_) {}
 
   let availW = P.screenResolution.availableWidth;
   let availH = P.screenResolution.availableHeight;
@@ -123,48 +165,81 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
-    // Desktop touch MQ vars: patch CSSStyleDeclaration once instead of
-    // Proxy-wrapping every getComputedStyle result.
-    if (P.maxTouchPoints === 0 && typeof CSSStyleDeclaration !== "undefined") {
-      const originalGPV = CSSStyleDeclaration.prototype.getPropertyValue;
-      CSSStyleDeclaration.prototype.getPropertyValue = cloak(function getPropertyValue(name) {
-        const v = originalGPV.call(this, name);
-        const key = String(name).toLowerCase();
-        if ((key === "--any-pointer" || key === "--pointer") && v === "coarse") return "fine";
-        if ((key === "--any-hover" || key === "--hover") && v === "none") return "hover";
-        return v;
+    const winPersona = P.platform === "Win32"
+      || (P.clientHints && P.clientHints.platform === "Windows");
+    const SYSTEM_UI_FONT_RE = /(?:^|;|\s)font\s*:\s*(caption|icon|menu|message-box|small-caption|status-bar)(?:\s|!|;|$)/i;
+    function rewriteSystemFontStyleValue(value) {
+      const s = String(value || "");
+      if (!SYSTEM_UI_FONT_RE.test(s)) return s;
+      return s.replace(
+        /font\s*:\s*(caption|icon|menu|message-box|small-caption|status-bar)(\s*!important)?/gi,
+        "font: 11px Tahoma$2"
+      );
+    }
+    // Chromium: getComputedStyle Proxy (Segoe UI + ActiveText). Safe on Blink.
+    // Gecko: never replace getComputedStyle — CreepJS deadlocks. Instead rewrite
+    // style writes CreepJS uses (`setAttribute("style", "font: caption")`).
+    if (typeof InstallTrigger === "undefined") {
+      if (P.maxTouchPoints === 0 && typeof CSSStyleDeclaration !== "undefined") {
+        const originalGPV = CSSStyleDeclaration.prototype.getPropertyValue;
+        CSSStyleDeclaration.prototype.getPropertyValue = cloak(function getPropertyValue(name) {
+          const v = originalGPV.call(this, name);
+          const key = String(name).toLowerCase();
+          if ((key === "--any-pointer" || key === "--pointer") && v === "coarse") return "fine";
+          if ((key === "--any-hover" || key === "--hover") && v === "none") return "hover";
+          return v;
+        });
+      }
+      const originalGCS = window.getComputedStyle.bind(window);
+      window.getComputedStyle = cloak(function getComputedStyle(el, pseudo) {
+        const style = originalGCS(el, pseudo);
+        try {
+          const cssText = (el && el.style && el.style.cssText) || "";
+          const attr = (el && el.getAttribute && el.getAttribute("style")) || "";
+          const combined = cssText + " " + attr;
+          const needsActiveText = /ActiveText/i.test(combined);
+          const needsSystemFont = winPersona && SYSTEM_UI_FONT_RE.test(combined);
+          if (!needsActiveText && !needsSystemFont) return style;
+          return new Proxy(style, {
+            get(target, prop, receiver) {
+              if (needsSystemFont && (prop === "fontFamily" || prop === "font-family")) {
+                return "Segoe UI";
+              }
+              if (needsActiveText && (prop === "backgroundColor" || prop === "color")) {
+                const v = Reflect.get(target, prop, receiver);
+                if (v === "rgb(255, 0, 0)" || v === "rgba(255, 0, 0, 1)") return "rgb(0, 0, 0)";
+                return v;
+              }
+              if (prop === "getPropertyValue") {
+                return function (name) {
+                  const key = String(name).toLowerCase();
+                  if (needsSystemFont && (key === "font-family" || key === "fontfamily")) {
+                    return "Segoe UI";
+                  }
+                  const v = target.getPropertyValue(name);
+                  if (needsActiveText && /color/i.test(String(name)) && (v === "rgb(255, 0, 0)" || v === "rgba(255, 0, 0, 1)")) {
+                    return "rgb(0, 0, 0)";
+                  }
+                  return v;
+                };
+              }
+              const val = Reflect.get(target, prop, receiver);
+              return typeof val === "function" ? val.bind(target) : val;
+            },
+          });
+        } catch (_) {}
+        return style;
+      });
+    } else if (winPersona) {
+      // CreepJS getSystemFonts: el.setAttribute("style", `font: ${font} !important`).
+      const originalSetAttribute = Element.prototype.setAttribute;
+      Element.prototype.setAttribute = cloak(function setAttribute(name, value) {
+        if (String(name).toLowerCase() === "style") {
+          value = rewriteSystemFontStyleValue(value);
+        }
+        return originalSetAttribute.call(this, name, value);
       });
     }
-    const originalGCS = window.getComputedStyle.bind(window);
-    window.getComputedStyle = cloak(function getComputedStyle(el, pseudo) {
-      const style = originalGCS(el, pseudo);
-      try {
-        const cssText = (el && el.style && el.style.cssText) || "";
-        const attr = (el && el.getAttribute && el.getAttribute("style")) || "";
-        if (!/ActiveText/i.test(cssText + attr)) return style;
-        return new Proxy(style, {
-          get(target, prop, receiver) {
-            if (prop === "backgroundColor" || prop === "color") {
-              const v = Reflect.get(target, prop, receiver);
-              if (v === "rgb(255, 0, 0)" || v === "rgba(255, 0, 0, 1)") return "rgb(0, 0, 0)";
-              return v;
-            }
-            if (prop === "getPropertyValue") {
-              return function (name) {
-                const v = target.getPropertyValue(name);
-                if (/color/i.test(String(name)) && (v === "rgb(255, 0, 0)" || v === "rgba(255, 0, 0, 1)")) {
-                  return "rgb(0, 0, 0)";
-                }
-                return v;
-              };
-            }
-            const val = Reflect.get(target, prop, receiver);
-            return typeof val === "function" ? val.bind(target) : val;
-          },
-        });
-      } catch (_) {}
-      return style;
-    });
   } catch (_) {}
 
   const fontSet = new Set(P.fontList || []);
@@ -176,7 +251,8 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     "fangsong", "inherit", "initial", "unset", "default",
   ]);
   function normalizeFontName(name) {
-    return String(name || "").replace(/^["']+|["']+$/g, "").trim();
+    // Avoid /["']/ regex — emit-time minify treats quotes inside regex as strings.
+    return String(name || "").replace(new RegExp('^["\']+|["\']+$', "g"), "").trim();
   }
   function fontAllowed(name) {
     const n = normalizeFontName(name);
@@ -264,6 +340,37 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       patchTextDraw(OffscreenCanvasRenderingContext2D.prototype);
     }
   } catch (_) {}
+  // Firefox often never settles FontFace.load / document.fonts.load for missing
+  // local("…") fonts. CreepJS Promise.allSettled then stalls forever on Computing…
+  const FONT_LOAD_TIMEOUT_MS = 1200;
+  function raceFontLoad(promise, onTimeout) {
+    return new Promise(function (resolve, reject) {
+      let settled = false;
+      const timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        try {
+          resolve(onTimeout());
+        } catch (err) {
+          reject(err);
+        }
+      }, FONT_LOAD_TIMEOUT_MS);
+      Promise.resolve(promise).then(
+        function (value) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        function (err) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  }
   try {
     if (document.fonts && document.fonts.load) {
       const originalLoad = document.fonts.load.bind(document.fonts);
@@ -273,6 +380,9 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
           for (let i = 0; i < families.length; i++) {
             if (!fontAllowed(families[i])) return Promise.resolve([]);
           }
+          return raceFontLoad(originalLoad(font, text), function () {
+            return [];
+          });
         }
         return originalLoad(font, text);
       });
@@ -289,7 +399,13 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
             new DOMException("A network error occurred.", "NetworkError")
           );
         }
-        return originalFontFaceLoad.apply(self, arguments).catch(function (err) {
+        const loading = originalFontFaceLoad.apply(self, arguments);
+        const guarded = fontSet.size > 0
+          ? raceFontLoad(loading, function () {
+              throw new DOMException("A network error occurred.", "NetworkError");
+            })
+          : loading;
+        return Promise.resolve(guarded).catch(function (err) {
           // Allowlisted Windows fonts may be absent on the host — fulfill so
           // collectors classify the persona OS instead of leaking "no fonts".
           if (fontSet.size > 0 && family && fontAllowed(family)) {
@@ -687,38 +803,43 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
-    const makePlugin = function (name, filename, description) {
-      const plugin = { name: name, filename: filename, description: description, length: 1 };
-      plugin[0] = { type: "application/pdf", suffixes: "pdf", description: description };
-      return plugin;
-    };
-    const plugins = [
-      makePlugin("PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-      makePlugin("Chrome PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-      makePlugin("Chromium PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-      makePlugin("Microsoft Edge PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
-      makePlugin("WebKit built-in PDF", "internal-pdf-viewer", "Portable Document Format"),
-    ];
-    plugins.item = function (i) { return this[i] || null; };
-    plugins.namedItem = function (name) {
-      for (let i = 0; i < this.length; i++) if (this[i].name === name) return this[i];
-      return null;
-    };
-    plugins.refresh = function () {};
-    Object.defineProperty(Navigator.prototype, "plugins", {
-      get: function () { return plugins; },
-      configurable: true,
-    });
-    const mimeTypes = [{ type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" }];
-    mimeTypes.item = function (i) { return this[i] || null; };
-    mimeTypes.namedItem = function (name) {
-      for (let i = 0; i < this.length; i++) if (this[i].type === name) return this[i];
-      return null;
-    };
-    Object.defineProperty(Navigator.prototype, "mimeTypes", {
-      get: function () { return mimeTypes; },
-      configurable: true,
-    });
+    // Only synthesize when headless left plugins empty. Overwriting a native
+    // PluginArray with a plain array fails `instanceof PluginArray`.
+    const nativePluginCount = navigator.plugins ? navigator.plugins.length : 0;
+    if (nativePluginCount === 0) {
+      const makePlugin = function (name, filename, description) {
+        const plugin = { name: name, filename: filename, description: description, length: 1 };
+        plugin[0] = { type: "application/pdf", suffixes: "pdf", description: description };
+        return plugin;
+      };
+      const plugins = [
+        makePlugin("PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        makePlugin("Chrome PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        makePlugin("Chromium PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        makePlugin("Microsoft Edge PDF Viewer", "internal-pdf-viewer", "Portable Document Format"),
+        makePlugin("WebKit built-in PDF", "internal-pdf-viewer", "Portable Document Format"),
+      ];
+      plugins.item = function (i) { return this[i] || null; };
+      plugins.namedItem = function (name) {
+        for (let i = 0; i < this.length; i++) if (this[i].name === name) return this[i];
+        return null;
+      };
+      plugins.refresh = function () {};
+      Object.defineProperty(Navigator.prototype, "plugins", {
+        get: function () { return plugins; },
+        configurable: true,
+      });
+      const mimeTypes = [{ type: "application/pdf", suffixes: "pdf", description: "Portable Document Format" }];
+      mimeTypes.item = function (i) { return this[i] || null; };
+      mimeTypes.namedItem = function (name) {
+        for (let i = 0; i < this.length; i++) if (this[i].type === name) return this[i];
+        return null;
+      };
+      Object.defineProperty(Navigator.prototype, "mimeTypes", {
+        get: function () { return mimeTypes; },
+        configurable: true,
+      });
+    }
   } catch (_) {}
 
   try {
@@ -866,6 +987,13 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
         if (q.includes("any-hover:hover") || q === "(hover:hover)" || q.endsWith("hover:hover)")) {
           return desktopMediaResult(query, true);
         }
+        // Parity with CDP Emulation.setEmulatedMedia (Firefox BiDi has no media override).
+        if (q.includes("prefers-color-scheme:dark")) {
+          return desktopMediaResult(query, true);
+        }
+        if (q.includes("prefers-color-scheme:light")) {
+          return desktopMediaResult(query, false);
+        }
         return originalMatchMedia(query);
       });
     }
@@ -894,136 +1022,12 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     });
   } catch (_) {}
 
-  const workerProfile = {
-    userAgent: P.userAgent,
-    platform: P.platform,
-    locale: P.locale,
-    hardwareConcurrency: P.hardwareConcurrency,
-    deviceMemory: P.deviceMemory,
-    maxTouchPoints: P.maxTouchPoints,
-    timezoneId: P.timezoneId,
-    webgl: {
-      vendor: (P.webgl && P.webgl.vendor) || "",
-      renderer: (P.webgl && P.webgl.renderer) || "",
-      maxTextureSize: (P.webgl && P.webgl.maxTextureSize) || 16384,
-    },
-    clientHints: P.clientHints || {},
-    injectChrome: false,
-  };
-  const workerBootstrap = [
-    "(function(){",
-    "\"use strict\";",
-    "var APPLIED=Symbol.for(\"bobby.fp.worker\");",
-    "if(globalThis[APPLIED])return;",
-    "Object.defineProperty(globalThis,APPLIED,{value:true,configurable:false,enumerable:false,writable:false});",
-    "const P=",
-  ].join("") + JSON.stringify(workerProfile) + ";" + [
-    "const UNMASKED_VENDOR_WEBGL=0x9245;",
-    "const UNMASKED_RENDERER_WEBGL=0x9246;",
-    "function patchNav(key,getFn){",
-    "try{Object.defineProperty(Navigator.prototype,key,{get:getFn,configurable:true});}catch(_){}",
-    "try{if(typeof navigator!==\"undefined\")Object.defineProperty(navigator,key,{get:getFn,configurable:true});}catch(_){}",
-    "}",
-    "patchNav(\"webdriver\",function webdriver(){return false;});",
-    "patchNav(\"userAgent\",function userAgent(){return P.userAgent;});",
-    "patchNav(\"platform\",function platform(){return P.platform;});",
-    "patchNav(\"language\",function language(){return P.locale;});",
-    "patchNav(\"languages\",function languages(){return Object.freeze([P.locale,P.locale.split(\"-\")[0]]);});",
-    "patchNav(\"hardwareConcurrency\",function hardwareConcurrency(){return P.hardwareConcurrency;});",
-    "patchNav(\"deviceMemory\",function deviceMemory(){return P.deviceMemory;});",
-    "patchNav(\"maxTouchPoints\",function maxTouchPoints(){return P.maxTouchPoints;});",
-    "try{",
-    "const hints=P.clientHints||{};",
-    "const brands=hints.brands||[];",
-    "const fullVersionList=hints.fullVersionList||[];",
-    "const uaData={",
-    "brands:brands.slice(),",
-    "mobile:!!hints.mobile,",
-    "platform:hints.platform||\"\",",
-    "getHighEntropyValues:function(hintsList){",
-    "const out={brands:brands.slice(),mobile:!!hints.mobile,platform:hints.platform||\"\"};",
-    "const wanted=Array.isArray(hintsList)?hintsList:[];",
-    "for(let i=0;i<wanted.length;i++){",
-    "const key=wanted[i];",
-    "if(key===\"architecture\")out.architecture=hints.architecture||\"\";",
-    "if(key===\"bitness\")out.bitness=hints.bitness||\"\";",
-    "if(key===\"model\")out.model=hints.model||\"\";",
-    "if(key===\"platformVersion\")out.platformVersion=hints.platformVersion||\"\";",
-    "if(key===\"uaFullVersion\"||key===\"fullVersion\")out.uaFullVersion=hints.fullVersion||\"\";",
-    "if(key===\"fullVersionList\")out.fullVersionList=fullVersionList.slice();",
-    "if(key===\"wow64\")out.wow64=false;",
-    "if(key===\"formFactors\")out.formFactors=[\"Desktop\"];",
-    "}",
-    "return Promise.resolve(out);",
-    "},",
-    "toJSON:function(){return{brands:brands.slice(),mobile:!!hints.mobile,platform:hints.platform||\"\"};},",
-    "};",
-    // Workers (esp. SharedWorker) often have no Navigator global — patch instance.
-    "try{if(typeof Navigator!==\"undefined\")Object.defineProperty(Navigator.prototype,\"userAgentData\",{get:function(){return uaData;},configurable:true});}catch(_){}",
-    "try{",
-    "const nav=typeof navigator!==\"undefined\"?navigator:null;",
-    "if(nav){",
-    "const nativeUad=nav.userAgentData;",
-    "try{delete nav.userAgentData;}catch(_){}",
-    "try{Object.defineProperty(nav,\"userAgentData\",{get:function(){return uaData;},configurable:true,enumerable:true});}catch(_){}",
-    "function patchUad(target){",
-    "if(!target)return;",
-    "try{Object.defineProperty(target,\"getHighEntropyValues\",{value:function(hintsList){return Promise.resolve(uaData.getHighEntropyValues(hintsList));},writable:true,configurable:true});}catch(_){}",
-    "try{target.getHighEntropyValues=function(hintsList){return Promise.resolve(uaData.getHighEntropyValues(hintsList));};}catch(_){}",
-    "try{Object.defineProperty(target,\"brands\",{get:function(){return brands.slice();},configurable:true});}catch(_){}",
-    "try{Object.defineProperty(target,\"platform\",{get:function(){return hints.platform||\"\";},configurable:true});}catch(_){}",
-    "try{Object.defineProperty(target,\"mobile\",{get:function(){return !!hints.mobile;},configurable:true});}catch(_){}",
-    "}",
-    "if(nav.userAgentData!==uaData){",
-    "patchUad(nativeUad);",
-    "try{patchUad(Object.getPrototypeOf(nativeUad));}catch(_){}",
-    "patchUad(nav.userAgentData);",
-    "try{patchUad(Object.getPrototypeOf(nav.userAgentData));}catch(_){}",
-    "}",
-    "}",
-    "}catch(_){}",
-    "}catch(_){}",
-    "try{",
-    "const tz=P.timezoneId;",
-    "if(tz&&typeof Intl!==\"undefined\"&&Intl.DateTimeFormat){",
-    "const OriginalDTF=Intl.DateTimeFormat;",
-    "Intl.DateTimeFormat=function(locales,options){",
-    "const opts=Object.assign({},options||{});",
-    "if(!opts.timeZone)opts.timeZone=tz;",
-    "return new OriginalDTF(locales,opts);",
-    "};",
-    "Intl.DateTimeFormat.prototype=OriginalDTF.prototype;",
-    "Intl.DateTimeFormat.supportedLocalesOf=OriginalDTF.supportedLocalesOf.bind(OriginalDTF);",
-    "}",
-    "}catch(_){}",
-    "function patchWebGl(proto){",
-    "if(!proto||!proto.getParameter)return;",
-    "const original=proto.getParameter;",
-    "const maxTex=(P.webgl&&P.webgl.maxTextureSize)||16384;",
-    "const MAX_TEXTURE_SIZE=proto.MAX_TEXTURE_SIZE||0x0D33;",
-    "const MAX_RENDERBUFFER_SIZE=proto.MAX_RENDERBUFFER_SIZE||0x84E8;",
-    "const MAX_VERTEX_ATTRIBS=proto.MAX_VERTEX_ATTRIBS||0x8869;",
-    "const MAX_VIEWPORT_DIMS=proto.MAX_VIEWPORT_DIMS||0x0D3A;",
-    "const ALIASED_LINE_WIDTH_RANGE=proto.ALIASED_LINE_WIDTH_RANGE||0x846E;",
-    "const ALIASED_POINT_SIZE_RANGE=proto.ALIASED_POINT_SIZE_RANGE||0x846D;",
-    "proto.getParameter=function getParameter(param){",
-    "if(param===UNMASKED_VENDOR_WEBGL)return P.webgl.vendor;",
-    "if(param===UNMASKED_RENDERER_WEBGL)return P.webgl.renderer;",
-    "if(param===MAX_TEXTURE_SIZE)return maxTex;",
-    "if(param===MAX_RENDERBUFFER_SIZE)return maxTex;",
-    "if(param===MAX_VERTEX_ATTRIBS)return 16;",
-    "if(param===MAX_VIEWPORT_DIMS)return new Int32Array([maxTex,maxTex]);",
-    "if(param===ALIASED_LINE_WIDTH_RANGE)return new Float32Array([1,1]);",
-    "if(param===ALIASED_POINT_SIZE_RANGE)return new Float32Array([1,1024]);",
-    "return original.apply(this,arguments);",
-    "};",
-    "}",
-    "try{",
-    "patchWebGl(typeof WebGLRenderingContext!==\"undefined\"&&WebGLRenderingContext.prototype);",
-    "if(typeof WebGL2RenderingContext!==\"undefined\")patchWebGl(WebGL2RenderingContext.prototype);",
-    "}catch(_){}",
-    "})();",
-  ].join("");
+  let _workerBootstrap = null;
+  function getWorkerBootstrap() {
+    if (_workerBootstrap !== null) return _workerBootstrap;
+    _workerBootstrap = __BOBBY_WORKER_BOOTSTRAP__;
+    return _workerBootstrap;
+  }
 
   function resolveUrl(scriptURL) {
     try { return new URL(scriptURL, location.href).href; } catch (_) { return String(scriptURL); }
@@ -1045,16 +1049,16 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     const isModule = options && options.type === "module";
     let body;
     if (isModule) {
-      body = workerBootstrap + "\nimport " + JSON.stringify(abs) + ";\n";
+      body = getWorkerBootstrap() + "\nimport " + JSON.stringify(abs) + ";\n";
     } else if (String(abs).indexOf("blob:") === 0) {
       // Blob sources are local — sync read is fine and keeps probe scripts exact.
       const inline = loadScriptSourceSync(abs);
       body = inline
-        ? workerBootstrap + "\n" + inline + "\n"
-        : workerBootstrap + "\ntry { importScripts(" + JSON.stringify(abs) + "); } catch (e) { throw e; }\n";
+        ? getWorkerBootstrap() + "\n" + inline + "\n"
+        : getWorkerBootstrap() + "\ntry { importScripts(" + JSON.stringify(abs) + "); } catch (e) { throw e; }\n";
     } else {
       // Avoid sync XHR on network URLs (main-thread stall on every Worker).
-      body = workerBootstrap + "\ntry { importScripts(" + JSON.stringify(abs) + "); } catch (e) { throw e; }\n";
+      body = getWorkerBootstrap() + "\ntry { importScripts(" + JSON.stringify(abs) + "); } catch (e) { throw e; }\n";
     }
     const blob = new Blob([body], { type: isModule ? "text/javascript" : "application/javascript" });
     return URL.createObjectURL(blob);
@@ -1121,9 +1125,158 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     } catch (_) {}
   }
 
-  try { deferWorkerWrap("Worker"); } catch (_) {}
-  try { deferWorkerWrap("SharedWorker"); } catch (_) {}
+  // Worker wrapping: blob+importScripts breaks Dedicated/Shared workers on Gecko
+  // (CreepJS then stalls in worker scope collection). Chromium tolerates the wrap;
+  // skip install on Gecko. Detect engine before UA spoof — InstallTrigger is Gecko-only.
+  const isGecko = typeof InstallTrigger !== "undefined";
+  if (!isGecko) {
+    try { deferWorkerWrap("Worker"); } catch (_) {}
+    try { deferWorkerWrap("SharedWorker"); } catch (_) {}
+  }
 })();"#;
+
+/// Collapse whitespace / line comments outside of string and regex literals.
+fn minify_js(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0usize;
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    let mut in_template = false;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut last_emit: Option<char> = None;
+
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        let next = bytes.get(i + 1).map(|&b| b as char);
+
+        if in_line_comment {
+            if c == '\n' {
+                in_line_comment = false;
+                // keep structural newline only when it may be needed
+                if matches!(last_emit, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+                {
+                    out.push('\n');
+                    last_emit = Some('\n');
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if c == '*' && next == Some('/') {
+                in_block_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_squote || in_dquote || in_template {
+            out.push(c);
+            last_emit = Some(c);
+            if c == '\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                last_emit = Some(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if in_squote && c == '\'' {
+                in_squote = false;
+            } else if in_dquote && c == '"' {
+                in_dquote = false;
+            } else if in_template && c == '`' {
+                in_template = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '/' && next == Some('/') {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        if c == '\'' {
+            in_squote = true;
+            out.push(c);
+            last_emit = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_dquote = true;
+            out.push(c);
+            last_emit = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == '`' {
+            in_template = true;
+            out.push(c);
+            last_emit = Some(c);
+            i += 1;
+            continue;
+        }
+
+        if c.is_ascii_whitespace() {
+            // Keep a single space only when both sides need a separator.
+            let prev = last_emit;
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j] as char).is_ascii_whitespace() {
+                j += 1;
+            }
+            let nxt = bytes.get(j).map(|&b| b as char);
+            let need = matches!(
+                (prev, nxt),
+                (Some(a), Some(b))
+                    if (a.is_ascii_alphanumeric() || a == '_' || a == '$' || a == '/')
+                        && (b.is_ascii_alphanumeric() || b == '_' || b == '$' || b == '/')
+            );
+            if need {
+                out.push(' ');
+                last_emit = Some(' ');
+            }
+            i = j;
+            continue;
+        }
+
+        out.push(c);
+        last_emit = Some(c);
+        i += 1;
+    }
+    out
+}
+
+fn worker_profile_json(session: &FingerprintSession) -> Result<String, FingerprintApplyError> {
+    serde_json::to_string(&serde_json::json!({
+        "userAgent": session.user_agent,
+        "platform": session.platform,
+        "locale": session.locale,
+        "hardwareConcurrency": session.hardware_concurrency,
+        "deviceMemory": session.device_memory,
+        "maxTouchPoints": session.max_touch_points,
+        "timezoneId": session.timezone_id,
+        "webgl": {
+            "vendor": session.webgl.vendor,
+            "renderer": session.webgl.renderer,
+            "maxTextureSize": session.webgl.max_texture_size,
+        },
+        "clientHints": session.client_hints,
+        "injectChrome": false,
+    }))
+    .map_err(|error| {
+        FingerprintApplyError::Host(format!("worker profile serialize failed: {error}"))
+    })
+}
 
 /// Build the document-start init script that patches fingerprint surfaces.
 pub fn build_init_script(session: &FingerprintSession) -> Result<String, FingerprintApplyError> {
@@ -1135,7 +1288,27 @@ pub fn build_init_script(session: &FingerprintSession) -> Result<String, Fingerp
             "init script template missing profile placeholder".into(),
         ));
     }
-    Ok(INIT_SCRIPT_TEMPLATE.replace(PROFILE_PLACEHOLDER, &profile))
+    if !INIT_SCRIPT_TEMPLATE.contains(WORKER_BOOTSTRAP_PLACEHOLDER) {
+        return Err(FingerprintApplyError::Host(
+            "init script template missing worker bootstrap placeholder".into(),
+        ));
+    }
+    if !WORKER_BOOTSTRAP_TEMPLATE.contains(WORKER_PROFILE_PLACEHOLDER) {
+        return Err(FingerprintApplyError::Host(
+            "worker bootstrap template missing profile placeholder".into(),
+        ));
+    }
+
+    let worker_profile = worker_profile_json(session)?;
+    let worker = WORKER_BOOTSTRAP_TEMPLATE.replace(WORKER_PROFILE_PLACEHOLDER, &worker_profile);
+    let worker_literal = serde_json::to_string(&minify_js(&worker)).map_err(|error| {
+        FingerprintApplyError::Host(format!("worker bootstrap stringify failed: {error}"))
+    })?;
+
+    let script = INIT_SCRIPT_TEMPLATE
+        .replace(PROFILE_PLACEHOLDER, &profile)
+        .replace(WORKER_BOOTSTRAP_PLACEHOLDER, &worker_literal);
+    Ok(minify_js(&script))
 }
 
 /// Probe script that returns observed fingerprint signals for conformance tests.
@@ -1342,12 +1515,10 @@ pub fn build_collector_probe_script() -> String {
 
   let toStringOk = false;
   try {
-    const desc = Object.getOwnPropertyDescriptor(Navigator.prototype, "webdriver");
-    if (desc && desc.get) {
-      toStringOk = Function.prototype.toString.call(desc.get).indexOf("[native code]") >= 0;
-    }
+    // Global Function.prototype.toString must stay native (no cloak).
+    toStringOk = Function.prototype.toString.toString().indexOf("[native code]") >= 0;
   } catch (_) {}
-  check("toStringNativeWebdriver", toStringOk);
+  check("toStringNativeProto", toStringOk);
 
   let vendorOk = true;
   try {
@@ -1609,8 +1780,8 @@ mod tests {
         let session = crate::create_session(&FingerprintConfig::default().with_session_seed(7));
         let script = build_init_script(&session).unwrap();
         assert!(
-            script.len() < 55_000,
-            "init script grew to {} bytes (budget 55k)",
+            script.len() < 40_000,
+            "init script grew to {} bytes (budget 40k)",
             script.len()
         );
     }
@@ -1624,5 +1795,97 @@ mod tests {
         let encoded = &ts[start..end];
         let decoded: String = serde_json::from_str(encoded).expect("template JSON string");
         assert_eq!(decoded, INIT_SCRIPT_TEMPLATE);
+
+        let wmarker = "export const WORKER_BOOTSTRAP_TEMPLATE = ";
+        let wstart = ts.find(wmarker).expect("worker template export") + wmarker.len();
+        let wend = ts[wstart..]
+            .find(";\n")
+            .expect("worker template terminator")
+            + wstart;
+        let wencoded = &ts[wstart..wend];
+        let wdecoded: String = serde_json::from_str(wencoded).expect("worker template JSON string");
+        assert_eq!(wdecoded.trim(), WORKER_BOOTSTRAP_TEMPLATE.trim());
+    }
+
+    #[test]
+    fn placeholders_present_in_templates() {
+        assert!(INIT_SCRIPT_TEMPLATE.contains(WORKER_BOOTSTRAP_PLACEHOLDER));
+        assert!(WORKER_BOOTSTRAP_TEMPLATE.contains(WORKER_PROFILE_PLACEHOLDER));
+        assert!(INIT_SCRIPT_TEMPLATE.contains("getWorkerBootstrap"));
+    }
+
+    #[test]
+    fn anti_detect_contracts_in_emitted_script() {
+        let win = crate::create_session(
+            &FingerprintConfig::default()
+                .with_session_seed(11)
+                .with_platform("Win32")
+                .with_inject_chrome(true),
+        );
+        let win_script = build_init_script(&win).unwrap();
+        assert!(win.platform == "Win32");
+        assert!(win_script.contains("Win32") || win_script.contains("\"platform\":\"Win32\""));
+        // Conditional webdriver — Proxy native getter (CreepJS lieProps / webDriverIsOn).
+        assert!(INIT_SCRIPT_TEMPLATE.contains("navigator.webdriver === true"));
+        assert!(INIT_SCRIPT_TEMPLATE.contains("new Proxy(nativeGet"));
+        assert!(INIT_SCRIPT_TEMPLATE.contains("target.apply(thisArg, args)"));
+        // No global Function.prototype.toString cloak (CreepJS hasToStringProxy).
+        assert!(!INIT_SCRIPT_TEMPLATE.contains("Function.prototype.toString ="));
+        assert!(INIT_SCRIPT_TEMPLATE.contains("function cloak(fn) { return fn; }"));
+        // No plain false→false webdriver redefine (detected as Navigator.webdriver lie).
+        assert!(!INIT_SCRIPT_TEMPLATE.contains("function webdriver() { return false; }"));
+        // Plugins only when empty.
+        assert!(INIT_SCRIPT_TEMPLATE.contains("nativePluginCount"));
+        // Windows platform lean + system fonts.
+        assert!(INIT_SCRIPT_TEMPLATE.contains("delete window.BarcodeDetector"));
+        assert!(INIT_SCRIPT_TEMPLATE.contains("Segoe UI"));
+        assert!(INIT_SCRIPT_TEMPLATE.contains("message-box"));
+        assert!(
+            INIT_SCRIPT_TEMPLATE.contains("FONT_LOAD_TIMEOUT_MS")
+                && INIT_SCRIPT_TEMPLATE.contains("raceFontLoad"),
+            "FontFace.load must race a timeout — Firefox hangs on missing local() fonts"
+        );
+        assert!(
+            INIT_SCRIPT_TEMPLATE.contains(r#"typeof InstallTrigger === "undefined""#),
+            "getComputedStyle Proxy must be gated off Gecko via InstallTrigger"
+        );
+        assert!(
+            INIT_SCRIPT_TEMPLATE.contains("rewriteSystemFontStyleValue")
+                && INIT_SCRIPT_TEMPLATE.contains("font: 11px Tahoma"),
+            "Gecko must rewrite system UI font style writes to Tahoma (Windows GeckoFonts)"
+        );
+        // Color scheme via matchMedia (Firefox lacks CDP setEmulatedMedia).
+        assert!(INIT_SCRIPT_TEMPLATE.contains("prefers-color-scheme:dark"));
+        assert!(INIT_SCRIPT_TEMPLATE.contains("prefers-color-scheme:light"));
+        // Lazy worker bootstrap injection.
+        assert!(!win_script.contains(WORKER_BOOTSTRAP_PLACEHOLDER));
+        assert!(win_script.contains("getWorkerBootstrap"));
+        assert!(WORKER_BOOTSTRAP_TEMPLATE.contains("navigator.webdriver===true"));
+        assert!(WORKER_BOOTSTRAP_TEMPLATE.contains("new Proxy(nativeGet"));
+        // Object-literal property must not end with `;` (Unexpected token ';' in workers).
+        assert!(!WORKER_BOOTSTRAP_TEMPLATE.contains("enumerable:!!(desc&&desc.enumerable);"));
+
+        let mac = crate::create_session(
+            &FingerprintConfig::default()
+                .with_session_seed(12)
+                .with_platform("MacIntel")
+                .with_inject_chrome(false),
+        );
+        assert_eq!(mac.platform, "MacIntel");
+        assert_eq!(mac.client_hints.platform, "macOS");
+        let mac_script = build_init_script(&mac).unwrap();
+        assert!(mac_script.contains("MacIntel") || mac_script.contains("macOS"));
+        // Template still carries Win persona gates; runtime uses profile platform.
+        assert!(mac_script.contains("BarcodeDetector"));
+        assert!(mac_script.contains("Segoe UI"));
+    }
+
+    #[test]
+    fn collector_probe_locks_tostring_and_webdriver_contracts() {
+        let probe = build_collector_probe_script();
+        assert!(probe.contains("toStringNativeProto"));
+        assert!(probe.contains("webdriverFalse"));
+        assert!(probe.contains("Function.prototype.toString.toString()"));
+        assert!(!probe.contains("toStringNativeWebdriver"));
     }
 }

@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use chromiumoxide::cdp::browser_protocol::emulation::{
-    SetDeviceMetricsOverrideParams, SetLocaleOverrideParams, SetTimezoneOverrideParams,
-    SetTouchEmulationEnabledParams, UserAgentBrandVersion, UserAgentMetadata,
+    MediaFeature, SetDeviceMetricsOverrideParams, SetLocaleOverrideParams,
+    SetTimezoneOverrideParams, SetTouchEmulationEnabledParams, UserAgentBrandVersion,
+    UserAgentMetadata,
 };
 use chromiumoxide::types::MethodId;
 use chromiumoxide::{Command, Method, Page};
@@ -123,18 +124,21 @@ impl FingerprintHost for ChromiumPageHost<'_> {
 
         // Independent overrides can run concurrently; init script stays last so
         // document-start injection sees the final UA/metrics environment.
-        let (r_emu, r_net, r_locale, r_tz, r_metrics) = tokio::join!(
+        let (r_emu, r_net, r_locale, r_tz, r_metrics, r_media) = tokio::join!(
             self.page.execute(emulation_ua),
             self.page.execute(network_ua),
             self.page.emulate_locale(locale),
             self.page.emulate_timezone(timezone),
             self.page.execute(metrics),
+            self.page
+                .emulate_media_features(vec![MediaFeature::new("prefers-color-scheme", "dark",)]),
         );
         r_emu.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
         r_net.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
         r_locale.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
         r_tz.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
         r_metrics.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+        r_media.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
 
         if let Some(touch) = touch {
             self.page

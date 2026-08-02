@@ -7,6 +7,8 @@ import {
   FINGERPRINT_OWNER_KEY,
   FINGERPRINT_PROFILE_KEY,
   PROFILE_PLACEHOLDER,
+  WORKER_BOOTSTRAP_PLACEHOLDER,
+  WORKER_PROFILE_PLACEHOLDER,
   buildInitScript,
   claimFingerprintHostOwnership,
   getFingerprintEnabled,
@@ -94,6 +96,35 @@ test("buildInitScript embeds profile into shared template", () => {
   assert.ok(script.includes('Symbol.for("bobby.fp.applied")'));
   assert.ok(!script.includes("__bobbyFingerprintApplied"));
   assert.equal(DEFAULT_FINGERPRINT_PROFILE.injectChrome, false);
+});
+
+test("buildInitScript minifies and injects worker bootstrap without placeholders", () => {
+  const script = buildInitScript(DEFAULT_FINGERPRINT_PROFILE);
+  assert.ok(!script.includes(WORKER_BOOTSTRAP_PLACEHOLDER));
+  assert.ok(!script.includes(WORKER_PROFILE_PLACEHOLDER));
+  assert.ok(script.includes("getWorkerBootstrap"));
+  assert.ok(script.includes("bobby.fp.worker"));
+  assert.ok(script.length < 40_000, `script grew to ${script.length} bytes (budget 40k)`);
+  // Anti-detect contracts mirrored from Rust template.
+  assert.ok(script.includes("BarcodeDetector"));
+  assert.ok(script.includes("Segoe UI"));
+  assert.ok(!script.includes("Function.prototype.toString="));
+  assert.ok(script.includes("nativePluginCount") || script.includes("nativePluginCount==="));
+});
+
+test("buildInitScript windows persona keeps platform gates", () => {
+  const profile = {
+    ...DEFAULT_FINGERPRINT_PROFILE,
+    platform: "Win32",
+    clientHints: {
+      ...DEFAULT_FINGERPRINT_PROFILE.clientHints,
+      platform: "Windows",
+    },
+  };
+  const script = buildInitScript(profile);
+  assert.ok(script.includes("Win32") || script.includes('"platform":"Win32"'));
+  assert.ok(script.includes("BarcodeDetector"));
+  assert.ok(script.includes("Segoe UI"));
 });
 
 test("syncFingerprintRegistration registers and clears", async () => {

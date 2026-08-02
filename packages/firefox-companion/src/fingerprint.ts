@@ -4,9 +4,18 @@ import { DEFAULT_FINGERPRINT_PROFILE as DEFAULT_PROFILE_RAW } from "./default-fi
 import {
   INIT_SCRIPT_TEMPLATE,
   PROFILE_PLACEHOLDER,
+  WORKER_BOOTSTRAP_PLACEHOLDER,
+  WORKER_BOOTSTRAP_TEMPLATE,
+  WORKER_PROFILE_PLACEHOLDER,
 } from "./init-script-template.js";
 
-export { INIT_SCRIPT_TEMPLATE, PROFILE_PLACEHOLDER };
+export {
+  INIT_SCRIPT_TEMPLATE,
+  PROFILE_PLACEHOLDER,
+  WORKER_BOOTSTRAP_PLACEHOLDER,
+  WORKER_BOOTSTRAP_TEMPLATE,
+  WORKER_PROFILE_PLACEHOLDER,
+};
 
 export const FINGERPRINT_ENABLED_KEY = "fingerprintEnabled";
 export const FINGERPRINT_PROFILE_KEY = "fingerprintProfile";
@@ -124,10 +133,153 @@ export async function setFingerprintProfile(
   await storage.local.set({ [FINGERPRINT_PROFILE_KEY]: profile });
 }
 
+/** Collapse whitespace / line comments outside of string literals. */
+function minifyJs(source: string): string {
+  let out = "";
+  let i = 0;
+  let inSquote = false;
+  let inDquote = false;
+  let inTemplate = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let lastEmit: string | null = null;
+
+  while (i < source.length) {
+    const c = source[i]!;
+    const next = source[i + 1];
+
+    if (inLineComment) {
+      if (c === "\n") {
+        inLineComment = false;
+        if (lastEmit && /[A-Za-z0-9_$]/.test(lastEmit)) {
+          out += "\n";
+          lastEmit = "\n";
+        }
+      }
+      i += 1;
+      continue;
+    }
+    if (inBlockComment) {
+      if (c === "*" && next === "/") {
+        inBlockComment = false;
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+
+    if (inSquote || inDquote || inTemplate) {
+      out += c;
+      lastEmit = c;
+      if (c === "\\" && i + 1 < source.length) {
+        const escaped = source[i + 1]!;
+        out += escaped;
+        lastEmit = escaped;
+        i += 2;
+        continue;
+      }
+      if (inSquote && c === "'") inSquote = false;
+      else if (inDquote && c === '"') inDquote = false;
+      else if (inTemplate && c === "`") inTemplate = false;
+      i += 1;
+      continue;
+    }
+
+    if (c === "/" && next === "/") {
+      inLineComment = true;
+      i += 2;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (c === "'") {
+      inSquote = true;
+      out += c;
+      lastEmit = c;
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      inDquote = true;
+      out += c;
+      lastEmit = c;
+      i += 1;
+      continue;
+    }
+    if (c === "`") {
+      inTemplate = true;
+      out += c;
+      lastEmit = c;
+      i += 1;
+      continue;
+    }
+
+    if (/\s/.test(c)) {
+      let j = i + 1;
+      while (j < source.length && /\s/.test(source[j]!)) j += 1;
+      const nxt = source[j];
+      const need =
+        !!lastEmit &&
+        nxt !== undefined &&
+        /[A-Za-z0-9_$/]/.test(lastEmit) &&
+        /[A-Za-z0-9_$/]/.test(nxt);
+      if (need) {
+        out += " ";
+        lastEmit = " ";
+      }
+      i = j;
+      continue;
+    }
+
+    out += c;
+    lastEmit = c;
+    i += 1;
+  }
+  return out;
+}
+
 /** Embed a profile into the shared Rust/TS init-script template. */
 export function buildInitScript(profile: FingerprintProfile): string {
   if (!INIT_SCRIPT_TEMPLATE.includes(PROFILE_PLACEHOLDER)) {
     throw new Error("init script template missing profile placeholder");
   }
-  return INIT_SCRIPT_TEMPLATE.replace(PROFILE_PLACEHOLDER, JSON.stringify(profile));
+  if (!INIT_SCRIPT_TEMPLATE.includes(WORKER_BOOTSTRAP_PLACEHOLDER)) {
+    throw new Error("init script template missing worker bootstrap placeholder");
+  }
+  if (!WORKER_BOOTSTRAP_TEMPLATE.includes(WORKER_PROFILE_PLACEHOLDER)) {
+    throw new Error("worker bootstrap template missing profile placeholder");
+  }
+
+  const workerProfile = {
+    userAgent: profile.userAgent,
+    platform: profile.platform,
+    locale: profile.locale,
+    hardwareConcurrency: profile.hardwareConcurrency,
+    deviceMemory: profile.deviceMemory,
+    maxTouchPoints: profile.maxTouchPoints,
+    timezoneId: profile.timezoneId,
+    webgl: {
+      vendor: profile.webgl?.vendor || "",
+      renderer: profile.webgl?.renderer || "",
+      maxTextureSize: profile.webgl?.maxTextureSize || 16384,
+    },
+    clientHints: profile.clientHints || {},
+    injectChrome: false,
+  };
+  const worker = minifyJs(
+    WORKER_BOOTSTRAP_TEMPLATE.replace(
+      WORKER_PROFILE_PLACEHOLDER,
+      JSON.stringify(workerProfile),
+    ),
+  );
+  const script = INIT_SCRIPT_TEMPLATE.replace(
+    PROFILE_PLACEHOLDER,
+    JSON.stringify(profile),
+  ).replace(WORKER_BOOTSTRAP_PLACEHOLDER, JSON.stringify(worker));
+  return minifyJs(script);
 }
