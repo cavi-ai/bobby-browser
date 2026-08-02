@@ -20,22 +20,24 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "cookie_get"
     );
     let destructive = matches!(name, "session_close" | "page_close" | "cookie_delete");
-    let idempotent = matches!(
+    // `idempotentHint` per MCP is unconditional: "calling the tool repeatedly
+    // with the same arguments will have no additional effect." An optional
+    // `idempotencyKey` does not establish that — without a caller-supplied
+    // key, `session_create` mints a second session, `command_execute` and
+    // every `intent_*` tool (e.g. `intent_fill`, which appends rather than
+    // replaces) have no dedupe at all. Only two tools converge regardless of
+    // any key: `checkpoint_save` (the store overwrites by `workflow_id`) and
+    // `emulate` (sets viewport/geolocation to fixed values).
+    let idempotent = matches!(name, "checkpoint_save" | "emulate");
+    // `command_execute` accepts an arbitrary `RuntimeCommand`, which can be
+    // `Navigate` or `DownloadUrl` — the same commands that earn the
+    // standalone tools their `openWorldHint`. A host gating "does this reach
+    // the network" on this flag would otherwise miss envelope-mediated
+    // navigation entirely.
+    let open_world = matches!(
         name,
-        "session_create"
-            | "checkpoint_save"
-            | "command_execute"
-            | "emulate"
-            | "intent_locate"
-            | "intent_fill"
-            | "intent_complete_form"
-            | "intent_submit_and_verify"
-            | "intent_extract"
-            | "intent_wait_for_state"
-            | "intent_follow"
-            | "intent_dismiss_obstruction"
+        "navigate" | "download_url" | "extract_structured" | "command_execute"
     );
-    let open_world = matches!(name, "navigate" | "download_url" | "extract_structured");
     json!({
         "readOnlyHint": read_only,
         "destructiveHint": destructive,
