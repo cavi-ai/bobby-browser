@@ -15,12 +15,12 @@ use config::{
     AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
     FirefoxCompanionConfig,
 };
+use fingerprinting::build_worker_probe_script;
 use firefox_companion::BidiClient;
 use release_gates::{NativeBrowserOperationProof, NativeBrowserProof};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use fingerprinting::build_worker_probe_script;
 use types::{
     ClickCommand, CommandError, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
     InspectCommand, NavigateCommand, PageId, SessionId, TypeTextCommand, WaitUntil,
@@ -34,7 +34,27 @@ const PROOF_HTML: &str = r#"<!doctype html><title>Native Firefox Proof</title><l
 
 const BEHAVIORAL_PROBE_HTML: &str = r#"<!doctype html>
 <html>
-<head><title>Behavioral Firefox Probe</title></head>
+<head>
+  <title>Behavioral Firefox Probe</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      font: 16px/1.4 system-ui, sans-serif;
+      background: #f4f4f1;
+      color: #1a1a1a;
+    }
+    main {
+      width: min(420px, 90vw);
+      padding: 24px;
+    }
+    label { display: block; margin-bottom: 6px; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 12px; }
+    button { padding: 8px 16px; }
+    #probe-report { margin-top: 16px; font-size: 12px; white-space: pre-wrap; }
+  </style>
+</head>
 <body>
   <main>
     <label for="name">Name</label>
@@ -820,30 +840,15 @@ async fn run_firefox_collector_probes(
                 error.message
             ));
         }
-        let mut report = firefox_eval_json(
-            worker,
-            &page_id,
-            FIREFOX_CREEPJS_PROBE,
-            15_000,
-        )
-        .await?;
-        let worker_probe = match firefox_eval_json(
-            worker,
-            &page_id,
-            &build_worker_probe_script(),
-            15_000,
-        )
-        .await
-        {
-            Ok(probe) => probe,
-            Err(error) => {
-                soft_findings.push(format!(
-                    "creepjs: worker probe failed ({})",
-                    error.message
-                ));
-                serde_json::json!({"error": error.message})
-            }
-        };
+        let mut report = firefox_eval_json(worker, &page_id, FIREFOX_CREEPJS_PROBE, 15_000).await?;
+        let worker_probe =
+            match firefox_eval_json(worker, &page_id, &build_worker_probe_script(), 15_000).await {
+                Ok(probe) => probe,
+                Err(error) => {
+                    soft_findings.push(format!("creepjs: worker probe failed ({})", error.message));
+                    serde_json::json!({"error": error.message})
+                }
+            };
         eprintln!(
             "=== [Firefox] CreepJS worker probe ===\n{}",
             serde_json::to_string_pretty(&worker_probe).unwrap_or_default()
@@ -953,9 +958,7 @@ async fn run_firefox_collector_probes(
     let creepjs = reports
         .iter()
         .find(|r| r["site"] == "creepjs")
-        .ok_or_else(|| {
-            workflow_error(ErrorCode::VerificationFailed, "creepjs report missing")
-        })?;
+        .ok_or_else(|| workflow_error(ErrorCode::VerificationFailed, "creepjs report missing"))?;
     if creepjs.pointer("/headlessFlags/webDriverIsOn") != Some(&serde_json::Value::Bool(false)) {
         return Err(workflow_error(
             ErrorCode::VerificationFailed,
@@ -967,9 +970,7 @@ async fn run_firefox_collector_probes(
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
-        soft_findings.push(
-            "creepjs: webdriver getter not native-looking after Proxy patch".into(),
-        );
+        soft_findings.push("creepjs: webdriver getter not native-looking after Proxy patch".into());
     }
     if creepjs.pointer("/headlessFlags/hasHeadlessUA") != Some(&serde_json::Value::Bool(false)) {
         return Err(workflow_error(
@@ -977,8 +978,7 @@ async fn run_firefox_collector_probes(
             "CreepJS hasHeadlessUA must be false",
         ));
     }
-    if creepjs.pointer("/stealthFlags/hasToStringProxy") != Some(&serde_json::Value::Bool(false))
-    {
+    if creepjs.pointer("/stealthFlags/hasToStringProxy") != Some(&serde_json::Value::Bool(false)) {
         return Err(workflow_error(
             ErrorCode::VerificationFailed,
             "CreepJS hasToStringProxy must be false",
@@ -1004,11 +1004,7 @@ async fn run_firefox_collector_probes(
     }
     let system_fonts = creepjs["systemFonts"]
         .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
     eprintln!("=== [Firefox] CreepJS systemFonts probe ===\n{system_fonts:?}");
     if !system_fonts.iter().any(|f| {
@@ -1190,14 +1186,9 @@ async fn firefox_wait_for_body(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut last_len = 0usize;
     loop {
-        let ready = firefox_eval_json(
-            worker,
-            page_id,
-            &format!("!!({predicate})"),
-            5_000,
-        )
-        .await
-        .unwrap_or(serde_json::Value::Bool(false));
+        let ready = firefox_eval_json(worker, page_id, &format!("!!({predicate})"), 5_000)
+            .await
+            .unwrap_or(serde_json::Value::Bool(false));
         if ready.as_bool() == Some(true) {
             return Ok(());
         }
@@ -1455,10 +1446,8 @@ pub fn ensure_firefox_fingerprint_prefs(profile: &Path) -> Result<(), CommandErr
         file.write_all(b"\n").map_err(io_error)?;
     }
     if existing.is_empty() {
-        file.write_all(
-            b"// Bobby Browser fingerprint dogfood prefs (auto-appended)\n",
-        )
-        .map_err(io_error)?;
+        file.write_all(b"// Bobby Browser fingerprint dogfood prefs (auto-appended)\n")
+            .map_err(io_error)?;
     }
     file.write_all(additions.as_bytes()).map_err(io_error)?;
     file.write_all(b"\n").map_err(io_error)?;

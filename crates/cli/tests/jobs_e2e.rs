@@ -1,10 +1,6 @@
 //! CLI + live broker e2e for `bobby jobs submit|status|cancel`.
 
-use std::{
-    process::Command,
-    sync::Arc,
-    time::Duration,
-};
+use std::{process::Command, sync::Arc, time::Duration};
 
 use broker::{serve_listener_graceful, testing::app_with_admin, RejectionWorkerStats};
 use tokio::{net::TcpListener, sync::Notify};
@@ -246,7 +242,9 @@ async fn cli_status_unknown_job_exits_nonzero() {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        combined.contains("jobs request failed") || combined.contains("404") || !combined.is_empty(),
+        combined.contains("jobs request failed")
+            || combined.contains("404")
+            || !combined.is_empty(),
         "expected error output on unknown job, got empty"
     );
     // Must be a fast HTTP failure, not a client timeout.
