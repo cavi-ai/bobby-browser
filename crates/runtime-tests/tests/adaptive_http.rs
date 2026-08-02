@@ -384,9 +384,8 @@ async fn adaptive_http() {
     )
     .await;
     let direct_text = inspection_text(&recovered);
-    let mut chromium_pairs = inspection_text(&recovered_chromium)
-        .split("; ")
-        .collect::<Vec<_>>();
+    let chromium_text = inspection_text(&recovered_chromium);
+    let mut chromium_pairs = chromium_text.split("; ").collect::<Vec<_>>();
     chromium_pairs.sort_unstable();
     assert!(
         chromium_pairs
