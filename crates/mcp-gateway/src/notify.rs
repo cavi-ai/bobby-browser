@@ -81,19 +81,31 @@ impl NotificationSink {
         }
     }
 
-    /// Opens a subscription. Each subscription carries its own event cursor,
-    /// starting at the oldest event still retained for this principal — the
-    /// same starting point `GET /v1/events?stream=1&after=0` gives an HTTP
-    /// client, and the only one available to a transport with no way to name a
-    /// resume cursor.
-    pub fn subscribe(&self) -> NotificationStream {
+    /// Opens a subscription, positioned at the store's tail: it delivers every
+    /// event appended for this principal from this moment on, and no history.
+    ///
+    /// Starting at [`EventCursor::ZERO`] instead is not a matter of taste, it is
+    /// broken. `EventStore`'s `HistoryLost` test compares a reader's cursor
+    /// against the *store-wide* front of retention, and the log is shared by
+    /// every principal — so after `max_event_retention` appends across all of
+    /// them (16,384 by default) a cursor-`ZERO` subscription gaps on its very
+    /// first read. Since MCP gives the client no way to name a resume cursor,
+    /// reconnecting reproduces it identically: on any broker that has been up
+    /// long enough, every client would get one gap frame and never a runtime
+    /// event again.
+    ///
+    /// Seeding here rather than on the first `recv` is deliberate: an event
+    /// appended between `subscribe` and the first `recv` must still be
+    /// delivered.
+    pub async fn subscribe(&self) -> NotificationStream {
         NotificationStream {
             control: self.control.subscribe(),
+            cursor: self.events.latest_cursor().await,
             events: self.events.clone(),
             principal: self.principal.clone(),
-            cursor: EventCursor::ZERO,
             queued: VecDeque::new(),
             events_open: true,
+            reseek: false,
             control_open: true,
         }
     }
@@ -119,6 +131,9 @@ pub struct NotificationStream {
     cursor: EventCursor,
     queued: VecDeque<Value>,
     events_open: bool,
+    /// Set when a gap has been reported and the cursor must be re-seeded from
+    /// the store's tail before the next read.
+    reseek: bool,
     control_open: bool,
 }
 
@@ -145,6 +160,15 @@ impl NotificationStream {
     /// keep-alive `timeout` — loses nothing.
     pub async fn recv(&mut self) -> Option<Value> {
         loop {
+            // Ahead of the queue drain, not after it: the gap frame queued below
+            // is returned on the very next turn of this loop, and anything
+            // appended between that return and the following `recv` would be
+            // skipped if the cursor were still stale. Re-seeking here keeps the
+            // whole gap-and-resume sequence inside one `recv` call.
+            if self.reseek {
+                self.cursor = self.events.latest_cursor().await;
+                self.reseek = false;
+            }
             if let Some(frame) = self.queued.pop_front() {
                 return Some(frame);
             }
@@ -159,6 +183,7 @@ impl NotificationStream {
                 cursor,
                 queued,
                 events_open,
+                reseek,
                 control_open,
             } = self;
             if *events_open {
@@ -175,18 +200,21 @@ impl NotificationStream {
                                 }
                             }
                             Err(gap) => {
-                                // Retention passed this subscriber. Matching
-                                // `GET /v1/events?stream=1`, the gap is
-                                // terminal for the event stream: the client is
-                                // told its view is incomplete and recovers with
-                                // the cursor-addressed `events_read` tool
-                                // rather than being fed a silently truncated
-                                // tail. Control frames keep flowing, because
-                                // unlike an SSE event stream this channel is
-                                // also the MCP session's only server-to-client
-                                // path and closing it would strand the client.
+                                // Retention passed this subscriber. Report it —
+                                // the client must never silently miss events —
+                                // and then re-arm from the store's tail.
+                                //
+                                // Latching the stream closed here instead would
+                                // be terminal for the *process* over stdio:
+                                // `Server::serve` subscribes once, outside its
+                                // loop, and a stdio session cannot reconnect
+                                // the way an HTTP client re-issues `GET
+                                // /v1/mcp`. One transient gap would silence
+                                // notifications for the rest of the session.
+                                // The contract is "you were told what you
+                                // lost", not "you get nothing further".
                                 queued.push_back(gap_frame(*cursor, gap));
-                                *events_open = false;
+                                *reseek = true;
                             }
                         }
                     }

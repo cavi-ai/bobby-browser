@@ -334,7 +334,7 @@ impl Server {
         let output = Arc::new(Mutex::new(output));
         let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> =
             FuturesUnordered::new();
-        let mut notifications = self.notifications.subscribe();
+        let mut notifications = self.notifications.subscribe().await;
         let mut notifications_open = true;
         // Notification writes are queued rather than awaited inline, so a client
         // that has stopped draining stdout cannot stall the read loop and

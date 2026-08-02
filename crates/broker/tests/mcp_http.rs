@@ -349,26 +349,20 @@ async fn checkpoint_save_resolves_evidence_refs_over_the_broker_http_transport()
 async fn app_with_events(
     events: interface_core::EventStore,
     principals: &[(uuid::Uuid, &[types::Capability])],
-) -> (axum::Router, Vec<String>) {
-    let authority = interface_core::AuthorityStore::in_memory();
+) -> (
+    axum::Router,
+    Vec<String>,
+    std::sync::Arc<interface_core::AuthorityStore>,
+) {
+    let authority = std::sync::Arc::new(interface_core::AuthorityStore::in_memory());
     let mut bearers = Vec::new();
     for (principal, capabilities) in principals {
-        bearers.push(
-            authority
-                .issue(
-                    types::PrincipalId::from_uuid(*principal),
-                    capabilities.to_vec(),
-                    chrono::Utc::now() + chrono::Duration::minutes(5),
-                )
-                .await
-                .expect("bearer issues")
-                .expose_once(),
-        );
+        bearers.push(issue_for(&authority, *principal, capabilities).await);
     }
     let runtime = sdk_core::RuntimeService::default();
     let app = broker::router(
         broker::AppState::new(
-            std::sync::Arc::new(authority),
+            authority.clone(),
             move |handle| {
                 std::sync::Arc::new(sdk_core::AuthenticatedRuntime::new(runtime.clone(), handle))
                     as std::sync::Arc<dyn interface_core::RuntimeInterface>
@@ -377,7 +371,23 @@ async fn app_with_events(
         )
         .with_boundaries(events, broker::ArtifactCatalog::default()),
     );
-    (app, bearers)
+    (app, bearers, authority)
+}
+
+async fn issue_for(
+    authority: &interface_core::AuthorityStore,
+    principal: uuid::Uuid,
+    capabilities: &[types::Capability],
+) -> String {
+    authority
+        .issue(
+            types::PrincipalId::from_uuid(principal),
+            capabilities.to_vec(),
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )
+        .await
+        .expect("bearer issues")
+        .expose_once()
 }
 
 async fn open_mcp_stream(app: &axum::Router, bearer: &str) -> axum::body::BodyDataStream {
@@ -425,7 +435,7 @@ async fn next_mcp_frame(
 #[tokio::test]
 async fn the_mcp_get_stream_pushes_the_principals_runtime_events() {
     let events = interface_core::EventStore::new(64);
-    let (app, bearers) = app_with_events(
+    let (app, bearers, _authority) = app_with_events(
         events.clone(),
         &[(PRINCIPAL_A, &[types::Capability::SessionRead])],
     )
@@ -452,12 +462,59 @@ async fn the_mcp_get_stream_pushes_the_principals_runtime_events() {
     assert_eq!(frame["params"]["payload"]["commandId"], "c-1", "{frame}");
 }
 
+/// CRITICAL regression: a subscription must start at the store's tail. The
+/// retained log is shared by every principal and `HistoryLost` is judged against
+/// its store-wide front, so a cursor-0 subscription gaps on its first read as
+/// soon as a broker has served `max_event_retention` appends — one gap frame per
+/// client and never a runtime event again, unrecoverable because MCP gives the
+/// client no way to name a resume cursor.
+#[tokio::test]
+async fn an_mcp_stream_opened_after_retention_wrapped_still_receives_new_events() {
+    let events = interface_core::EventStore::new(2);
+    let (app, bearers, _authority) = app_with_events(
+        events.clone(),
+        &[
+            (PRINCIPAL_A, &[types::Capability::SessionRead]),
+            (PRINCIPAL_B, &[types::Capability::SessionRead]),
+        ],
+    )
+    .await;
+
+    // Another principal's traffic wraps retention, as a live broker's does.
+    for index in 0..5 {
+        events
+            .append_for(
+                types::PrincipalId::from_uuid(PRINCIPAL_B),
+                interface_core::Event::new("command.outcome", json!({"index": index})),
+            )
+            .await;
+    }
+
+    let mut stream = open_mcp_stream(&app, &bearers[0]).await;
+    events
+        .append_for(
+            types::PrincipalId::from_uuid(PRINCIPAL_A),
+            interface_core::Event::new("command.outcome", json!({"commandId": "c-1"})),
+        )
+        .await;
+
+    let frame = next_mcp_frame(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("a frame arrives");
+    assert_eq!(
+        frame["params"]["kind"], "command.outcome",
+        "a stream opened against a wrapped store must deliver new events, not a \
+         terminal gap: {frame}"
+    );
+    assert_eq!(frame["params"]["payload"]["commandId"], "c-1", "{frame}");
+}
+
 /// CRITICAL: `GET /v1/mcp` scopes its stream to the authenticated principal.
 /// A frame crossing principals here is a data leak, not a cosmetic defect.
 #[tokio::test]
 async fn the_mcp_get_stream_never_delivers_another_principals_events() {
     let events = interface_core::EventStore::new(64);
-    let (app, bearers) = app_with_events(
+    let (app, bearers, _authority) = app_with_events(
         events.clone(),
         &[
             (PRINCIPAL_A, &[types::Capability::SessionRead]),
@@ -485,6 +542,25 @@ async fn the_mcp_get_stream_never_delivers_another_principals_events() {
             .is_none(),
         "principal B's MCP stream must never carry principal A's events"
     );
+
+    // `next_mcp_frame` cannot distinguish "nothing arrived" from "the stream was
+    // already dead", so the assertion above is only worth anything once B's
+    // stream is shown to be live: its own event must still come through, at its
+    // own cursor.
+    events
+        .append_for(
+            types::PrincipalId::from_uuid(PRINCIPAL_B),
+            interface_core::Event::new("command.outcome", json!({"audience": "b"})),
+        )
+        .await;
+    let frame = next_mcp_frame(&mut stream_b, Duration::from_secs(2))
+        .await
+        .expect("B's stream is live, not broken");
+    assert_eq!(frame["params"]["payload"]["audience"], "b", "{frame}");
+    assert_eq!(
+        frame["params"]["cursor"], 2,
+        "B resumes at its own event, never having been offered A's: {frame}"
+    );
 }
 
 /// A principal that `GET /v1/events` and the `events_read` tool would both
@@ -493,7 +569,7 @@ async fn the_mcp_get_stream_never_delivers_another_principals_events() {
 #[tokio::test]
 async fn the_mcp_get_stream_withholds_events_from_a_principal_without_subscribe_events() {
     let events = interface_core::EventStore::new(64);
-    let (app, bearers) = app_with_events(
+    let (app, bearers, authority) = app_with_events(
         events.clone(),
         &[(PRINCIPAL_A, &[types::Capability::ArtifactRead])],
     )
@@ -512,6 +588,26 @@ async fn the_mcp_get_stream_withholds_events_from_a_principal_without_subscribe_
             .await
             .is_none(),
         "events reached a principal that lacks session:read"
+    );
+
+    // Gated, not dead: control frames must still reach this client, or the
+    // assertion above would pass just as well against a broken channel. Rotating
+    // the principal's capabilities is what publishes one.
+    let rotated = issue_for(
+        &authority,
+        PRINCIPAL_A,
+        &[types::Capability::ArtifactRead, types::Capability::PageRead],
+    )
+    .await;
+    let (status, body) = post_mcp(&app, &rotated, initialize_request(1)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let frame = next_mcp_frame(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("the channel is open for control frames");
+    assert_eq!(
+        frame["method"], "notifications/tools/list_changed",
+        "{frame}"
     );
 }
 
