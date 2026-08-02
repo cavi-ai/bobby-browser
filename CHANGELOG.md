@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.
+- The graph invalidates on any command not on an explicit read-only allowlist, including `navigate` and `emulate`, which are `CommandClass::Replayable` yet change the page.
+- A failed non-read-only command invalidates too, since a command that failed is not a command that did nothing.
+- Truncated accessibility snapshots are not recorded, so the graph never reports a control absent when it was cut off.
+- Ambiguous, partial, and below-floor matches answer nothing rather than guessing.
 - Add a `[nodes.<name>]` config table: named, separately addressable nodes with `kind` (`vision` or `context`), `endpoint_url`, optional `token_env`, and `timeout_ms`.
 - Add `executionPolicy.visionNode`, naming which registered node a session escalates to.
 - A named node that is unknown, or configured with the wrong kind, declines the escalation and never falls back to another node or to a process-wide provider.
