@@ -513,6 +513,15 @@ mod tests {
     }
 
     #[test]
+    fn default_includes_scheduler_journal_path() {
+        let config = AppConfig::default();
+        assert_eq!(
+            config.storage.scheduler_journal_path,
+            std::path::PathBuf::from("./data/storage/scheduler-jobs.jsonl")
+        );
+    }
+
+    #[test]
     fn from_toml_str_round_trips_the_default_config() {
         let text = toml::to_string(&AppConfig::default()).unwrap();
         let parsed = AppConfig::from_toml_str(&text).unwrap();

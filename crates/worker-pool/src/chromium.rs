@@ -662,6 +662,7 @@ impl BrowserWorker for ChromiumWorker {
         &self,
         command: &OpenPageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        let page_id = PageId::new();
         let page = {
             let browser = self.browser.lock().await;
             let browser = browser.as_ref().ok_or_else(closed_error)?;
