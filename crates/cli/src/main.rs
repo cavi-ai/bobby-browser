@@ -949,12 +949,14 @@ fn run_jobs(command: JobsCommand) -> Result<()> {
             jobs_client::submit_job(
                 &base_url,
                 bearer,
-                &name,
-                payload,
-                priority,
-                max_retries,
-                timeout_ms,
-                idempotency_key,
+                jobs_client::SubmitJobOptions {
+                    name: &name,
+                    payload,
+                    priority,
+                    max_retries,
+                    timeout_ms,
+                    idempotency_key,
+                },
             )?;
         }
         JobsCommand::Status { common, job_id } => {

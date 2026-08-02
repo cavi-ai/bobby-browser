@@ -346,21 +346,19 @@ impl BezierMouseSimulator {
     }
 
     /// Path from a randomized approach offset to a jittered element-local origin.
+    ///
+    /// Vertical approach is biased from below the target so BiDi element-origin
+    /// moves stay inside the viewport after `scrollIntoView` places the target
+    /// near the top/middle of the window.
     pub fn generate_approach_path(&self, random: &mut SessionRandom) -> MousePath {
-        let start_x = random.next_f64(-180.0, 180.0);
-        let start_y = random.next_f64(-140.0, 140.0);
-        let start_x = if start_x.abs() < 24.0 {
+        let mut start_x = random.next_f64(-140.0, 140.0);
+        if start_x.abs() < 28.0 {
             let sign = if start_x >= 0.0 { 1.0 } else { -1.0 };
-            sign * 24.0 + random.next_f64(10.0, 40.0) * sign
-        } else {
-            start_x
-        };
-        let start_y = if start_y.abs() < 24.0 {
-            let sign = if start_y >= 0.0 { 1.0 } else { -1.0 };
-            sign * 24.0 + random.next_f64(10.0, 40.0) * sign
-        } else {
-            start_y
-        };
+            start_x = sign * 28.0 + random.next_f64(8.0, 36.0) * sign;
+        }
+        // Prefer approach from below (positive element-local Y). Negative Y
+        // frequently exits the viewport when the target sits near the top edge.
+        let start_y = random.next_f64(36.0, 110.0);
         self.generate_path(random, start_x, start_y, 0.0, 0.0)
     }
 

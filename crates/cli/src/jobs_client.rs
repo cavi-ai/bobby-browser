@@ -65,7 +65,10 @@ pub fn jobs_url(base_url: &str, path: &str) -> Result<String> {
 }
 
 /// Prefer `--payload-file` when set; otherwise parse `--payload` JSON.
-pub fn resolve_submit_payload(payload: &str, payload_file: Option<&Path>) -> Result<serde_json::Value> {
+pub fn resolve_submit_payload(
+    payload: &str,
+    payload_file: Option<&Path>,
+) -> Result<serde_json::Value> {
     if let Some(path) = payload_file {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read payload file {}", path.display()))?;
@@ -173,24 +176,30 @@ fn jobs_request_blocking(options: JobsRequestOptions) -> Result<()> {
     Ok(())
 }
 
-pub fn submit_job(
-    base_url: &str,
-    bearer: String,
-    name: &str,
-    payload: serde_json::Value,
-    priority: JobPriorityArg,
-    max_retries: u32,
-    timeout_ms: Option<u64>,
-    idempotency_key: Option<String>,
-) -> Result<()> {
+pub struct SubmitJobOptions<'a> {
+    pub name: &'a str,
+    pub payload: serde_json::Value,
+    pub priority: JobPriorityArg,
+    pub max_retries: u32,
+    pub timeout_ms: Option<u64>,
+    pub idempotency_key: Option<String>,
+}
+
+pub fn submit_job(base_url: &str, bearer: String, options: SubmitJobOptions<'_>) -> Result<()> {
     let url = jobs_url(base_url, "/v1/jobs")?;
-    let body = build_submit_body(name, payload, priority, max_retries, timeout_ms);
+    let body = build_submit_body(
+        options.name,
+        options.payload,
+        options.priority,
+        options.max_retries,
+        options.timeout_ms,
+    );
     jobs_request(JobsRequestOptions {
         method: reqwest::Method::POST,
         url,
         bearer,
         body: Some(body),
-        idempotency_key,
+        idempotency_key: options.idempotency_key,
     })
 }
 
@@ -244,8 +253,7 @@ mod tests {
     fn resolve_submit_payload_prefers_file() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, r#"{{"from":"file"}}"#).unwrap();
-        let value =
-            resolve_submit_payload(r#"{"from":"flag"}"#, Some(file.path())).unwrap();
+        let value = resolve_submit_payload(r#"{"from":"flag"}"#, Some(file.path())).unwrap();
         assert_eq!(value["from"], "file");
     }
 
@@ -257,13 +265,7 @@ mod tests {
 
     #[test]
     fn build_submit_body_omits_timeout_when_unset() {
-        let body = build_submit_body(
-            "echo",
-            json!({}),
-            JobPriorityArg::Normal,
-            3,
-            None,
-        );
+        let body = build_submit_body("echo", json!({}), JobPriorityArg::Normal, 3, None);
         assert_eq!(body["name"], "echo");
         assert_eq!(body["priority"], "normal");
         assert_eq!(body["maxRetries"], 3);
@@ -272,13 +274,7 @@ mod tests {
 
     #[test]
     fn build_submit_body_includes_timeout_when_set() {
-        let body = build_submit_body(
-            "echo",
-            json!({"k":1}),
-            JobPriorityArg::High,
-            1,
-            Some(5000),
-        );
+        let body = build_submit_body("echo", json!({"k":1}), JobPriorityArg::High, 1, Some(5000));
         assert_eq!(body["timeoutMs"], 5000);
         assert_eq!(body["priority"], "high");
     }
