@@ -75,7 +75,11 @@ jobs:
           install-dependencies: true
 
       - name: Locate Chrome
-        run: echo "BOBBY_CHROME_EXECUTABLE=$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)" >> "$GITHUB_ENV"
+        run: |
+          BIN="$(find /opt/hostedtoolcache -path '*chrome-linux64/chrome' -type f | head -n 1)"
+          echo "BOBBY_CHROME_EXECUTABLE=$(readlink -f "$BIN")" >> "$GITHUB_ENV"
+          echo "resolved=$(readlink -f "$BIN")"
+          ls -laL "$(readlink -f "$BIN")"
 
       - name: Chrome diagnostics
         run: |
