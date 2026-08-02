@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- Add `networkLog` (MCP `network_log`): always-on bounded per-page network capture (512 entries) on Chromium (CDP Network events) and Firefox (BiDi network events), dumped as a HAR 1.2 artifact.
+
+
 ## 0.3.1 - 2026-08-01
 ### Documentation
 - Publish a new immutable docs artifact that names `@cavi-ai/bobby-browser`

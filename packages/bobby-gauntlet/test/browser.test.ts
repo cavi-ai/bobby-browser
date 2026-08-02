@@ -5,11 +5,11 @@ import { JSDOM } from "jsdom";
 
 import { mountGauntlet } from "../src/app.js";
 
-function mount(path: string) {
-  const window = new JSDOM("<main id=app></main>", { url: `https://gauntlet.test${path}?seed=browser-seed` }).window;
+function mount(path: string, seed = "browser-seed") {
+  const window = new JSDOM("<main id=app></main>", { url: `https://gauntlet.test${path}?seed=${seed}` }).window;
   const document = window.document;
   const root = document.querySelector<HTMLElement>("#app");
-  return { root: requireElement(root, "application root", (element) => mountGauntlet(element, path, "?seed=browser-seed")), window };
+  return { root: requireElement(root, "application root", (element) => mountGauntlet(element, path, `?seed=${seed}`)), window };
 }
 
 function result(root: HTMLElement): string {
@@ -51,20 +51,30 @@ test("DOM drift station rejects an actionable stale target before accepting its 
   assert.match(result(root), /passed/i);
 });
 
-test("semantic form station is completed through labelled browser controls", () => {
+test("semantic form station exposes no fixture-specific targeting hooks", () => {
   const { root } = mount("/station/semantic-form/");
-  const fullName = requireElement(root.querySelector<HTMLInputElement>("[aria-label='Full name']"), "full name input");
-  const email = requireElement(root.querySelector<HTMLInputElement>("[aria-label='Email address']"), "email input");
-  assert.equal(fullName.dataset.testid, "semantic-full-name");
-  assert.equal(email.dataset.testid, "semantic-email");
-  assert.equal(root.querySelector<HTMLButtonElement>("button[type=submit]")?.dataset.testid, "semantic-submit");
+  const fullName = requireElement(root.querySelector<HTMLInputElement>("input[autocomplete='name']"), "full name input");
+  const email = requireElement(root.querySelector<HTMLInputElement>("input[autocomplete='email']"), "email input");
+  assert.equal(root.querySelector("[data-testid^='semantic-']"), null);
+  assert.equal(root.querySelector("button[type=submit]")?.getAttribute("aria-label"), "Submit form");
   fullName.value = "Bobby";
   email.value = "bobby@example.test";
-  const plan = requireElement(root.querySelector<HTMLSelectElement>("[aria-label='Plan']"), "plan selector");
+  const plan = requireElement(root.querySelector<HTMLSelectElement>("select"), "plan selector");
   plan.value = "pro";
+  requireElement(root.querySelector<HTMLInputElement>("input[type='checkbox']"), "terms checkbox").checked = true;
 
   root.querySelector<HTMLButtonElement>("button[type=submit]")?.click();
   assert.match(result(root), /passed/i);
+});
+
+test("semantic form station mutates labels and field order across seeds", () => {
+  const signatures = new Set<string>();
+  for (let index = 0; index < 16; index += 1) {
+    const { root } = mount("/station/semantic-form/", `semantic-mutation-${index}`);
+    const form = requireElement(root.querySelector("form"), "semantic form");
+    signatures.add(Array.from(form.querySelectorAll("label")).map((label) => label.textContent?.trim()).join("|"));
+  }
+  assert.ok(signatures.size > 1, "semantic labels and ordering must vary by seed");
 });
 
 test("validation station publishes corrective feedback and derives a correction from browser constraints", () => {
@@ -85,4 +95,3 @@ test("validation station publishes corrective feedback and derives a correction 
   assert.equal(feedback.textContent, "");
   assert.match(result(root), /passed/i);
 });
-

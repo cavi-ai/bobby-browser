@@ -59,6 +59,7 @@ Tools are advertised only when the principal holds the required capability.
 | `pdf` | `browser:mutate` | Print the page to a PDF artifact |
 | `dialog` | `browser:mutate` | Accept or dismiss the next JS dialog |
 | `emulate` | `browser:mutate` | Viewport + geolocation overrides |
+| `network_log` | `browser:mutate` | Dump recorded network log as HAR |
 | `cookie_set` | `browser:mutate` | Store cookies |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
