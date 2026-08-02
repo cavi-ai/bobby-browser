@@ -77,6 +77,12 @@ jobs:
       - name: Locate Chrome
         run: echo "BOBBY_CHROME_EXECUTABLE=$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)" >> "$GITHUB_ENV"
 
+      - name: Chrome diagnostics
+        run: |
+          echo "executable=$BOBBY_CHROME_EXECUTABLE"
+          ls -la "$BOBBY_CHROME_EXECUTABLE" || true
+          ldd "$BOBBY_CHROME_EXECUTABLE" | grep "not found" || true
+
       - name: Worker live tests
         run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
 
