@@ -55,7 +55,12 @@ validators / Rust types.
   Primitive `accessibilitySnapshot` uses
   `{ kind: "accessibilitySnapshot", input: { maxNodes? } }` (default 256,
   max 2048; see [Accessibility snapshot](../guides/accessibility-snapshot.md)).
-- **POST `/v1/checkpoints`** — checkpoint request with verified evidence (see SDK `CheckpointRequest`)
+- **POST `/v1/checkpoints`** — `{ checkpoint, evidenceRefs }` (see SDK
+  `CheckpointRequest`). `evidenceRefs` is a bounded list (max 128) of command
+  ids whose evidence the runtime already journaled; it resolves them itself.
+  Evidence is never supplied by the caller, and an id naming a command this
+  principal does not own, or one with no terminal journal record, fails the
+  checkpoint.
 - **GET `/v1/recovery/{workflow}`** — `RecoveryStatus`
   (`{ workflowId, checkpoint, receipts }`); requires `recovery:read` and session
   ownership of the workflow. Missing / unowned → not found.

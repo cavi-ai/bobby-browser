@@ -14,9 +14,8 @@ use interface_core::{canonical_sha256, Event, EventGap, IdempotencyReservation};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use task_scheduler::{Job, JobConfig, JobError, JobId, JobPriority, JobStatus};
 use types::{
-    CommandEnvelope, CommandOutcome, CorrelationId, Evidence, InterfaceErrorCode,
-    InterfaceOperation, OpenPageRequest, PrincipalId, RecoveryDecision, WorkflowCheckpoint,
-    WorkflowId,
+    CommandEnvelope, CommandOutcome, CorrelationId, InterfaceErrorCode, InterfaceOperation,
+    OpenPageRequest, PrincipalId, RecoveryDecision, WorkflowCheckpoint, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -179,22 +178,44 @@ async fn submit_command(
     Ok(outcome_response(outcome))
 }
 
+/// The caller names commands whose evidence the runtime already recorded; it
+/// does not hand evidence in. `deny_unknown_fields` is what makes the old
+/// `evidence` key a hard rejection rather than a silently ignored payload, so a
+/// client that was authoring its own evidence learns it at the boundary instead
+/// of persisting a checkpoint nothing verified.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CheckpointRequest {
     checkpoint: WorkflowCheckpoint,
     #[serde(default)]
-    evidence: Vec<Evidence>,
+    evidence_refs: Vec<types::CommandId>,
 }
+
+/// Matches `mcp_gateway::schema::MAX_EVIDENCE_ITEMS`. Both surfaces resolve
+/// through the same journal, so both bound the work the same way.
+const MAX_EVIDENCE_REFS: usize = 128;
 
 async fn checkpoint(
     Extension(request): Extension<AuthenticatedRequest>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<WorkflowCheckpoint>, ProtocolError> {
     let input: CheckpointRequest = parse_json(body, &request.context.correlation_id)?;
+    if input.evidence_refs.len() > MAX_EVIDENCE_REFS {
+        return Err(ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id,
+        ));
+    }
+    // Resolve first, exactly as `mcp-gateway` does: `resolve_command_evidence`
+    // is the layer that checks each command's owning session, so a reference to
+    // another principal's command fails here rather than contributing evidence.
+    let evidence = request
+        .runtime
+        .resolve_command_evidence(request.context.clone(), input.evidence_refs)
+        .await?;
     request
         .runtime
-        .checkpoint(request.context, input.checkpoint, input.evidence)
+        .checkpoint(request.context, input.checkpoint, evidence)
         .await
         .map(Json)
         .map_err(ProtocolError::from)

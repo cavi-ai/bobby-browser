@@ -18,8 +18,15 @@ replayable inputs.
 ## Writing a checkpoint
 
 `POST /v1/checkpoints` requires `recovery:write`. Body shape matches the
-TypeScript SDK `CheckpointRequest` (workflow / attempt / session / page ids plus
-verified evidence).
+TypeScript SDK `CheckpointRequest`: the checkpoint (workflow / attempt /
+session / page ids, restart URL, recovery class, invariants, replayable inputs)
+plus `evidenceRefs`.
+
+`evidenceRefs` names command ids, not evidence. The runtime resolves each id
+against the journal it wrote itself, checks that the naming principal owns the
+command's session, and fails the checkpoint if an id has no terminal record. A
+caller cannot author evidence for work it did not perform — the same contract
+the MCP `checkpoint_save` tool enforces. Maximum 128 refs.
 
 Typical moments to checkpoint:
 
@@ -30,7 +37,10 @@ Typical moments to checkpoint:
 TypeScript:
 
 ```ts
-await client.checkpoint(request, { idempotencyKey: crypto.randomUUID() });
+await client.checkpoint(
+  { checkpoint, evidenceRefs: [submitOutcome.commandId] },
+  { idempotencyKey: crypto.randomUUID() },
+);
 ```
 
 ## Recovery

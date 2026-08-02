@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **Breaking (HTTP):** `POST /v1/checkpoints` takes `evidenceRefs` (command ids, max 128) instead of `evidence`. The runtime resolves each id against its own journal and checks session ownership, so a caller can no longer author evidence for work it did not perform. Matches the MCP `checkpoint_save` contract. TypeScript SDK `CheckpointRequest.evidence` is replaced by `CheckpointRequest.evidenceRefs`.
+- Add `crates/interface-conformance/tests/checkpoint_evidence.rs`: asserts no adapter accepts caller-authored checkpoint evidence, and that `evidenceRefs` is accepted on each.
 - Add `executionPolicy.fingerprint` and `executionPolicy.humanize`, both deny-by-default. Fingerprint spoofing was a process-wide worker-factory setting; it is now per session. Humanized input timing was unconditional on the Firefox path; it is now per session.
 - `PageRuntime` writes both flags to the worker on every lease, so a pooled worker never carries one session's opt-in into another's.
 - Add `Evidence::Humanization` (`engine`, `actions`, `synthesizedMs`), emitted only when the session opted into `humanize`.
