@@ -16,7 +16,7 @@ use types::{
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
-pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, VisionGate};
+pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, SessionGate, VisionGate};
 pub use executor::ExecutorError;
 pub use intent_engine::VisionAssist;
 pub use recovery::{

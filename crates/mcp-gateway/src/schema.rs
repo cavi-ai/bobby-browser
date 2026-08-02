@@ -36,7 +36,9 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "executionPolicy": object(
                     json!({
                         "javascriptEvaluation":{"type":"boolean"},
-                        "visionAssist":{"type":"boolean"}
+                        "visionAssist":{"type":"boolean"},
+                        "fingerprint":{"type":"boolean"},
+                        "humanize":{"type":"boolean"}
                     }),
                     &[]
                 )
@@ -1532,6 +1534,15 @@ fn evidence_variants() -> Vec<Value> {
             &["record"],
         ),
         tagged_fields(
+            "humanization",
+            json!({
+                "engine":string(1, 64),
+                "actions":{"type":"integer","minimum":0,"maximum":65535},
+                "synthesizedMs":{"type":"integer","minimum":0,"maximum":600000}
+            }),
+            &["engine", "actions", "synthesizedMs"],
+        ),
+        tagged_fields(
             "extraction",
             json!({
                 "field":string(1, 256),
@@ -1703,7 +1714,12 @@ fn session_state() -> Value {
             "created_at":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
             "last_used_at":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
             "execution_policy":object(
-                json!({"javascriptEvaluation":{"type":"boolean"},"visionAssist":{"type":"boolean"}}),
+                json!({
+                    "javascriptEvaluation":{"type":"boolean"},
+                    "visionAssist":{"type":"boolean"},
+                    "fingerprint":{"type":"boolean"},
+                    "humanize":{"type":"boolean"}
+                }),
                 &[]
             )
         }),

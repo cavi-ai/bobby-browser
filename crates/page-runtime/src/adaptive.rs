@@ -22,6 +22,29 @@ pub struct VisionGate {
     pub capability_ok: bool,
 }
 
+/// Everything `ExecutionPolicy` decides that the executor has to apply to a
+/// leased worker, resolved once per command by the layer that can see the
+/// session (`sdk_core::RuntimeService`).
+///
+/// `Default` is all-off, which is what every caller that does not resolve a
+/// session gets. That is the deny-by-default direction: a caller that cannot
+/// prove the session opted in does not get fingerprinting or humanization.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionGate {
+    pub vision: VisionGate,
+    pub fingerprint: bool,
+    pub humanize: bool,
+}
+
+impl From<VisionGate> for SessionGate {
+    fn from(vision: VisionGate) -> Self {
+        Self {
+            vision,
+            ..Self::default()
+        }
+    }
+}
+
 struct WorkerIntentBrowser<'a> {
     lease: &'a WorkerLease,
 }
