@@ -2622,3 +2622,271 @@ async fn an_unknown_prompt_name_is_rejected() {
         .unwrap();
     assert!(got["error"].is_object(), "unknown prompt name was accepted");
 }
+
+// ---------------------------------------------------------------------------
+// Server-to-client notifications
+// ---------------------------------------------------------------------------
+
+const NOTIFY_PRINCIPAL_A: uuid::Uuid = uuid!("10000000-0000-0000-0000-000000000090");
+const NOTIFY_PRINCIPAL_B: uuid::Uuid = uuid!("10000000-0000-0000-0000-000000000091");
+
+/// A `Server` bound to an explicit principal and an `EventStore` the test also
+/// holds — the shape the broker builds, where one retained log is shared by
+/// every principal's `Server`. Appending through that store is the same call
+/// `Server::submit_envelope` and the broker's `POST /v1/commands` route make,
+/// so these tests drive the real event path rather than a test-only shim.
+async fn notify_fixture(principal: uuid::Uuid, events: EventStore) -> Server {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(principal),
+            [Capability::SessionRead],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let runtime = Arc::new(AuthenticatedRuntime::new(
+        RuntimeService::default(),
+        handle.clone(),
+    ));
+    let server = Server::for_interface(runtime, handle, events, ArtifactResources::default());
+    initialize(&server).await;
+    server
+}
+
+async fn next_notification(stream: &mut mcp_gateway::NotificationStream) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(2), stream.recv())
+        .await
+        .expect("a notification arrives")
+        .expect("the subscription is open")
+}
+
+#[tokio::test]
+async fn runtime_events_reach_the_client_as_notifications() {
+    let events = EventStore::new(64);
+    let server = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
+    let mut notifications = server.notifications().subscribe();
+
+    events
+        .append_for(
+            PrincipalId::from_uuid(NOTIFY_PRINCIPAL_A),
+            Event::new("command.outcome", json!({"commandId": "c-1"})),
+        )
+        .await;
+
+    let frame = next_notification(&mut notifications).await;
+    assert_eq!(frame["method"], "notifications/bobby/event");
+    assert_eq!(frame["jsonrpc"], "2.0");
+    assert!(frame["params"].is_object(), "{frame}");
+    assert!(
+        frame.get("id").is_none(),
+        "a notification must carry no id: {frame}"
+    );
+    // `params` is the event body `GET /v1/events` returns, verbatim.
+    assert_eq!(frame["params"]["kind"], "command.outcome");
+    assert_eq!(frame["params"]["cursor"], 1);
+    assert_eq!(frame["params"]["payload"]["commandId"], "c-1");
+}
+
+/// CRITICAL: the notification stream is principal-scoped, or it is a
+/// cross-principal data leak. `EventStore` partitions by audience and the only
+/// read path a subscription can reach is `read_after_for`; this proves that end
+/// to end against the shared store the broker actually uses.
+#[tokio::test]
+async fn notifications_never_deliver_another_principals_events() {
+    let events = EventStore::new(64);
+    let server_a = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
+    let server_b = notify_fixture(NOTIFY_PRINCIPAL_B, events.clone()).await;
+    let mut stream_a = server_a.notifications().subscribe();
+    let mut stream_b = server_b.notifications().subscribe();
+
+    events
+        .append_for(
+            PrincipalId::from_uuid(NOTIFY_PRINCIPAL_B),
+            Event::new("command.outcome", json!({"audience": "b"})),
+        )
+        .await;
+
+    let frame = next_notification(&mut stream_b).await;
+    assert_eq!(frame["params"]["payload"]["audience"], "b");
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), stream_a.recv())
+            .await
+            .is_err(),
+        "principal A must never observe principal B's events"
+    );
+
+    // ...and A's stream is live, not merely broken: its own event still arrives.
+    events
+        .append_for(
+            PrincipalId::from_uuid(NOTIFY_PRINCIPAL_A),
+            Event::new("command.outcome", json!({"audience": "a"})),
+        )
+        .await;
+    let frame = next_notification(&mut stream_a).await;
+    assert_eq!(frame["params"]["payload"]["audience"], "a");
+    assert_eq!(
+        frame["params"]["cursor"], 2,
+        "A resumes at its own event, never having been offered B's"
+    );
+}
+
+/// Falling behind retention must be visible. The frame carries the same
+/// `EventGap` body, and the same `event.gap` marker, that
+/// `GET /v1/events?stream=1` sends before it closes a lagging stream.
+#[tokio::test]
+async fn a_subscriber_that_falls_behind_retention_is_told_it_lost_events() {
+    let events = EventStore::new(2);
+    let server = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
+    let mut notifications = server.notifications().subscribe();
+
+    let principal = PrincipalId::from_uuid(NOTIFY_PRINCIPAL_A);
+    for index in 0..5 {
+        events
+            .append_for(
+                principal.clone(),
+                Event::new("command.outcome", json!({"index": index})),
+            )
+            .await;
+    }
+
+    let frame = next_notification(&mut notifications).await;
+    assert_eq!(frame["method"], "notifications/bobby/event");
+    assert!(frame.get("id").is_none(), "{frame}");
+    assert_eq!(frame["params"]["kind"], "event.gap");
+    assert_eq!(frame["params"]["payload"]["reason"], "historyLost");
+    assert_eq!(
+        frame["params"]["payload"]["earliestAvailable"], 4,
+        "the client is told exactly where the surviving history starts: {frame}"
+    );
+
+    // The gap is terminal for the event half, matching `GET /v1/events?stream=1`:
+    // the client recovers through the cursor-addressed `events_read` tool rather
+    // than being fed a silently truncated tail.
+    events
+        .append_for(
+            principal,
+            Event::new("command.outcome", json!({"index": 99})),
+        )
+        .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), notifications.recv())
+            .await
+            .is_err(),
+        "the event stream must not resume silently after a gap"
+    );
+}
+
+#[tokio::test]
+async fn initialize_advertises_that_the_tool_list_can_change() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"test","version":"1"}
+            }),
+        ))
+        .await
+        .expect("initialize returns a response");
+    assert_eq!(
+        response["result"]["capabilities"]["tools"]["listChanged"], true,
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn a_capability_change_tells_subscribed_clients_to_relist_tools() {
+    let events = EventStore::new(64);
+    let server = notify_fixture(NOTIFY_PRINCIPAL_A, events).await;
+    let mut notifications = server.notifications().subscribe();
+
+    server.notify_tools_list_changed();
+
+    let frame = next_notification(&mut notifications).await;
+    assert_eq!(frame["method"], "notifications/tools/list_changed");
+    assert_eq!(frame["jsonrpc"], "2.0");
+    assert!(
+        frame.get("id").is_none(),
+        "a notification must carry no id: {frame}"
+    );
+}
+
+/// The stdio transport pushes frames the client never asked for, on the same
+/// stdout it writes responses to, one whole frame per line.
+#[tokio::test]
+async fn the_stdio_transport_writes_notifications_as_unsolicited_frames() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let events = EventStore::new(64);
+    let server = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
+    let (client, server_io) = tokio::io::duplex(64 * 1024);
+    let (server_read, server_write) = tokio::io::split(server_io);
+    let (client_read, mut client_write) = tokio::io::split(client);
+    let mut reader = BufReader::new(client_read);
+
+    let driver = async {
+        // A request and its response first, so the notification below has to
+        // share the writer with real response traffic.
+        client_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    request(
+                        41,
+                        "tools/call",
+                        json!({"name":"runtime_info","arguments":{}})
+                    )
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("request writes");
+        events
+            .append_for(
+                PrincipalId::from_uuid(NOTIFY_PRINCIPAL_A),
+                Event::new("command.outcome", json!({"commandId": "c-2"})),
+            )
+            .await;
+
+        // Responses and notifications share one writer and may arrive in either
+        // order; read until both have.
+        let mut frames = Vec::new();
+        while !frames.iter().any(|frame: &Value| frame["id"] == json!(41))
+            || !frames.iter().any(|frame: &Value| frame.get("id").is_none())
+        {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.expect("stdout reads");
+            frames.push(serde_json::from_str(line.trim()).expect("one JSON object per line"));
+        }
+        frames
+    };
+
+    let frames = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            result = server.serve(server_read, server_write) => {
+                panic!("serve returned before the notification arrived: {result:?}")
+            }
+            frames = driver => frames,
+        }
+    })
+    .await
+    .expect("a notification reaches stdout");
+
+    let response = frames
+        .iter()
+        .find(|frame| frame["id"] == json!(41))
+        .expect("the response to id 41 is on stdout");
+    assert!(response["result"].is_object(), "{response}");
+    let notification = frames
+        .iter()
+        .find(|frame| frame.get("id").is_none())
+        .expect("an unsolicited notification is on stdout");
+    assert_eq!(notification["method"], "notifications/bobby/event");
+    assert_eq!(notification["params"]["payload"]["commandId"], "c-2");
+}

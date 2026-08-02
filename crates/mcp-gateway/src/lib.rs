@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 mod annotations;
+pub mod notify;
 mod prompts;
 pub mod protocol;
 mod resources;
@@ -24,5 +25,6 @@ pub fn definitions_for_test() -> serde_json::Value {
     schema::definitions_for_test()
 }
 
+pub use notify::{NotificationSink, NotificationStream};
 pub use resources::{ArtifactCatalogFull, ArtifactResources};
 pub use server::Server;
