@@ -76,10 +76,11 @@ jobs:
 
       - name: Locate Chrome
         run: |
-          BIN="$(find /opt/hostedtoolcache -path '*chrome-linux64/chrome' -type f | head -n 1)"
+          BIN="$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)"
           echo "BOBBY_CHROME_EXECUTABLE=$(readlink -f "$BIN")" >> "$GITHUB_ENV"
           echo "resolved=$(readlink -f "$BIN")"
-          ls -laL "$(readlink -f "$BIN")"
+          "$(readlink -f "$BIN")" --version
+          "$(readlink -f "$BIN")" --headless --no-sandbox --dump-dom about:blank | head -c 200
 
       - name: Chrome diagnostics
         run: |
