@@ -109,7 +109,7 @@ function checkpoint(): Record<string, unknown> {
 
 test("deep validators accept every exact public response variant", () => {
   assert.equal(isRuntimeInfo({ version: "1", capabilities: ["session:read"], active_sessions: 0, queued_jobs: 1, uptime_ms: Number.MAX_SAFE_INTEGER }), true);
-  assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } }), true);
+  assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }), true);
   assert.equal(isPageState({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 }), true);
 
   for (const evidence of evidenceFixtures()) {
@@ -163,7 +163,7 @@ test("deep validators accept every exact public response variant", () => {
   const withReceipts = checkpoint();
   withReceipts.recoveryReceipts = [{ recordedAt: TIME, opaque: "receipt payloads are passed through" }];
   assert.equal(isWorkflowCheckpoint(withReceipts), true);
-  assert.equal(isSessionStateList([{ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } }]), true);
+  assert.equal(isSessionStateList([{ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }]), true);
   assert.equal(isSessionStateList([]), true);
   assert.equal(isSessionStateList([{ id: "bad" }]), false);
   for (const decision of [
@@ -188,7 +188,7 @@ test("malformed nested fixtures are rejected for every public response family", 
   invalidCheckpoint.recoveryHistory = [{ recordedAt: "not-a-time", decision: recoveryDecision() }];
   const malformed: Array<[string, boolean]> = [
     ["RuntimeInfo", isRuntimeInfo({ version: "1", capabilities: [], active_sessions: 0.5, queued_jobs: 0, uptime_ms: 0 })],
-    ["SessionState", isSessionState({ id: ID, profile: "default", proxy: null, page_ids: ["not-a-uuid"], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } })],
+    ["SessionState", isSessionState({ id: ID, profile: "default", proxy: null, page_ids: ["not-a-uuid"], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } })],
     ["PageState/PageMode", isPageState({ id: ID, session_id: ID_2, url: null, mode: "document", ready_state: "complete", pending_requests: 0 })],
     ["CommandOutcome/Evidence", isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "download", filename: "a", path: "b", bytes: 1, sha256: SHA.toUpperCase() }] })],
     ["CommandOutcome/CommandError", isCommandOutcome({ status: "failed", commandId: ID, error: { code: "unknown", message: "x", layer: "workflow", retryable: false } })],
@@ -201,9 +201,9 @@ test("malformed nested fixtures are rejected for every public response family", 
 });
 
 test("validators reject invalid UUID, timestamp, digest, finite-number, and optional/null shapes", () => {
-  assert.equal(isSessionState({ id: "not-a-uuid", profile: "default", proxy: null, page_ids: [], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } }), false);
-  assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: "2026-07-17", last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } }), false);
-  assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: "2026-02-30T12:00:00Z", last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } }), false);
+  assert.equal(isSessionState({ id: "not-a-uuid", profile: "default", proxy: null, page_ids: [], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }), false);
+  assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: "2026-07-17", last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }), false);
+  assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: "2026-02-30T12:00:00Z", last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }), false);
   assert.equal(isRuntimeInfo({ version: "1", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: Infinity }), false);
   assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "executionPath", path: "directHttp", reason: "eligibleStaticDocument", stateVersion: 0, elapsedMs: 0, bytes: null, sha256: SHA }] }), false);
   assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [{ kind: "executionPath", path: "directHttp", reason: "eligibleStaticDocument", stateVersion: 0, elapsedMs: 0, bytes: null, sha256: null, finalUrl: 1 }] }), false);
@@ -215,7 +215,7 @@ test("validators reject invalid UUID, timestamp, digest, finite-number, and opti
 test("validators reject unknown and variant-incompatible keys at every object layer", () => {
   const withExtra = <T extends Record<string, unknown>>(value: T): T & { unexpected: boolean } => ({ ...value, unexpected: true });
   assert.equal(isRuntimeInfo(withExtra({ version: "1", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 0 })), false);
-  assert.equal(isSessionState(withExtra({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false } })), false);
+  assert.equal(isSessionState(withExtra({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } })), false);
   assert.equal(isPageState(withExtra({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 })), false);
 
   for (const evidence of evidenceFixtures()) {

@@ -986,6 +986,26 @@ pub struct ExecutionPolicy {
     pub javascript_evaluation: bool,
     #[serde(default)]
     pub vision_assist: bool,
+    /// Whether workers leased for this session apply fingerprint spoofing.
+    ///
+    /// Fingerprinting was a process-wide knob on the worker factory
+    /// (`ChromiumWorkerFactory::with_fingerprint`), which meant one operator
+    /// decision applied to every principal's sessions and no caller could see
+    /// or choose it. It belongs here for the same reason
+    /// `javascript_evaluation` does: it changes what the browser presents to
+    /// the page, so it is a per-session decision the caller makes explicitly
+    /// and the runtime records.
+    #[serde(default)]
+    pub fingerprint: bool,
+    /// Whether workers leased for this session synthesize human-like input
+    /// timing (`behavioral-engine`) instead of driving the browser directly.
+    ///
+    /// Off by default because it changes observable timing on the intent
+    /// execution path, and intent verification compares what it asked for
+    /// against what the browser did. When on, the synthesized timing is
+    /// carried in `Evidence::Humanization` so the two agree.
+    #[serde(default)]
+    pub humanize: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

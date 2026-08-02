@@ -118,6 +118,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
             execution_policy: ExecutionPolicy {
                 javascript_evaluation: false,
                 vision_assist: true,
+                ..ExecutionPolicy::default()
             },
         })
         .await

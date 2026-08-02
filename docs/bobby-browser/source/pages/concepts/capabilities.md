@@ -65,5 +65,7 @@ Submitting a command still requires `browser:mutate`. Nested commands add:
 | Intent + file fill (`fill` / `completeForm` with `files`) | `intent:execute` and `file:upload` |
 | Vision escalation | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
 | Structured extraction (`extractStructured` / MCP `extract_structured`) | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
+| Fingerprint spoofing | session `executionPolicy.fingerprint` |
+| Humanized input timing | session `executionPolicy.humanize` |
 
 Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` set when known.

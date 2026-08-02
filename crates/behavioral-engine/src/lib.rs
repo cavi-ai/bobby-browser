@@ -15,7 +15,9 @@ pub use score::{
     ScoreCategory,
 };
 pub use scrolling::{ScrollAction, ScrollConfig, ScrollSimulator};
-pub use typing::{compose_typed_text, TextConfig, TypingAction, TypingSimulator};
+pub use typing::{
+    compose_typed_text, synthesized_total_ms, TextConfig, TypingAction, TypingSimulator,
+};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};

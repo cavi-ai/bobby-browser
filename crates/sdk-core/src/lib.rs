@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use config::AppConfig;
-use page_runtime::{ExecutionPhaseObserver, PageRuntime, VisionAssist, VisionGate};
+use page_runtime::{ExecutionPhaseObserver, PageRuntime, SessionGate, VisionAssist, VisionGate};
 use page_runtime::{RecoveryCoordinator, RecoveryError};
 use session_manager::SessionManager;
 use types::{
@@ -268,27 +268,31 @@ impl RuntimeService {
             }
         }
 
-        let vision_gate = match &envelope.command {
-            RuntimeCommand::Intent(_) => {
-                let session_ok = self
-                    .sessions
-                    .get(&envelope.session_id)
-                    .await
-                    .map(|session| session.execution_policy.vision_assist)
-                    .unwrap_or(false);
-                VisionGate {
-                    session_ok,
-                    capability_ok: vision_capability_ok,
-                }
-            }
+        // One session lookup for the whole policy. Absent session means every
+        // flag is false, same fail-closed direction as the JavaScript gate
+        // above: a command whose session cannot be resolved does not get
+        // vision escalation, fingerprint spoofing, or humanized input.
+        let policy = self
+            .sessions
+            .get(&envelope.session_id)
+            .await
+            .map(|session| session.execution_policy.clone())
+            .unwrap_or_default();
+        let vision = match &envelope.command {
+            RuntimeCommand::Intent(_) => VisionGate {
+                session_ok: policy.vision_assist,
+                capability_ok: vision_capability_ok,
+            },
             RuntimeCommand::Primitive(_) => VisionGate::default(),
+        };
+        let gate = SessionGate {
+            vision,
+            fingerprint: policy.fingerprint,
+            humanize: policy.humanize,
         };
         self.in_flight
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let outcome = self
-            .pages
-            .execute_with_vision_gate(envelope, vision_gate)
-            .await;
+        let outcome = self.pages.execute_with_session_gate(envelope, gate).await;
         self.in_flight
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         outcome
