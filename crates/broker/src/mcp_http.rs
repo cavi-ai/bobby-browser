@@ -207,7 +207,7 @@ pub(crate) async fn get_mcp(State(state): State<AppState>, headers: HeaderMap) -
             .mcp_servers
             .get_or_create(&state, handle.clone())
             .await;
-        let notifications = server.notifications().subscribe();
+        let notifications = server.notifications().subscribe().await;
         // See `McpStream`: the subscription outlives this `Arc`, deliberately.
         drop(server);
         if authorized_for_events(&handle) {

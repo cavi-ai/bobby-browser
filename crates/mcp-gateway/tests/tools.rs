@@ -2666,7 +2666,7 @@ async fn next_notification(stream: &mut mcp_gateway::NotificationStream) -> Valu
 async fn runtime_events_reach_the_client_as_notifications() {
     let events = EventStore::new(64);
     let server = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
-    let mut notifications = server.notifications().subscribe();
+    let mut notifications = server.notifications().subscribe().await;
 
     events
         .append_for(
@@ -2698,8 +2698,8 @@ async fn notifications_never_deliver_another_principals_events() {
     let events = EventStore::new(64);
     let server_a = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
     let server_b = notify_fixture(NOTIFY_PRINCIPAL_B, events.clone()).await;
-    let mut stream_a = server_a.notifications().subscribe();
-    let mut stream_b = server_b.notifications().subscribe();
+    let mut stream_a = server_a.notifications().subscribe().await;
+    let mut stream_b = server_b.notifications().subscribe().await;
 
     events
         .append_for(
@@ -2733,14 +2733,17 @@ async fn notifications_never_deliver_another_principals_events() {
     );
 }
 
-/// Falling behind retention must be visible. The frame carries the same
-/// `EventGap` body, and the same `event.gap` marker, that
-/// `GET /v1/events?stream=1` sends before it closes a lagging stream.
+/// Falling behind retention must be visible, and then survivable. The frame
+/// carries the same `EventGap` body, and the same `event.gap` marker, that
+/// `GET /v1/events?stream=1` sends — but unlike that stream, this one re-arms
+/// instead of closing: `Server::serve` subscribes once for the life of a stdio
+/// process, which cannot reconnect, so latching the event half shut would
+/// silence notifications for the rest of the session over one transient gap.
 #[tokio::test]
 async fn a_subscriber_that_falls_behind_retention_is_told_it_lost_events() {
     let events = EventStore::new(2);
     let server = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
-    let mut notifications = server.notifications().subscribe();
+    let mut notifications = server.notifications().subscribe().await;
 
     let principal = PrincipalId::from_uuid(NOTIFY_PRINCIPAL_A);
     for index in 0..5 {
@@ -2762,21 +2765,20 @@ async fn a_subscriber_that_falls_behind_retention_is_told_it_lost_events() {
         "the client is told exactly where the surviving history starts: {frame}"
     );
 
-    // The gap is terminal for the event half, matching `GET /v1/events?stream=1`:
-    // the client recovers through the cursor-addressed `events_read` tool rather
-    // than being fed a silently truncated tail.
+    // Having been told what it lost, the client keeps receiving what follows.
     events
         .append_for(
             principal,
             Event::new("command.outcome", json!({"index": 99})),
         )
         .await;
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(300), notifications.recv())
-            .await
-            .is_err(),
-        "the event stream must not resume silently after a gap"
+    let frame = next_notification(&mut notifications).await;
+    assert_eq!(
+        frame["params"]["kind"], "command.outcome",
+        "the event stream must re-arm after a gap, not stay silent for the rest \
+         of the session: {frame}"
     );
+    assert_eq!(frame["params"]["payload"]["index"], 99, "{frame}");
 }
 
 #[tokio::test]
@@ -2804,7 +2806,7 @@ async fn initialize_advertises_that_the_tool_list_can_change() {
 async fn a_capability_change_tells_subscribed_clients_to_relist_tools() {
     let events = EventStore::new(64);
     let server = notify_fixture(NOTIFY_PRINCIPAL_A, events).await;
-    let mut notifications = server.notifications().subscribe();
+    let mut notifications = server.notifications().subscribe().await;
 
     server.notify_tools_list_changed();
 
@@ -2847,6 +2849,19 @@ async fn the_stdio_transport_writes_notifications_as_unsolicited_frames() {
             )
             .await
             .expect("request writes");
+
+        // Drain the response before appending. A subscription starts at the
+        // store's tail, so an event appended before `serve` has subscribed is
+        // legitimately not this subscriber's; seeing the response proves the
+        // read loop — and therefore the subscription it opens ahead of that
+        // loop — is up.
+        let mut frames = Vec::new();
+        while !frames.iter().any(|frame: &Value| frame["id"] == json!(41)) {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.expect("stdout reads");
+            frames.push(serde_json::from_str(line.trim()).expect("one JSON object per line"));
+        }
+
         events
             .append_for(
                 PrincipalId::from_uuid(NOTIFY_PRINCIPAL_A),
@@ -2854,12 +2869,7 @@ async fn the_stdio_transport_writes_notifications_as_unsolicited_frames() {
             )
             .await;
 
-        // Responses and notifications share one writer and may arrive in either
-        // order; read until both have.
-        let mut frames = Vec::new();
-        while !frames.iter().any(|frame: &Value| frame["id"] == json!(41))
-            || !frames.iter().any(|frame: &Value| frame.get("id").is_none())
-        {
+        while !frames.iter().any(|frame: &Value| frame.get("id").is_none()) {
             let mut line = String::new();
             reader.read_line(&mut line).await.expect("stdout reads");
             frames.push(serde_json::from_str(line.trim()).expect("one JSON object per line"));
@@ -2889,4 +2899,45 @@ async fn the_stdio_transport_writes_notifications_as_unsolicited_frames() {
         .expect("an unsolicited notification is on stdout");
     assert_eq!(notification["method"], "notifications/bobby/event");
     assert_eq!(notification["params"]["payload"]["commandId"], "c-2");
+}
+
+/// CRITICAL regression: a subscription must start at the store's tail, not at
+/// cursor 0. The retained log is shared by every principal, and
+/// `EventStore::read_after_for` reports `HistoryLost` against the STORE-WIDE
+/// front of the deque — so once a broker has served `max_event_retention`
+/// appends across all principals, a cursor-0 subscription gaps on its very
+/// first read and every client gets one gap frame and never a runtime event
+/// again. MCP gives the client no way to name a resume cursor, so reconnecting
+/// reproduces it identically.
+#[tokio::test]
+async fn a_subscription_opened_after_retention_wrapped_still_receives_new_events() {
+    let events = EventStore::new(2);
+    let server = notify_fixture(NOTIFY_PRINCIPAL_A, events.clone()).await;
+
+    // Another principal's traffic wraps retention, exactly as a busy broker's does.
+    for index in 0..5 {
+        events
+            .append_for(
+                PrincipalId::from_uuid(NOTIFY_PRINCIPAL_B),
+                Event::new("command.outcome", json!({"index": index})),
+            )
+            .await;
+    }
+
+    let mut notifications = server.notifications().subscribe().await;
+
+    events
+        .append_for(
+            PrincipalId::from_uuid(NOTIFY_PRINCIPAL_A),
+            Event::new("command.outcome", json!({"commandId": "c-1"})),
+        )
+        .await;
+
+    let frame = next_notification(&mut notifications).await;
+    assert_eq!(
+        frame["params"]["kind"], "command.outcome",
+        "a subscription opened against a wrapped store must deliver new events, \
+         not gap against history it never asked for: {frame}"
+    );
+    assert_eq!(frame["params"]["payload"]["commandId"], "c-1", "{frame}");
 }
