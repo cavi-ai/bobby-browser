@@ -260,9 +260,10 @@ test("championship route publishes one final app-produced aggregate only after i
   click("dom-drift", "[data-testid=replacement-target]");
 
   const semantic = section("semantic-form");
-  semantic.querySelector<HTMLInputElement>("[aria-label='Full name']")!.value = "Bobby";
-  semantic.querySelector<HTMLInputElement>("[aria-label='Email address']")!.value = "bobby@example.test";
-  semantic.querySelector<HTMLSelectElement>("[aria-label='Plan']")!.value = "pro";
+  semantic.querySelector<HTMLInputElement>("input[autocomplete='name']")!.value = "Bobby";
+  semantic.querySelector<HTMLInputElement>("input[autocomplete='email']")!.value = "bobby@example.test";
+  semantic.querySelector<HTMLSelectElement>("select")!.value = "pro";
+  semantic.querySelector<HTMLInputElement>("input[type=checkbox]")!.checked = true;
   click("semantic-form", "button[type=submit]");
 
   section("validation").querySelector<HTMLInputElement>("[aria-label='Rejected value']")!.value = "00000";
@@ -354,4 +355,3 @@ function openDownloadedArtifact(window: DOMWindow, root: HTMLElement): { input: 
   if (confirm === null) throw new Error("download confirmation is missing");
   return { input, confirm, bytes: decodeDownloadedBytes(link?.href ?? "") };
 }
-

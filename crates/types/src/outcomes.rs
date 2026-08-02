@@ -241,6 +241,13 @@ pub enum Evidence {
         viewport: Option<crate::ViewportSize>,
         geolocation: Option<crate::GeolocationCoordinates>,
     },
+    HarArtifact {
+        artifact_id: String,
+        media_type: String,
+        bytes: u64,
+        sha256: String,
+        entries: u32,
+    },
     IntentExecution {
         record: ExecutionRecord,
     },

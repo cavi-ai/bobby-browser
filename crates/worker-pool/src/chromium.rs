@@ -158,6 +158,8 @@ impl WorkerFactory for ChromiumWorkerFactory {
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
             network_trackers: Mutex::new(HashMap::new()),
+            har_recorders: Mutex::new(HashMap::new()),
+            har_tasks: Mutex::new(HashMap::new()),
             http_state: Mutex::new(HttpBridgeState::default()),
             handler_task: Mutex::new(Some(handler_task)),
             fingerprint: Mutex::new(self.fingerprint.clone()),
@@ -234,6 +236,8 @@ struct ChromiumWorker {
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
     network_trackers: Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>,
+    har_recorders: Mutex<HashMap<PageId, Arc<crate::HarRecorder>>>,
+    har_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
     http_state: Mutex<HttpBridgeState>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
     fingerprint: Mutex<FingerprintConfig>,
@@ -264,6 +268,93 @@ impl ChromiumWorker {
             shadow_path: target.shadow_path.iter().map(segment).collect(),
             ..Default::default()
         }
+    }
+
+    /// Lazily attaches the per-page HAR collector: three CDP network event
+    /// streams merged into the page's bounded recorder, keyed by request id.
+    async fn ensure_har_collector(
+        &self,
+        page_id: &PageId,
+    ) -> Result<Arc<crate::HarRecorder>, CommandError> {
+        if let Some(recorder) = self.har_recorders.lock().await.get(page_id) {
+            return Ok(recorder.clone());
+        }
+        let page = {
+            let pages = self.pages.lock().await;
+            pages.get(page_id).cloned().ok_or_else(page_missing)?
+        };
+        let recorder = Arc::new(crate::HarRecorder::default());
+        let task_recorder = recorder.clone();
+        let task = tokio::spawn(async move {
+            use chromiumoxide::cdp::browser_protocol::network::{
+                EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
+                EventResponseReceived,
+            };
+            let Ok(mut will_send) = page.event_listener::<EventRequestWillBeSent>().await else {
+                return;
+            };
+            let Ok(mut responses) = page.event_listener::<EventResponseReceived>().await else {
+                return;
+            };
+            let Ok(mut finished) = page.event_listener::<EventLoadingFinished>().await else {
+                return;
+            };
+            let Ok(mut failed) = page.event_listener::<EventLoadingFailed>().await else {
+                return;
+            };
+            let mut pending: HashMap<String, crate::HarEntry> = HashMap::new();
+            loop {
+                tokio::select! {
+                    event = will_send.next() => {
+                        let Some(event) = event else { break };
+                        pending.insert(event.request_id.inner().to_owned(), crate::HarEntry {
+                            url: event.request.url.clone(),
+                            method: event.request.method.clone(),
+                            status: None,
+                            started_unix_ms: *event.wall_time.inner() * 1000.0,
+                            elapsed_ms: None,
+                            transfer_bytes: None,
+                            mime_type: None,
+                            error_text: None,
+                        });
+                    }
+                    event = responses.next() => {
+                        let Some(event) = event else { break };
+                        let id = event.request_id.inner().to_owned();
+                        if let Some(entry) = pending.get_mut(&id) {
+                            entry.status = Some(event.response.status as u16);
+                            entry.mime_type = Some(event.response.mime_type.clone());
+                        }
+                    }
+                    event = finished.next() => {
+                        let Some(event) = event else { break };
+                        let id = event.request_id.inner().to_owned();
+                        if let Some(mut entry) = pending.remove(&id) {
+                            entry.elapsed_ms = entry
+                                .started_unix_ms
+                                .is_finite()
+                                .then(|| (*event.timestamp.inner() * 1000.0).max(0.0));
+                            entry.transfer_bytes = Some(event.encoded_data_length as u64);
+                            task_recorder.record(entry).await;
+                        }
+                    }
+                    event = failed.next() => {
+                        let Some(event) = event else { break };
+                        let id = event.request_id.inner().to_owned();
+                        if let Some(mut entry) = pending.remove(&id) {
+                            entry.error_text = Some(event.error_text.clone());
+                            task_recorder.record(entry).await;
+                        }
+                    }
+                }
+            }
+        });
+        self.har_recorders
+            .lock()
+            .await
+            .insert(page_id.clone(), recorder.clone());
+        self.har_tasks.lock().await.insert(page_id.clone(), task);
+        Ok(recorder)
     }
 
     async fn resolve_target(
@@ -712,6 +803,44 @@ impl BrowserWorker for ChromiumWorker {
             page_id: evidence.page_id,
             url: evidence.url,
             title: evidence.title,
+        }])
+    }
+
+    async fn network_log(
+        &self,
+        page_id: &PageId,
+        command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let recorder = self.ensure_har_collector(page_id).await?;
+        let entries = recorder.take(command.clear).await;
+        let page_url = {
+            let pages = self.pages.lock().await;
+            match pages.get(page_id) {
+                Some(page) => page.url().await.ok().flatten().unwrap_or_default(),
+                None => String::new(),
+            }
+        };
+        let document = crate::har::har_document(&entries, &page_url);
+        let bytes = serde_json::to_vec(&document)
+            .map_err(|error| driver_error(ErrorCode::Internal, error.to_string()))?;
+        let record = self
+            .artifacts
+            .put(
+                &self.session_id,
+                page_id,
+                "application/json",
+                "har",
+                &bytes,
+                MAX_VISION_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| driver_error(ErrorCode::Internal, error))?;
+        Ok(vec![Evidence::HarArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+            entries: entries.len() as u32,
         }])
     }
 

@@ -581,6 +581,7 @@ pub struct FirefoxCompanionWorker {
     pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
     page_cleanups: Arc<RwLock<HashMap<PageId, OpenPageCleanup>>>,
     pending_prompts: Arc<RwLock<HashMap<String, PendingPrompt>>>,
+    har_recorder: Arc<worker_pool::HarRecorder>,
     closed: AtomicBool,
     lifecycle: AsyncMutex<()>,
     shutdown: Arc<WorkerShutdown>,
@@ -1140,7 +1141,7 @@ impl FirefoxCompanionWorker {
         let subscription = transport
             .send(
                 "session.subscribe",
-                json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened"]}),
+                json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened", "network.beforeRequestSent", "network.responseCompleted", "network.fetchError"]}),
             )
             .await?;
         if !subscription.is_object() {
@@ -1154,6 +1155,10 @@ impl FirefoxCompanionWorker {
         let page_cleanups = Arc::new(RwLock::new(HashMap::<PageId, OpenPageCleanup>::new()));
         let pending_prompts = Arc::new(RwLock::new(HashMap::<String, PendingPrompt>::new()));
         let cleanup_prompts = Arc::clone(&pending_prompts);
+        let har_recorder = Arc::new(worker_pool::HarRecorder::default());
+        let har_pending = Arc::new(RwLock::new(HashMap::<String, worker_pool::HarEntry>::new()));
+        let har_recorder_task = Arc::clone(&har_recorder);
+        let har_pending_task = Arc::clone(&har_pending);
         let cleanup_pages = Arc::clone(&pages);
         let cleanup_registry = Arc::clone(&page_cleanups);
         let cleanup_transport = Arc::clone(&transport);
@@ -1168,6 +1173,84 @@ impl FirefoxCompanionWorker {
                                 mark_destroyed_context(&cleanup_pages, &cleanup_registry, context)
                                     .await;
                             release_removed_pages(&task_failure, removals).await;
+                        }
+                    }
+                    Ok(event) if event.method == "network.beforeRequestSent" => {
+                        let id = event
+                            .params
+                            .pointer("/request/request")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(id) = id {
+                            let url = event
+                                .params
+                                .pointer("/request/url")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                            let method = event
+                                .params
+                                .pointer("/request/method")
+                                .and_then(Value::as_str)
+                                .unwrap_or("GET")
+                                .to_owned();
+                            har_pending_task.write().await.insert(
+                                id,
+                                worker_pool::HarEntry {
+                                    url,
+                                    method,
+                                    status: None,
+                                    started_unix_ms: now_unix_seconds() * 1000.0,
+                                    elapsed_ms: None,
+                                    transfer_bytes: None,
+                                    mime_type: None,
+                                    error_text: None,
+                                },
+                            );
+                        }
+                    }
+                    Ok(event) if event.method == "network.responseCompleted" => {
+                        let id = event
+                            .params
+                            .pointer("/request/request")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(id) = id {
+                            if let Some(mut entry) = har_pending_task.write().await.remove(&id) {
+                                entry.status = event
+                                    .params
+                                    .pointer("/response/status")
+                                    .and_then(Value::as_u64)
+                                    .map(|status| status as u16);
+                                entry.mime_type = event
+                                    .params
+                                    .pointer("/response/mimeType")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned);
+                                entry.transfer_bytes = event
+                                    .params
+                                    .pointer("/response/content/size")
+                                    .and_then(Value::as_u64);
+                                entry.elapsed_ms = Some(0.0);
+                                har_recorder_task.record(entry).await;
+                            }
+                        }
+                    }
+                    Ok(event) if event.method == "network.fetchError" => {
+                        let id = event
+                            .params
+                            .pointer("/request/request")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(id) = id {
+                            if let Some(mut entry) = har_pending_task.write().await.remove(&id) {
+                                entry.error_text = event
+                                    .params
+                                    .get("errorText")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned);
+                                har_recorder_task.record(entry).await;
+                            }
                         }
                     }
                     Ok(event) if event.method == "browsingContext.userPromptOpened" => {
@@ -1229,6 +1312,7 @@ impl FirefoxCompanionWorker {
             pages,
             page_cleanups,
             pending_prompts,
+            har_recorder,
             closed: AtomicBool::new(false),
             lifecycle: AsyncMutex::new(()),
             shutdown: Arc::new(WorkerShutdown {
@@ -3714,6 +3798,47 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ])
+    }
+
+    async fn network_log(
+        &self,
+        page_id: &PageId,
+        command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let entries = self.har_recorder.take(command.clear).await;
+        let page_url = String::new();
+        let document = worker_pool::har_document(&entries, &page_url);
+        let bytes = serde_json::to_vec(&document)
+            .map_err(|error| driver_error(ErrorCode::Internal, error.to_string(), false))?;
+        let record = self
+            .artifacts
+            .as_ref()
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox HAR artifact storage is not configured",
+                    false,
+                )
+            })?
+            .put(
+                self.session_id.as_ref().ok_or_else(page_missing)?,
+                page_id,
+                "application/json",
+                "har",
+                &bytes,
+                MAX_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| {
+                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
+            })?;
+        Ok(vec![Evidence::HarArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+            entries: entries.len() as u32,
+        }])
     }
 
     async fn emulate(

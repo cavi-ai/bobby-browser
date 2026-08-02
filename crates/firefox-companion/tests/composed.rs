@@ -57,6 +57,7 @@ impl BidiTransport for BindingBidi {
             .push((method.to_owned(), params.clone()));
         match method {
             "session.subscribe" => Ok(json!({})),
+            "script.addPreloadScript" => Ok(json!({"script": "composed-preload"})),
             "browsingContext.create" => Ok(json!({"context": "bidi-context-created"})),
             "script.evaluate" if params["expression"] == "document.title" => {
                 Ok(json!({"result": {"type": "string", "value": "Composed original title"}}))

@@ -589,6 +589,12 @@ async fn browser_execute(
                 .evaluate_javascript(page_id.expect("validated page id"), command)
                 .await?
         }
+        PrimitiveCommand::NetworkLog(command) => {
+            lease
+                .worker()
+                .network_log(page_id.expect("validated page id"), command)
+                .await?
+        }
         PrimitiveCommand::Emulate(command) => {
             lease
                 .worker()
