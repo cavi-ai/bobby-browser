@@ -9,7 +9,7 @@ export interface SessionState { id: Id; profile: string; proxy: string | null; p
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
 /** Matches types::ExecutionPolicy (deny-by-default when omitted). */
-export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; }
+export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; }
 export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; }
 export interface OpenPageRequest { session_id: Id; }
 
@@ -112,6 +112,7 @@ export type Evidence =
   | { kind: "formSnapshot"; snapshot: FormSnapshot }
   | { kind: "controlAction"; action: ControlActionEvidence }
   | { kind: "intentExecution"; record: ExecutionRecord }
+  | { kind: "humanization"; engine: string; actions: number; synthesizedMs: number }
   | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 
 /** Every serde(tag = "status") CommandOutcome variant in the committed Rust contract. */

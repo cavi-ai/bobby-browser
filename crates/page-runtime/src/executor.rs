@@ -8,7 +8,7 @@ use types::{
 };
 use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
-use crate::{PageRuntime, VisionGate};
+use crate::{PageRuntime, SessionGate, VisionGate};
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -115,7 +115,7 @@ impl PageRuntime {
     }
 
     pub async fn execute(&self, envelope: CommandEnvelope) -> CommandOutcome {
-        self.execute_with_vision_gate(envelope, VisionGate::default())
+        self.execute_with_session_gate(envelope, SessionGate::default())
             .await
     }
 
@@ -123,6 +123,15 @@ impl PageRuntime {
         &self,
         envelope: CommandEnvelope,
         vision_gate: VisionGate,
+    ) -> CommandOutcome {
+        self.execute_with_session_gate(envelope, vision_gate.into())
+            .await
+    }
+
+    pub async fn execute_with_session_gate(
+        &self,
+        envelope: CommandEnvelope,
+        gate: SessionGate,
     ) -> CommandOutcome {
         let command_id = envelope.command_id.clone();
         if let Err(error) = self.validate(&envelope).await {
@@ -182,6 +191,25 @@ impl PageRuntime {
                     .await;
             }
         };
+        // Apply the session's policy to the worker before it runs anything.
+        // Workers are pooled and re-leased across sessions, so the previous
+        // lease's settings are still in place here — writing both flags on
+        // every lease is what stops one session's opt-in from leaking into
+        // the next session's worker.
+        if let Err(error) = lease
+            .worker()
+            .set_fingerprint_enabled(gate.fingerprint)
+            .await
+        {
+            return self
+                .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
+                .await;
+        }
+        if let Err(error) = lease.worker().set_humanization_enabled(gate.humanize).await {
+            return self
+                .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
+                .await;
+        }
         let page_state = match envelope.page_id.as_ref() {
             Some(page_id) => match self.get(page_id).await {
                 Ok(page) => Some(page),
@@ -202,7 +230,7 @@ impl PageRuntime {
         };
         let mut execution = match self
             .adaptive
-            .execute(&envelope, &lease, page_state, vision_gate)
+            .execute(&envelope, &lease, page_state, gate.vision)
             .await
         {
             Ok(execution) => execution,
