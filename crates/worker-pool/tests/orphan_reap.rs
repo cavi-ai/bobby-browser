@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
 use config::BrowserConfig;
@@ -7,9 +6,7 @@ use worker_pool::{ChromiumWorkerFactory, WorkerFactory};
 
 fn browser_config(root: &std::path::Path) -> BrowserConfig {
     BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.join("profiles"),
         headless: true,
         max_active: 1,
@@ -28,6 +25,14 @@ fn browser_config(root: &std::path::Path) -> BrowserConfig {
 /// harmlessly (ESRCH) if the process already exited.
 unsafe fn force_kill(pid: i32) -> i32 {
     libc::kill(pid, libc::SIGKILL)
+}
+
+fn chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
 }
 
 /// Simulates the exact scenario the orphan-reaping registry exists for: a

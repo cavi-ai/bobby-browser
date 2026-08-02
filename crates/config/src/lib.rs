@@ -337,7 +337,9 @@ impl Default for AppConfig {
                 shutdown_timeout_ms: 10_000,
             },
             browser: BrowserConfig {
-                executable: None,
+                executable: std::env::var_os("BOBBY_CHROME_EXECUTABLE")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from),
                 profiles_dir: PathBuf::from("./data/profiles"),
                 headless: true,
                 max_active: 8,
