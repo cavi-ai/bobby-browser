@@ -164,6 +164,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             handler_task: Mutex::new(Some(handler_task)),
             fingerprint: Mutex::new(self.fingerprint.clone()),
             fingerprint_enabled: AtomicBool::new(self.fingerprint.enabled),
+            fingerprint_plan: Mutex::new(None),
         }))
     }
 }
@@ -242,6 +243,8 @@ struct ChromiumWorker {
     handler_task: Mutex<Option<JoinHandle<()>>>,
     fingerprint: Mutex<FingerprintConfig>,
     fingerprint_enabled: AtomicBool,
+    /// Cached apply plan for the current fingerprint config (rebuilt on invalidate).
+    fingerprint_plan: Mutex<Option<std::sync::Arc<FingerprintApplyPlan>>>,
 }
 
 #[derive(Default)]
@@ -389,23 +392,34 @@ impl ChromiumWorker {
         {
             return Ok(());
         }
-        let config = {
-            let mut config = self.fingerprint.lock().await.clone();
-            config.enabled = true;
-            config
-        };
-        let plan = match FingerprintApplyPlan::from_config(&config) {
-            Ok(Some(plan)) => plan,
-            Ok(None) => return Ok(()),
-            Err(error) => {
-                return Err(driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    error.to_string(),
-                ))
+        let plan = {
+            let cached = self.fingerprint_plan.lock().await;
+            if let Some(plan) = cached.as_ref() {
+                plan.clone()
+            } else {
+                drop(cached);
+                let config = {
+                    let mut config = self.fingerprint.lock().await.clone();
+                    config.enabled = true;
+                    config
+                };
+                let plan = match FingerprintApplyPlan::from_config(&config) {
+                    Ok(Some(plan)) => std::sync::Arc::new(plan),
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        return Err(driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            error.to_string(),
+                        ))
+                    }
+                };
+                let mut cached = self.fingerprint_plan.lock().await;
+                *cached = Some(plan.clone());
+                plan
             }
         };
         crate::fingerprint_host::ChromiumPageHost { page }
-            .apply_fingerprint(&plan)
+            .apply_fingerprint(plan.as_ref())
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))
     }
@@ -429,6 +443,8 @@ impl BrowserWorker for ChromiumWorker {
     async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
         self.fingerprint_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        // Drop cached plan so the next apply rebuilds with current config/enabled state.
+        *self.fingerprint_plan.lock().await = None;
         Ok(())
     }
 

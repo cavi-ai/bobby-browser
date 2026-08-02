@@ -123,21 +123,28 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
+    // Desktop touch MQ vars: patch CSSStyleDeclaration once instead of
+    // Proxy-wrapping every getComputedStyle result.
+    if (P.maxTouchPoints === 0 && typeof CSSStyleDeclaration !== "undefined") {
+      const originalGPV = CSSStyleDeclaration.prototype.getPropertyValue;
+      CSSStyleDeclaration.prototype.getPropertyValue = cloak(function getPropertyValue(name) {
+        const v = originalGPV.call(this, name);
+        const key = String(name).toLowerCase();
+        if ((key === "--any-pointer" || key === "--pointer") && v === "coarse") return "fine";
+        if ((key === "--any-hover" || key === "--hover") && v === "none") return "hover";
+        return v;
+      });
+    }
     const originalGCS = window.getComputedStyle.bind(window);
     window.getComputedStyle = cloak(function getComputedStyle(el, pseudo) {
       const style = originalGCS(el, pseudo);
-      const desktopTouch = P.maxTouchPoints === 0;
       try {
         const cssText = (el && el.style && el.style.cssText) || "";
         const attr = (el && el.getAttribute && el.getAttribute("style")) || "";
-        const activeText = /ActiveText/i.test(cssText + attr);
-        if (!activeText && !desktopTouch) return style;
+        if (!/ActiveText/i.test(cssText + attr)) return style;
         return new Proxy(style, {
           get(target, prop, receiver) {
             if (prop === "backgroundColor" || prop === "color") {
-              if (!activeText) {
-                return Reflect.get(target, prop, receiver);
-              }
               const v = Reflect.get(target, prop, receiver);
               if (v === "rgb(255, 0, 0)" || v === "rgba(255, 0, 0, 1)") return "rgb(0, 0, 0)";
               return v;
@@ -145,13 +152,8 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
             if (prop === "getPropertyValue") {
               return function (name) {
                 const v = target.getPropertyValue(name);
-                const key = String(name).toLowerCase();
-                if (activeText && /color/i.test(key) && (v === "rgb(255, 0, 0)" || v === "rgba(255, 0, 0, 1)")) {
+                if (/color/i.test(String(name)) && (v === "rgb(255, 0, 0)" || v === "rgba(255, 0, 0, 1)")) {
                   return "rgb(0, 0, 0)";
-                }
-                if (desktopTouch) {
-                  if ((key === "--any-pointer" || key === "--pointer") && v === "coarse") return "fine";
-                  if ((key === "--any-hover" || key === "--hover") && v === "none") return "hover";
                 }
                 return v;
               };
@@ -166,6 +168,8 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   const fontSet = new Set(P.fontList || []);
+  const fontSetLower = new Set();
+  fontSet.forEach(function (f) { fontSetLower.add(String(f).toLowerCase()); });
   const FONT_GENERICS = new Set([
     "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
     "ui-serif", "ui-sans-serif", "ui-monospace", "ui-rounded", "emoji", "math",
@@ -179,12 +183,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     if (!n) return true;
     if (FONT_GENERICS.has(n.toLowerCase())) return true;
     if (fontSet.size === 0) return true;
-    if (fontSet.has(n)) return true;
-    const lower = n.toLowerCase();
-    for (const allowed of fontSet) {
-      if (String(allowed).toLowerCase() === lower) return true;
-    }
-    return false;
+    return fontSet.has(n) || fontSetLower.has(n.toLowerCase());
   }
   function rewriteFontFamilyList(familyList) {
     const parts = String(familyList || "").split(",");
@@ -307,18 +306,14 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       const style = el.style;
       const prevFamily = style.fontFamily;
       const prevFont = style.font;
-      let computedFamily = "";
-      try {
-        if (typeof getComputedStyle === "function") {
-          computedFamily = getComputedStyle(el).fontFamily || "";
-        }
-      } catch (_) {}
-      const sourceFamily = prevFamily || computedFamily;
+      // Fast path: no inline font → skip layout-taxing computed lookup (font
+      // probes set inline family; normal layout must stay cheap).
+      if (!prevFamily && !prevFont) return fn();
       let mode = null;
       try {
-        if (sourceFamily) {
-          const next = rewriteFontFamilyList(sourceFamily);
-          if (next !== sourceFamily) {
+        if (prevFamily) {
+          const next = rewriteFontFamilyList(prevFamily);
+          if (next !== prevFamily) {
             style.fontFamily = next;
             mode = "family";
           }
@@ -1048,13 +1043,17 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   function wrapWorkerScriptUrl(scriptURL, options) {
     const abs = resolveUrl(scriptURL);
     const isModule = options && options.type === "module";
-    const inline = !isModule ? loadScriptSourceSync(abs) : null;
     let body;
     if (isModule) {
       body = workerBootstrap + "\nimport " + JSON.stringify(abs) + ";\n";
-    } else if (inline) {
-      body = workerBootstrap + "\n" + inline + "\n";
+    } else if (String(abs).indexOf("blob:") === 0) {
+      // Blob sources are local — sync read is fine and keeps probe scripts exact.
+      const inline = loadScriptSourceSync(abs);
+      body = inline
+        ? workerBootstrap + "\n" + inline + "\n"
+        : workerBootstrap + "\ntry { importScripts(" + JSON.stringify(abs) + "); } catch (e) { throw e; }\n";
     } else {
+      // Avoid sync XHR on network URLs (main-thread stall on every Worker).
       body = workerBootstrap + "\ntry { importScripts(" + JSON.stringify(abs) + "); } catch (e) { throw e; }\n";
     }
     const blob = new Blob([body], { type: isModule ? "text/javascript" : "application/javascript" });
@@ -1110,10 +1109,15 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       });
     } catch (_) {}
     try {
-      const timer = setInterval(function () {
-        if (tryInstall()) clearInterval(timer);
-      }, 0);
-      setTimeout(function () { clearInterval(timer); }, 5000);
+      let attempts = 0;
+      const tick = function () {
+        if (tryInstall() || ++attempts > 8) return;
+        try {
+          if (typeof requestAnimationFrame === "function") requestAnimationFrame(tick);
+          else setTimeout(tick, 16);
+        } catch (_) {}
+      };
+      tick();
     } catch (_) {}
   }
 
@@ -1598,6 +1602,17 @@ mod tests {
         let session = crate::create_session(&FingerprintConfig::default().with_session_seed(2));
         let script = build_init_script(&session).unwrap();
         assert!(!script.contains(PROFILE_PLACEHOLDER));
+    }
+
+    #[test]
+    fn init_script_stays_under_size_budget() {
+        let session = crate::create_session(&FingerprintConfig::default().with_session_seed(7));
+        let script = build_init_script(&session).unwrap();
+        assert!(
+            script.len() < 55_000,
+            "init script grew to {} bytes (budget 55k)",
+            script.len()
+        );
     }
 
     #[test]
