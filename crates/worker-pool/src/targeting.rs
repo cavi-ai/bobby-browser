@@ -323,6 +323,17 @@ impl ResolvedTarget {
         page: &Page,
         operation: &str,
     ) -> Result<T, CommandError> {
+        if let Some(element) = &self.native {
+            let value = element
+                .call_js_fn_by_value(
+                    format!("function() {{ const el=this; {operation} }}"),
+                    false,
+                )
+                .await
+                .map_err(cdp_error)?;
+            return serde_json::from_value(value)
+                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error));
+        }
         let page = self.execution_page(page);
         let expression = locator_expression(&self.locator, operation)?;
         eval_scoped(page, &self.locator.scope, expression).await
