@@ -57,6 +57,7 @@ fn init_script_contains_niche_surface_markers() {
     assert!(INIT_SCRIPT_TEMPLATE.contains("FontFace.prototype.load"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("TouchEvent"));
     assert!(INIT_SCRIPT_TEMPLATE.contains("--any-pointer"));
+    assert!(INIT_SCRIPT_TEMPLATE.contains("CSSStyleDeclaration"));
 }
 
 #[test]

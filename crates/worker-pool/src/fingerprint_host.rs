@@ -98,35 +98,19 @@ impl FingerprintHost for ChromiumPageHost<'_> {
         plan: &FingerprintApplyPlan,
     ) -> Result<(), FingerprintApplyError> {
         let metadata = user_agent_metadata_value(plan)?;
-        // Emulation covers navigator.userAgentData; Network covers Sec-CH-UA headers.
-        for method in [
+        let emulation_ua = UserAgentOverrideCmd::for_domain(
             "Emulation.setUserAgentOverride",
-            "Network.setUserAgentOverride",
-        ] {
-            self.page
-                .execute(UserAgentOverrideCmd::for_domain(
-                    method,
-                    plan,
-                    metadata.clone(),
-                ))
-                .await
-                .map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
-        }
-
-        self.page
-            .emulate_locale(SetLocaleOverrideParams {
-                locale: Some(plan.locale.clone()),
-            })
-            .await
-            .map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
-
-        self.page
-            .emulate_timezone(SetTimezoneOverrideParams {
-                timezone_id: plan.timezone_id.clone(),
-            })
-            .await
-            .map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
-
+            plan,
+            metadata.clone(),
+        );
+        let network_ua =
+            UserAgentOverrideCmd::for_domain("Network.setUserAgentOverride", plan, metadata);
+        let locale = SetLocaleOverrideParams {
+            locale: Some(plan.locale.clone()),
+        };
+        let timezone = SetTimezoneOverrideParams {
+            timezone_id: plan.timezone_id.clone(),
+        };
         let metrics = SetDeviceMetricsOverrideParams::builder()
             .width(plan.device_metrics.width as i64)
             .height(plan.device_metrics.height as i64)
@@ -134,14 +118,25 @@ impl FingerprintHost for ChromiumPageHost<'_> {
             .mobile(plan.device_metrics.mobile)
             .build()
             .map_err(FingerprintApplyError::Host)?;
-        self.page
-            .execute(metrics)
-            .await
-            .map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+        let touch = (plan.session.max_touch_points == 0)
+            .then(|| SetTouchEmulationEnabledParams::new(false));
 
-        // Desktop personas must not advertise touch emulation from CDP.
-        if plan.session.max_touch_points == 0 {
-            let touch = SetTouchEmulationEnabledParams::new(false);
+        // Independent overrides can run concurrently; init script stays last so
+        // document-start injection sees the final UA/metrics environment.
+        let (r_emu, r_net, r_locale, r_tz, r_metrics) = tokio::join!(
+            self.page.execute(emulation_ua),
+            self.page.execute(network_ua),
+            self.page.emulate_locale(locale),
+            self.page.emulate_timezone(timezone),
+            self.page.execute(metrics),
+        );
+        r_emu.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+        r_net.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+        r_locale.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+        r_tz.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+        r_metrics.map_err(|error| FingerprintApplyError::Host(error.to_string()))?;
+
+        if let Some(touch) = touch {
             self.page
                 .execute(touch)
                 .await
