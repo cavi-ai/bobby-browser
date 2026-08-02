@@ -197,8 +197,8 @@ fn recover_workflow(arguments: &Value) -> Option<Value> {
          If you are reconnecting after the interruption, the server pushes runtime events as \
          notifications/bobby/event on this connection -- no polling needed. A pushed frame whose \
          kind is event.gap means events were dropped from the push channel before you \
-         reconnected; call events_read to read them back from its payload's earliestAvailable. \
-         See bobby://failure-taxonomy.\n\
+         reconnected; call events_read with cursor set to its payload's earliestAvailable - 1 \
+         to read them back. See bobby://failure-taxonomy.\n\
          \n\
          On failure with notFound, this principal does not own workflowId's checkpoint \
          session, or the session is closed -- verify with session_list before retrying."
