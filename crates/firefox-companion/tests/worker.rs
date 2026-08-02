@@ -3065,3 +3065,54 @@ async fn handle_dialog_waits_for_and_accepts_a_user_prompt() {
             && call.params.get("accept") == Some(&json!(true))
     }));
 }
+
+#[tokio::test]
+async fn fingerprint_toggle_adds_and_removes_preload_script() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-fp-toggle"}))]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+
+    let calls = bidi.calls().await;
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.method == "script.addPreloadScript"),
+        "worker init must register fingerprint preload script"
+    );
+    assert!(
+        calls.iter().any(|call| {
+            call.method == "emulation.setUserAgentOverride"
+                || call.method == "emulation.setLocaleOverride"
+                || call.method == "emulation.setTimezoneOverride"
+        }),
+        "worker init must attempt emulation overrides"
+    );
+
+    worker.set_fingerprint_enabled(false).await.unwrap();
+    assert!(
+        bidi.calls()
+            .await
+            .iter()
+            .any(|call| call.method == "script.removePreloadScript"),
+        "disable must remove preload script"
+    );
+
+    worker.set_fingerprint_enabled(true).await.unwrap();
+    let add_count = bidi
+        .calls()
+        .await
+        .iter()
+        .filter(|call| call.method == "script.addPreloadScript")
+        .count();
+    assert_eq!(add_count, 2, "re-enable must add preload script again");
+
+    let calls_before_open = bidi.calls().await.len();
+    worker.open_page(PageId::new()).await.unwrap();
+    let new_adds = bidi.calls().await[calls_before_open..]
+        .iter()
+        .filter(|call| call.method == "script.addPreloadScript")
+        .count();
+    assert_eq!(
+        new_adds, 0,
+        "open_page must not double-add when preload already synced"
+    );
+}

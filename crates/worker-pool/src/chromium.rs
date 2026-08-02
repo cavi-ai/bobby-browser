@@ -7,8 +7,6 @@ use std::time::Instant;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig};
-use fingerprinting::{FingerprintApplyPlan, FingerprintConfig, FingerprintHost};
-use std::sync::atomic::AtomicBool;
 use chromiumoxide::cdp::browser_protocol::browser::{
     DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
@@ -27,11 +25,13 @@ use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
+use fingerprinting::{FingerprintApplyPlan, FingerprintConfig, FingerprintHost};
 use futures::StreamExt;
 use network_engine::state::{
     HttpCookie, HttpCookiePartitionKey, HttpStateSnapshot, ResponseStateDelta,
 };
 use sha2::{Digest, Sha256};
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
@@ -383,7 +383,10 @@ impl ChromiumWorker {
     }
 
     async fn apply_fingerprint_to_page(&self, page: &Page) -> Result<(), CommandError> {
-        if !self.fingerprint_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self
+            .fingerprint_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return Ok(());
         }
         let config = {
@@ -423,9 +426,10 @@ impl BrowserWorker for ChromiumWorker {
         &self.profile_dir
     }
 
-    fn set_fingerprint_enabled(&self, enabled: bool) {
+    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
         self.fingerprint_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     fn fingerprint_enabled(&self) -> bool {

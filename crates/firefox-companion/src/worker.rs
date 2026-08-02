@@ -12,11 +12,9 @@ use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use behavioral_engine::{
-    session_pause, BezierMouseSimulator, BehavioralConfig, MousePath, ScrollAction,
+    session_pause, BehavioralConfig, BezierMouseSimulator, MousePath, ScrollAction,
     ScrollSimulator, SessionRandom, TypingSimulator,
 };
-use fingerprinting::FingerprintApplyPlan;
-use fingerprinting::FingerprintConfig;
 use companion_core::{
     AttachmentLease, CompanionServerHandle, CompanionSessionError, PageBindingTicket,
 };
@@ -26,6 +24,8 @@ use companion_protocol::{
 use dom_engine::{
     resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
 };
+use fingerprinting::FingerprintApplyPlan;
+use fingerprinting::FingerprintConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1108,6 +1108,7 @@ impl FirefoxCompanionWorker {
         let script_id = host.add_preload_script(&plan).await.map_err(|error| {
             driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
         })?;
+        let _ = host.apply_emulation_overrides(&plan).await;
         *self
             .fingerprint_preload_script
             .lock()
@@ -1300,7 +1301,9 @@ impl FirefoxCompanionWorker {
         let typing_simulator = TypingSimulator::new(behavioral_config.typing);
         let scroll_simulator = ScrollSimulator::new(behavioral_config.scroll);
         let session_jitter = behavioral_config.session_jitter;
-        let fingerprint = FingerprintConfig::default().with_session_seed(session_seed);
+        let fingerprint = FingerprintConfig::default()
+            .with_session_seed(session_seed)
+            .with_inject_chrome(false);
         let fingerprint_enabled = AtomicBool::new(fingerprint.enabled);
 
         let worker = Self {
@@ -1876,9 +1879,7 @@ impl FirefoxCompanionWorker {
             }
             _ => pointer_actions(context, &shared_id),
         };
-        self.transport
-            .send("input.performActions", actions)
-            .await?;
+        self.transport.send("input.performActions", actions).await?;
         Ok(())
     }
 
@@ -2469,8 +2470,29 @@ impl BrowserWorker for FirefoxCompanionWorker {
         &self.profile_dir
     }
 
-    fn set_fingerprint_enabled(&self, enabled: bool) {
+    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
         self.fingerprint_enabled.store(enabled, Ordering::Relaxed);
+        // Force resync: clear cached preload id so sync re-adds or removes now.
+        if !enabled {
+            let existing = self
+                .fingerprint_preload_script
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(script_id) = existing {
+                let host = crate::fingerprint_host::FirefoxBidiHost {
+                    transport: self.transport.as_ref(),
+                    context: None,
+                };
+                let _ = host.remove_preload_script(&script_id).await;
+            }
+            return Ok(());
+        }
+        *self
+            .fingerprint_preload_script
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.sync_fingerprint_preload().await
     }
 
     fn fingerprint_enabled(&self) -> bool {
@@ -2843,9 +2865,8 @@ impl BrowserWorker for FirefoxCompanionWorker {
 
         self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
             .await?;
-        let path = self.with_session_random(|random| {
-            self.mouse_simulator.generate_approach_path(random)
-        });
+        let path =
+            self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
 
         self.perform_pointer_click(&context, &shared_id, Some(&path))
             .await?;
@@ -3467,9 +3488,8 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .await?;
         self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
             .await?;
-        let path = self.with_session_random(|random| {
-            self.mouse_simulator.generate_approach_path(random)
-        });
+        let path =
+            self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
         self.perform_pointer_click(&context, &shared_id, Some(&path))
             .await?;
 
@@ -4864,7 +4884,10 @@ impl FirefoxCompanionWorker {
 
         for action in actions {
             match action {
-                behavioral_engine::TypingAction::KeyDown { character, delay_ms } => {
+                behavioral_engine::TypingAction::KeyDown {
+                    character,
+                    delay_ms,
+                } => {
                     bidi_actions.push(json!({
                         "type": "keyDown",
                         "value": character.chars().next().unwrap_or(' ').to_string(),
@@ -4876,7 +4899,10 @@ impl FirefoxCompanionWorker {
                         }));
                     }
                 }
-                behavioral_engine::TypingAction::KeyUp { character, delay_ms } => {
+                behavioral_engine::TypingAction::KeyUp {
+                    character,
+                    delay_ms,
+                } => {
                     bidi_actions.push(json!({
                         "type": "keyUp",
                         "value": character.chars().next().unwrap_or(' ').to_string(),

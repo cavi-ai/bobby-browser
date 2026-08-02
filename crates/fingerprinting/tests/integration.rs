@@ -1,7 +1,7 @@
 use fingerprinting::{
-    build_init_script, build_probe_script, CanvasConfig, CanvasMasker, FingerprintApplyPlan,
-    FingerprintConfig, FontConfig, FontMasker, ScreenConfig, ScreenMasker, WebGlConfig,
-    create_session,
+    build_init_script, build_probe_script, create_session, CanvasConfig, CanvasMasker,
+    FingerprintApplyPlan, FingerprintConfig, FontConfig, FontMasker, ScreenConfig, ScreenMasker,
+    WebGlConfig,
 };
 use rand::SeedableRng;
 
@@ -52,9 +52,8 @@ fn font_masker_empty_falls_back_to_defaults() {
 
 #[test]
 fn font_masker_custom_fonts() {
-    let masker = FontMasker::new(
-        FontConfig::default().with_standard_fonts(vec!["CustomFont".to_string()]),
-    );
+    let masker =
+        FontMasker::new(FontConfig::default().with_standard_fonts(vec!["CustomFont".to_string()]));
     assert_eq!(masker.get_standard_fonts(), vec!["CustomFont".to_string()]);
 }
 
@@ -128,9 +127,17 @@ fn apply_plan_none_when_disabled() {
 fn apply_plan_contains_init_and_probe_scripts() {
     let config = FingerprintConfig::default().with_session_seed(99);
     let plan = FingerprintApplyPlan::from_config(&config).unwrap().unwrap();
-    assert!(plan.init_script.contains("__bobbyFingerprintApplied"));
+    assert!(plan
+        .init_script
+        .contains("Symbol.for(\"bobby.fp.applied\")"));
+    assert!(!plan.init_script.contains("__bobbyFingerprintApplied"));
     assert!(plan.init_script.contains(&plan.session.user_agent));
     assert!(plan.init_script.contains(&plan.session.webgl.vendor));
+    assert!(plan.init_script.contains("iceTransportPolicy"));
+    assert!(plan.init_script.contains("enumerateDevices"));
+    assert!(plan.init_script.contains("getBattery"));
+    assert!(plan.init_script.contains("maxTextureSize"));
+    assert_eq!(plan.session.webgl.max_texture_size, 16384);
     assert!(plan.probe_script.contains("canvasHash"));
     assert_eq!(plan.user_agent, plan.session.user_agent);
     assert_eq!(plan.device_metrics.width, 1920);
@@ -139,8 +146,8 @@ fn apply_plan_contains_init_and_probe_scripts() {
 #[test]
 fn init_script_is_deterministic_for_seed() {
     let config = FingerprintConfig::default().with_session_seed(55);
-    let a = build_init_script(&create_session(&config));
-    let b = build_init_script(&create_session(&config));
+    let a = build_init_script(&create_session(&config)).unwrap();
+    let b = build_init_script(&create_session(&config)).unwrap();
     assert_eq!(a, b);
     assert!(!build_probe_script().is_empty());
 }
@@ -153,22 +160,74 @@ fn consistency_rejects_mac_fonts_on_windows_ua() {
 }
 
 #[test]
+fn consistency_rejects_ua_ch_platform_mismatch() {
+    let mut session = create_session(
+        &FingerprintConfig::default()
+            .with_session_seed(2)
+            .with_platform("MacIntel"),
+    );
+    session.client_hints.platform = "Windows".to_string();
+    assert!(session.validate_consistency().is_err());
+
+    session = create_session(
+        &FingerprintConfig::default()
+            .with_session_seed(3)
+            .with_platform("MacIntel"),
+    );
+    session.platform = "Win32".to_string();
+    assert!(session.validate_consistency().is_err());
+}
+
+#[test]
+fn consistency_rejects_chrome_major_drift() {
+    let mut session = create_session(&FingerprintConfig::default().with_session_seed(4));
+    session.client_hints.full_version = "99.0.0.0".to_string();
+    assert!(session.validate_consistency().is_err());
+
+    session = create_session(&FingerprintConfig::default().with_session_seed(5));
+    session.user_agent = session.user_agent.replace("Chrome/131", "Chrome/120");
+    assert!(session.validate_consistency().is_err());
+
+    session = create_session(&FingerprintConfig::default().with_session_seed(6));
+    session.client_hints.brands = session
+        .client_hints
+        .brands
+        .into_iter()
+        .map(|mut brand| {
+            if brand.brand == "Chromium" {
+                brand.version = "99".to_string();
+            }
+            brand
+        })
+        .collect();
+    assert!(session.validate_consistency().is_err());
+}
+
+#[test]
+fn consistency_rejects_empty_webgl() {
+    let mut session = create_session(&FingerprintConfig::default().with_session_seed(7));
+    session.webgl.vendor = String::new();
+    assert!(session.validate_consistency().is_err());
+
+    session = create_session(&FingerprintConfig::default().with_session_seed(8));
+    session.webgl.renderer = String::new();
+    assert!(session.validate_consistency().is_err());
+}
+
+#[test]
 fn fingerprint_config_chain() {
     let config = FingerprintConfig::default()
         .with_session_seed(3)
         .with_canvas(CanvasConfig::default().with_hash_seed(42))
         .with_webgl(WebGlConfig::default().with_vendor("Test Vendor"))
         .with_fonts(FontConfig::default().with_standard_fonts(vec!["Test".to_string()]))
-        .with_screen(
-            ScreenConfig::default()
-                .with_width(1366)
-                .with_height(768),
-        );
+        .with_screen(ScreenConfig::default().with_width(1366).with_height(768));
     let session = create_session(&config);
     assert_eq!(session.screen_resolution.width, 1366);
     assert_eq!(session.screen_resolution.height, 768);
     assert_eq!(session.font_list, vec!["Test".to_string()]);
     assert_eq!(session.webgl.vendor, "Test Vendor");
+    assert_eq!(session.webgl.max_texture_size, 16384);
 }
 
 #[test]

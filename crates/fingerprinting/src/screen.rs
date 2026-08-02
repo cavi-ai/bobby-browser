@@ -91,10 +91,7 @@ impl ScreenMasker {
 
     /// Get the spoofed screen resolution.
     pub fn get_spoofed_resolution(&self) -> ScreenResolution {
-        let available_height = self
-            .config
-            .height
-            .saturating_sub(self.config.taskbar_inset);
+        let available_height = self.config.height.saturating_sub(self.config.taskbar_inset);
 
         ScreenResolution {
             width: self.config.width,
