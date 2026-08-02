@@ -337,3 +337,46 @@ async fn a_read_only_tool_is_never_also_destructive() {
         );
     }
 }
+
+const DESCRIPTION_MAX_CHARS: usize = 400;
+
+#[tokio::test]
+async fn descriptions_stay_under_the_cap() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap();
+        let description = tool["description"].as_str().unwrap_or_default();
+        assert!(!description.is_empty(), "{name} has an empty description");
+        assert!(
+            description.chars().count() <= DESCRIPTION_MAX_CHARS,
+            "{name} description is {} chars, over the {DESCRIPTION_MAX_CHARS} cap",
+            description.chars().count()
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_description_names_its_required_capability() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap();
+        let description = tool["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("Requires "),
+            "{name} description does not name its capability: {description}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn mutating_tools_describe_a_repair_action() {
+    for tool in list_tools(all_capabilities()).await {
+        let name = tool["name"].as_str().unwrap();
+        if tool["annotations"]["readOnlyHint"] == serde_json::json!(true) {
+            continue;
+        }
+        let description = tool["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("On failure"),
+            "{name} description has no repair clause: {description}"
+        );
+    }
+}
