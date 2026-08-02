@@ -53,6 +53,8 @@ jobs:
     name: chromium · live browser tests
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
+    env:
+      BOBBY_CHROME_NO_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v7
 
