@@ -1479,9 +1479,10 @@ fn chromium_executable() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        chrome_executable().to_string_lossy().into_owned(),
+        "/Applications/Chromium.app/Contents/MacOS/Chromium".to_owned(),
+        "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+            .to_owned(),
     ]
     .into_iter()
     .map(PathBuf::from)
@@ -1759,6 +1760,14 @@ mod replay_contracts {
             STATIONS.len()
         );
     }
+}
+
+fn chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
 }
 
 #[tokio::test]

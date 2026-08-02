@@ -1,4 +1,11 @@
 use config::BrowserConfig;
+
+fn chrome_executable() -> PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| chrome_executable())
+}
+
 use network_engine::state::{HttpCookie, ResponseStateDelta};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -54,9 +61,7 @@ async fn synchronizes_versioned_http_state() {
     let state_url = format!("http://{address}/state");
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -221,9 +226,7 @@ async fn correlates_popup_and_download_before_clicking() {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -318,9 +321,7 @@ async fn drives_a_real_chromium_page() {
     let upload = profiles.path().join("resume.txt");
     std::fs::write(&upload, b"Ada Lovelace").unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: profiles.path().to_path_buf(),
         headless: true,
         max_active: 8,
@@ -414,9 +415,7 @@ async fn drives_a_real_chromium_page() {
 async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -508,9 +507,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
 async fn form_controls_have_normalized_roles_names_constraints_and_native_selection() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -830,9 +827,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
 async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -926,9 +921,7 @@ async fn network_quiet_respects_url_and_long_lived_ignores() {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -1032,9 +1025,7 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
     let root = tempfile::tempdir().unwrap();
     let session_id = SessionId::new();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -1114,9 +1105,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
     let host = test_site::spawn_frame_host(&fixture.base_url()).await;
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -1215,9 +1204,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
     let host = test_site::spawn_frame_host(&fixture.base_url()).await;
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
@@ -1343,9 +1330,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
 async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
-        executable: Some(PathBuf::from(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        )),
+        executable: Some(chrome_executable()),
         profiles_dir: root.path().join("profiles"),
         headless: true,
         max_active: 1,
