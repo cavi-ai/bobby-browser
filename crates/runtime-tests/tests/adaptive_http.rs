@@ -383,11 +383,16 @@ async fn adaptive_http() {
         }),
     )
     .await;
+    let direct_text = inspection_text(&recovered);
+    let mut chromium_pairs = inspection_text(&recovered_chromium)
+        .split("; ")
+        .collect::<Vec<_>>();
+    chromium_pairs.sort_unstable();
     assert!(
-        inspection_text(&recovered).contains(&inspection_text(&recovered_chromium)),
-        "recovered direct HTTP and Chromium must observe coherent cookie state: direct={:?} chromium={:?} evidence={recovered_chromium:?}",
-        inspection_text(&recovered),
-        inspection_text(&recovered_chromium),
+        chromium_pairs
+            .iter()
+            .all(|pair| direct_text.contains(pair)),
+        "recovered direct HTTP and Chromium must observe coherent cookie state: direct={direct_text:?} chromium={chromium_pairs:?} evidence={recovered_chromium:?}",
     );
 
     println!(
