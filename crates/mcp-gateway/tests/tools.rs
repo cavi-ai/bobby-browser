@@ -1975,14 +1975,7 @@ async fn tools_list_fits_the_frame_budget_for_a_full_capability_principal() {
     }
 }
 
-/// An eighth of the 1 MiB frame cap. Each tool schema has to be self-contained
-/// — MCP gives clients no way to resolve a `$ref` across tools — so a catalog
-/// this size is genuine cost, not duplication. The budget leaves room to grow
-/// while still catching a reintroduction of the shared-`$defs` regression,
-/// which ran an order of magnitude past this.
-const TOOLS_LIST_BYTE_BUDGET: usize = 128 * 1024;
-/// No tool should approach the whole type system on its own.
-const PER_TOOL_BYTE_BUDGET: usize = 32 * 1024;
+use mcp_gateway::{PER_TOOL_BYTE_BUDGET, TOOLS_LIST_BYTE_BUDGET};
 
 async fn authenticated_with_intents() -> AuthenticatedRuntime {
     let authority = AuthorityStore::in_memory();

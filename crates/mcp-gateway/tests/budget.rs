@@ -18,15 +18,7 @@ use types::{
 };
 use uuid::uuid;
 
-/// The `tools/list` payload an agent downloads on connect, in bytes.
-///
-/// There used to be a second, looser cap here (`TOOLS_LIST_MAX_BYTES`,
-/// 160,000) alongside `tests/tools.rs`'s pre-existing
-/// `TOOLS_LIST_BYTE_BUDGET` (128 * 1024 = 131,072, "an eighth of the 1 MiB
-/// frame cap"). Two caps on the same quantity never both bind — the looser
-/// one is dead weight — so this asserts against the tighter, pre-existing
-/// number directly rather than defining a second constant.
-const TOOLS_LIST_MAX_BYTES: usize = 128 * 1024;
+use mcp_gateway::TOOLS_LIST_BYTE_BUDGET;
 
 pub fn all_capabilities() -> Vec<Capability> {
     vec![
@@ -103,13 +95,42 @@ pub async fn list_tools(capabilities: Vec<Capability>) -> Vec<Value> {
         .clone()
 }
 
+/// Records the achieved size, not just that it is under the cap. `bobby
+/// doctor`'s handshake check reports this number against the same budget, and
+/// the spec's projection (113,200 bytes against a 105,800-byte baseline) is
+/// only checkable if the real figure is written down somewhere a person reads.
+/// `--nocapture` prints it; the assertion message carries it on failure.
 #[tokio::test]
 async fn tools_list_stays_within_the_connect_budget() {
     let tools = list_tools(all_capabilities()).await;
     let bytes = serde_json::to_string(&tools).unwrap().len();
+    let mut sizes = tools
+        .iter()
+        .map(|tool| {
+            (
+                serde_json::to_string(tool).unwrap().len(),
+                tool["name"].as_str().unwrap_or("?").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    sizes.sort_unstable();
+    sizes.reverse();
+    let breakdown = sizes
+        .iter()
+        .take(5)
+        .map(|(size, name)| format!("{name}={size}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "tools/list: {} tools, {bytes} bytes ({}% of the {TOOLS_LIST_BYTE_BUDGET} byte budget); \
+         largest: {breakdown}",
+        tools.len(),
+        bytes * 100 / TOOLS_LIST_BYTE_BUDGET,
+    );
     assert!(
-        bytes <= TOOLS_LIST_MAX_BYTES,
-        "tools/list is {bytes} bytes, over the {TOOLS_LIST_MAX_BYTES} byte budget"
+        bytes <= TOOLS_LIST_BYTE_BUDGET,
+        "tools/list is {bytes} bytes, over the {TOOLS_LIST_BYTE_BUDGET} byte budget; \
+         largest: {breakdown}"
     );
 }
 
