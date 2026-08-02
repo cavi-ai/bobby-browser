@@ -72,6 +72,9 @@ jobs:
       - name: Install Chrome
         uses: browser-actions/setup-chrome@latest
 
+      - name: Locate Chrome
+        run: echo "BOBBY_CHROME_EXECUTABLE=$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)" >> "$GITHUB_ENV"
+
       - name: Worker live tests
         run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
 
