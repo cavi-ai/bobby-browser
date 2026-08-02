@@ -63,7 +63,7 @@ async fn wait_cli_status(
         .await;
         let json = stdout_json(&output);
         let status = json["status"].as_str().unwrap_or("");
-        if want.iter().any(|value| *value == status) {
+        if want.contains(&status) {
             return json;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
