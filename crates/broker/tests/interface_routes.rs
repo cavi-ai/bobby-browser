@@ -124,6 +124,15 @@ impl RuntimeInterface for CountingRuntime {
         self.inner.checkpoint(ctx, checkpoint, evidence).await
     }
 
+    async fn resolve_command_evidence(
+        &self,
+        ctx: RequestContext,
+        command_ids: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        self.count();
+        self.inner.resolve_command_evidence(ctx, command_ids).await
+    }
+
     async fn recover(
         &self,
         ctx: RequestContext,
@@ -200,6 +209,34 @@ async fn healthz_is_minimal_and_legacy_routes_do_not_exist() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+#[tokio::test]
+async fn form_snapshot_query_is_validated_before_runtime_dispatch() {
+    let (app, token, calls) = counted_app([Capability::PageRead], InterfaceConfig::default()).await;
+    let session = uuid!("20000000-0000-0000-0000-000000000020");
+    let page = uuid!("30000000-0000-0000-0000-000000000030");
+
+    for query in [
+        "maxControls=0",
+        "maxControls=513",
+        "unknown=1",
+        "maxControls=1&maxControls=2",
+    ] {
+        let uri = format!("/v1/sessions/{session}/pages/{page}/forms?{query}");
+        let response = app
+            .clone()
+            .oneshot(authorized("GET", &uri, &token, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{query}"
+        );
+    }
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

@@ -1,0 +1,20 @@
+[package]
+name = "fingerprinting"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+async-trait.workspace = true
+hex.workspace = true
+rand = { version = "0.9", features = ["std", "std_rng"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

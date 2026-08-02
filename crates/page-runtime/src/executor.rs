@@ -473,6 +473,18 @@ impl PageRuntime {
                     Err(verification_error("typed value did not match page state"))
                 }
             }
+            PrimitiveCommand::ControlAction(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::ControlAction { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "control action returned no typed post-action evidence",
+                    ))
+                }
+            }
             PrimitiveCommand::Click(command) => {
                 if let Some(expected_url) = &command.expected_url {
                     let verification = lease
@@ -520,6 +532,58 @@ impl PageRuntime {
                     Err(verification_error(
                         "accessibility snapshot returned no snapshot evidence",
                     ))
+                }
+            }
+            PrimitiveCommand::NetworkLog(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::HarArtifact { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("network log returned no HAR artifact"))
+                }
+            }
+            PrimitiveCommand::Emulate(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Emulation { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("emulate command returned no emulation evidence"))
+                }
+            }
+            PrimitiveCommand::HandleDialog(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Dialog { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("dialog command returned no dialog evidence"))
+                }
+            }
+            PrimitiveCommand::PrintToPdf(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::PdfArtifact { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("PDF command returned no PDF artifact"))
+                }
+            }
+            PrimitiveCommand::GetCookies(_)
+            | PrimitiveCommand::SetCookies(_)
+            | PrimitiveCommand::DeleteCookies(_) => {
+                if evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::CookieState { .. }))
+                {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error("cookie command returned no cookie state"))
                 }
             }
             PrimitiveCommand::ExtractStructured(_) => {

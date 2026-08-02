@@ -14,6 +14,7 @@ const SESSION_ID = "00000000-0000-4000-8000-000000000005";
 const REFERENCE_ID = "00000000-0000-4000-8000-000000000006";
 const CHECKPOINT_ID = "00000000-0000-4000-8000-000000000007";
 const CORRELATION_ID = "00000000-0000-4000-8000-000000000008";
+const PAGE_ID = "00000000-0000-4000-8000-000000000009";
 
 async function withServer(
   handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
@@ -34,6 +35,18 @@ function writeJson(response: ServerResponse, status: number, body: unknown): voi
   response.writeHead(status, { "content-type": "application/json", "x-interface-version": INTERFACE_VERSION });
   response.end(JSON.stringify(body));
 }
+
+test("formSnapshot performs a bounded direct page read and validates the canonical response", async () => {
+  await withServer((request, response) => {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, `/v1/sessions/${SESSION_ID}/pages/${PAGE_ID}/forms?maxControls=7`);
+    writeJson(response, 200, { schemaVersion: 1, pageId: PAGE_ID, forms: [], unownedControls: [], truncated: false });
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    const snapshot = await client.formSnapshot(SESSION_ID, PAGE_ID, { maxControls: 7 });
+    assert.equal(snapshot.pageId, PAGE_ID);
+  });
+});
 
 function envelope(): CommandEnvelope {
   return {

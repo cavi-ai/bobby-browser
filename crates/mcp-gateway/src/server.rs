@@ -4,7 +4,7 @@ use std::{
     io,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration as StdDuration,
@@ -22,16 +22,22 @@ use tokio::{
     sync::{Mutex, Notify},
 };
 
+use crate::annotations::{tool_annotations, tool_title};
+use crate::notify::{tools_list_changed_frame, NotificationSink};
 use crate::protocol::{
     error, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
     MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
     METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
 };
-use crate::schema::{tool_schema, validate_tool_arguments};
+use crate::resources::{static_resource_body, static_resources};
+use crate::schema::{advertised_tool_schema, tool_output_schema, validate_tool_arguments};
 use crate::ArtifactResources;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
 const MAX_PENDING_CANCELLATIONS: usize = 1024;
+/// How many notification frames `serve` may have queued for the writer before it
+/// stops pulling more off the subscription. See the comment at its use site.
+const MAX_PENDING_NOTIFICATION_WRITES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lifecycle {
@@ -46,6 +52,7 @@ pub struct Server {
     authorization: AuthorizationGuard,
     events: EventStore,
     resources: ArtifactResources,
+    notifications: NotificationSink,
     lifecycle: Mutex<Lifecycle>,
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
@@ -76,17 +83,41 @@ impl Server {
         events: EventStore,
         resources: ArtifactResources,
     ) -> Self {
+        // Built here, in the one constructor both `new`/`production` and the
+        // broker's per-principal path funnel through, so neither transport can
+        // end up with a `Server` whose notification fan-out was never wired.
+        let notifications = NotificationSink::new(events.clone(), handle.principal_id().clone());
         Self {
             runtime,
             handle: handle.clone(),
             authorization: AuthorizationGuard::new(handle),
             events,
             resources,
+            notifications,
             lifecycle: Mutex::new(Lifecycle::AwaitingInitialize),
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             shutting_down: AtomicBool::new(false),
         }
+    }
+
+    /// This principal's outbound notification fan-out. A transport subscribes
+    /// here to learn what to push to the client without being asked.
+    pub fn notifications(&self) -> &NotificationSink {
+        &self.notifications
+    }
+
+    /// Tells every subscribed client that this principal's capability set — and
+    /// therefore the tool list `tools/list` returns — has changed.
+    ///
+    /// The advertised `tools.listChanged` capability is a promise, so the only
+    /// caller is whoever actually observes the change: over streamable HTTP
+    /// that is `McpServers`, which detects a rotated `CapabilityHandle` and
+    /// rebuilds the `Server`. A stdio session's capabilities are frozen by its
+    /// bootstrap credential and cannot change, so nothing calls this there —
+    /// the promise holds vacuously.
+    pub fn notify_tools_list_changed(&self) {
+        self.notifications.publish(tools_list_changed_frame());
     }
 
     pub async fn handle_message(&self, message: Value) -> Option<Value> {
@@ -159,8 +190,9 @@ impl Server {
                     json!({
                         "protocolVersion": MCP_PROTOCOL_VERSION,
                         "capabilities": {
-                            "tools": {"listChanged": false},
-                            "resources": {"subscribe": false, "listChanged": false}
+                            "tools": {"listChanged": true},
+                            "resources": {"subscribe": false, "listChanged": false},
+                            "prompts": {"listChanged": false}
                         },
                         "serverInfo": {
                             "name": "automation-runtime",
@@ -252,6 +284,8 @@ impl Server {
             "tools/call" => self.call_tool(id, params).await,
             "resources/list" => self.list_resources(id, params).await,
             "resources/read" => self.read_resource(id, params).await,
+            "prompts/list" => self.list_prompts(id, params),
+            "prompts/get" => self.get_prompt(id, params),
             "resources/templates/list" if valid_initial_list_params(&params) => {
                 match self.authorize_response(id.clone(), types::InterfaceOperation::ReadArtifact) {
                     Ok(()) => success(id, json!({"resourceTemplates": []})),
@@ -292,12 +326,52 @@ impl Server {
         W: AsyncWrite + Unpin,
     {
         let mut input = BufReader::new(input);
+        // Every frame that reaches the client — responses and notifications
+        // alike — goes through `write_response`, which serializes the whole
+        // frame and its newline while holding this one lock. That is what keeps
+        // a notification from being interleaved into the middle of a response
+        // and killing the session with an unparseable line.
         let output = Arc::new(Mutex::new(output));
         let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> =
             FuturesUnordered::new();
+        let mut notifications = self.notifications.subscribe().await;
+        let mut notifications_open = true;
+        // Notification writes are queued rather than awaited inline, so a client
+        // that has stopped draining stdout cannot stall the read loop and
+        // deadlock the session against its own unread request pipe. Queueing is
+        // what needs the bound: responses are queued too, but the client's own
+        // request volume caps those, while notifications arrive whether or not
+        // it asks. Past the cap the branch is disabled and nothing is pulled off
+        // the subscription until a write lands, which is exactly the
+        // backpressure the queue itself cannot apply. Frames missed while
+        // stalled are not lost silently — the subscription resumes from its
+        // cursor and reports a gap if retention passed it.
+        let outstanding = Arc::new(AtomicUsize::new(0));
         let mut frame = Vec::new();
         loop {
             tokio::select! {
+                notification = notifications.recv(),
+                    if notifications_open
+                        && outstanding.load(Ordering::Acquire) < MAX_PENDING_NOTIFICATION_WRITES =>
+                {
+                    match notification {
+                        // `write_response`'s oversized-frame fallback is
+                        // unreachable here: an `EventStore` payload is
+                        // sanitized to 16 KiB and a kind to 128 B, three orders
+                        // of magnitude under `MAX_FRAME_BYTES`.
+                        Some(notification) => {
+                            let output = output.clone();
+                            let outstanding = outstanding.clone();
+                            outstanding.fetch_add(1, Ordering::Release);
+                            pending.push(Box::pin(async move {
+                                let result = write_response(&output, Some(notification)).await;
+                                outstanding.fetch_sub(1, Ordering::Release);
+                                result
+                            }));
+                        }
+                        None => notifications_open = false,
+                    }
+                }
                 status = read_bounded_frame(&mut input, &mut frame) => {
                     let response = match status? {
                         FrameStatus::Eof => break,
@@ -371,7 +445,11 @@ impl Server {
         for name in [
             "checkpoint_save",
             "click",
+            "cookie_delete",
+            "cookie_get",
+            "cookie_set",
             "command_execute",
+            "control_action",
             "intent_complete_form",
             "intent_dismiss_obstruction",
             "intent_extract",
@@ -380,17 +458,22 @@ impl Server {
             "intent_locate",
             "intent_submit_and_verify",
             "intent_wait_for_state",
+            "dialog",
             "download_url",
+            "emulate",
             "evaluate_javascript",
             "events_read",
             "inspect",
             "navigate",
+            "network_log",
             "a11y_snapshot",
             "extract_structured",
+            "form_snapshot",
             "page_activate",
             "page_close",
             "page_list",
             "page_open",
+            "pdf",
             "recovery_status",
             "runtime_info",
             "screenshot",
@@ -409,12 +492,44 @@ impl Server {
             {
                 tools.push(json!({
                     "name": name,
+                    "title": tool_title(name),
                     "description": tool_description(name),
-                    "inputSchema": tool_schema(name)
+                    "inputSchema": advertised_tool_schema(name),
+                    "outputSchema": tool_output_schema(name),
+                    "annotations": tool_annotations(name)
                 }));
             }
         }
         success(id, json!({"tools":tools}))
+    }
+
+    fn list_prompts(&self, id: Value, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&context) {
+            return interface_error_response(id, interface_error);
+        }
+        if !valid_initial_list_params(&params) {
+            return error(id, INVALID_PARAMS, "Invalid params", None);
+        }
+        success(id, crate::prompts::list_prompts())
+    }
+
+    fn get_prompt(&self, id: Value, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&context) {
+            return interface_error_response(id, interface_error);
+        }
+        let input: PromptGetArgs = match bounded_parse(params) {
+            Ok(input) => input,
+            Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
+        };
+        match crate::prompts::get_prompt(&input.name, &input.arguments) {
+            Some(result) => success(id, result),
+            // An unknown name and a known name missing a required argument
+            // both collapse here rather than falling through to a prompt
+            // with placeholder text an agent would then execute verbatim.
+            None => error(id, INVALID_PARAMS, "Invalid params", None),
+        }
     }
 
     async fn list_resources(&self, id: Value, params: Value) -> Value {
@@ -428,18 +543,18 @@ impl Server {
         if !valid_initial_list_params(&params) {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         }
-        let resources = self
-            .resources
-            .list()
-            .await
-            .into_iter()
-            .map(|artifact_id| {
+        let resources = static_resources()
+            .iter()
+            .map(
+                |(uri, name, description)| json!({"uri":uri,"name":name,"description":description}),
+            )
+            .chain(self.resources.list().await.into_iter().map(|artifact_id| {
                 json!({
                     "uri":format!("artifact://{artifact_id}"),
                     "name":format!("artifact-{artifact_id}"),
                     "description":"Authenticated runtime artifact"
                 })
-            })
+            }))
             .collect::<Vec<_>>();
         success(id, json!({"resources":resources}))
     }
@@ -456,6 +571,12 @@ impl Server {
             Ok(input) => input,
             Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
         };
+        if let Some(text) = static_resource_body(&input.uri) {
+            return success(
+                id,
+                json!({"contents":[{"uri":input.uri,"mimeType":"text/markdown","text":text}]}),
+            );
+        }
         let Some(artifact_id) = parse_artifact_uri(&input.uri) else {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         };
@@ -995,7 +1116,7 @@ impl Server {
                 self.submit_envelope(context, envelope).await
             }
             "page_close" => {
-                let input: PageCloseArgs = match bounded_parse(call.arguments) {
+                let input: FormSnapshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
@@ -1039,6 +1160,173 @@ impl Server {
                             max_nodes: input.max_nodes,
                         },
                     ),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "form_snapshot" => {
+                let input: FormSnapshotArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                if input
+                    .max_controls
+                    .is_some_and(|limit| !(1..=512).contains(&limit))
+                {
+                    return invalid_params_reason(id, "malformedArguments");
+                }
+                self.runtime
+                    .form_snapshot(context, input.session_id, input.page_id, input.max_controls)
+                    .await
+                    .and_then(to_json)
+            }
+            "control_action" => {
+                let input: ControlActionArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                if input.action.validate().is_err() {
+                    return invalid_params_reason(id, "malformedArguments");
+                }
+                let (context, envelope) = primitive_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    input.workflow_id,
+                    types::PrimitiveCommand::ControlAction(types::ControlActionCommand {
+                        target: input.target,
+                        action: input.action,
+                    }),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "network_log" => {
+                let input: NetworkLogArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::NetworkLog(
+                        types::NetworkLogCommand {
+                            clear: input.clear.unwrap_or(true),
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "emulate" => {
+                let input: EmulateArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::Emulate(
+                        types::EmulateCommand {
+                            viewport: input.viewport,
+                            geolocation: input.geolocation,
+                            mobile: input.mobile,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "dialog" => {
+                let input: DialogArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::HandleDialog(
+                        types::HandleDialogCommand {
+                            action: input.action,
+                            timeout_ms: input.timeout_ms,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "pdf" => {
+                let input: PdfArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::PrintToPdf(
+                        types::PrintToPdfCommand {
+                            landscape: input.landscape,
+                            print_background: input.print_background.unwrap_or(true),
+                            scale: input.scale,
+                            page_ranges: input.page_ranges,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "cookie_get" => {
+                let input: CookieGetArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::GetCookies(
+                        types::GetCookiesCommand { urls: input.urls },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "cookie_set" => {
+                let input: CookieSetArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::SetCookies(
+                        types::SetCookiesCommand {
+                            cookies: input.cookies,
+                        },
+                    )),
+                );
+                self.submit_envelope(context, envelope).await
+            }
+            "cookie_delete" => {
+                let input: CookieDeleteArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = command_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    None,
+                    types::RuntimeCommand::Primitive(types::PrimitiveCommand::DeleteCookies(
+                        types::DeleteCookiesCommand {
+                            urls: input.urls,
+                            names: input.names,
+                        },
+                    )),
                 );
                 self.submit_envelope(context, envelope).await
             }
@@ -1118,10 +1406,27 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                self.runtime
-                    .checkpoint(context, input.checkpoint, input.evidence)
+                // The caller names commands, not evidence: resolve each id
+                // against the journal the runtime itself wrote before the
+                // checkpoint is ever persisted. A name with no journal
+                // record, one that never reached a terminal outcome, or one
+                // this principal does not own, is rejected here rather than
+                // silently contributing nothing — both transports (stdio and
+                // the broker's `POST /v1/mcp`) go through the same
+                // `RuntimeInterface` trait method, so ownership is enforced
+                // identically either way.
+                match self
+                    .runtime
+                    .resolve_command_evidence(context.clone(), input.evidence_refs)
                     .await
-                    .and_then(to_json)
+                {
+                    Ok(evidence) => self
+                        .runtime
+                        .checkpoint(context, input.checkpoint, evidence)
+                        .await
+                        .and_then(to_json),
+                    Err(interface_error) => Err(interface_error),
+                }
             }
             "workflow_recover" => {
                 let input: WorkflowRecoverArgs = match bounded_parse(call.arguments) {
@@ -1596,7 +1901,7 @@ struct CommandExecuteArgs {
 struct CheckpointSaveArgs {
     checkpoint: types::WorkflowCheckpoint,
     #[serde(default)]
-    evidence: Vec<types::Evidence>,
+    evidence_refs: Vec<types::CommandId>,
 }
 
 #[derive(Deserialize)]
@@ -1759,6 +2064,22 @@ struct PageCloseArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FormSnapshotArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    max_controls: Option<u32>,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
+}
+
+page_scoped_args!(ControlActionArgs {
+    target: types::FormControlTarget,
+    action: types::ControlAction,
+});
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct A11ySnapshotArgs {
     session_id: types::SessionId,
     page_id: types::PageId,
@@ -1766,6 +2087,81 @@ struct A11ySnapshotArgs {
     max_nodes: Option<u32>,
     #[serde(default)]
     workflow_id: Option<types::WorkflowId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkLogArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    clear: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EmulateArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    viewport: Option<types::ViewportSize>,
+    #[serde(default)]
+    geolocation: Option<types::GeolocationCoordinates>,
+    #[serde(default)]
+    mobile: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DialogArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    action: types::DialogAction,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PdfArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    landscape: bool,
+    #[serde(default)]
+    print_background: Option<bool>,
+    #[serde(default)]
+    scale: Option<f64>,
+    #[serde(default)]
+    page_ranges: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieGetArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    urls: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieSetArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    cookies: Vec<types::SetCookieParam>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CookieDeleteArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    urls: Vec<String>,
+    #[serde(default)]
+    names: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1804,6 +2200,16 @@ struct EventsReadArgs {
 #[serde(deny_unknown_fields)]
 struct ResourceReadArgs {
     uri: String,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptGetArgs {
+    name: String,
+    #[serde(default = "empty_arguments")]
+    arguments: Value,
     #[serde(default, rename = "_meta")]
     _meta: Option<Value>,
 }
@@ -2016,10 +2422,10 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
     match name {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
-        "command_execute" | "navigate" | "click" | "type_text" | "inspect" | "screenshot"
-        | "wait_for" | "page_list" | "page_close" | "page_activate" | "a11y_snapshot" => {
-            Some(&[types::Capability::BrowserMutate])
-        }
+        "command_execute" | "control_action" | "navigate" | "click" | "type_text" | "inspect"
+        | "screenshot" | "wait_for" | "page_list" | "page_close" | "page_activate"
+        | "a11y_snapshot" | "pdf" | "dialog" | "emulate" | "network_log" | "cookie_get"
+        | "cookie_set" | "cookie_delete" => Some(&[types::Capability::BrowserMutate]),
         "extract_structured" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::VisionAssist,
@@ -2048,6 +2454,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
             types::Capability::IntentExecute,
         ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
+        "form_snapshot" => Some(&[types::Capability::PageRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),
         "session_close" | "session_create" => Some(&[types::Capability::SessionWrite]),
         _ => None,
@@ -2059,6 +2466,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         "checkpoint_save" => Some(types::InterfaceOperation::CreateCheckpoint),
         "recovery_status" => Some(types::InterfaceOperation::ReadCheckpoint),
         "command_execute"
+        | "control_action"
         | "navigate"
         | "click"
         | "type_text"
@@ -2070,6 +2478,13 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "page_activate"
         | "a11y_snapshot"
         | "extract_structured"
+        | "pdf"
+        | "dialog"
+        | "emulate"
+        | "network_log"
+        | "cookie_get"
+        | "cookie_set"
+        | "cookie_delete"
         | "download_url"
         | "upload_files"
         | "evaluate_javascript"
@@ -2082,6 +2497,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "intent_submit_and_verify"
         | "intent_wait_for_state" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
+        "form_snapshot" => Some(types::InterfaceOperation::ReadPage),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
         "session_close" => Some(types::InterfaceOperation::DeleteSession),
@@ -2094,38 +2510,47 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
 
 fn tool_description(name: &str) -> &'static str {
     match name {
-        "checkpoint_save" => "Persist a verified workflow checkpoint.",
-        "click" => "Click an element on a page.",
-        "command_execute" => "Execute one bounded browser command envelope.",
-        "download_url" => "Download a URL into the session's downloads.",
-        "evaluate_javascript" => "Evaluate JavaScript on a page (session policy gated).",
-        "events_read" => "Read retained runtime events after a cursor.",
-        "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable).",
-        "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner (Reconciliable).",
-        "intent_extract" => "Read named fields off the page without mutating it (Replayable).",
-        "intent_fill" => "Fill one described form control and verify the value (Reconciliable).",
-        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable).",
-        "intent_locate" => "Locate an element by described purpose (Replayable).",
-        "intent_submit_and_verify" => "Submit a form and verify the expected resulting state (Boundary; needs a matching checkpoint).",
-        "intent_wait_for_state" => "Wait for a described page state (Replayable).",
-        "inspect" => "Read page state, optionally element-scoped.",
-        "navigate" => "Navigate a page to a URL.",
-        "a11y_snapshot" => "Capture a compact accessibility tree of a page.",
-        "extract_structured" => "Extract schema-shaped JSON from a page via the vision provider.",
-        "page_activate" => "Bring a page to the front in an owned session.",
-        "page_close" => "Close a page in an owned session.",
-        "page_list" => "List pages in an owned session.",
-        "page_open" => "Open a page in an owned session.",
-        "recovery_status" => "Read a workflow's checkpoint and recovery receipts.",
-        "runtime_info" => "Read runtime capability and health information.",
-        "screenshot" => "Capture a screenshot artifact of a page or element.",
-        "session_close" => "Close a browser session and release its worker.",
-        "session_create" => "Create a browser session.",
-        "session_list" => "List browser sessions visible to the principal.",
-        "type_text" => "Type text into an element.",
-        "upload_files" => "Set files on a file input from upload roots.",
-        "wait_for" => "Wait for a page condition with a bounded timeout.",
-        "workflow_recover" => "Recover a workflow from its verified checkpoint.",
+        "runtime_info" => "Runtime version, granted capabilities, active session count, uptime, and credential expiry. Requires session:read.",
+        "session_list" => "List browser sessions visible to this principal, each with its profile and open-page count. Requires session:read.",
+        "page_list" => "List open pages in an owned session, each with its id, URL, and title. Requires browser:mutate.",
+        "inspect" => "Read a page's text, optionally scoped to one element by selector or target, with HTML on request. Requires browser:mutate.",
+        "a11y_snapshot" => "Capture a compact accessibility tree for a page, capped at 2048 nodes, with command-ready targets on actionable nodes. Requires browser:mutate. Start here: pass a node's target into an intent_* tool rather than guessing a selector.",
+        "form_snapshot" => "Read a bounded, engine-neutral inventory of a page's form controls without exposing selectors or sensitive values. Requires page:read.",
+        "screenshot" => "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
+        "events_read" => "Read retained runtime events for this principal after a cursor, bounded by a limit. Requires session:read. Long-polls: it blocks until an event past the cursor arrives or the request deadline expires (about 60s), so it is not a quick read. The notifications/bobby/event channel pushes the same frames without polling -- see bobby://failure-taxonomy.",
+        "recovery_status" => "Read a workflow's checkpoint and recovery receipts without attempting recovery. Requires recovery:read.",
+        "cookie_get" => "Read cookies visible to a page, optionally filtered by URL. Requires browser:mutate.",
+        "checkpoint_save" => "Persist a verified workflow checkpoint. Requires recovery:write. Pass evidenceRefs -- the command ids whose evidence the runtime already recorded; it resolves them from the journal. On failure with a missing command id, confirm the command completed before checkpointing it.",
+        "workflow_recover" => "Recover a workflow from its last verified checkpoint, resuming, restarting, or flagging reconciliation. Requires recovery:write. Produces recovery evidence and the decision reached. On failure with notFound, this principal doesn't own the checkpoint's session (it may be closed) -- verify with session_list. A missing checkpoint itself surfaces as an opaque internal error, not notFound.",
+        "session_create" => "Create a browser session with a profile, optional proxy, and execution policy. Requires session:write. Produces the session's id and initial state. On failure with resourceExhausted, this principal already holds its session limit -- close an idle one first.",
+        "session_close" => "Close a session and release its pages, workers, and artifacts. Requires session:write. Destructive: in-flight commands on the session are cancelled. On failure, the session may already be closed -- confirm with session_list.",
+        "page_open" => "Open a page in an owned session, optionally navigating it to a URL in the same call. Requires page:write, and browser:mutate too if a URL is given. Produces the page's id and, if navigated, navigation evidence. On failure with notFound, the session is not owned by this principal -- check session_list.",
+        "page_close" => "Close a page in an owned session. Requires browser:mutate. Destructive: the page and its in-flight commands are gone immediately. On failure with notFound, the page id is stale -- call page_list for current ids.",
+        "page_activate" => "Bring a page to the front in an owned session. Requires browser:mutate. Produces the activated page's URL and title. On failure with notFound, the page id is stale -- call page_list for current ids.",
+        "navigate" => "Navigate a page to a URL and wait for the requested load state. Requires browser:mutate. Produces navigation evidence with the settled URL and title. On failure with invalidRequest, the URL scheme isn't http(s) or data -- use one of those; on deadlineExceeded, retry with a longer timeout_ms.",
+        "click" => "Click an element identified by a selector or a resolved target. Requires browser:mutate. Produces execution-path evidence for the click. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
+        "type_text" => "Type text into an element identified by a selector or a resolved target, optionally clearing it first. Requires browser:mutate. Produces execution-path evidence for the input. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
+        "wait_for" => "Wait for a page condition with a bounded timeout. Requires browser:mutate. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
+        "control_action" => "Perform one typed native form-control action and return the reread control state. Requires browser:mutate, and file:upload too if the action is setFiles. Produces control-action evidence with the post-action value. On failure with targetNotFound, take a fresh form_snapshot and pass the new target.",
+        "emulate" => "Set viewport size, mobile mode, and geolocation overrides for a page. Requires browser:mutate. Produces emulation evidence confirming the applied overrides. On failure with invalidRequest, viewport or coordinates are out of range -- keep width/height within 1-16384 and coordinates within valid bounds.",
+        "dialog" => "Accept or dismiss the next JavaScript dialog on a page within a timeout. Requires browser:mutate. Produces dialog evidence with the dialog's message and the action taken. On failure with deadlineExceeded, no dialog opened in time -- confirm the triggering action actually opens one.",
+        "pdf" => "Print a page to a PDF artifact with optional layout and scale. Requires browser:mutate. Produces a PDF artifact with its size and checksum. On failure with invalidRequest, scale is out of range -- pass a value between 0.1 and 2.0.",
+        "cookie_set" => "Store cookies on a page's jar. Requires browser:mutate. Produces the updated cookie-jar state. On failure with invalidRequest, more than 128 cookies were passed in one call -- split into batches of 128 or fewer.",
+        "cookie_delete" => "Delete cookies from a page's jar by origin and optionally by name. Requires browser:mutate. Destructive: matching cookies are removed immediately. On failure with notFound, the page id is stale -- call page_list for current ids.",
+        "extract_structured" => "Extract schema-shaped JSON from a page via the configured vision provider. Requires browser:mutate and vision:assist. Produces structured-extraction evidence with the schema-shaped value. On failure with visionAssistDenied, the session's vision policy or provider isn't enabled -- read the page with inspect or a11y_snapshot instead.",
+        "download_url" => "Download a URL into the session's downloads, bounded by a byte limit. Requires browser:mutate and file:download. Produces a download artifact with its size and checksum. On failure with networkPolicyDenied, use an http(s) URL without embedded credentials and a max_bytes within the configured range.",
+        "upload_files" => "Set files on a file input from the runtime's configured upload roots. Requires browser:mutate and file:upload. Produces upload evidence naming the selector and resolved paths. On failure with policyDenied, the path is outside the configured upload roots -- pass a path under an allowed root.",
+        "evaluate_javascript" => "Evaluate a JavaScript expression on a page, optionally awaiting its promise. Requires browser:mutate and javascript:evaluate. Produces the returned value, or notes truncation. On failure with policyDenied, the session's execution policy forbids evaluation -- use a11y_snapshot and the intent_* tools instead.",
+        "command_execute" => "Execute one bounded browser command envelope naming its own capability and evidence. Requires browser:mutate, plus whatever the wrapped command needs. Produces the same evidence as the named command it wraps. On failure with deadlineOutOfRange, set the envelope's deadline within the allowed window and resubmit.",
+        "intent_locate" => "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
+        "intent_fill" => "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
+        "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable). Requires browser:mutate and intent:execute. Produces per-field resolution and fill evidence in order. On failure with verificationFailed, targetNotFound, or intentActionMismatch on one field, the fields before it are already filled -- re-run with only the remaining fields.",
+        "intent_submit_and_verify" => "Submit a form and verify the expected resulting state (Boundary; needs a matching checkpoint). Requires browser:mutate and intent:execute. Produces submission and state evidence. On failure with needsReconciliation, do not retry -- the submit may have already landed; call recovery_status for the workflow and reconcile before continuing.",
+        "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
+        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and destination evidence. On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
+        "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
+        "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
+        "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure with verificationFailed, the runtime produced no HAR artifact -- not a caller-fixable condition; retry, and report if it persists.",
         _ => "Runtime operation.",
     }
 }

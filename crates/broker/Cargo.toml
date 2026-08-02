@@ -30,6 +30,7 @@ interface-core = { path = "../interface-core", version = "0.3.1" }
 artifact-store = { path = "../artifact-store", version = "0.3.1" }
 mcp-gateway = { path = "../mcp-gateway", version = "0.3.1" }
 worker-pool = { path = "../worker-pool", version = "0.3.1" }
+task-scheduler = { path = "../task-scheduler", version = "0.3.1" }
 observability = { path = "../observability", version = "0.3.1" }
 
 futures-util.workspace = true

@@ -7,8 +7,8 @@ mod session_ownership;
 use async_trait::async_trait;
 use chrono::Utc;
 use types::{
-    Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
-    InterfaceError, InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState,
+    Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
+    Evidence, InterfaceError, InterfaceErrorCode, InterfaceOperation, OpenPageRequest, PageState,
     RecoveryDecision, RequestContext, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint,
     WorkflowId,
 };
@@ -48,6 +48,25 @@ pub trait RuntimeInterface: Send + Sync {
         ctx: RequestContext,
         req: OpenPageRequest,
     ) -> InterfaceResult<PageState>;
+    async fn form_snapshot(
+        &self,
+        _ctx: RequestContext,
+        _session: SessionId,
+        _page: types::PageId,
+        _max_controls: Option<u32>,
+    ) -> InterfaceResult<types::FormSnapshot> {
+        Err(InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: "form snapshots are not supported".into(),
+            correlation_id: types::CorrelationId::new(),
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
     async fn submit(
         &self,
         ctx: RequestContext,
@@ -59,6 +78,23 @@ pub trait RuntimeInterface: Send + Sync {
         checkpoint: WorkflowCheckpoint,
         evidence: Vec<Evidence>,
     ) -> InterfaceResult<WorkflowCheckpoint>;
+    /// Evidence the runtime itself recorded for already-run commands, resolved
+    /// by id rather than authored by the caller.
+    ///
+    /// The journal these ids are resolved against is not principal-partitioned
+    /// (one runtime, shared across every authenticated principal), so an
+    /// implementation MUST verify each referenced command belongs to a session
+    /// this principal owns before returning its evidence — the same guard
+    /// `checkpoint` itself applies to `checkpoint.session_id` via
+    /// `require_owned_session`. A referenced command this principal does not
+    /// own must be rejected, never silently skipped or substituted with
+    /// nothing, since either would let a caller learn something about a
+    /// command it does not own from the shape of the response.
+    async fn resolve_command_evidence(
+        &self,
+        ctx: RequestContext,
+        command_ids: Vec<CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>>;
     async fn recover(
         &self,
         ctx: RequestContext,

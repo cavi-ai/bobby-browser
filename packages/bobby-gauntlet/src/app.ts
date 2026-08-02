@@ -173,18 +173,17 @@ function renderSemanticForm(document: Document, station: HTMLElement, controller
   const state = controller.stateFor("semantic-form");
   const form = document.createElement("form");
   form.append(title(document, "Semantic form", "Complete the form by the meaning of each labelled control."));
-  const name = labelledInput(document, "Full name", state.fields.name, "text");
-  const email = labelledInput(document, "Email address", state.fields.email, "email");
-  name.input.dataset.testid = "semantic-full-name";
-  email.input.dataset.testid = "semantic-email";
-  const planLabel = document.createElement("label"); planLabel.textContent = "Plan";
-  const plan = document.createElement("select"); plan.name = state.fields.plan; plan.setAttribute("aria-label", "Plan");
+  const name = labelledInput(document, state.labels.name, state.fields.name, "text"); name.input.autocomplete = "name";
+  const email = labelledInput(document, state.labels.email, state.fields.email, "email"); email.input.autocomplete = "email";
+  const planLabel = document.createElement("label"); planLabel.textContent = state.labels.plan;
+  const plan = document.createElement("select"); plan.name = state.fields.plan; plan.setAttribute("aria-label", state.labels.plan);
   for (const value of ["starter", "pro"]) { const option = document.createElement("option"); option.value = value; option.textContent = value === "pro" ? "Professional" : "Starter"; plan.append(option); }
   planLabel.append(plan);
-  const termsLabel = document.createElement("label"); termsLabel.textContent = "Accept terms";
+  const termsLabel = document.createElement("label"); termsLabel.textContent = state.labels.terms;
   const terms = document.createElement("input"); terms.type = "checkbox"; terms.name = "accept-terms"; termsLabel.prepend(terms);
-  const submit = buttonFor(document, "Submit form", "submit"); submit.dataset.testid = "semantic-submit";
-  form.append(name.label, email.label, planLabel, termsLabel, submit);
+  const submit = buttonFor(document, "Submit form", "submit"); submit.setAttribute("aria-label", "Submit form");
+  const controls = { name: name.label, email: email.label, plan: planLabel, terms: termsLabel };
+  form.append(...state.order.map((key) => controls[key]), submit);
   form.addEventListener("submit", (event) => { event.preventDefault(); report(controller.verify("semantic-form", { values: { [state.fields.name]: name.input.value, [state.fields.email]: email.input.value, [state.fields.plan]: plan.value, "accept-terms": terms.checked } })); });
   station.prepend(form);
 }

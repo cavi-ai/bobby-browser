@@ -3,6 +3,17 @@ use thiserror::Error;
 
 use crate::{AttemptId, CommandId, PageId};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlActionEvidence {
+    pub operation: crate::FormControlOperation,
+    pub target: crate::FormControlTarget,
+    pub state: crate::FormControlState,
+    pub validity: crate::FormControlValidity,
+    pub node_replaced: bool,
+}
+
 /// A minimal semantic target that can be copied directly into a command's
 /// `TargetSpec` without exposing engine-specific DOM identifiers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,10 +211,42 @@ pub enum Evidence {
         nodes: Vec<AccessibilityNode>,
         truncated: bool,
     },
+    FormSnapshot {
+        snapshot: crate::FormSnapshot,
+    },
+    ControlAction {
+        action: ControlActionEvidence,
+    },
     StructuredExtraction {
         page_id: PageId,
         value: serde_json::Value,
         truncated: bool,
+    },
+    CookieState {
+        page_id: Option<PageId>,
+        cookies: Vec<crate::CookieRecord>,
+    },
+    PdfArtifact {
+        artifact_id: String,
+        media_type: String,
+        bytes: u64,
+        sha256: String,
+    },
+    Dialog {
+        dialog_type: String,
+        message: String,
+        action: String,
+    },
+    Emulation {
+        viewport: Option<crate::ViewportSize>,
+        geolocation: Option<crate::GeolocationCoordinates>,
+    },
+    HarArtifact {
+        artifact_id: String,
+        media_type: String,
+        bytes: u64,
+        sha256: String,
+        entries: u32,
     },
     IntentExecution {
         record: ExecutionRecord,

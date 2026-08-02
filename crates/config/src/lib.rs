@@ -326,6 +326,13 @@ pub struct StorageConfig {
     pub journal_path: PathBuf,
     pub checkpoints_dir: PathBuf,
     pub authority_path: PathBuf,
+    /// Append-only JSONL journal for the in-process task scheduler.
+    #[serde(default = "default_scheduler_journal_path")]
+    pub scheduler_journal_path: PathBuf,
+}
+
+fn default_scheduler_journal_path() -> PathBuf {
+    PathBuf::from("./data/storage/scheduler-jobs.jsonl")
 }
 
 impl Default for AppConfig {
@@ -337,7 +344,9 @@ impl Default for AppConfig {
                 shutdown_timeout_ms: 10_000,
             },
             browser: BrowserConfig {
-                executable: None,
+                executable: std::env::var_os("BOBBY_CHROME_EXECUTABLE")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from),
                 profiles_dir: PathBuf::from("./data/profiles"),
                 headless: true,
                 max_active: 8,
@@ -353,6 +362,7 @@ impl Default for AppConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
                 checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
                 authority_path: PathBuf::from("./data/storage/authority.json"),
+                scheduler_journal_path: default_scheduler_journal_path(),
             },
             http: HttpConfig::default(),
             interface: InterfaceConfig::default(),
@@ -502,6 +512,15 @@ mod tests {
         ] {
             assert!(invalid.validate().is_err());
         }
+    }
+
+    #[test]
+    fn default_includes_scheduler_journal_path() {
+        let config = AppConfig::default();
+        assert_eq!(
+            config.storage.scheduler_journal_path,
+            std::path::PathBuf::from("./data/storage/scheduler-jobs.jsonl")
+        );
     }
 
     #[test]

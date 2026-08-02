@@ -9,7 +9,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
 use tokio::sync::RwLock;
-use types::{CommandPhase, OpenPageRequest, PageId, PageMode, PageState, RuntimeError, SessionId};
+use types::{
+    CommandId, CommandOutcome, CommandPhase, Evidence, OpenPageRequest, PageId, PageMode,
+    PageState, RuntimeError, SessionId,
+};
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
@@ -104,6 +107,70 @@ impl PageRuntime {
         self.register_page(req.session_id).await
     }
 
+    /// Evidence the runtime itself recorded for a command.
+    ///
+    /// The journal is the only authority here: an agent naming a command it
+    /// never ran, or one that never reached a terminal outcome, gets an
+    /// error rather than an empty vector it could mistake for success.
+    pub async fn evidence_for_command(
+        &self,
+        command_id: CommandId,
+    ) -> Result<Vec<Evidence>, RecoveryError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        let scan = journal
+            .history(command_id.clone())
+            .await
+            .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        scan.records
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.outcome {
+                Some(CommandOutcome::Completed { evidence, .. })
+                | Some(CommandOutcome::NeedsReconciliation { evidence, .. }) => Some(evidence),
+                _ => None,
+            })
+            .ok_or(RecoveryError::CommandOutcomeMissing(command_id))
+    }
+
+    /// The session a command was submitted under, per the runtime's own
+    /// journal.
+    ///
+    /// Every command's first journal record (`CommandPhase::Accepted`) always
+    /// stores its `CommandEnvelope` — see `executor.rs`'s `execute_with_vision_gate`,
+    /// which journals it before anything else can fail — so this is available
+    /// for any command that has a journal record at all. Callers use this to
+    /// verify a command referenced only by id (e.g. `checkpoint_save`'s
+    /// `evidenceRefs`) belongs to a session they are authorized to see,
+    /// before its evidence is ever resolved or trusted: the journal itself
+    /// has no notion of principal, so that check has to happen here, keyed
+    /// on the session the command actually ran under, not on which session
+    /// the caller merely claims.
+    pub async fn command_session(
+        &self,
+        command_id: &CommandId,
+    ) -> Result<SessionId, RecoveryError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        let scan = journal
+            .history(command_id.clone())
+            .await
+            .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        scan.records
+            .iter()
+            .find_map(|record| {
+                record
+                    .envelope
+                    .as_ref()
+                    .map(|envelope| envelope.session_id.clone())
+            })
+            .ok_or_else(|| RecoveryError::CommandOutcomeMissing(command_id.clone()))
+    }
+
     pub async fn open_browser(&self, session_id: SessionId) -> Result<PageState, RuntimeError> {
         let workers = self
             .workers
@@ -119,6 +186,44 @@ impl PageRuntime {
             return Err(RuntimeError::Internal(error.message));
         }
         Ok(page)
+    }
+
+    pub async fn form_snapshot(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<types::FormSnapshot, RuntimeError> {
+        let page = self
+            .inner
+            .read()
+            .await
+            .get(page_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::NotFound("page".into()))?;
+        if &page.session_id != session_id {
+            return Err(RuntimeError::NotFound("page".into()));
+        }
+        let workers = self
+            .workers
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Internal("browser workers are not configured".into()))?;
+        let lease = workers
+            .lease(session_id.clone())
+            .await
+            .map_err(|error| RuntimeError::Internal(error.message))?;
+        let evidence = lease
+            .worker()
+            .form_snapshot(page_id, max_controls)
+            .await
+            .map_err(|error| RuntimeError::Internal(error.message))?;
+        evidence
+            .into_iter()
+            .find_map(|item| match item {
+                types::Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| RuntimeError::Internal("worker omitted form snapshot evidence".into()))
     }
 
     async fn register_page(&self, session_id: SessionId) -> PageState {

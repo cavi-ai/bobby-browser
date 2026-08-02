@@ -1,4 +1,7 @@
 mod chromium;
+mod fingerprint_host;
+mod form_snapshot;
+mod har;
 mod network_quiet;
 pub mod process_registry;
 mod selection;
@@ -22,6 +25,12 @@ use types::{
 };
 
 pub use chromium::ChromiumWorkerFactory;
+pub use fingerprint_host::ChromiumPageHost;
+pub use form_snapshot::{
+    control_action_evidence, decode_form_snapshot, form_snapshot_expression,
+    form_snapshot_expression_with_limit, validate_control_action,
+};
+pub use har::{har_document, HarEntry, HarRecorder};
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
@@ -159,6 +168,15 @@ fn policy_error(message: impl Into<String>) -> CommandError {
 pub trait BrowserWorker: Send + Sync {
     fn worker_id(&self) -> WorkerId;
     fn profile_dir(&self) -> &Path;
+    /// Toggle fingerprint spoofing. Implementations that register preload
+    /// scripts should apply/remove them immediately (not only on next page).
+    async fn set_fingerprint_enabled(&self, _enabled: bool) -> Result<(), CommandError> {
+        Ok(())
+    }
+    /// Whether fingerprint spoofing is currently enabled.
+    fn fingerprint_enabled(&self) -> bool {
+        false
+    }
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError>;
     async fn navigate(
         &self,
@@ -196,6 +214,13 @@ pub trait BrowserWorker: Send + Sync {
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        _command: &types::ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
     async fn open_page_command(
         &self,
         _command: &OpenPageCommand,
@@ -207,6 +232,62 @@ pub trait BrowserWorker: Send + Sync {
     }
     /// In-memory viewport PNG for machine consumers (vision assist). Unlike
     /// `capture_screenshot`, no artifact is persisted and no evidence emitted.
+    async fn network_log(
+        &self,
+        _page_id: &PageId,
+        _command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn emulate(
+        &self,
+        _page_id: &PageId,
+        _command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn handle_dialog(
+        &self,
+        _page_id: &PageId,
+        _command: &types::HandleDialogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn print_to_pdf(
+        &self,
+        _page_id: &PageId,
+        _command: &types::PrintToPdfCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn get_cookies(
+        &self,
+        _page_id: &PageId,
+        _command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn set_cookies(
+        &self,
+        _page_id: &PageId,
+        _command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn delete_cookies(
+        &self,
+        _page_id: &PageId,
+        _command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
     async fn screenshot_bytes(&self, _page_id: &PageId) -> Result<Vec<u8>, CommandError> {
         Err(unsupported_error())
     }
@@ -215,6 +296,14 @@ pub trait BrowserWorker: Send + Sync {
         &self,
         _page_id: &PageId,
         _command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+
+    async fn form_snapshot(
+        &self,
+        _page_id: &PageId,
+        _max_controls: Option<u32>,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }

@@ -109,6 +109,8 @@ export type Evidence =
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
   | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean }
+  | { kind: "formSnapshot"; snapshot: FormSnapshot }
+  | { kind: "controlAction"; action: ControlActionEvidence }
   | { kind: "intentExecution"; record: ExecutionRecord }
   | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 
@@ -134,6 +136,12 @@ export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
 export interface AccessibilitySnapshotCommand { maxNodes?: number | null }
 export interface ExtractStructuredCommand { schema: unknown; purpose?: string | null }
+export interface CookieRecord { name: string; value: string; domain: string; path: string; secure: boolean; httpOnly: boolean; sameSite?: string; expiresUnix?: number }
+export interface SetCookieParam { name: string; value: string; url: string; path?: string | null; secure?: boolean; httpOnly?: boolean; sameSite?: string | null; expiresUnix?: number | null }
+export interface GetCookiesCommand { urls?: string[] }
+export interface SetCookiesCommand { cookies: SetCookieParam[] }
+export interface DeleteCookiesCommand { urls?: string[]; names?: string[] }
+export interface PrintToPdfCommand { landscape?: boolean; printBackground?: boolean; scale?: number | null; pageRanges?: string | null }
 export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number }
 export interface AccessibilityNode {
   role?: string;
@@ -168,6 +176,16 @@ export interface FormGroup { id: string; label: string | null; description: stri
 export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
 export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
 export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; }
+export type ControlAction =
+  | { kind: "setText"; value: string }
+  | { kind: "setChecked"; checked: boolean }
+  | { kind: "selectOne"; value: string }
+  | { kind: "selectMany"; values: string[] }
+  | { kind: "setFiles"; paths: string[] }
+  | { kind: "clear" }
+  | { kind: "activate" };
+export interface ControlActionCommand { target: FormControlTarget; action: ControlAction; }
+export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; }
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
@@ -186,10 +204,15 @@ export type PrimitiveCommand =
   | { kind: "activatePage"; input: ActivatePageCommand }
   | { kind: "accessibilitySnapshot"; input: AccessibilitySnapshotCommand }
   | { kind: "extractStructured"; input: ExtractStructuredCommand }
+  | { kind: "getCookies"; input: GetCookiesCommand }
+  | { kind: "setCookies"; input: SetCookiesCommand }
+  | { kind: "deleteCookies"; input: DeleteCookiesCommand }
+  | { kind: "printToPdf"; input: PrintToPdfCommand }
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }
-  | { kind: "captureScreenshot"; input: CaptureScreenshotCommand };
+  | { kind: "captureScreenshot"; input: CaptureScreenshotCommand }
+  | { kind: "controlAction"; input: ControlActionCommand };
 
 export interface IntentHints {
   role?: string | null;
@@ -264,6 +287,7 @@ export interface EventGapEnvelope { error: InterfaceError; gap: EventGap; }
 
 export interface ArtifactReference { referenceId: Id; artifactId: string; sha256: string; bytes: number; mediaType: string; }
 export interface RequestOptions { signal?: AbortSignal; deadline?: Date | string; timeoutMs?: number; correlationId?: Id; idempotencyKey?: string; }
+export interface FormSnapshotOptions extends RequestOptions { maxControls?: number; }
 export interface EventOptions extends RequestOptions {
   /** Broker batch bound: a safe integer from 1 through 256. */
   limit?: number;
