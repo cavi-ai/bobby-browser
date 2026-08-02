@@ -3,7 +3,7 @@ use chrono::Utc;
 use page_runtime::RecoveryCoordinator;
 use sdk_core::RuntimeService;
 use types::{
-    AttemptId, CheckpointId, CommandClass, Evidence, PageId, SessionId, WorkflowCheckpoint,
+    AttemptId, CheckpointId, CommandClass, CommandId, PageId, SessionId, WorkflowCheckpoint,
     WorkflowId,
 };
 
@@ -43,7 +43,7 @@ async fn runtime_service_exposes_durable_checkpoint_and_recovery_boundary() {
         .contains(&"checkpoint-recovery".to_string()));
 
     runtime
-        .checkpoint(checkpoint.clone(), Vec::<Evidence>::new())
+        .checkpoint(checkpoint.clone(), Vec::<CommandId>::new())
         .await
         .unwrap();
     assert_eq!(

@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{fs::OpenOptions, io::Read};
+use std::{
+    fs::OpenOptions,
+    io::{Read, Write},
+};
 
 use axum::{response::Html, routing::get, Router};
 use companion_protocol::{BrowserEngine, BrowserIdentity, InteractionPath};
@@ -12,14 +15,15 @@ use config::{
     AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
     FirefoxCompanionConfig,
 };
+use fingerprinting::build_worker_probe_script;
 use firefox_companion::BidiClient;
 use release_gates::{NativeBrowserOperationProof, NativeBrowserProof};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use types::{
-    ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand,
-    PageId, SessionId, TypeTextCommand, WaitUntil,
+    ClickCommand, CommandError, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
+    InspectCommand, NavigateCommand, PageId, SessionId, TypeTextCommand, WaitUntil,
 };
 use url::Url;
 use worker_pool::BrowserWorker;
@@ -27,6 +31,129 @@ use worker_pool::BrowserWorker;
 const PROOF_TIMEOUT: Duration = Duration::from_secs(60);
 const EXTENSION_ID: &str = "firefox-companion@bobby-browser.local";
 const PROOF_HTML: &str = r#"<!doctype html><title>Native Firefox Proof</title><label for="name">Name</label><input id="name"><button id="submit" onclick="const value = document.querySelector('#name').value; document.querySelector('#result').textContent = value === 'Bobby' ? 'Submitted' : 'Rejected'">Submit</button><p id="result"></p>"#;
+
+const BEHAVIORAL_PROBE_HTML: &str = r#"<!doctype html>
+<html>
+<head>
+  <title>Behavioral Firefox Probe</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      font: 16px/1.4 system-ui, sans-serif;
+      background: #f4f4f1;
+      color: #1a1a1a;
+    }
+    main {
+      width: min(420px, 90vw);
+      padding: 24px;
+    }
+    label { display: block; margin-bottom: 6px; }
+    input { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 12px; }
+    button { padding: 8px 16px; }
+    #probe-report { margin-top: 16px; font-size: 12px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <label for="name">Name</label>
+    <input id="name" autocomplete="off">
+    <button id="submit" type="button">Submit</button>
+    <p id="result"></p>
+    <pre id="probe-report"></pre>
+  </main>
+  <script>
+    (() => {
+      const pointer = [];
+      const keys = [];
+      const wheels = [];
+      const started = performance.now();
+      const pushBounded = (arr, item, max) => {
+        arr.push(item);
+        if (arr.length > max) arr.shift();
+      };
+      window.addEventListener('pointermove', (event) => {
+        pushBounded(pointer, {
+          t: performance.now() - started,
+          x: event.clientX,
+          y: event.clientY
+        }, 400);
+      }, { passive: true });
+      window.addEventListener('keydown', (event) => {
+        pushBounded(keys, {
+          t: performance.now() - started,
+          key: event.key
+        }, 200);
+      });
+      window.addEventListener('wheel', (event) => {
+        pushBounded(wheels, {
+          t: performance.now() - started,
+          dy: event.deltaY
+        }, 100);
+      }, { passive: true });
+
+      const intervalStats = (samples) => {
+        if (samples.length < 2) return { count: samples.length, mean: 0, cv: 0, max: 0 };
+        const gaps = [];
+        for (let i = 1; i < samples.length; i++) {
+          gaps.push(Math.max(0, samples[i].t - samples[i - 1].t));
+        }
+        const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+        const variance = gaps.reduce((a, b) => a + (b - mean) * (b - mean), 0) / gaps.length;
+        const std = Math.sqrt(variance);
+        return {
+          count: samples.length,
+          mean,
+          cv: mean > 0 ? std / mean : 0,
+          max: Math.max(...gaps)
+        };
+      };
+
+      const pathLength = (samples) => {
+        let total = 0;
+        for (let i = 1; i < samples.length; i++) {
+          const dx = samples[i].x - samples[i - 1].x;
+          const dy = samples[i].y - samples[i - 1].y;
+          total += Math.hypot(dx, dy);
+        }
+        return total;
+      };
+
+      document.querySelector('#submit').addEventListener('click', () => {
+        const value = document.querySelector('#name').value;
+        const ok = value === 'Bobby';
+        document.querySelector('#result').textContent = ok ? 'Submitted' : 'Rejected';
+        const keyStats = intervalStats(keys);
+        const pointerLen = pathLength(pointer);
+        const report = {
+          passed: ok,
+          pointerMoves: pointer.length,
+          pointerPathPx: Math.round(pointerLen),
+          keydowns: keyStats.count,
+          keyIntervalMeanMs: Math.round(keyStats.mean),
+          keyIntervalCv: Number(keyStats.cv.toFixed(3)),
+          keyIntervalMaxMs: Math.round(keyStats.max),
+          wheelEvents: wheels.length,
+          durationMs: Math.round(performance.now() - started)
+        };
+        document.querySelector('#probe-report').textContent = JSON.stringify(report);
+      });
+    })();
+  </script>
+</body>
+</html>"#;
+
+/// Live Firefox behavioral dogfood summary (DOM probe + engine evidence).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BehavioralFirefoxDogfoodReport {
+    pub confirmation_text: String,
+    pub type_interaction_path: InteractionPath,
+    pub click_interaction_path: InteractionPath,
+    pub type_duration_ms: u64,
+    pub click_duration_ms: u64,
+    pub probe: serde_json::Value,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledFirefoxConfig {
@@ -317,6 +444,870 @@ pub async fn run_installed_firefox_workflow(
     )
 }
 
+/// Live Firefox dogfood for behavioral engine wiring (mouse / typing / scroll).
+///
+/// Uses the same env + enrollment path as [`run_installed_firefox_workflow`]:
+/// `BOBBY_FIREFOX_BIN`, `BOBBY_FIREFOX_PROFILE`, `BOBBY_COMPANION_EXTENSION`.
+pub async fn run_installed_firefox_behavioral_dogfood(
+    config: InstalledFirefoxConfig,
+) -> Result<BehavioralFirefoxDogfoodReport, CommandError> {
+    validate_installed_config(&config)?;
+    let fixture = BehavioralProbeSite::spawn().await?;
+    let state_dir = proof_state_dir();
+    std::fs::create_dir_all(&state_dir).map_err(io_error)?;
+    let descriptor_path = state_dir.join("native-host-descriptor.json");
+    let process_observations = ProcessObservationCollector::new(Vec::new());
+    let enrollment = cli::start_firefox_profile_enrollment(
+        cli::FirefoxProfileEnrollmentConfig {
+            companion_bind: "127.0.0.1:0".parse().expect("loopback enrollment address"),
+            descriptor_path: descriptor_path.clone(),
+            timeout: PROOF_TIMEOUT,
+            pairing_code_ttl: PROOF_TIMEOUT,
+            attachment_ttl: Duration::from_secs(300),
+        },
+        process_observations.pairing_code_observer(),
+    )
+    .await?;
+    let (mut firefox, bidi_url) =
+        launch_firefox(&config, &fixture.url, &process_observations).await?;
+    let extension_session = BidiClient::connect_session(bidi_url.clone(), PROOF_TIMEOUT).await?;
+    let (method, params) = temporary_extension_install_command(&config.companion_extension)?;
+    let installed = extension_session.send(method, params).await;
+    if let Err(error) = installed {
+        let _ = extension_session.end_session().await;
+        terminate_firefox(&mut firefox).await;
+        return Err(error);
+    }
+    if installed
+        .as_ref()
+        .ok()
+        .and_then(|value| value["extension"].as_str())
+        != Some(EXTENSION_ID)
+    {
+        let _ = extension_session.end_session().await;
+        terminate_firefox(&mut firefox).await;
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            "Firefox installed an unexpected companion extension",
+        ));
+    }
+    let enrollment = enrollment.wait().await;
+    let extension_session_ended = extension_session.end_session().await;
+    let enrollment = match enrollment {
+        Ok(enrollment) => enrollment,
+        Err(error) => {
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = extension_session_ended {
+        terminate_firefox(&mut firefox).await;
+        return Err(error);
+    }
+    let profile_id = enrollment.profile_id().clone();
+    let factory = match cli::compose_worker_factory_with_enrolled_firefox(
+        &AppConfig::default(),
+        BrowserSelectionConfig {
+            preference: EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: Some(profile_id.0.to_string()),
+            },
+            firefox: vec![FirefoxCompanionConfig {
+                profile_id: profile_id.0.to_string(),
+                bidi_url: bidi_url.to_string(),
+                profile_dir: config.profile.clone(),
+                companion_bind: "127.0.0.1:0".into(),
+                descriptor_path: descriptor_path.clone(),
+                timeout_ms: PROOF_TIMEOUT.as_millis() as u64,
+                pairing_code_ttl_ms: PROOF_TIMEOUT.as_millis() as u64,
+                attachment_ttl_ms: 300_000,
+            }],
+        },
+        process_observations.pairing_code_observer(),
+        enrollment,
+    ) {
+        Ok(factory) => factory,
+        Err(error) => {
+            terminate_firefox(&mut firefox).await;
+            return Err(workflow_error(ErrorCode::BrowserLaunchFailed, error));
+        }
+    };
+
+    let worker = match factory.launch(&SessionId::new()).await {
+        Ok(worker) => worker,
+        Err(error) => {
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+    let page_id = PageId::new();
+    if let Err(error) = worker.open_page(page_id.clone()).await {
+        let _ = worker.close().await;
+        terminate_firefox(&mut firefox).await;
+        return Err(error);
+    }
+
+    let navigated = worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: fixture.url.clone(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await;
+    if let Err(error) = navigated {
+        let _ = worker.close().await;
+        terminate_firefox(&mut firefox).await;
+        return Err(error);
+    }
+
+    let type_started = Instant::now();
+    let typed = worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                selector: "#name".into(),
+                target: None,
+                value: "Bobby".into(),
+                clear_first: true,
+                expected_url: None,
+            },
+        )
+        .await;
+    let typed = match typed {
+        Ok(typed) => typed,
+        Err(error) => {
+            let _ = worker.close().await;
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+    let type_duration_ms = type_started.elapsed().as_millis().max(1) as u64;
+
+    let click_started = Instant::now();
+    let clicked = worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: "#submit".into(),
+                target: None,
+                boundary: true,
+                expected_url: None,
+            },
+        )
+        .await;
+    let clicked = match clicked {
+        Ok(clicked) => clicked,
+        Err(error) => {
+            let _ = worker.close().await;
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+    let click_duration_ms = click_started.elapsed().as_millis().max(1) as u64;
+
+    let confirmation = wait_for_confirmation(worker.as_ref(), &page_id).await;
+    let (confirmation, _) = match confirmation {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = worker.close().await;
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+    let probe = match wait_for_probe_report(worker.as_ref(), &page_id).await {
+        Ok(probe) => probe,
+        Err(error) => {
+            let _ = worker.close().await;
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+
+    let type_path = interaction_path_from_evidence(&typed)?;
+    let click_path = interaction_path_from_evidence(&clicked)?;
+
+    let _ = worker.close().await;
+    terminate_firefox(&mut firefox).await;
+
+    Ok(BehavioralFirefoxDogfoodReport {
+        confirmation_text: confirmation,
+        type_interaction_path: type_path,
+        click_interaction_path: click_path,
+        type_duration_ms,
+        click_duration_ms,
+        probe,
+    })
+}
+
+/// Live Firefox fingerprint collector dogfood (BrowserLeaks / CreepJS / FingerprintJS).
+///
+/// Same env + enrollment path as [`run_installed_firefox_behavioral_dogfood`].
+/// Asserts Firefox-appropriate CreepJS flags; prints Chromium-comparable score JSON.
+pub async fn run_installed_firefox_fingerprint_dogfood(
+    config: InstalledFirefoxConfig,
+) -> Result<FirefoxFingerprintDogfoodReport, CommandError> {
+    validate_installed_config(&config)?;
+    ensure_firefox_fingerprint_prefs(&config.profile)?;
+    let state_dir = proof_state_dir();
+    std::fs::create_dir_all(&state_dir).map_err(io_error)?;
+    let descriptor_path = state_dir.join("native-host-descriptor.json");
+    let process_observations = ProcessObservationCollector::new(Vec::new());
+    let enrollment = cli::start_firefox_profile_enrollment(
+        cli::FirefoxProfileEnrollmentConfig {
+            companion_bind: "127.0.0.1:0".parse().expect("loopback enrollment address"),
+            descriptor_path: descriptor_path.clone(),
+            timeout: PROOF_TIMEOUT,
+            pairing_code_ttl: PROOF_TIMEOUT,
+            attachment_ttl: Duration::from_secs(300),
+        },
+        process_observations.pairing_code_observer(),
+    )
+    .await?;
+    let (mut firefox, bidi_url) =
+        launch_firefox(&config, "about:blank", &process_observations).await?;
+    let extension_session = BidiClient::connect_session(bidi_url.clone(), PROOF_TIMEOUT).await?;
+    let (method, params) = temporary_extension_install_command(&config.companion_extension)?;
+    let installed = extension_session.send(method, params).await;
+    if let Err(error) = installed {
+        let _ = extension_session.end_session().await;
+        terminate_firefox(&mut firefox).await;
+        return Err(error);
+    }
+    if installed
+        .as_ref()
+        .ok()
+        .and_then(|value| value["extension"].as_str())
+        != Some(EXTENSION_ID)
+    {
+        let _ = extension_session.end_session().await;
+        terminate_firefox(&mut firefox).await;
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            "Firefox installed an unexpected companion extension",
+        ));
+    }
+    let enrollment = enrollment.wait().await;
+    let extension_session_ended = extension_session.end_session().await;
+    let enrollment = match enrollment {
+        Ok(enrollment) => enrollment,
+        Err(error) => {
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = extension_session_ended {
+        terminate_firefox(&mut firefox).await;
+        return Err(error);
+    }
+    let profile_id = enrollment.profile_id().clone();
+    let factory = match cli::compose_worker_factory_with_enrolled_firefox(
+        &AppConfig::default(),
+        BrowserSelectionConfig {
+            preference: EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: Some(profile_id.0.to_string()),
+            },
+            firefox: vec![FirefoxCompanionConfig {
+                profile_id: profile_id.0.to_string(),
+                bidi_url: bidi_url.to_string(),
+                profile_dir: config.profile.clone(),
+                companion_bind: "127.0.0.1:0".into(),
+                descriptor_path: descriptor_path.clone(),
+                timeout_ms: PROOF_TIMEOUT.as_millis() as u64,
+                pairing_code_ttl_ms: PROOF_TIMEOUT.as_millis() as u64,
+                attachment_ttl_ms: 300_000,
+            }],
+        },
+        process_observations.pairing_code_observer(),
+        enrollment,
+    ) {
+        Ok(factory) => factory,
+        Err(error) => {
+            terminate_firefox(&mut firefox).await;
+            return Err(workflow_error(ErrorCode::BrowserLaunchFailed, error));
+        }
+    };
+
+    let worker = match factory.launch(&SessionId::new()).await {
+        Ok(worker) => worker,
+        Err(error) => {
+            terminate_firefox(&mut firefox).await;
+            return Err(error);
+        }
+    };
+
+    let result = run_firefox_collector_probes(worker.as_ref()).await;
+    let _ = worker.close().await;
+    terminate_firefox(&mut firefox).await;
+    result
+}
+
+#[derive(Debug, Clone)]
+pub struct FirefoxFingerprintDogfoodReport {
+    pub reports: Vec<serde_json::Value>,
+    pub soft_findings: Vec<String>,
+}
+
+async fn run_firefox_collector_probes(
+    worker: &dyn BrowserWorker,
+) -> Result<FirefoxFingerprintDogfoodReport, CommandError> {
+    let mut reports: Vec<serde_json::Value> = Vec::new();
+    let mut soft_findings: Vec<String> = Vec::new();
+
+    // A. BrowserLeaks JS
+    {
+        let page_id = PageId::new();
+        worker.open_page(page_id.clone()).await?;
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "https://browserleaks.com/javascript".into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 30_000,
+                },
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let report = firefox_eval_json(
+            worker,
+            &page_id,
+            r#"({
+  site: "browserleaks-js",
+  userAgent: navigator.userAgent,
+  platform: navigator.platform,
+  webdriver: navigator.webdriver,
+  vendor: navigator.vendor,
+  languages: [...navigator.languages],
+  hardwareConcurrency: navigator.hardwareConcurrency,
+  deviceMemory: navigator.deviceMemory,
+  plugins: navigator.plugins?.length,
+  chrome: typeof chrome !== "undefined",
+  chromeRuntime: !!(window.chrome && chrome.runtime),
+  fingerprintApplied: !!globalThis[Symbol.for("bobby.fp.applied")],
+  bodySnippet: document.body?.innerText?.slice(0, 2500) || ""
+})"#,
+            15_000,
+        )
+        .await?;
+        eprintln!(
+            "=== [Firefox] BrowserLeaks JS ===\n{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+        soft_findings.extend(firefox_collect_soft_findings(&report));
+        if report["chrome"] == true {
+            soft_findings.push(
+                "browserleaks-js: unexpected chrome object on Firefox (inject_chrome is false)"
+                    .into(),
+            );
+        }
+        reports.push(report);
+    }
+
+    // B. CreepJS — finishes once getComputedStyle Proxy is skipped on Gecko.
+    {
+        let page_id = PageId::new();
+        worker.open_page(page_id.clone()).await?;
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "https://abrahamjuliot.github.io/creepjs/".into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 30_000,
+                },
+            )
+            .await?;
+        let creepjs_ready = firefox_wait_for_body(
+            worker,
+            &page_id,
+            r#"(function() {
+  const t = document.body?.innerText || "";
+  if (t.includes("Computing...")) return false;
+  return t.includes("FP ID") || t.includes("like headless") || t.includes("% headless") || t.length > 1200;
+})()"#,
+            45_000,
+            1500,
+        )
+        .await;
+
+        if let Err(error) = creepjs_ready {
+            soft_findings.push(format!(
+                "creepjs: page wait failed ({}); probing partial DOM",
+                error.message
+            ));
+        }
+        let mut report = firefox_eval_json(worker, &page_id, FIREFOX_CREEPJS_PROBE, 15_000).await?;
+        let worker_probe =
+            match firefox_eval_json(worker, &page_id, &build_worker_probe_script(), 15_000).await {
+                Ok(probe) => probe,
+                Err(error) => {
+                    soft_findings.push(format!("creepjs: worker probe failed ({})", error.message));
+                    serde_json::json!({"error": error.message})
+                }
+            };
+        eprintln!(
+            "=== [Firefox] CreepJS worker probe ===\n{}",
+            serde_json::to_string_pretty(&worker_probe).unwrap_or_default()
+        );
+        if let Some(obj) = report.as_object_mut() {
+            obj.insert("workerProbe".to_string(), worker_probe);
+        }
+        if let Some(scores) = report.get("headlessScores") {
+            eprintln!(
+                "=== [Firefox] CreepJS headless scores ===\n  like headless: {}\n  headless: {}\n  stealth: {}",
+                scores["like"].as_str().unwrap_or("n/a"),
+                scores["headless"].as_str().unwrap_or("n/a"),
+                scores["stealth"].as_str().unwrap_or("n/a"),
+            );
+        }
+        eprintln!(
+            "=== [Firefox] CreepJS flags ===\n{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "headlessFlags": report.get("headlessFlags"),
+                "stealthFlags": report.get("stealthFlags"),
+            }))
+            .unwrap_or_default()
+        );
+        eprintln!(
+            "=== [Firefox] CreepJS ===\n{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+        soft_findings.extend(firefox_collect_soft_findings(&report));
+        if report
+            .pointer("/stealthFlags/hasBadChromeRuntime")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            soft_findings.push("creepjs: hasBadChromeRuntime (unexpected on Firefox)".into());
+        }
+        let body = report["bodyText"].as_str().unwrap_or("");
+        if body.contains("Computing...") {
+            return Err(workflow_error(
+                ErrorCode::VerificationFailed,
+                "CreepJS stuck on Computing... (Gecko getComputedStyle Proxy must stay disabled)",
+            ));
+        }
+        if report["headlessScores"]["like"].as_str().is_none()
+            || report["headlessScores"]["headless"].as_str().is_none()
+            || report["headlessScores"]["stealth"].as_str().is_none()
+        {
+            return Err(workflow_error(
+                ErrorCode::VerificationFailed,
+                "CreepJS headless scores missing after collection",
+            ));
+        }
+        reports.push(report);
+    }
+
+    // C. FingerprintJS demo
+    {
+        let page_id = PageId::new();
+        worker.open_page(page_id.clone()).await?;
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "https://fingerprintjs.github.io/fingerprintjs/".into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 30_000,
+                },
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let report = firefox_eval_json(
+            worker,
+            &page_id,
+            r#"({
+  site: "fingerprintjs",
+  webdriver: navigator.webdriver,
+  fingerprintApplied: !!globalThis[Symbol.for("bobby.fp.applied")],
+  visitorId: (document.body?.innerText || "").match(/Visitor ID:\s*([a-f0-9]+)/i)?.[1] || null,
+  bodySnippet: document.body?.innerText?.slice(0, 2500) || ""
+})"#,
+            15_000,
+        )
+        .await?;
+        eprintln!(
+            "=== [Firefox] FingerprintJS ===\n{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+        soft_findings.extend(firefox_collect_soft_findings(&report));
+        reports.push(report);
+    }
+
+    for report in &reports {
+        let site = report["site"].as_str().unwrap_or("unknown");
+        if report["fingerprintApplied"] != true {
+            return Err(workflow_error(
+                ErrorCode::VerificationFailed,
+                format!("{site}: fingerprint not applied"),
+            ));
+        }
+        if !(report["webdriver"].is_null() || report["webdriver"] == false) {
+            return Err(workflow_error(
+                ErrorCode::VerificationFailed,
+                format!("{site}: webdriver tell detected: {:?}", report["webdriver"]),
+            ));
+        }
+    }
+
+    let creepjs = reports
+        .iter()
+        .find(|r| r["site"] == "creepjs")
+        .ok_or_else(|| workflow_error(ErrorCode::VerificationFailed, "creepjs report missing"))?;
+    if creepjs.pointer("/headlessFlags/webDriverIsOn") != Some(&serde_json::Value::Bool(false)) {
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            "CreepJS webDriverIsOn must be false",
+        ));
+    }
+    if creepjs
+        .pointer("/headlessFlags/webdriverGetterNative")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        soft_findings.push("creepjs: webdriver getter not native-looking after Proxy patch".into());
+    }
+    if creepjs.pointer("/headlessFlags/hasHeadlessUA") != Some(&serde_json::Value::Bool(false)) {
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            "CreepJS hasHeadlessUA must be false",
+        ));
+    }
+    if creepjs.pointer("/stealthFlags/hasToStringProxy") != Some(&serde_json::Value::Bool(false)) {
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            "CreepJS hasToStringProxy must be false",
+        ));
+    }
+    if creepjs.pointer("/headlessFlags/prefersLightColor") != Some(&serde_json::Value::Bool(false))
+    {
+        soft_findings.push("creepjs: prefersLightColor still true after dark scheme patch".into());
+    }
+    if creepjs.pointer("/platformHint/hasBarcodeDetector") != Some(&serde_json::Value::Bool(false))
+    {
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            "Windows persona must hide BarcodeDetector",
+        ));
+    }
+    let win = creepjs["platformHint"]["windows"].as_f64().unwrap_or(0.0);
+    let mac = creepjs["platformHint"]["mac"].as_f64().unwrap_or(0.0);
+    if win < mac {
+        soft_findings.push(format!(
+            "creepjs: Windows platform estimate ({win}) behind Mac ({mac}) — Gecko API lean expected"
+        ));
+    }
+    let system_fonts = creepjs["systemFonts"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    eprintln!("=== [Firefox] CreepJS systemFonts probe ===\n{system_fonts:?}");
+    if !system_fonts.iter().any(|f| {
+        let n = f.trim_matches('"');
+        n.contains("Segoe UI") || n == "Tahoma"
+    }) {
+        return Err(workflow_error(
+            ErrorCode::VerificationFailed,
+            format!(
+                "creepjs: system UI fonts missing Windows family (Segoe UI/Tahoma), got {system_fonts:?}"
+            ),
+        ));
+    }
+
+    if !soft_findings.is_empty() {
+        eprintln!("\n=== [Firefox] Soft findings (non-fatal) ===");
+        for finding in &soft_findings {
+            eprintln!("  - {finding}");
+        }
+    }
+
+    Ok(FirefoxFingerprintDogfoodReport {
+        reports,
+        soft_findings,
+    })
+}
+
+const FIREFOX_CREEPJS_PROBE: &str = r#"(async () => {
+  const text = document.body?.innerText || "";
+  let hasBadChromeRuntime = false;
+  try {
+    if ('chrome' in window && chrome.runtime) {
+      try {
+        if ('prototype' in chrome.runtime.sendMessage || 'prototype' in chrome.runtime.connect) {
+          hasBadChromeRuntime = true;
+        } else {
+          try { new chrome.runtime.sendMessage; hasBadChromeRuntime = true; } catch (err) {
+            if (err?.constructor?.name !== 'TypeError') hasBadChromeRuntime = true;
+          }
+        }
+      } catch (_) { hasBadChromeRuntime = true; }
+    }
+  } catch (_) {}
+  const hasToStringProxy = (() => {
+    try {
+      return Function.prototype.toString.toString().indexOf('[native code]') < 0;
+    } catch (_) { return true; }
+  })();
+  let webdriverGetterNative = true;
+  try {
+    const desc = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
+    if (desc && desc.get) {
+      webdriverGetterNative = Function.prototype.toString.call(desc.get).indexOf('[native code]') >= 0;
+    }
+  } catch (_) {}
+  const webDriverIsOn = (
+    (CSS.supports('border-end-end-radius: initial') && navigator.webdriver === undefined) ||
+    !!navigator.webdriver ||
+    !webdriverGetterNative
+  );
+  const hasBarcodeDetector = 'BarcodeDetector' in window;
+  const platformHint = (() => {
+    const hasTouch = 'ontouchstart' in window && typeof TouchEvent !== 'undefined';
+    const hasAppBadge = 'setAppBadge' in Navigator.prototype;
+    const hasSharedWorker = 'SharedWorker' in window;
+    const hasEyeDropper = 'EyeDropper' in window;
+    const hasFsw = 'FileSystemWritableFileStream' in window;
+    const hasHid = 'HID' in window && 'HIDDevice' in window;
+    const hasSerial = 'SerialPort' in window && 'Serial' in window;
+    const noDownlinkMax = !('downlinkMax' in (navigator.connection || {}));
+    const v88 = CSS.supports('aspect-ratio: initial');
+    const win = [
+      v88 ? !hasBarcodeDetector : null,
+      noDownlinkMax,
+      hasEyeDropper,
+      hasFsw,
+      hasHid,
+      hasSerial,
+      hasSharedWorker,
+      true,
+      hasAppBadge,
+    ].filter((x) => x !== null);
+    const mac = [
+      v88 ? hasBarcodeDetector : null,
+      noDownlinkMax,
+      hasEyeDropper,
+      hasFsw,
+      hasHid,
+      hasSerial,
+      hasSharedWorker,
+      !hasTouch,
+      hasAppBadge,
+    ].filter((x) => x !== null);
+    const score = (arr) => +(arr.filter(Boolean).length / arr.length).toFixed(2);
+    return {
+      hasBarcodeDetector,
+      windows: score(win),
+      mac: score(mac),
+    };
+  })();
+  return {
+    site: "creepjs",
+    webdriver: navigator.webdriver,
+    fingerprintApplied: !!globalThis[Symbol.for("bobby.fp.applied")],
+    bodyText: text.slice(0, 8000),
+    lieHints: text.match(/lie[s]?|headless|webdriver|stealth|inconsistenc|bot|worker|sharedworker/gi)?.slice(0, 40) || [],
+    workerHeadlessLeak: text.toLowerCase().includes("headlesschrome"),
+    headlessScores: {
+      like: text.match(/(\d+)%\s*like headless/i)?.[1] || null,
+      headless: text.match(/(\d+)%\s*headless/i)?.[1] || null,
+      stealth: text.match(/(\d+)%\s*stealth/i)?.[1] || null,
+    },
+    headlessFlags: {
+      webDriverIsOn,
+      hasHeadlessUA: /HeadlessChrome/.test(navigator.userAgent) || /HeadlessChrome/.test(navigator.appVersion),
+      webdriverGetterNative,
+      prefersLightColor: matchMedia('(prefers-color-scheme: light)').matches,
+    },
+    stealthFlags: {
+      hasToStringProxy,
+      hasBadChromeRuntime,
+    },
+    platformHint,
+    systemFonts: (() => {
+      try {
+        const el = document.createElement("div");
+        document.body.appendChild(el);
+        const families = new Set();
+        ["caption", "icon", "menu", "message-box", "small-caption", "status-bar"].forEach((font) => {
+          el.setAttribute("style", "font: " + font + " !important");
+          families.add(getComputedStyle(el).fontFamily);
+        });
+        document.body.removeChild(el);
+        return Array.from(families);
+      } catch (_) {
+        return [];
+      }
+    })(),
+  };
+})()"#;
+
+async fn firefox_eval_json(
+    worker: &dyn BrowserWorker,
+    page_id: &PageId,
+    expression: &str,
+    timeout_ms: u64,
+) -> Result<serde_json::Value, CommandError> {
+    let evidence = worker
+        .evaluate_javascript(
+            page_id,
+            &EvaluateJavaScriptCommand {
+                expression: expression.to_owned(),
+                timeout_ms,
+                await_promise: true,
+            },
+        )
+        .await?;
+    evidence
+        .into_iter()
+        .find_map(|item| match item {
+            Evidence::JavaScriptResult { value, .. } => Some(value),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            workflow_error(
+                ErrorCode::VerificationFailed,
+                "Firefox evaluate_javascript missing JavaScriptResult evidence",
+            )
+        })
+}
+
+async fn firefox_wait_for_body(
+    worker: &dyn BrowserWorker,
+    page_id: &PageId,
+    predicate: &str,
+    timeout_ms: u64,
+    poll_ms: u64,
+) -> Result<(), CommandError> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last_len = 0usize;
+    loop {
+        let ready = firefox_eval_json(worker, page_id, &format!("!!({predicate})"), 5_000)
+            .await
+            .unwrap_or(serde_json::Value::Bool(false));
+        if ready.as_bool() == Some(true) {
+            return Ok(());
+        }
+        if let Ok(snippet) = firefox_eval_json(
+            worker,
+            page_id,
+            r#"((document.body && document.body.innerText) || "").slice(0, 400)"#,
+            5_000,
+        )
+        .await
+        {
+            let text = snippet.as_str().unwrap_or("");
+            if text.len() != last_len {
+                eprintln!(
+                    "=== [Firefox] collector wait body ({len} chars) ===\n{text}",
+                    len = text.len()
+                );
+                last_len = text.len();
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(workflow_error(
+                ErrorCode::DeadlineExceeded,
+                "Firefox collector page body wait timed out",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+    }
+}
+
+fn firefox_collect_soft_findings(report: &serde_json::Value) -> Vec<String> {
+    let mut findings = Vec::new();
+    let site = report["site"].as_str().unwrap_or("unknown");
+    let patterns = [
+        "headless",
+        "webdriver",
+        "inconsistenc",
+        "stealth",
+        "bot detected",
+        "automation",
+        "headlesschrome",
+    ];
+    let texts: Vec<String> = report["bodySnippet"]
+        .as_str()
+        .into_iter()
+        .chain(report["bodyText"].as_str())
+        .map(str::to_string)
+        .collect();
+    for text in texts {
+        let lower = text.to_lowercase();
+        for pattern in patterns {
+            if lower.contains(pattern) {
+                findings.push(format!("{site}: body mentions '{pattern}'"));
+            }
+        }
+    }
+    if let Some(hints) = report["lieHints"].as_array() {
+        for hint in hints {
+            if let Some(s) = hint.as_str() {
+                findings.push(format!("{site}: lie hint '{s}'"));
+            }
+        }
+    }
+    findings
+}
+
+fn interaction_path_from_evidence(evidence: &[Evidence]) -> Result<InteractionPath, CommandError> {
+    evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::BrowserExecution {
+                interaction_path, ..
+            } => serde_json::from_str(&format!("\"{interaction_path}\"")).ok(),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            workflow_error(
+                ErrorCode::VerificationFailed,
+                "browser execution identity is missing",
+            )
+        })
+}
+
+async fn wait_for_probe_report(
+    worker: &dyn BrowserWorker,
+    page_id: &PageId,
+) -> Result<serde_json::Value, CommandError> {
+    for _ in 0..50 {
+        let evidence = worker
+            .inspect(
+                page_id,
+                &InspectCommand {
+                    selector: Some("#probe-report".into()),
+                    include_html: false,
+                    ..InspectCommand::default()
+                },
+            )
+            .await?;
+        if let Some(text) = evidence.iter().find_map(|item| match item {
+            Evidence::Inspection { text, .. } if !text.trim().is_empty() => {
+                Some(text.trim().to_owned())
+            }
+            _ => None,
+        }) {
+            return serde_json::from_str(&text).map_err(|error| {
+                workflow_error(
+                    ErrorCode::VerificationFailed,
+                    format!("behavioral probe report was not valid JSON: {error}"),
+                )
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(workflow_error(
+        ErrorCode::VerificationFailed,
+        "behavioral probe report was not observed",
+    ))
+}
+
 fn validate_installed_config(config: &InstalledFirefoxConfig) -> Result<(), CommandError> {
     if !config.firefox_bin.is_file() || !config.profile.is_dir() {
         return Err(workflow_error(
@@ -361,6 +1352,34 @@ impl Drop for ProofSite {
     }
 }
 
+struct BehavioralProbeSite {
+    url: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl BehavioralProbeSite {
+    async fn spawn() -> Result<Self, CommandError> {
+        let app = Router::new().route("/", get(|| async { Html(BEHAVIORAL_PROBE_HTML) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(io_error)?;
+        let address = listener.local_addr().map_err(io_error)?;
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(Self {
+            url: format!("http://{address}/"),
+            task,
+        })
+    }
+}
+
+impl Drop for BehavioralProbeSite {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 fn temporary_extension_install_command(
     source: &Path,
 ) -> Result<(&'static str, serde_json::Value), CommandError> {
@@ -386,11 +1405,61 @@ fn proof_state_dir() -> PathBuf {
         .join("target/firefox-companion-proof")
 }
 
+/// Ensure dogfood profile `user.js` has fingerprint-related prefs.
+/// Appends missing lines; does not rewrite existing prefs.
+pub fn ensure_firefox_fingerprint_prefs(profile: &Path) -> Result<(), CommandError> {
+    const PREFS: &[(&str, &str)] = &[
+        (
+            "privacy.resistFingerprinting",
+            "user_pref(\"privacy.resistFingerprinting\", false);",
+        ),
+        (
+            "ui.systemUsesDarkTheme",
+            "user_pref(\"ui.systemUsesDarkTheme\", 1);",
+        ),
+    ];
+    let path = profile.join("user.js");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(io_error(error)),
+    };
+    let mut additions = String::new();
+    for (key, line) in PREFS {
+        if existing.contains(key) {
+            continue;
+        }
+        if !additions.is_empty() {
+            additions.push('\n');
+        }
+        additions.push_str(line);
+    }
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(io_error)?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        file.write_all(b"\n").map_err(io_error)?;
+    }
+    if existing.is_empty() {
+        file.write_all(b"// Bobby Browser fingerprint dogfood prefs (auto-appended)\n")
+            .map_err(io_error)?;
+    }
+    file.write_all(additions.as_bytes()).map_err(io_error)?;
+    file.write_all(b"\n").map_err(io_error)?;
+    Ok(())
+}
+
 async fn launch_firefox(
     config: &InstalledFirefoxConfig,
     startup_url: &str,
     process_observations: &ProcessObservationCollector,
 ) -> Result<(Child, Url), CommandError> {
+    ensure_firefox_fingerprint_prefs(&config.profile)?;
     let endpoint_file = config.profile.join("WebDriverBiDiServer.json");
     match endpoint_file.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_file() => {
@@ -443,9 +1512,15 @@ async fn launch_firefox(
     })
     .await
     .map_err(|_| {
+        let lock = config.profile.join(".parentlock");
+        let lock_hint = if lock.exists() {
+            " (profile .parentlock exists — quit any Firefox using this profile)"
+        } else {
+            ""
+        };
         workflow_error(
             ErrorCode::BrowserLaunchFailed,
-            "Firefox BiDi endpoint timed out",
+            format!("Firefox BiDi endpoint timed out{lock_hint}"),
         )
     })??;
     Ok((child, url))

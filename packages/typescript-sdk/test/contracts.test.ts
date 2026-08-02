@@ -3,6 +3,8 @@ import test from "node:test";
 
 import type {
   CommandOutcome,
+  ControlAction,
+  ControlActionEvidence,
   Evidence,
   InterfaceError,
   InterfaceEvent,
@@ -18,6 +20,27 @@ test("TargetSpec accepts the minimal semantic target supported by the wire schem
     ordinal: 1,
   };
   assert.deepEqual(target, { role: "textbox", accessibleName: "Phone", ordinal: 1 });
+});
+
+test("control action contracts preserve the closed tagged wire shape", () => {
+  const actions: ControlAction[] = [
+    { kind: "setText", value: "Ada" },
+    { kind: "setChecked", checked: true },
+    { kind: "selectOne", value: "pro" },
+    { kind: "selectMany", values: ["one", "two"] },
+    { kind: "setFiles", paths: ["/input/resume.pdf"] },
+    { kind: "clear" },
+    { kind: "activate" },
+  ];
+  const evidence: ControlActionEvidence = {
+    operation: "setChecked",
+    target: { role: "checkbox", accessibleName: "Terms", ordinal: null, framePath: [], shadowPath: [] },
+    state: { kind: "checked", checked: true },
+    validity: { willValidate: true, valid: true, flags: [], message: null, describedBy: [] },
+    nodeReplaced: false,
+  };
+  assert.equal(actions.length, 7);
+  assert.equal(evidence.operation, "setChecked");
 });
 
 test("contracts preserve every discriminated wire variant", () => {

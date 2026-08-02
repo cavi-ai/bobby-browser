@@ -45,9 +45,74 @@ jobs:
         run: cargo build --workspace --locked
 
       - name: Test
-        # Chromium-dependent tests are #[ignore]d and skipped here; they run in the
-        # certification job locally. This gate covers all logic/contract tests.
+        # Logic/contract tests. Chromium-dependent tests are #[ignore]d here and
+        # run live in the `chromium` job below.
         run: cargo test --workspace --locked
+
+  chromium:
+    name: chromium · live browser tests
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    env:
+      BOBBY_CHROME_NO_SANDBOX: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: 150.0.7871.124
+          install-dependencies: true
+
+      - name: Locate Chrome
+        run: |
+          BIN="$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)"
+          echo "BOBBY_CHROME_EXECUTABLE=$(readlink -f "$BIN")" >> "$GITHUB_ENV"
+          echo "resolved=$(readlink -f "$BIN")"
+          "$(readlink -f "$BIN")" --version
+          "$(readlink -f "$BIN")" --headless --no-sandbox --dump-dom about:blank | head -c 200
+
+      - name: Chrome diagnostics
+        run: |
+          echo "executable=$BOBBY_CHROME_EXECUTABLE"
+          ls -la "$BOBBY_CHROME_EXECUTABLE" || true
+          ldd "$BOBBY_CHROME_EXECUTABLE" | grep "not found" || true
+
+      - name: Worker live tests
+        run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
+
+      - name: Runtime live tests
+        run: >-
+          cargo test -p runtime-tests --locked
+          --test adaptive_http
+          --test agentic_interaction
+          --test browser_vertical_slice
+          --test checkpoint_recovery
+          --test intent_dismiss_obstruction_workflow
+          --test intent_extract_workflow
+          --test intent_follow_workflow
+          --test intent_form_workflow
+          --test intent_vision_escalation
+          --test interface_capacity
+          --test interface_recovery
+          --test interface_security
+          -- --ignored --test-threads=1
+
+      - name: Conformance live tests
+        run: cargo test -p interface-conformance --test javascript_evaluation --locked -- --ignored --test-threads=1
 
   node:
     name: node · typescript · docs
@@ -60,7 +125,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24.18.1
           cache: pnpm
 
       - name: Install

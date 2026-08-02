@@ -6,7 +6,9 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 `FormSnapshot` is the versioned, engine-neutral contract for observing forms
 before an agent plans edits. Version 1 is additive: it does not change the
-existing accessibility snapshot or expose a new browser command by itself.
+existing accessibility snapshot. Agents can request the contract through the
+read-only MCP `form_snapshot` tool with `{ sessionId, pageId, maxControls? }`; it requires
+`page:read`, not browser mutation or caller-enabled JavaScript evaluation.
 
 The contract represents owned forms, unowned controls, labeled groups,
 constraints, validity, options, supported operations, and safe semantic
@@ -62,3 +64,17 @@ JSON Schema with its `schema` feature. TypeScript consumers use
 
 Future engine, MCP, and agent-skill adapters should produce or consume this
 contract instead of defining engine-specific form shapes.
+
+Live Chromium and Firefox reads use the same bounded raw DOM projection and
+the same Rust normalizer. Canonical IDs, control kinds, typed state, validity,
+supported operations, redaction, and truncation are not decided by
+engine-specific scripts.
+
+## Typed control actions
+
+Each control advertises the exact operations accepted by the reconciliable
+`controlAction` primitive. Chromium and Firefox preflight the operation against
+the reread control, execute it once through their native transport, then return
+`ControlActionEvidence` with the operation, semantic target, typed state,
+validity, and node-replacement status. Unsupported or ambiguous targets fail
+before mutation; uncertainty after dispatch is never blindly replayed.

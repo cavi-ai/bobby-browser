@@ -1,8 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{AttemptId, CommandId, PageId, SessionId, WorkflowId};
+use crate::{
+    AttemptId, CommandId, FormControlTarget, PageId, SessionId, WorkflowId, MAX_FORM_REFERENCES,
+    MAX_FORM_VALUE_BYTES,
+};
 
 pub const MAX_INTENT_PURPOSE_BYTES: usize = 256;
 
@@ -285,10 +288,18 @@ pub enum PrimitiveCommand {
     ActivatePage(ActivatePageCommand),
     AccessibilitySnapshot(AccessibilitySnapshotCommand),
     ExtractStructured(ExtractStructuredCommand),
+    GetCookies(GetCookiesCommand),
+    PrintToPdf(PrintToPdfCommand),
+    HandleDialog(HandleDialogCommand),
+    Emulate(EmulateCommand),
+    NetworkLog(NetworkLogCommand),
+    SetCookies(SetCookiesCommand),
+    DeleteCookies(DeleteCookiesCommand),
     ClickAndWaitForPopup(ClickAndWaitForPopupCommand),
     ClickAndWaitForDownload(ClickAndWaitForDownloadCommand),
     WaitFor(WaitForCommand),
     CaptureScreenshot(CaptureScreenshotCommand),
+    ControlAction(ControlActionCommand),
     SetFocusEmulation(SetFocusEmulationCommand),
     SetEmulatedMedia(SetEmulatedMediaCommand),
     EvaluateJavaScript(EvaluateJavaScriptCommand),
@@ -325,6 +336,13 @@ impl PrimitiveCommand {
                     sanitize(url);
                 }
             }
+            Self::ControlAction(command) => {
+                if let ControlAction::SetFiles { paths } = &mut command.action {
+                    for (index, path) in paths.iter_mut().enumerate() {
+                        *path = format!("upload://input/{index}");
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -337,14 +355,22 @@ impl PrimitiveCommand {
             | Self::ListPages(_)
             | Self::WaitFor(_)
             | Self::ActivatePage(_)
+            | Self::Emulate(_)
+            | Self::NetworkLog(_)
             | Self::AccessibilitySnapshot(_)
             | Self::ExtractStructured(_)
+            | Self::GetCookies(_)
+            | Self::PrintToPdf(_)
             | Self::CaptureScreenshot(_) => CommandClass::Replayable,
+            Self::SetCookies(_) | Self::DeleteCookies(_) | Self::HandleDialog(_) => {
+                CommandClass::Reconciliable
+            }
             Self::DownloadUrl(_)
             | Self::TypeText(_)
             | Self::UploadFiles(_)
             | Self::ClosePage(_)
             | Self::EvaluateJavaScript(_) => CommandClass::Reconciliable,
+            Self::ControlAction(_) => CommandClass::Reconciliable,
             Self::ClickAndWaitForPopup(_) | Self::ClickAndWaitForDownload(_) => {
                 CommandClass::Boundary
             }
@@ -352,6 +378,81 @@ impl PrimitiveCommand {
             Self::Click(_) => CommandClass::Reconciliable,
             Self::SetFocusEmulation(_) => CommandClass::Reconciliable,
             Self::SetEmulatedMedia(_) => CommandClass::Reconciliable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlActionCommand {
+    pub target: FormControlTarget,
+    pub action: ControlAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ControlAction {
+    SetText { value: String },
+    SetChecked { checked: bool },
+    SelectOne { value: String },
+    SelectMany { values: Vec<String> },
+    SetFiles { paths: Vec<String> },
+    Clear,
+    Activate,
+}
+
+impl ControlAction {
+    pub fn validate(&self) -> Result<(), String> {
+        fn bounded(value: &str, field: &str) -> Result<(), String> {
+            if value.len() > MAX_FORM_VALUE_BYTES {
+                return Err(format!("{field} exceeds {MAX_FORM_VALUE_BYTES} bytes"));
+            }
+            Ok(())
+        }
+
+        match self {
+            Self::SetText { value } | Self::SelectOne { value } => bounded(value, "value"),
+            Self::SelectMany { values } => {
+                if values.is_empty() || values.len() > MAX_FORM_REFERENCES {
+                    return Err(format!(
+                        "values must contain between 1 and {MAX_FORM_REFERENCES} items"
+                    ));
+                }
+                let mut unique = BTreeSet::new();
+                for value in values {
+                    bounded(value, "selection value")?;
+                    if !unique.insert(value) {
+                        return Err("selection values must be unique".into());
+                    }
+                }
+                Ok(())
+            }
+            Self::SetFiles { paths } => {
+                if paths.is_empty() || paths.len() > MAX_FORM_REFERENCES {
+                    return Err(format!(
+                        "paths must contain between 1 and {MAX_FORM_REFERENCES} items"
+                    ));
+                }
+                for path in paths {
+                    bounded(path, "file path")?;
+                }
+                Ok(())
+            }
+            Self::SetChecked { .. } | Self::Clear | Self::Activate => Ok(()),
+        }
+    }
+
+    pub fn operation(&self) -> crate::FormControlOperation {
+        match self {
+            Self::SetText { .. } => crate::FormControlOperation::SetText,
+            Self::SetChecked { .. } => crate::FormControlOperation::SetChecked,
+            Self::SelectOne { .. } => crate::FormControlOperation::SelectOne,
+            Self::SelectMany { .. } => crate::FormControlOperation::SelectMany,
+            Self::SetFiles { .. } => crate::FormControlOperation::SetFiles,
+            Self::Clear => crate::FormControlOperation::Clear,
+            Self::Activate => crate::FormControlOperation::Activate,
         }
     }
 }
@@ -476,6 +577,151 @@ pub struct AccessibilitySnapshotCommand {
 pub struct ExtractStructuredCommand {
     pub schema: serde_json::Value,
     pub purpose: Option<String>,
+}
+
+/// One cookie as returned by a cookie read on any engine.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CookieRecord {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_unix: Option<f64>,
+}
+
+/// One cookie to store. `url` anchors the cookie's origin; `path`, flags, and
+/// expiry are optional per the driver defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCookieParam {
+    pub name: String,
+    pub value: String,
+    pub url: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub http_only: bool,
+    #[serde(default)]
+    pub same_site: Option<String>,
+    #[serde(default)]
+    pub expires_unix: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkLogCommand {
+    /// Clear the recorded log after producing the artifact (default true).
+    #[serde(default = "default_true")]
+    pub clear: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ViewportSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeolocationCoordinates {
+    pub latitude: f64,
+    pub longitude: f64,
+    #[serde(default)]
+    pub accuracy: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EmulateCommand {
+    #[serde(default)]
+    pub viewport: Option<ViewportSize>,
+    #[serde(default)]
+    pub geolocation: Option<GeolocationCoordinates>,
+    /// Mobile device-metrics flag (Chromium); harmless elsewhere.
+    #[serde(default)]
+    pub mobile: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum DialogAction {
+    Accept,
+    Dismiss,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HandleDialogCommand {
+    pub action: DialogAction,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrintToPdfCommand {
+    #[serde(default)]
+    pub landscape: bool,
+    #[serde(default = "default_print_background")]
+    pub print_background: bool,
+    #[serde(default)]
+    pub scale: Option<f64>,
+    #[serde(default)]
+    pub page_ranges: Option<String>,
+}
+
+fn default_print_background() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetCookiesCommand {
+    /// Restrict to these origin URLs; empty returns all cookies for the page's jar.
+    #[serde(default)]
+    pub urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCookiesCommand {
+    pub cookies: Vec<SetCookieParam>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteCookiesCommand {
+    /// Restrict deletion to these origin URLs; empty means every origin.
+    #[serde(default)]
+    pub urls: Vec<String>,
+    /// Restrict deletion to these cookie names; empty means every cookie.
+    #[serde(default)]
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

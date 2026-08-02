@@ -221,6 +221,33 @@ impl ResolvedTarget {
         self.eval(page, &script).await
     }
 
+    pub async fn select_options(
+        &self,
+        page: &Page,
+        values: &[String],
+    ) -> Result<Vec<String>, CommandError> {
+        let values = serde_json::to_string(values).map_err(|error| {
+            target_error(
+                ErrorCode::InvalidRequest,
+                format!("invalid select values: {error}"),
+            )
+        })?;
+        self.eval(
+            page,
+            &format!("if(!(el instanceof HTMLSelectElement)||!el.multiple)throw new Error('resolved control is not a multi-select');const requested=new Set({values});for(const value of requested){{const matches=[...el.options].filter(option=>option.value===value&&!option.disabled);if(matches.length!==1)throw new Error('select option is missing, ambiguous, or disabled')}}for(const option of el.options)option.selected=requested.has(option.value);el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return [...el.selectedOptions].map(option=>option.value)"),
+        )
+        .await
+    }
+
+    pub async fn clear_control(&self, page: &Page) -> Result<(), CommandError> {
+        self.eval::<bool>(
+            page,
+            "if(el instanceof HTMLInputElement&&el.type==='file'){throw new Error('file controls require native clear')}if(el instanceof HTMLSelectElement){for(const option of el.options)option.selected=false}else if('checked'in el){el.checked=false}else if('value'in el){el.value=''}else if(el.isContentEditable){el.textContent=''}else{throw new Error('resolved control cannot be cleared')}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true",
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn screenshot(&self, page: &Page) -> Result<Vec<u8>, CommandError> {
         let page = self.execution_page(page);
         if let Some(element) = &self.native {
@@ -296,6 +323,17 @@ impl ResolvedTarget {
         page: &Page,
         operation: &str,
     ) -> Result<T, CommandError> {
+        if let Some(element) = &self.native {
+            let value = element
+                .call_js_fn_by_value(
+                    format!("function() {{ const el=this; {operation} }}"),
+                    false,
+                )
+                .await
+                .map_err(cdp_error)?;
+            return serde_json::from_value(value)
+                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error));
+        }
         let page = self.execution_page(page);
         let expression = locator_expression(&self.locator, operation)?;
         eval_scoped(page, &self.locator.scope, expression).await

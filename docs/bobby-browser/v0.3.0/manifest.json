@@ -3,12 +3,22 @@
   "package": "bobby-browser",
   "product": "bobby-browser",
   "version": "0.3.0",
+<<<<<<< HEAD
   "contentSha256": "c475f865834d434a12d9727e4d0d452159e4a4a8b8f820827eb5e2f58f321787",
+=======
+  "contentSha256": "3092119836f1480de2289c5ffb9d6eec849585a581a0bad954b2594cbacb04d3",
+>>>>>>> 27941c6 (feat(cookies): cookie primitives on Chromium and Firefox)
   "publicBasePath": "/docs/bobby-browser/v0.3.0",
   "stableAlias": "/docs/bobby-browser",
   "release": {
     "tag": "v0.3.0",
+<<<<<<< HEAD
     "commit": "5ddf9611b093e66cf924a75472e45fb71e8cf1b0"
   },
   "generatedAt": "2026-08-01T04:49:41.000Z"
+=======
+    "commit": "d564bfb4651139bf7b1b71121ca0b5f28b098ded"
+  },
+  "generatedAt": "2026-08-01T04:16:09.000Z"
+>>>>>>> 27941c6 (feat(cookies): cookie primitives on Chromium and Firefox)
 }

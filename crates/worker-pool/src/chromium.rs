@@ -25,18 +25,21 @@ use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
+use fingerprinting::{FingerprintApplyPlan, FingerprintConfig, FingerprintHost};
 use futures::StreamExt;
 use network_engine::state::{
     HttpCookie, HttpCookiePartitionKey, HttpStateSnapshot, ResponseStateDelta,
 };
 use sha2::{Digest, Sha256};
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand,
-    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence,
-    PageId, ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand,
+    ClickCommand, ClosePageCommand, CommandError, ControlAction, ControlActionCommand, ErrorCode,
+    ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
+    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
+    ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
     TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 
@@ -52,6 +55,7 @@ use crate::{
 pub struct ChromiumWorkerFactory {
     config: BrowserConfig,
     pid_registry_dir: PathBuf,
+    fingerprint: FingerprintConfig,
 }
 
 impl ChromiumWorkerFactory {
@@ -67,6 +71,7 @@ impl ChromiumWorkerFactory {
         Self {
             config,
             pid_registry_dir,
+            fingerprint: FingerprintConfig::default(),
         }
     }
 
@@ -83,7 +88,13 @@ impl ChromiumWorkerFactory {
         Self {
             config,
             pid_registry_dir,
+            fingerprint: FingerprintConfig::default(),
         }
+    }
+
+    pub fn with_fingerprint(mut self, fingerprint: FingerprintConfig) -> Self {
+        self.fingerprint = fingerprint;
+        self
     }
 }
 
@@ -101,12 +112,26 @@ impl WorkerFactory for ChromiumWorkerFactory {
 
         let mut builder = ChromiumConfig::builder()
             .user_data_dir(profile_dir.clone())
-            .launch_timeout(Duration::from_secs(20));
+            .launch_timeout(Duration::from_secs(20))
+            // Strip --enable-automation + disable AutomationControlled so
+            // navigator.webdriver is natively false (CreepJS webDriverIsOn).
+            .hide();
         if let Some(executable) = &self.config.executable {
             builder = builder.chrome_executable(executable);
         }
         if !self.config.headless {
             builder = builder.with_head();
+        }
+        // Chrome's sandbox requires root or unprivileged user namespaces;
+        // hosted CI has neither. Honor an explicit opt-out rather than
+        // guessing from uid (runners are unprivileged but still blocked).
+        #[cfg(unix)]
+        {
+            let blocked = unsafe { libc::geteuid() } == 0
+                || std::env::var_os("BOBBY_CHROME_NO_SANDBOX").is_some();
+            if blocked {
+                builder = builder.no_sandbox();
+            }
         }
         let config = builder
             .build()
@@ -147,8 +172,13 @@ impl WorkerFactory for ChromiumWorkerFactory {
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
             network_trackers: Mutex::new(HashMap::new()),
+            har_recorders: Mutex::new(HashMap::new()),
+            har_tasks: Mutex::new(HashMap::new()),
             http_state: Mutex::new(HttpBridgeState::default()),
             handler_task: Mutex::new(Some(handler_task)),
+            fingerprint: Mutex::new(self.fingerprint.clone()),
+            fingerprint_enabled: AtomicBool::new(self.fingerprint.enabled),
+            fingerprint_plan: Mutex::new(None),
         }))
     }
 }
@@ -221,8 +251,14 @@ struct ChromiumWorker {
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
     network_trackers: Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>,
+    har_recorders: Mutex<HashMap<PageId, Arc<crate::HarRecorder>>>,
+    har_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
     http_state: Mutex<HttpBridgeState>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
+    fingerprint: Mutex<FingerprintConfig>,
+    fingerprint_enabled: AtomicBool,
+    /// Cached apply plan for the current fingerprint config (rebuilt on invalidate).
+    fingerprint_plan: Mutex<Option<std::sync::Arc<FingerprintApplyPlan>>>,
 }
 
 #[derive(Default)]
@@ -232,6 +268,112 @@ struct HttpBridgeState {
 }
 
 impl ChromiumWorker {
+    fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
+        fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
+            Box::new(TargetSpec {
+                role: Some(segment.role.clone()),
+                accessible_name: Some(segment.accessible_name.clone()),
+                ordinal: segment.ordinal,
+                ..Default::default()
+            })
+        }
+        TargetSpec {
+            role: Some(target.role.clone()),
+            accessible_name: Some(target.accessible_name.clone()),
+            ordinal: target.ordinal,
+            frame_path: target.frame_path.iter().map(segment).collect(),
+            shadow_path: target.shadow_path.iter().map(segment).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Lazily attaches the per-page HAR collector: three CDP network event
+    /// streams merged into the page's bounded recorder, keyed by request id.
+    async fn ensure_har_collector(
+        &self,
+        page_id: &PageId,
+    ) -> Result<Arc<crate::HarRecorder>, CommandError> {
+        if let Some(recorder) = self.har_recorders.lock().await.get(page_id) {
+            return Ok(recorder.clone());
+        }
+        let page = {
+            let pages = self.pages.lock().await;
+            pages.get(page_id).cloned().ok_or_else(page_missing)?
+        };
+        let recorder = Arc::new(crate::HarRecorder::default());
+        let task_recorder = recorder.clone();
+        let task = tokio::spawn(async move {
+            use chromiumoxide::cdp::browser_protocol::network::{
+                EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
+                EventResponseReceived,
+            };
+            let Ok(mut will_send) = page.event_listener::<EventRequestWillBeSent>().await else {
+                return;
+            };
+            let Ok(mut responses) = page.event_listener::<EventResponseReceived>().await else {
+                return;
+            };
+            let Ok(mut finished) = page.event_listener::<EventLoadingFinished>().await else {
+                return;
+            };
+            let Ok(mut failed) = page.event_listener::<EventLoadingFailed>().await else {
+                return;
+            };
+            let mut pending: HashMap<String, crate::HarEntry> = HashMap::new();
+            loop {
+                tokio::select! {
+                    event = will_send.next() => {
+                        let Some(event) = event else { break };
+                        pending.insert(event.request_id.inner().to_owned(), crate::HarEntry {
+                            url: event.request.url.clone(),
+                            method: event.request.method.clone(),
+                            status: None,
+                            started_unix_ms: *event.wall_time.inner() * 1000.0,
+                            elapsed_ms: None,
+                            transfer_bytes: None,
+                            mime_type: None,
+                            error_text: None,
+                        });
+                    }
+                    event = responses.next() => {
+                        let Some(event) = event else { break };
+                        let id = event.request_id.inner().to_owned();
+                        if let Some(entry) = pending.get_mut(&id) {
+                            entry.status = Some(event.response.status as u16);
+                            entry.mime_type = Some(event.response.mime_type.clone());
+                        }
+                    }
+                    event = finished.next() => {
+                        let Some(event) = event else { break };
+                        let id = event.request_id.inner().to_owned();
+                        if let Some(mut entry) = pending.remove(&id) {
+                            entry.elapsed_ms = entry
+                                .started_unix_ms
+                                .is_finite()
+                                .then(|| (*event.timestamp.inner() * 1000.0).max(0.0));
+                            entry.transfer_bytes = Some(event.encoded_data_length as u64);
+                            task_recorder.record(entry).await;
+                        }
+                    }
+                    event = failed.next() => {
+                        let Some(event) = event else { break };
+                        let id = event.request_id.inner().to_owned();
+                        if let Some(mut entry) = pending.remove(&id) {
+                            entry.error_text = Some(event.error_text.clone());
+                            task_recorder.record(entry).await;
+                        }
+                    }
+                }
+            }
+        });
+        self.har_recorders
+            .lock()
+            .await
+            .insert(page_id.clone(), recorder.clone());
+        self.har_tasks.lock().await.insert(page_id.clone(), task);
+        Ok(recorder)
+    }
+
     async fn resolve_target(
         &self,
         page_id: &PageId,
@@ -245,6 +387,7 @@ impl ChromiumWorker {
     }
 
     async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
+        self.apply_fingerprint_to_page(&page).await?;
         let tracker = crate::network_quiet::NetworkQuietTracker::start(&page)
             .await
             .map_err(command_failed)?;
@@ -254,6 +397,45 @@ impl ChromiumWorker {
             .insert(page_id.clone(), tracker);
         self.pages.lock().await.insert(page_id, page);
         Ok(())
+    }
+
+    async fn apply_fingerprint_to_page(&self, page: &Page) -> Result<(), CommandError> {
+        if !self
+            .fingerprint_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        let plan = {
+            let cached = self.fingerprint_plan.lock().await;
+            if let Some(plan) = cached.as_ref() {
+                plan.clone()
+            } else {
+                drop(cached);
+                let config = {
+                    let mut config = self.fingerprint.lock().await.clone();
+                    config.enabled = true;
+                    config
+                };
+                let plan = match FingerprintApplyPlan::from_config(&config) {
+                    Ok(Some(plan)) => std::sync::Arc::new(plan),
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        return Err(driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            error.to_string(),
+                        ))
+                    }
+                };
+                let mut cached = self.fingerprint_plan.lock().await;
+                *cached = Some(plan.clone());
+                plan
+            }
+        };
+        crate::fingerprint_host::ChromiumPageHost { page }
+            .apply_fingerprint(plan.as_ref())
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))
     }
 
     async fn unregister_page(&self, page_id: &PageId) -> Option<Page> {
@@ -270,6 +452,19 @@ impl BrowserWorker for ChromiumWorker {
 
     fn profile_dir(&self) -> &Path {
         &self.profile_dir
+    }
+
+    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
+        self.fingerprint_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        // Drop cached plan so the next apply rebuilds with current config/enabled state.
+        *self.fingerprint_plan.lock().await = None;
+        Ok(())
+    }
+
+    fn fingerprint_enabled(&self) -> bool {
+        self.fingerprint_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
@@ -500,19 +695,117 @@ impl BrowserWorker for ChromiumWorker {
         ])
     }
 
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        command
+            .action
+            .validate()
+            .map_err(|message| driver_error(ErrorCode::InvalidRequest, message))?;
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let read_snapshot = async || -> Result<types::FormSnapshot, CommandError> {
+            let value: serde_json::Value = page
+                .evaluate(crate::form_snapshot_expression(page_id))
+                .await
+                .map_err(command_failed)?
+                .into_value()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            let encoded = value.as_str().ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "form snapshot returned non-text JSON",
+                )
+            })?;
+            crate::decode_form_snapshot(page_id.clone(), encoded, 512)
+        };
+        let find_control = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
+            snapshot
+                .forms
+                .iter()
+                .flat_map(|form| form.controls.iter())
+                .chain(snapshot.unowned_controls.iter())
+                .find(|control| control.target.as_ref() == Some(&command.target))
+                .cloned()
+        };
+        let before = read_snapshot().await?;
+        let before_control = find_control(&before).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetNotFound,
+                "form control target was not found",
+            )
+        })?;
+        crate::validate_control_action(&before_control, &command.action)?;
+
+        let target = Self::control_target_spec(&command.target);
+        let resolved = self
+            .resolve_target(page_id, page, "", Some(&target))
+            .await?;
+        match &command.action {
+            ControlAction::SetText { value } => resolved.type_text(page, value, true).await?,
+            ControlAction::SetChecked { checked } => {
+                resolved.set_checked(page, *checked).await?;
+            }
+            ControlAction::SelectOne { value } => {
+                resolved.select_option(page, value).await?;
+            }
+            ControlAction::SelectMany { values } => {
+                resolved.select_options(page, values).await?;
+            }
+            ControlAction::SetFiles { paths } => {
+                let requested = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+                let paths = resolve_upload_paths(&self.upload_roots, &requested)?
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                resolved.set_files(page, paths).await?;
+            }
+            ControlAction::Clear => {
+                if before_control.control_kind == types::FormControlKind::File {
+                    resolved.set_files(page, Vec::new()).await?;
+                } else {
+                    resolved.clear_control(page).await?;
+                }
+            }
+            ControlAction::Activate => resolved.click(page).await?,
+        }
+
+        let after = read_snapshot().await?;
+        let after_control = find_control(&after).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetDetached,
+                "form control was replaced or detached after dispatch",
+            )
+        })?;
+        let evidence = crate::control_action_evidence(&after_control, &command.action, false)?;
+        Ok(vec![Evidence::ControlAction { action: evidence }])
+    }
+
     async fn open_page_command(
         &self,
         command: &OpenPageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page_id = PageId::new();
-        let browser = self.browser.lock().await;
-        let browser = browser.as_ref().ok_or_else(closed_error)?;
-        let page = browser
-            .new_page(command.url.as_deref().unwrap_or("about:blank"))
-            .await
-            .map_err(command_failed)?;
-        let evidence = page_evidence(page_id.clone(), &page).await?;
-        self.register_page(page_id, page).await?;
+        let page = {
+            let browser = self.browser.lock().await;
+            let browser = browser.as_ref().ok_or_else(closed_error)?;
+            // Always start blank so init scripts register before first real document.
+            browser
+                .new_page("about:blank")
+                .await
+                .map_err(command_failed)?
+        };
+        self.register_page(page_id.clone(), page).await?;
+        if let Some(url) = command.url.as_deref() {
+            let pages = self.pages.lock().await;
+            let page = pages.get(&page_id).ok_or_else(page_missing)?;
+            page.goto(url).await.map_err(command_failed)?;
+        }
+        let pages = self.pages.lock().await;
+        let page = pages.get(&page_id).ok_or_else(page_missing)?;
+        let evidence = page_evidence(page_id, page).await?;
         Ok(vec![Evidence::Page {
             page_id: evidence.page_id,
             url: evidence.url,
@@ -545,6 +838,275 @@ impl BrowserWorker for ChromiumWorker {
             url: evidence.url,
             title: evidence.title,
         }])
+    }
+
+    async fn network_log(
+        &self,
+        page_id: &PageId,
+        command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let recorder = self.ensure_har_collector(page_id).await?;
+        let entries = recorder.take(command.clear).await;
+        let page_url = {
+            let pages = self.pages.lock().await;
+            match pages.get(page_id) {
+                Some(page) => page.url().await.ok().flatten().unwrap_or_default(),
+                None => String::new(),
+            }
+        };
+        let document = crate::har::har_document(&entries, &page_url);
+        let bytes = serde_json::to_vec(&document)
+            .map_err(|error| driver_error(ErrorCode::Internal, error.to_string()))?;
+        let record = self
+            .artifacts
+            .put(
+                &self.session_id,
+                page_id,
+                "application/json",
+                "har",
+                &bytes,
+                MAX_VISION_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| driver_error(ErrorCode::Internal, error))?;
+        Ok(vec![Evidence::HarArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+            entries: entries.len() as u32,
+        }])
+    }
+
+    async fn emulate(
+        &self,
+        page_id: &PageId,
+        command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        if let Some(viewport) = command.viewport {
+            if viewport.width == 0
+                || viewport.height == 0
+                || viewport.width > 16384
+                || viewport.height > 16384
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "viewport dimensions must be within 1..=16384",
+                ));
+            }
+            let params = chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams::builder()
+                .width(viewport.width as i64)
+                .height(viewport.height as i64)
+                .device_scale_factor(1.0)
+                .mobile(command.mobile.unwrap_or(false))
+                .build()
+                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))?;
+            page.execute(params).await.map_err(command_failed)?;
+        }
+        if let Some(coordinates) = command.geolocation {
+            if !coordinates.latitude.is_finite()
+                || !coordinates.longitude.is_finite()
+                || !(-90.0..=90.0).contains(&coordinates.latitude)
+                || !(-180.0..=180.0).contains(&coordinates.longitude)
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "geolocation coordinates are out of range",
+                ));
+            }
+            let params = chromiumoxide::cdp::browser_protocol::emulation::SetGeolocationOverrideParams::builder()
+                .latitude(coordinates.latitude)
+                .longitude(coordinates.longitude)
+                .accuracy(coordinates.accuracy.unwrap_or(1.0))
+                .build();
+            page.execute(params).await.map_err(command_failed)?;
+        }
+        Ok(vec![Evidence::Emulation {
+            viewport: command.viewport,
+            geolocation: command.geolocation,
+        }])
+    }
+
+    async fn handle_dialog(
+        &self,
+        page_id: &PageId,
+        command: &types::HandleDialogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let timeout = std::time::Duration::from_millis(
+            command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
+        );
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let mut events = page
+            .event_listener::<chromiumoxide::cdp::browser_protocol::page::EventJavascriptDialogOpening>()
+            .await
+            .map_err(command_failed)?;
+        let event = tokio::time::timeout(timeout, events.next())
+            .await
+            .map_err(|_| {
+                driver_error(
+                    ErrorCode::DeadlineExceeded,
+                    format!(
+                        "no JavaScript dialog opened within {}ms",
+                        timeout.as_millis()
+                    ),
+                )
+            })?
+            .ok_or_else(|| driver_error(ErrorCode::NotFound, "dialog event stream closed"))?;
+        let accept = matches!(command.action, types::DialogAction::Accept);
+        page.execute(
+            chromiumoxide::cdp::browser_protocol::page::HandleJavaScriptDialogParams::new(accept),
+        )
+        .await
+        .map_err(command_failed)?;
+        Ok(vec![Evidence::Dialog {
+            dialog_type: format!("{:?}", event.r#type).to_lowercase(),
+            message: event.message.clone(),
+            action: if accept {
+                "accept".into()
+            } else {
+                "dismiss".into()
+            },
+        }])
+    }
+
+    async fn print_to_pdf(
+        &self,
+        page_id: &PageId,
+        command: &types::PrintToPdfCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        if let Some(scale) = command.scale {
+            if !(0.1..=2.0).contains(&scale) {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "PDF scale must be within 0.1..=2.0",
+                ));
+            }
+        }
+        let params = chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams {
+            landscape: Some(command.landscape),
+            print_background: Some(command.print_background),
+            scale: command.scale,
+            page_ranges: command.page_ranges.clone(),
+            ..Default::default()
+        };
+        let bytes = page.pdf(params).await.map_err(screenshot_error)?;
+        let record = self
+            .artifacts
+            .put(
+                &self.session_id,
+                page_id,
+                "application/pdf",
+                "pdf",
+                &bytes,
+                MAX_VISION_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| driver_error(ErrorCode::ScreenshotCaptureFailed, error))?;
+        Ok(vec![Evidence::PdfArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+        }])
+    }
+
+    async fn get_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let mut params = chromiumoxide::cdp::browser_protocol::network::GetCookiesParams::default();
+        if !command.urls.is_empty() {
+            params.urls = Some(command.urls.clone());
+        }
+        let result = page.execute(params).await.map_err(command_failed)?.result;
+        Ok(vec![Evidence::CookieState {
+            page_id: Some(page_id.clone()),
+            cookies: result.cookies.into_iter().map(cookie_record).collect(),
+        }])
+    }
+
+    async fn set_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        if command.cookies.len() > 128 {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "cookie set exceeds the 128-cookie bound",
+            ));
+        }
+        let params = chromiumoxide::cdp::browser_protocol::network::SetCookiesParams {
+            cookies: command.cookies.iter().map(set_cookie_param).collect(),
+        };
+        page.execute(params).await.map_err(command_failed)?;
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command
+                    .cookies
+                    .iter()
+                    .map(|cookie| cookie.url.clone())
+                    .collect(),
+            },
+        )
+        .await
+    }
+
+    async fn delete_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let current = self
+            .get_cookies(
+                page_id,
+                &types::GetCookiesCommand {
+                    urls: command.urls.clone(),
+                },
+            )
+            .await?;
+        let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
+            return Ok(current);
+        };
+        for cookie in cookies {
+            if !command.names.is_empty() && !command.names.contains(&cookie.name) {
+                continue;
+            }
+            let mut params =
+                chromiumoxide::cdp::browser_protocol::network::DeleteCookiesParams::new(
+                    &cookie.name,
+                );
+            params.url = command.urls.first().cloned().or_else(|| {
+                Some(format!(
+                    "https://{}{}",
+                    cookie.domain.trim_start_matches('.'),
+                    cookie.path
+                ))
+            });
+            params.domain = Some(cookie.domain.clone());
+            params.path = Some(cookie.path.clone());
+            page.execute(params).await.map_err(command_failed)?;
+        }
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command.urls.clone(),
+            },
+        )
+        .await
     }
 
     async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
@@ -591,6 +1153,33 @@ impl BrowserWorker for ChromiumWorker {
             nodes,
             truncated,
         }])
+    }
+
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let max_controls = max_controls.unwrap_or(512) as usize;
+        let pages = self.pages.lock().await;
+        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let value: serde_json::Value = page
+            .evaluate(crate::form_snapshot_expression_with_limit(
+                page_id,
+                max_controls,
+            ))
+            .await
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let encoded = value.as_str().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "form snapshot returned non-text JSON",
+            )
+        })?;
+        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        Ok(vec![Evidence::FormSnapshot { snapshot }])
     }
 
     async fn activate_page(
@@ -1733,6 +2322,42 @@ fn compact_ax_tree(
     let truncated = budget == 0 && raw.len() > max_nodes;
     super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals);
     (roots_built, truncated)
+}
+
+fn cookie_record(
+    cookie: chromiumoxide::cdp::browser_protocol::network::Cookie,
+) -> types::CookieRecord {
+    types::CookieRecord {
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path,
+        secure: cookie.secure,
+        http_only: cookie.http_only,
+        same_site: cookie.same_site.map(|value| format!("{value:?}")),
+        expires_unix: Some(cookie.expires),
+    }
+}
+
+fn set_cookie_param(
+    param: &types::SetCookieParam,
+) -> chromiumoxide::cdp::browser_protocol::network::CookieParam {
+    use chromiumoxide::cdp::browser_protocol::network::{
+        CookieParam, CookieSameSite, TimeSinceEpoch,
+    };
+    let mut built = CookieParam::new(&param.name, &param.value);
+    built.url = Some(param.url.clone());
+    built.path = param.path.clone();
+    built.secure = Some(param.secure);
+    built.http_only = Some(param.http_only);
+    built.same_site = param.same_site.as_deref().and_then(|value| match value {
+        "Strict" | "strict" => Some(CookieSameSite::Strict),
+        "Lax" | "lax" => Some(CookieSameSite::Lax),
+        "None" | "none" => Some(CookieSameSite::None),
+        _ => None,
+    });
+    built.expires = param.expires_unix.map(TimeSinceEpoch::new);
+    built
 }
 
 #[cfg(test)]

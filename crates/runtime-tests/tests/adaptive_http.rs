@@ -94,12 +94,27 @@ async fn submit(
     workflow_id: &WorkflowId,
     command: PrimitiveCommand,
 ) -> Vec<Evidence> {
-    let command_debug = format!("{command:?}");
-    match runtime
-        .submit(envelope(session_id, page_id, workflow_id, command))
+    submit_with_id(runtime, session_id, page_id, workflow_id, command)
         .await
-    {
-        CommandOutcome::Completed { evidence, .. } => evidence,
+        .1
+}
+
+/// Same as [`submit`], but also returns the command id the runtime journaled
+/// the outcome under — needed wherever a caller must later reference this
+/// command's evidence by id (`RuntimeService::checkpoint`'s `evidence_refs`)
+/// rather than supplying the evidence directly.
+async fn submit_with_id(
+    runtime: &RuntimeService,
+    session_id: &types::SessionId,
+    page_id: &PageId,
+    workflow_id: &WorkflowId,
+    command: PrimitiveCommand,
+) -> (CommandId, Vec<Evidence>) {
+    let command_debug = format!("{command:?}");
+    let envelope = envelope(session_id, page_id, workflow_id, command);
+    let command_id = envelope.command_id.clone();
+    match runtime.submit(envelope).await {
+        CommandOutcome::Completed { evidence, .. } => (command_id, evidence),
         outcome => panic!("command {command_debug} did not complete: {outcome:?}"),
     }
 }
@@ -122,6 +137,14 @@ fn inspection_text(evidence: &[Evidence]) -> String {
         .expect("inspection evidence")
 }
 
+fn chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn adaptive_http() {
@@ -134,9 +157,7 @@ async fn adaptive_http() {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )),
+            executable: Some(PathBuf::from(&chrome_executable())),
             profiles_dir: root.path().join("profiles"),
             headless: true,
             max_active: 2,
@@ -152,6 +173,7 @@ async fn adaptive_http() {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
         },
         http: HttpConfig {
             allow_loopback: true,
@@ -307,7 +329,7 @@ async fn adaptive_http() {
         }),
     )
     .await;
-    let cookie = submit(
+    let (cookie_command_id, cookie) = submit_with_id(
         &runtime,
         &session.id,
         &page.id,
@@ -345,7 +367,10 @@ async fn adaptive_http() {
         recovery_receipts: Vec::new(),
         created_at: Utc::now(),
     };
-    runtime.checkpoint(checkpoint, cookie).await.unwrap();
+    runtime
+        .checkpoint(checkpoint, vec![cookie_command_id])
+        .await
+        .unwrap();
     let pre_recovery_worker = workers.lease(session.id.clone()).await.unwrap().worker_id();
     assert!(matches!(
         runtime.recover(&workflow).await.unwrap(),
@@ -377,9 +402,15 @@ async fn adaptive_http() {
         }),
     )
     .await;
+    let direct_text = inspection_text(&recovered);
+    let chromium_text = inspection_text(&recovered_chromium);
+    let mut chromium_pairs = chromium_text.split("; ").collect::<Vec<_>>();
+    chromium_pairs.sort_unstable();
     assert!(
-        inspection_text(&recovered).contains(&inspection_text(&recovered_chromium)),
-        "recovered direct HTTP and Chromium must observe coherent cookie state"
+        chromium_pairs
+            .iter()
+            .all(|pair| direct_text.contains(pair)),
+        "recovered direct HTTP and Chromium must observe coherent cookie state: direct={direct_text:?} chromium={chromium_pairs:?} evidence={recovered_chromium:?}",
     );
 
     println!(

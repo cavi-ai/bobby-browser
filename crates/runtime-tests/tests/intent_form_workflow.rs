@@ -107,6 +107,14 @@ fn assert_deterministic(record: &ExecutionRecord, kind: &str) {
 
 /// Live Chromium multi-step intent proof against the vertical-slice fixture:
 /// locate → fill (text + file) → wait-for-state → submit-and-verify.
+fn chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn intent_form_workflow_is_deterministic_on_live_chromium() {
@@ -128,9 +136,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )),
+            executable: Some(PathBuf::from(&chrome_executable())),
             profiles_dir: root.path().join("profiles"),
             headless: true,
             max_active: 1,
@@ -146,6 +152,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
             journal_path: root.path().join("commands.jsonl"),
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
@@ -222,7 +229,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
         IntentCommand::Fill(FillIntent {
             purpose: "Resume".into(),
             hints: IntentHints {
-                role: Some("textbox".into()),
+                role: Some("button".into()),
                 ..IntentHints::default()
             },
             value: FillValue::Files {
@@ -328,7 +335,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 page_id: page.id.clone(),
                 restart_url: fixture.base_url(),
                 current_url: current_url.clone(),
-                cursor: Some(inspect_id),
+                cursor: Some(inspect_id.clone()),
                 boundary_command_id: Some(submit_id.clone()),
                 recovery_class: CommandClass::Boundary,
                 invariants: vec![
@@ -341,7 +348,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
-            observed,
+            vec![inspect_id],
         )
         .await
         .unwrap();

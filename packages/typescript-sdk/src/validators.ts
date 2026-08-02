@@ -95,6 +95,13 @@ function isTargetSegment(value: unknown): boolean {
 function isFormControlTarget(value: unknown): value is FormControlTarget {
   return hasExactKeys(value, ["role", "accessibleName", "ordinal", "framePath", "shadowPath"]) && boundedText(value.role, 128) && boundedText(value.accessibleName, 2048) && (value.ordinal === null || isSafeUnsigned(value.ordinal, 2047)) && Array.isArray(value.framePath) && value.framePath.length <= 8 && value.framePath.every(isTargetSegment) && Array.isArray(value.shadowPath) && value.shadowPath.length <= 8 && value.shadowPath.every(isTargetSegment);
 }
+function isControlActionEvidence(value: unknown): boolean {
+  if (!hasExactKeys(value, ["operation", "target", "state", "validity", "nodeReplaced"]) || !oneOf(value.operation, OPERATIONS) || !isFormControlTarget(value.target) || typeof value.nodeReplaced !== "boolean" || !isRecord(value.state) || !isRecord(value.validity)) return false;
+  const state = value.state;
+  const stateValid = state.kind === "empty" ? hasExactKeys(state, ["kind"]) : state.kind === "text" ? hasExactKeys(state, ["kind", "value"]) && boundedText(state.value, 4096, true) : state.kind === "redacted" ? hasExactKeys(state, ["kind", "present"]) && typeof state.present === "boolean" : state.kind === "checked" ? hasExactKeys(state, ["kind", "checked"]) && typeof state.checked === "boolean" : state.kind === "selection" ? hasExactKeys(state, ["kind", "values"]) && Array.isArray(state.values) && state.values.length <= 512 && state.values.every((v) => boundedText(v, 4096, true)) : state.kind === "files" && hasExactKeys(state, ["kind", "count"]) && isSafeUnsigned(state.count, 512);
+  const validity = value.validity;
+  return stateValid && hasExactKeys(validity, ["willValidate", "valid", "flags", "message", "describedBy"]) && typeof validity.willValidate === "boolean" && typeof validity.valid === "boolean" && Array.isArray(validity.flags) && validity.flags.every((v) => oneOf(v, VALIDITY_FLAGS)) && nullableBoundedText(validity.message, 1024) && Array.isArray(validity.describedBy) && validity.describedBy.every((v) => boundedText(v, 2048));
+}
 function isFormControl(value: unknown): value is FormControl {
   if (!hasExactKeys(value, ["id", "formId", "groupId", "target", "controlKind", "accessibleName", "label", "description", "placeholder", "autocomplete", "state", "constraints", "validity", "options", "supportedOperations"]) || !boundedText(value.id, 128) || !(value.formId === null || boundedText(value.formId, 128)) || !(value.groupId === null || boundedText(value.groupId, 128)) || !(value.target === null || isFormControlTarget(value.target)) || !oneOf(value.controlKind, CONTROL_KINDS) || !nullableBoundedText(value.accessibleName, 2048) || !nullableBoundedText(value.label, 2048) || !nullableBoundedText(value.description, 2048) || !nullableBoundedText(value.placeholder, 2048) || !nullableBoundedText(value.autocomplete, 2048)) return false;
   const state = value.state;
@@ -285,6 +292,11 @@ export function isEvidence(value: unknown): value is Evidence {
     case "javaScriptResult": return hasExactKeys(value, ["kind", "value", "truncated"]) && isJsonValue(value.value) && typeof value.truncated === "boolean";
     case "intentExecution": return hasExactKeys(value, ["kind", "record"]) && isExecutionRecord(value.record);
     case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
+    case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
+    case "controlAction": return hasExactKeys(value, ["kind", "action"]) && isControlActionEvidence(value.action);
+    case "cookieState": return hasExactKeys(value, ["kind", "pageId", "cookies"], []) && (value.pageId === null || isUuid(value.pageId)) && Array.isArray(value.cookies) && value.cookies.every(isCookieRecord);
+    case "pdfArtifact": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
+    case "dialog": return hasExactKeys(value, ["kind", "dialogType", "message", "action"]) && isString(value.dialogType) && isString(value.message) && (value.action === "accept" || value.action === "dismiss");
     default: return false;
   }
 }
@@ -294,6 +306,18 @@ export function isRecoveryStatus(value: unknown): value is RecoveryStatus {
     && isUuid(value.workflowId)
     && isWorkflowCheckpoint(value.checkpoint)
     && Array.isArray(value.receipts);
+}
+
+function isCookieRecord(value: unknown): boolean {
+  return hasExactKeys(value, ["name", "value", "domain", "path", "secure", "httpOnly"], ["sameSite", "expiresUnix"])
+    && isString(value.name)
+    && isString(value.value)
+    && isString(value.domain)
+    && isString(value.path)
+    && typeof value.secure === "boolean"
+    && typeof value.httpOnly === "boolean"
+    && (value.sameSite === undefined || isString(value.sameSite))
+    && (value.expiresUnix === undefined || (typeof value.expiresUnix === "number" && Number.isFinite(value.expiresUnix)));
 }
 
 function isAccessibilityNode(value: unknown, depth = 0): boolean {

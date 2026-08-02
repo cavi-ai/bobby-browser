@@ -11,6 +11,10 @@ use std::{
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use behavioral_engine::{
+    session_pause, BehavioralConfig, BezierMouseSimulator, MousePath, ScrollAction,
+    ScrollSimulator, SessionRandom, TypingSimulator,
+};
 use companion_core::{
     AttachmentLease, CompanionServerHandle, CompanionSessionError, PageBindingTicket,
 };
@@ -20,6 +24,8 @@ use companion_protocol::{
 use dom_engine::{
     resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
 };
+use fingerprinting::FingerprintApplyPlan;
+use fingerprinting::FingerprintConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -31,14 +37,17 @@ use tokio::{
 use types::ProfileId;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, CommandId, ErrorCode, ErrorLayer, Evidence,
-    InspectCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    ClickCommand, ClosePageCommand, CommandError, CommandId, ControlAction, ControlActionCommand,
+    ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
+    InspectCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId,
+    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    WaitUntil, WorkerId,
 };
 use url::Url;
 use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
 
 use crate::bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
+use crate::generate_session_seed;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,6 +65,27 @@ const PAGE_BINDING_TITLE_PREFIX: &str = "automation-runtime-binding:";
 pub const MAX_TRACKED_PAGES: usize = 256;
 const PAGE_BINDING_RELEASE_ATTEMPTS: usize = 3;
 const MAX_FRAME_PATH_DEPTH: usize = 8;
+const MAX_JS_RESULT_BYTES: usize = 256 * 1024;
+const MAX_JS_TIMEOUT_MS: u64 = 30_000;
+
+fn form_control_target_spec(target: &FormControlTarget) -> TargetSpec {
+    fn segment(value: &types::SemanticTargetSegment) -> Box<TargetSpec> {
+        Box::new(TargetSpec {
+            role: Some(value.role.clone()),
+            accessible_name: Some(value.accessible_name.clone()),
+            ordinal: value.ordinal,
+            ..Default::default()
+        })
+    }
+    TargetSpec {
+        role: Some(target.role.clone()),
+        accessible_name: Some(target.accessible_name.clone()),
+        ordinal: target.ordinal,
+        frame_path: target.frame_path.iter().map(segment).collect(),
+        shadow_path: target.shadow_path.iter().map(segment).collect(),
+        ..Default::default()
+    }
+}
 const MAX_UPLOAD_FILES: usize = 32;
 const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -531,6 +561,20 @@ enum PageContext {
     Releasing { context: Option<String> },
 }
 
+struct PendingPrompt {
+    prompt_type: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScrollMetrics {
+    needed: bool,
+    current_y: f64,
+    target_y: f64,
+    viewport_height: f64,
+}
+
 pub struct FirefoxCompanionWorker {
     id: WorkerId,
     profile_dir: PathBuf,
@@ -539,6 +583,8 @@ pub struct FirefoxCompanionWorker {
     observer: Arc<dyn ExtensionObserver>,
     pages: Arc<RwLock<HashMap<PageId, PageContext>>>,
     page_cleanups: Arc<RwLock<HashMap<PageId, OpenPageCleanup>>>,
+    pending_prompts: Arc<RwLock<HashMap<String, PendingPrompt>>>,
+    har_recorder: Arc<worker_pool::HarRecorder>,
     closed: AtomicBool,
     lifecycle: AsyncMutex<()>,
     shutdown: Arc<WorkerShutdown>,
@@ -549,6 +595,14 @@ pub struct FirefoxCompanionWorker {
     artifacts: Option<ArtifactStore>,
     upload_roots: Vec<PathBuf>,
     downloads_dir: Option<PathBuf>,
+    session_random: TaskMutex<SessionRandom>,
+    mouse_simulator: BezierMouseSimulator,
+    typing_simulator: TypingSimulator,
+    scroll_simulator: ScrollSimulator,
+    session_jitter: Duration,
+    fingerprint: TaskMutex<FingerprintConfig>,
+    fingerprint_enabled: AtomicBool,
+    fingerprint_preload_script: TaskMutex<Option<String>>,
 }
 
 struct WorkerShutdown {
@@ -979,6 +1033,139 @@ impl FirefoxCompanionWorker {
         self
     }
 
+    pub fn with_behavioral_config(mut self, config: BehavioralConfig) -> Self {
+        let config = config.sanitize();
+        self.mouse_simulator = BezierMouseSimulator::new(config.mouse);
+        self.typing_simulator = TypingSimulator::new(config.typing);
+        self.scroll_simulator = ScrollSimulator::new(config.scroll);
+        self.session_jitter = config.session_jitter;
+        self
+    }
+
+    pub fn with_fingerprint_config(mut self, config: FingerprintConfig) -> Self {
+        self.fingerprint_enabled
+            .store(config.enabled, Ordering::Relaxed);
+        self.fingerprint = TaskMutex::new(config);
+        self
+    }
+
+    pub fn session_seed(&self) -> u64 {
+        self.session_random
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .seed()
+    }
+
+    async fn sync_fingerprint_preload(&self) -> Result<(), CommandError> {
+        let enabled = self.fingerprint_enabled.load(Ordering::Relaxed);
+        let existing = self
+            .fingerprint_preload_script
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+
+        if enabled && existing.is_some() {
+            return Ok(());
+        }
+        if !enabled && existing.is_none() {
+            return Ok(());
+        }
+
+        let host = crate::fingerprint_host::FirefoxBidiHost {
+            transport: self.transport.as_ref(),
+            context: None,
+        };
+
+        if let Some(script_id) = existing {
+            let _ = host.remove_preload_script(&script_id).await;
+            *self
+                .fingerprint_preload_script
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+
+        if !enabled {
+            return Ok(());
+        }
+
+        let config = {
+            let mut config = self
+                .fingerprint
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            config.enabled = true;
+            config
+        };
+        let plan = match FingerprintApplyPlan::from_config(&config) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    error.to_string(),
+                    false,
+                ))
+            }
+        };
+        let script_id = host.add_preload_script(&plan).await.map_err(|error| {
+            driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
+        })?;
+        // Session-level UA/locale/tz (no browsing context yet). Viewport/DPR
+        // require a context — see apply_fingerprint_emulation_for_context.
+        let _ = host.apply_emulation_overrides(&plan).await;
+        *self
+            .fingerprint_preload_script
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(script_id);
+        Ok(())
+    }
+
+    /// Re-apply UA/locale/tz plus `browsingContext.setViewport` for a tab.
+    /// Session preload uses `context: None` so viewport never runs until here.
+    async fn apply_fingerprint_emulation_for_context(
+        &self,
+        context: &str,
+    ) -> Result<(), CommandError> {
+        if !self.fingerprint_enabled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let config = {
+            let mut config = self
+                .fingerprint
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            config.enabled = true;
+            config
+        };
+        let plan = match FingerprintApplyPlan::from_config(&config) {
+            Ok(Some(plan)) => plan,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    error.to_string(),
+                    false,
+                ))
+            }
+        };
+        let host = crate::fingerprint_host::FirefoxBidiHost {
+            transport: self.transport.as_ref(),
+            context: Some(context),
+        };
+        let _ = host.apply_emulation_overrides(&plan).await;
+        Ok(())
+    }
+
+    fn with_session_random<R>(&self, f: impl FnOnce(&mut SessionRandom) -> R) -> R {
+        let mut random = self
+            .session_random
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut random)
+    }
+
     pub async fn new(
         id: WorkerId,
         profile_dir: PathBuf,
@@ -997,7 +1184,7 @@ impl FirefoxCompanionWorker {
         let subscription = transport
             .send(
                 "session.subscribe",
-                json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd"]}),
+                json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened", "network.beforeRequestSent", "network.responseCompleted", "network.fetchError"]}),
             )
             .await?;
         if !subscription.is_object() {
@@ -1009,6 +1196,12 @@ impl FirefoxCompanionWorker {
         }
         let pages = Arc::new(RwLock::new(HashMap::<PageId, PageContext>::new()));
         let page_cleanups = Arc::new(RwLock::new(HashMap::<PageId, OpenPageCleanup>::new()));
+        let pending_prompts = Arc::new(RwLock::new(HashMap::<String, PendingPrompt>::new()));
+        let cleanup_prompts = Arc::clone(&pending_prompts);
+        let har_recorder = Arc::new(worker_pool::HarRecorder::default());
+        let har_pending = Arc::new(RwLock::new(HashMap::<String, worker_pool::HarEntry>::new()));
+        let har_recorder_task = Arc::clone(&har_recorder);
+        let har_pending_task = Arc::clone(&har_pending);
         let cleanup_pages = Arc::clone(&pages);
         let cleanup_registry = Arc::clone(&page_cleanups);
         let cleanup_transport = Arc::clone(&transport);
@@ -1023,6 +1216,100 @@ impl FirefoxCompanionWorker {
                                 mark_destroyed_context(&cleanup_pages, &cleanup_registry, context)
                                     .await;
                             release_removed_pages(&task_failure, removals).await;
+                        }
+                    }
+                    Ok(event) if event.method == "network.beforeRequestSent" => {
+                        let id = event
+                            .params
+                            .pointer("/request/request")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(id) = id {
+                            let url = event
+                                .params
+                                .pointer("/request/url")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                            let method = event
+                                .params
+                                .pointer("/request/method")
+                                .and_then(Value::as_str)
+                                .unwrap_or("GET")
+                                .to_owned();
+                            har_pending_task.write().await.insert(
+                                id,
+                                worker_pool::HarEntry {
+                                    url,
+                                    method,
+                                    status: None,
+                                    started_unix_ms: now_unix_seconds() * 1000.0,
+                                    elapsed_ms: None,
+                                    transfer_bytes: None,
+                                    mime_type: None,
+                                    error_text: None,
+                                },
+                            );
+                        }
+                    }
+                    Ok(event) if event.method == "network.responseCompleted" => {
+                        let id = event
+                            .params
+                            .pointer("/request/request")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(id) = id {
+                            if let Some(mut entry) = har_pending_task.write().await.remove(&id) {
+                                entry.status = event
+                                    .params
+                                    .pointer("/response/status")
+                                    .and_then(Value::as_u64)
+                                    .map(|status| status as u16);
+                                entry.mime_type = event
+                                    .params
+                                    .pointer("/response/mimeType")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned);
+                                entry.transfer_bytes = event
+                                    .params
+                                    .pointer("/response/content/size")
+                                    .and_then(Value::as_u64);
+                                entry.elapsed_ms = Some(0.0);
+                                har_recorder_task.record(entry).await;
+                            }
+                        }
+                    }
+                    Ok(event) if event.method == "network.fetchError" => {
+                        let id = event
+                            .params
+                            .pointer("/request/request")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(id) = id {
+                            if let Some(mut entry) = har_pending_task.write().await.remove(&id) {
+                                entry.error_text = event
+                                    .params
+                                    .get("errorText")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned);
+                                har_recorder_task.record(entry).await;
+                            }
+                        }
+                    }
+                    Ok(event) if event.method == "browsingContext.userPromptOpened" => {
+                        let context = event.params.get("context").and_then(Value::as_str);
+                        let prompt_type = event.params.get("type").and_then(Value::as_str);
+                        let message = event.params.get("message").and_then(Value::as_str);
+                        if let (Some(context), Some(prompt_type), Some(message)) =
+                            (context, prompt_type, message)
+                        {
+                            cleanup_prompts.write().await.insert(
+                                context.to_owned(),
+                                PendingPrompt {
+                                    prompt_type: prompt_type.to_owned(),
+                                    message: message.to_owned(),
+                                },
+                            );
                         }
                     }
                     Ok(_) => {}
@@ -1049,7 +1336,19 @@ impl FirefoxCompanionWorker {
             Arc::clone(&lease),
             Arc::clone(&observer),
         )))));
-        Ok(Self {
+        let session_seed = generate_session_seed();
+        let session_random = TaskMutex::new(SessionRandom::new(session_seed));
+        let behavioral_config = BehavioralConfig::default().sanitize();
+        let mouse_simulator = BezierMouseSimulator::new(behavioral_config.mouse);
+        let typing_simulator = TypingSimulator::new(behavioral_config.typing);
+        let scroll_simulator = ScrollSimulator::new(behavioral_config.scroll);
+        let session_jitter = behavioral_config.session_jitter;
+        let fingerprint = FingerprintConfig::default()
+            .with_session_seed(session_seed)
+            .with_inject_chrome(false);
+        let fingerprint_enabled = AtomicBool::new(fingerprint.enabled);
+
+        let worker = Self {
             id,
             profile_dir,
             lease,
@@ -1057,6 +1356,8 @@ impl FirefoxCompanionWorker {
             observer,
             pages,
             page_cleanups,
+            pending_prompts,
+            har_recorder,
             closed: AtomicBool::new(false),
             lifecycle: AsyncMutex::new(()),
             shutdown: Arc::new(WorkerShutdown {
@@ -1071,7 +1372,17 @@ impl FirefoxCompanionWorker {
             artifacts: None,
             upload_roots: Vec::new(),
             downloads_dir: None,
-        })
+            session_random,
+            mouse_simulator,
+            typing_simulator,
+            scroll_simulator,
+            session_jitter,
+            fingerprint: TaskMutex::new(fingerprint),
+            fingerprint_enabled,
+            fingerprint_preload_script: TaskMutex::new(None),
+        };
+        worker.sync_fingerprint_preload().await?;
+        Ok(worker)
     }
 
     fn start_shutdown(&self) {
@@ -1401,6 +1712,34 @@ impl FirefoxCompanionWorker {
         }
     }
 
+    async fn evaluate_control_script(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+        body: &str,
+    ) -> Result<(), CommandError> {
+        let context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &context, "", Some(target))
+            .await?;
+        let selector = serde_json::to_string(&selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let response = self.transport.send("script.evaluate", json!({
+            "expression": format!("(()=>{{const el=document.querySelector({selector});if(!el)return false;{body}el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()"),
+            "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+            "awaitPromise": false,
+            "resultOwnership": "none",
+        })).await?;
+        if response.pointer("/result/value").and_then(Value::as_bool) != Some(true) {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox control action was rejected",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
     async fn descend_frame_context(
         &self,
         context: &str,
@@ -1545,11 +1884,189 @@ impl FirefoxCompanionWorker {
         &self,
         context: &str,
         shared_id: &str,
+        mouse_path: Option<&MousePath>,
     ) -> Result<(), CommandError> {
         let shared_id = self.preflight_pointer_target(context, shared_id).await?;
-        self.transport
-            .send("input.performActions", pointer_actions(context, &shared_id))
+        let actions = match mouse_path {
+            Some(path) if !path.points.is_empty() => {
+                let pointer_moves = self.pointer_moves_for_path(&path.points, &shared_id);
+                let mut actions_array = Vec::new();
+                actions_array.extend(pointer_moves);
+                let mut dwell_ms = path.hover_dwell_ms;
+                let jitter_ms = self.with_session_random(|random| {
+                    let config = BehavioralConfig {
+                        session_jitter: self.session_jitter,
+                        ..BehavioralConfig::default()
+                    };
+                    session_pause(random, &config).as_millis() as u64
+                });
+                dwell_ms = dwell_ms.saturating_add(jitter_ms / 4);
+                if dwell_ms > 0 {
+                    actions_array.push(serde_json::json!({
+                        "type": "pause",
+                        "duration": dwell_ms
+                    }));
+                }
+                actions_array.push(serde_json::json!({"type": "pointerDown", "button": 0}));
+                actions_array.push(serde_json::json!({"type": "pointerUp", "button": 0}));
+                serde_json::json!({
+                    "context": context,
+                    "actions": [{
+                        "type": "pointer",
+                        "id": "automation-runtime-pointer",
+                        "parameters": {"pointerType": "mouse"},
+                        "actions": actions_array
+                    }]
+                })
+            }
+            _ => pointer_actions(context, &shared_id),
+        };
+        self.transport.send("input.performActions", actions).await?;
+        Ok(())
+    }
+
+    fn pointer_moves_for_path(
+        &self,
+        points: &[behavioral_engine::MousePoint],
+        shared_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let mut previous_ts = 0u64;
+        points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| {
+                let duration = if index == 0 {
+                    0
+                } else {
+                    point.timestamp_ms.saturating_sub(previous_ts)
+                };
+                previous_ts = point.timestamp_ms;
+                serde_json::json!({
+                    "type": "pointerMove",
+                    "x": point.x,
+                    "y": point.y,
+                    "duration": duration,
+                    "origin": {"type": "element", "element": {"sharedId": shared_id}}
+                })
+            })
+            .collect()
+    }
+
+    async fn behavioral_scroll_into_view_if_needed(
+        &self,
+        context: &str,
+        shared_id: &str,
+    ) -> Result<(), CommandError> {
+        let response = self
+            .transport
+            .send(
+                "script.callFunction",
+                json!({
+                    "functionDeclaration": "function automationScrollMetrics(element){if(!(element instanceof Element)||!element.isConnected)return JSON.stringify({needed:false});const rect=element.getBoundingClientRect();const viewportHeight=window.innerHeight||document.documentElement.clientHeight||1;const pageHeight=Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0,viewportHeight);const currentY=window.scrollY||document.documentElement.scrollTop||0;const margin=Math.min(80,viewportHeight*0.15);let targetY=currentY;if(rect.top<margin){targetY=Math.max(0,currentY+rect.top-margin);}else if(rect.bottom>viewportHeight-margin){targetY=Math.max(0,currentY+(rect.bottom-(viewportHeight-margin)));}const needed=Math.abs(targetY-currentY)>8;return JSON.stringify({needed,currentY,targetY,viewportHeight,pageHeight});}",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "arguments": [{"sharedId": shared_id}],
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
             .await?;
+        let payload = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .unwrap_or("{\"needed\":false}");
+        let metrics: ScrollMetrics = serde_json::from_str(payload).unwrap_or(ScrollMetrics {
+            needed: false,
+            current_y: 0.0,
+            target_y: 0.0,
+            viewport_height: 800.0,
+        });
+        if !metrics.needed {
+            return Ok(());
+        }
+        let actions = self.with_session_random(|random| {
+            self.scroll_simulator.generate_to_position(
+                random,
+                metrics.target_y,
+                metrics.current_y,
+                metrics.viewport_height.max(1.0),
+            )
+        });
+        self.perform_scroll_actions(context, &actions).await
+    }
+
+    async fn perform_scroll_actions(
+        &self,
+        context: &str,
+        actions: &[ScrollAction],
+    ) -> Result<(), CommandError> {
+        if actions.is_empty() {
+            return Ok(());
+        }
+
+        let mut wheel_batch = Vec::new();
+        let flush_wheel = |batch: &mut Vec<Value>| -> Result<Option<Value>, CommandError> {
+            if batch.is_empty() {
+                return Ok(None);
+            }
+            let actions = std::mem::take(batch);
+            Ok(Some(json!({
+                "context": context,
+                "actions": [{
+                    "type": "wheel",
+                    "id": "automation-runtime-wheel",
+                    "actions": actions
+                }]
+            })))
+        };
+
+        for action in actions {
+            match action {
+                ScrollAction::Scroll {
+                    delta_y,
+                    duration_ms,
+                }
+                | ScrollAction::Bounce {
+                    delta_y,
+                    duration_ms,
+                } => {
+                    wheel_batch.push(json!({
+                        "type": "scroll",
+                        "x": 0,
+                        "y": 0,
+                        "deltaX": 0,
+                        "deltaY": delta_y,
+                        "duration": duration_ms,
+                        "origin": "viewport"
+                    }));
+                }
+                ScrollAction::Pause { duration_ms } => {
+                    if let Some(payload) = flush_wheel(&mut wheel_batch)? {
+                        self.transport.send("input.performActions", payload).await?;
+                    }
+                    if *duration_ms > 0 {
+                        self.transport
+                            .send(
+                                "input.performActions",
+                                json!({
+                                    "context": context,
+                                    "actions": [{
+                                        "type": "none",
+                                        "id": "automation-runtime-scroll-pause",
+                                        "actions": [{
+                                            "type": "pause",
+                                            "duration": duration_ms
+                                        }]
+                                    }]
+                                }),
+                            )
+                            .await?;
+                    }
+                }
+            }
+        }
+        if let Some(payload) = flush_wheel(&mut wheel_batch)? {
+            self.transport.send("input.performActions", payload).await?;
+        }
         Ok(())
     }
 
@@ -1995,9 +2512,114 @@ impl BrowserWorker for FirefoxCompanionWorker {
         &self.profile_dir
     }
 
+    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
+        self.fingerprint_enabled.store(enabled, Ordering::Relaxed);
+        // Force resync: clear cached preload id so sync re-adds or removes now.
+        if !enabled {
+            let existing = self
+                .fingerprint_preload_script
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(script_id) = existing {
+                let host = crate::fingerprint_host::FirefoxBidiHost {
+                    transport: self.transport.as_ref(),
+                    context: None,
+                };
+                let _ = host.remove_preload_script(&script_id).await;
+            }
+            return Ok(());
+        }
+        *self
+            .fingerprint_preload_script
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.sync_fingerprint_preload().await
+    }
+
+    fn fingerprint_enabled(&self) -> bool {
+        self.fingerprint_enabled.load(Ordering::Relaxed)
+    }
+
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
-        let guard = self.open_page_owned(page_id).await?;
-        guard.disarm().await
+        self.sync_fingerprint_preload().await?;
+        let guard = self.open_page_owned(page_id.clone()).await?;
+        guard.disarm().await?;
+        // Viewport/DPR need a browsing context id (session preload has none).
+        if let Ok(context) = self.context(&page_id).await {
+            self.apply_fingerprint_emulation_for_context(&context)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn evaluate_javascript(
+        &self,
+        page_id: &PageId,
+        command: &EvaluateJavaScriptCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        let timeout_ms = command.timeout_ms.clamp(1, MAX_JS_TIMEOUT_MS);
+        // Page realm (no companion sandbox) so fingerprint preload patches are visible.
+        // JSON.stringify avoids BiDi RemoteValue object graphs for collector probes.
+        let wrapped = format!(
+            "(async () => {{\n  const __bobby_v = await ({expr});\n  return JSON.stringify(__bobby_v === undefined ? null : __bobby_v);\n}})()",
+            expr = command.expression
+        );
+        let response = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            self.transport.send(
+                "script.evaluate",
+                json!({
+                    "expression": wrapped,
+                    "target": {"context": context},
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                }),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            driver_error(
+                ErrorCode::DeadlineExceeded,
+                format!("Firefox JavaScript evaluation exceeded {timeout_ms} ms"),
+                true,
+            )
+        })??;
+        if let Some(exception) = response.get("exceptionDetails") {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox JavaScript evaluation failed: {exception}"),
+                false,
+            ));
+        }
+        let raw = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox JavaScript evaluation did not return a JSON string",
+                    false,
+                )
+            })?;
+        let truncated = raw.len() > MAX_JS_RESULT_BYTES;
+        let slice = if truncated {
+            &raw[..MAX_JS_RESULT_BYTES]
+        } else {
+            raw
+        };
+        let value: Value = serde_json::from_str(slice).map_err(|error| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox JavaScript result was not valid JSON: {error}"),
+                false,
+            )
+        })?;
+        Ok(vec![
+            Evidence::JavaScriptResult { value, truncated },
+            self.evidence(InteractionPath::EngineNative),
+        ])
     }
 
     async fn navigate(
@@ -2042,6 +2664,172 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .to_owned();
         Ok(vec![
             Evidence::Navigation { url, title },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let max_controls = max_controls.unwrap_or(512) as usize;
+        let context = self.context(page_id).await?;
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": worker_pool::form_snapshot_expression_with_limit(page_id, max_controls),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        let encoded = response
+            .pointer("/result/value")
+            .or_else(|| response.get("value"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox BiDi returned an invalid form snapshot",
+                    false,
+                )
+            })?;
+        let snapshot = worker_pool::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        Ok(vec![
+            Evidence::FormSnapshot { snapshot },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        command
+            .action
+            .validate()
+            .map_err(|message| driver_error(ErrorCode::InvalidRequest, message, false))?;
+        let target = form_control_target_spec(&command.target);
+        let snapshot = self
+            .form_snapshot(page_id, None)
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "missing form snapshot",
+                    false,
+                )
+            })?;
+        let find = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
+            snapshot
+                .forms
+                .iter()
+                .flat_map(|form| form.controls.iter())
+                .chain(snapshot.unowned_controls.iter())
+                .find(|control| control.target.as_ref() == Some(&command.target))
+                .cloned()
+        };
+        let control = find(&snapshot).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetNotFound,
+                "form control target was not found",
+                false,
+            )
+        })?;
+        worker_pool::validate_control_action(&control, &command.action)?;
+        match &command.action {
+            ControlAction::SetText { value } | ControlAction::SelectOne { value } => {
+                self.type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        value: value.clone(),
+                        clear_first: true,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SetChecked { checked } => {
+                self.type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        value: checked.to_string(),
+                        clear_first: false,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SetFiles { paths } => {
+                self.upload_files(
+                    page_id,
+                    &UploadFilesCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        paths: paths.clone(),
+                    },
+                )
+                .await?;
+            }
+            ControlAction::Activate => {
+                self.click(
+                    page_id,
+                    &ClickCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        boundary: false,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SelectMany { values } => {
+                self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;for(const value of requested)if([...el.options].filter(option=>option.value===value&&!option.disabled).length!==1)return false;for(const option of el.options)option.selected=requested.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
+            }
+            ControlAction::Clear => {
+                self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if('checked'in el)el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
+            }
+        }
+        let after = self
+            .form_snapshot(page_id, None)
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "missing post-action form snapshot",
+                    true,
+                )
+            })?;
+        let control = find(&after).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetDetached,
+                "form control was replaced after dispatch",
+                true,
+            )
+        })?;
+        Ok(vec![
+            Evidence::ControlAction {
+                action: worker_pool::control_action_evidence(&control, &command.action, false)?,
+            },
             self.evidence(InteractionPath::EngineNative),
         ])
     }
@@ -2191,7 +2979,14 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     .await?
             }
         };
-        self.perform_pointer_click(&context, &shared_id).await?;
+
+        self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
+            .await?;
+        let path =
+            self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
+
+        self.perform_pointer_click(&context, &shared_id, Some(&path))
+            .await?;
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -2808,12 +3603,37 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let shared_id = self
             .resolve_element(&context, &selector, command.target.is_some())
             .await?;
-        self.perform_pointer_click(&context, &shared_id).await?;
+        self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
+            .await?;
+        let path =
+            self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
+        self.perform_pointer_click(&context, &shared_id, Some(&path))
+            .await?;
+
+        let typing_actions = self.with_session_random(|random| {
+            let mut actions = Vec::new();
+            let config = BehavioralConfig {
+                session_jitter: self.session_jitter,
+                ..BehavioralConfig::default()
+            };
+            let pause_ms = session_pause(random, &config).as_millis() as u64;
+            if pause_ms > 0 {
+                actions.push(behavioral_engine::TypingAction::Pause {
+                    duration_ms: pause_ms,
+                });
+            }
+            actions.extend(self.typing_simulator.generate_with_clear(
+                random,
+                &command.value,
+                command.clear_first,
+            ));
+            actions
+        });
+
+        let bidi_actions = self.behavioral_typing_to_bidi(&context, &typing_actions);
+
         self.transport
-            .send(
-                "input.performActions",
-                keyboard_actions(&context, &command.value, command.clear_first),
-            )
+            .send("input.performActions", bidi_actions)
             .await?;
         let mut evidence = vec![
             Evidence::Element {
@@ -3115,6 +3935,418 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ])
+    }
+
+    async fn network_log(
+        &self,
+        page_id: &PageId,
+        command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let entries = self.har_recorder.take(command.clear).await;
+        let page_url = String::new();
+        let document = worker_pool::har_document(&entries, &page_url);
+        let bytes = serde_json::to_vec(&document)
+            .map_err(|error| driver_error(ErrorCode::Internal, error.to_string(), false))?;
+        let record = self
+            .artifacts
+            .as_ref()
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox HAR artifact storage is not configured",
+                    false,
+                )
+            })?
+            .put(
+                self.session_id.as_ref().ok_or_else(page_missing)?,
+                page_id,
+                "application/json",
+                "har",
+                &bytes,
+                MAX_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| {
+                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
+            })?;
+        Ok(vec![Evidence::HarArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+            entries: entries.len() as u32,
+        }])
+    }
+
+    async fn emulate(
+        &self,
+        page_id: &PageId,
+        command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if let Some(viewport) = command.viewport {
+            if viewport.width == 0
+                || viewport.height == 0
+                || viewport.width > 16384
+                || viewport.height > 16384
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "viewport dimensions must be within 1..=16384",
+                    false,
+                ));
+            }
+            self.transport
+                .send(
+                    "browsingContext.setViewport",
+                    json!({
+                        "context": context,
+                        "viewport": {"width": viewport.width, "height": viewport.height},
+                    }),
+                )
+                .await?;
+        }
+        if let Some(coordinates) = command.geolocation {
+            if !coordinates.latitude.is_finite()
+                || !coordinates.longitude.is_finite()
+                || !(-90.0..=90.0).contains(&coordinates.latitude)
+                || !(-180.0..=180.0).contains(&coordinates.longitude)
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "geolocation coordinates are out of range",
+                    false,
+                ));
+            }
+            let mut params = json!({
+                "context": context,
+                "coordinates": {
+                    "latitude": coordinates.latitude,
+                    "longitude": coordinates.longitude,
+                },
+            });
+            if let Some(accuracy) = coordinates.accuracy {
+                params["coordinates"]["accuracy"] = json!(accuracy);
+            }
+            self.transport
+                .send("session.setGeolocationOverride", params)
+                .await
+                .map_err(|error| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        format!(
+                            "geolocation override is not supported by this browser: {}",
+                            error.message
+                        ),
+                        false,
+                    )
+                })?;
+        }
+        Ok(vec![Evidence::Emulation {
+            viewport: command.viewport,
+            geolocation: command.geolocation,
+        }])
+    }
+
+    async fn handle_dialog(
+        &self,
+        page_id: &PageId,
+        command: &types::HandleDialogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let timeout = std::time::Duration::from_millis(
+            command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
+        );
+        let context = self.context(page_id).await?;
+        let deadline = std::time::Instant::now() + timeout;
+        let prompt = loop {
+            let pending = self.pending_prompts.write().await.remove(&context);
+            if let Some(prompt) = pending {
+                break prompt;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(driver_error(
+                    ErrorCode::DeadlineExceeded,
+                    format!("no user prompt opened within {}ms", timeout.as_millis()),
+                    true,
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
+        let accept = matches!(command.action, types::DialogAction::Accept);
+        self.transport
+            .send(
+                "browsingContext.handleUserPrompt",
+                json!({"context": context, "accept": accept}),
+            )
+            .await
+            .map_err(|error| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    format!("Firefox user prompt handling failed: {}", error.message),
+                    false,
+                )
+            })?;
+        Ok(vec![Evidence::Dialog {
+            dialog_type: prompt.prompt_type,
+            message: prompt.message,
+            action: if accept {
+                "accept".into()
+            } else {
+                "dismiss".into()
+            },
+        }])
+    }
+
+    async fn print_to_pdf(
+        &self,
+        page_id: &PageId,
+        command: &types::PrintToPdfCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if let Some(scale) = command.scale {
+            if !(0.1..=2.0).contains(&scale) {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "PDF scale must be within 0.1..=2.0",
+                    false,
+                ));
+            }
+        }
+        let mut params = json!({
+            "context": context,
+            "landscape": command.landscape,
+            "background": command.print_background,
+        });
+        if let Some(scale) = command.scale {
+            params["scale"] = json!(scale);
+        }
+        if let Some(ranges) = &command.page_ranges {
+            params["pageRanges"] = json!([ranges]);
+        }
+        let response = self.transport.send("browsingContext.print", params).await?;
+        let encoded = response
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox PDF omitted document data",
+                    false,
+                )
+            })?;
+        if encoded.len() > MAX_SCREENSHOT_BYTES.saturating_mul(4) / 3 + 8 {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox PDF exceeded its encoded bound",
+                false,
+            ));
+        }
+        let bytes = BASE64.decode(encoded).map_err(|_| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox PDF returned invalid base64",
+                false,
+            )
+        })?;
+        if bytes.len() > MAX_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox PDF exceeded its byte bound",
+                false,
+            ));
+        }
+        if bytes.len() < 5 || &bytes[..5] != b"%PDF-" {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox print did not return PDF bytes",
+                false,
+            ));
+        }
+        let record = self
+            .artifacts
+            .as_ref()
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox PDF artifact storage is not configured",
+                    false,
+                )
+            })?
+            .put(
+                self.session_id.as_ref().ok_or_else(page_missing)?,
+                page_id,
+                "application/pdf",
+                "pdf",
+                &bytes,
+                MAX_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| {
+                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
+            })?;
+        Ok(vec![Evidence::PdfArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+        }])
+    }
+
+    async fn get_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.context(page_id).await?;
+        let response = self.transport.send("storage.getCookies", json!({})).await?;
+        let cookies = response
+            .get("cookies")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox cookie read returned no cookie list",
+                    false,
+                )
+            })?;
+        let urls: Vec<&str> = command.urls.iter().map(String::as_str).collect();
+        let mut records = Vec::new();
+        for cookie in cookies.iter().take(2048) {
+            let domain = cookie
+                .get("domain")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let path = cookie.get("path").and_then(Value::as_str).unwrap_or("/");
+            if !urls.is_empty()
+                && !urls
+                    .iter()
+                    .any(|url| url.contains(domain.trim_start_matches('.')) && url.contains(path))
+            {
+                continue;
+            }
+            records.push(types::CookieRecord {
+                name: cookie
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                value: cookie
+                    .pointer("/value/value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                domain: domain.to_owned(),
+                path: path.to_owned(),
+                secure: cookie
+                    .get("secure")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                http_only: cookie
+                    .get("httpOnly")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                same_site: cookie
+                    .get("sameSite")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                expires_unix: cookie.get("expiry").and_then(Value::as_f64),
+            });
+        }
+        Ok(vec![Evidence::CookieState {
+            page_id: Some(page_id.clone()),
+            cookies: records,
+        }])
+    }
+
+    async fn set_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if command.cookies.len() > 128 {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "cookie set exceeds the 128-cookie bound",
+                false,
+            ));
+        }
+        if command.cookies.iter().any(|cookie| cookie.http_only) {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "httpOnly cookies cannot be honored on this Firefox build (storage.setCookies is unsupported); refused rather than downgraded",
+                false,
+            ));
+        }
+        for cookie in &command.cookies {
+            let mut assignment = format!("{}={}", cookie.name, cookie.value);
+            assignment.push_str(&format!("; path={}", cookie.path.as_deref().unwrap_or("/")));
+            if cookie.secure {
+                assignment.push_str("; secure");
+            }
+            if let Some(same_site) = &cookie.same_site {
+                assignment.push_str(&format!("; samesite={same_site}"));
+            }
+            if let Some(expires) = cookie.expires_unix {
+                let max_age = (expires - now_unix_seconds()).max(0.0) as u64;
+                assignment.push_str(&format!("; max-age={max_age}"));
+            }
+            let statement = format!("document.cookie = {}", js_string(&assignment));
+            self.evaluate_page_script(&context, &statement).await?;
+        }
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command
+                    .cookies
+                    .iter()
+                    .map(|cookie| cookie.url.clone())
+                    .collect(),
+            },
+        )
+        .await
+    }
+
+    async fn delete_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        let current = self
+            .get_cookies(
+                page_id,
+                &types::GetCookiesCommand {
+                    urls: command.urls.clone(),
+                },
+            )
+            .await?;
+        let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
+            return Ok(current);
+        };
+        for cookie in cookies {
+            if !command.names.is_empty() && !command.names.contains(&cookie.name) {
+                continue;
+            }
+            self.evaluate_page_script(
+                &context,
+                &format!(
+                    "document.cookie = {}",
+                    js_string(&format!(
+                        "{}=; path={}; expires=Thu, 01 Jan 1970 00:00:00 GMT",
+                        cookie.name, cookie.path,
+                    )),
+                ),
+            )
+            .await?;
+        }
+        self.get_cookies(
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command.urls.clone(),
+            },
+        )
+        .await
     }
 
     async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
@@ -3582,38 +4814,6 @@ fn pointer_actions(context: &str, shared_id: &str) -> Value {
     })
 }
 
-fn keyboard_actions(context: &str, value: &str, clear_first: bool) -> Value {
-    let mut actions = Vec::new();
-    if clear_first {
-        let modifier = if cfg!(target_os = "macos") {
-            "\u{e03d}"
-        } else {
-            "\u{e009}"
-        };
-        actions.extend([
-            json!({"type": "keyDown", "value": modifier}),
-            json!({"type": "keyDown", "value": "a"}),
-            json!({"type": "keyUp", "value": "a"}),
-            json!({"type": "keyUp", "value": modifier}),
-            json!({"type": "keyDown", "value": "\u{e003}"}),
-            json!({"type": "keyUp", "value": "\u{e003}"}),
-        ]);
-    }
-    for character in value.chars() {
-        let character = character.to_string();
-        actions.push(json!({"type": "keyDown", "value": character}));
-        actions.push(json!({"type": "keyUp", "value": character}));
-    }
-    json!({
-        "context": context,
-        "actions": [{
-            "type": "key",
-            "id": "automation-runtime-keyboard",
-            "actions": actions,
-        }]
-    })
-}
-
 /// Renews the worker's attachment lease at half the remaining TTL, keeping
 /// long-lived sessions usable past the original attachment expiry. A renewal
 /// failure is retried shortly; once the lease actually expires the task stops
@@ -3783,6 +4983,159 @@ fn interaction_path_name(path: InteractionPath) -> &'static str {
         InteractionPath::ExtensionApi => "extensionApi",
         InteractionPath::HostNative => "hostNative",
     }
+}
+
+impl FirefoxCompanionWorker {
+    /// Convert behavioral typing actions to BiDi keyboard actions.
+    fn behavioral_typing_to_bidi(
+        &self,
+        context: &str,
+        actions: &[behavioral_engine::TypingAction],
+    ) -> Value {
+        let mut bidi_actions: Vec<Value> = Vec::new();
+        let modifier = if cfg!(target_os = "macos") {
+            "\u{e03d}"
+        } else {
+            "\u{e009}"
+        };
+
+        for action in actions {
+            match action {
+                behavioral_engine::TypingAction::KeyDown {
+                    character,
+                    delay_ms,
+                } => {
+                    bidi_actions.push(json!({
+                        "type": "keyDown",
+                        "value": character.chars().next().unwrap_or(' ').to_string(),
+                    }));
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "pause",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::KeyUp {
+                    character,
+                    delay_ms,
+                } => {
+                    bidi_actions.push(json!({
+                        "type": "keyUp",
+                        "value": character.chars().next().unwrap_or(' ').to_string(),
+                    }));
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "pause",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::SelectAll { delay_ms } => {
+                    bidi_actions.push(json!({"type": "keyDown", "value": modifier}));
+                    bidi_actions.push(json!({"type": "keyDown", "value": "a"}));
+                    bidi_actions.push(json!({"type": "keyUp", "value": "a"}));
+                    bidi_actions.push(json!({"type": "keyUp", "value": modifier}));
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "pause",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::Backspace { count, delay_ms } => {
+                    for _ in 0..*count {
+                        bidi_actions.push(json!({
+                            "type": "keyDown",
+                            "value": "\u{e003}",
+                        }));
+                        bidi_actions.push(json!({
+                            "type": "keyUp",
+                            "value": "\u{e003}",
+                        }));
+                    }
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "pause",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                }
+                behavioral_engine::TypingAction::CopyPaste { text, delay_ms } => {
+                    // Insert paste text as a rapid key burst (never bare Ctrl+V
+                    // against an empty clipboard).
+                    if *delay_ms > 0 {
+                        bidi_actions.push(json!({
+                            "type": "pause",
+                            "duration": *delay_ms,
+                        }));
+                    }
+                    for character in text.chars() {
+                        let character = character.to_string();
+                        bidi_actions.push(json!({"type": "keyDown", "value": character}));
+                        bidi_actions.push(json!({"type": "keyUp", "value": character}));
+                    }
+                }
+                behavioral_engine::TypingAction::Pause { duration_ms } => {
+                    bidi_actions.push(json!({
+                        "type": "pause",
+                        "duration": *duration_ms,
+                    }));
+                }
+            }
+        }
+
+        json!({
+            "context": context,
+            "actions": [{
+                "type": "key",
+                "id": "automation-runtime-keyboard-behavioral",
+                "actions": bidi_actions,
+            }]
+        })
+    }
+
+    /// Bounded, server-generated statement execution for operations Firefox
+    /// Bounded, server-generated statement execution for operations Firefox
+    /// BiDi does not cover on this build (cookie mutation). Statements are
+    /// constructed from validated parameters only — never from caller strings.
+    async fn evaluate_page_script(
+        &self,
+        context: &str,
+        expression: &str,
+    ) -> Result<(), CommandError> {
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": expression,
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        if let Some(exception) = response.get("exceptionDetails") {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox cookie statement failed: {exception}"),
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn js_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn now_unix_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 #[cfg(test)]

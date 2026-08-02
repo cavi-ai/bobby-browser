@@ -1,5 +1,6 @@
 mod auth;
 mod authority_persist;
+mod jobs;
 mod mcp_http;
 mod routes;
 
@@ -19,9 +20,10 @@ use axum::{extract::DefaultBodyLimit, middleware, routing::get, serve::Listener,
 use config::{AppConfig, InterfaceConfig};
 use interface_core::{
     ArtifactContent, ArtifactReader, ArtifactReference, Authority, CapabilityHandle, EventStore,
-    InterfaceResult, RuntimeInterface, SessionOwnershipRegistry,
+    IdempotencyStore, InterfaceResult, RuntimeInterface, SessionOwnershipRegistry,
 };
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
+use task_scheduler::JobScheduler;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
@@ -30,6 +32,7 @@ use tokio::{
 use types::{CommandEnvelope, CommandOutcome, Evidence, PrincipalId, SessionId};
 
 pub use auth::{EnrolledAuthority, StartupCredential, StartupCredentialError};
+use jobs::JobSubmitOutcome;
 
 type RuntimeBinder = dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static;
 
@@ -231,6 +234,8 @@ pub struct AppState {
     principal_permits: Arc<RwLock<HashMap<PrincipalId, Arc<Semaphore>>>>,
     mcp_servers: mcp_http::McpServers,
     mcp_resources: mcp_gateway::ArtifactResources,
+    scheduler: Arc<JobScheduler>,
+    job_idempotency: Arc<IdempotencyStore<JobSubmitOutcome>>,
 }
 
 impl AppState {
@@ -254,8 +259,15 @@ impl AppState {
             principal_permits: Arc::new(RwLock::new(HashMap::new())),
             mcp_servers: mcp_http::McpServers::default(),
             mcp_resources: mcp_gateway::ArtifactResources::default(),
+            scheduler: Arc::new(jobs::memory_scheduler()),
+            job_idempotency: Arc::new(jobs::job_idempotency_store()),
             interface,
         }
+    }
+
+    pub fn with_scheduler(mut self, scheduler: Arc<JobScheduler>) -> Self {
+        self.scheduler = scheduler;
+        self
     }
 
     pub fn with_boundaries(mut self, events: EventStore, artifacts: ArtifactCatalog) -> Self {
@@ -609,7 +621,7 @@ async fn bootstrap_listener_with<T, Clock, Build, BuildFuture, Bind, BindFuture>
     now: Clock,
     build_runtime: Build,
     bind_listener: Bind,
-) -> anyhow::Result<(Router, T)>
+) -> anyhow::Result<(Router, T, Arc<JobScheduler>)>
 where
     Clock: Fn() -> chrono::DateTime<chrono::Utc>,
     Build: FnOnce(AppConfig) -> BuildFuture,
@@ -656,6 +668,11 @@ where
     .map_err(anyhow::Error::new)?;
     let events = EventStore::new(config.interface.max_event_retention);
     let bindings = RuntimeBindingCache::new();
+    let scheduler = Arc::new(
+        jobs::journal_scheduler(&config)
+            .await
+            .map_err(|e| anyhow::anyhow!("scheduler bootstrap failed: {e}"))?,
+    );
     let app = router(
         AppState::new(
             persistent_authority,
@@ -670,6 +687,7 @@ where
             },
             config.interface.clone(),
         )
+        .with_scheduler(Arc::clone(&scheduler))
         .with_boundaries(
             events,
             ArtifactCatalog::new(
@@ -689,14 +707,14 @@ where
     );
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
     let listener = gate.bind_if_valid_at(now(), || bind_listener(addr)).await?;
-    Ok((app, listener))
+    Ok((app, listener, scheduler))
 }
 
 pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
     let max_connections = config.interface.max_connections;
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
-    let (app, listener) = bootstrap_listener_with(
+    let (app, listener, scheduler) = bootstrap_listener_with(
         config,
         startup,
         chrono::Utc::now,
@@ -712,7 +730,11 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         },
     )
     .await?;
-    serve_listener_graceful(
+    let run_handle = {
+        let scheduler = Arc::clone(&scheduler);
+        tokio::spawn(async move { scheduler.run().await })
+    };
+    let serve_result = serve_listener_graceful(
         listener,
         app,
         max_connections,
@@ -721,7 +743,9 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         shutdown_signal(),
         drain_after_signal(shutdown_timeout),
     )
-    .await?;
+    .await;
+    jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
+    serve_result?;
     Ok(())
 }
 
@@ -840,6 +864,11 @@ pub mod testing {
                 Capability::PageRead,
                 Capability::PageWrite,
                 Capability::BrowserMutate,
+                Capability::RecoveryRead,
+                Capability::RecoveryWrite,
+                Capability::JobSubmit,
+                Capability::JobRead,
+                Capability::JobCancel,
             ],
             Utc::now() + Duration::minutes(30),
         )
@@ -873,7 +902,7 @@ pub mod testing {
         // or not, so `last_bound_principal` reflects the true caller of the most recent
         // request regardless of caching.
         let bindings = crate::RuntimeBindingCache::new();
-        let app = router(AppState::new(
+        let state = AppState::new(
             persistent_authority as Arc<dyn Authority>,
             move |handle| {
                 record_bound_principal(handle.principal_id());
@@ -886,7 +915,12 @@ pub mod testing {
                 }) as Arc<dyn RuntimeInterface>
             },
             interface,
-        ));
+        );
+        let scheduler = Arc::clone(&state.scheduler);
+        tokio::spawn(async move {
+            let _ = scheduler.run().await;
+        });
+        let app = router(state);
         (app, authority, ADMIN_BEARER.to_owned())
     }
 
@@ -957,7 +991,7 @@ pub async fn serve_with_worker_factory(
     let max_connections = config.interface.max_connections;
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
-    let (app, listener) = bootstrap_listener_with(
+    let (app, listener, scheduler) = bootstrap_listener_with(
         config,
         startup,
         chrono::Utc::now,
@@ -973,7 +1007,11 @@ pub async fn serve_with_worker_factory(
         },
     )
     .await?;
-    serve_listener_graceful(
+    let run_handle = {
+        let scheduler = Arc::clone(&scheduler);
+        tokio::spawn(async move { scheduler.run().await })
+    };
+    let serve_result = serve_listener_graceful(
         listener,
         app,
         max_connections,
@@ -982,7 +1020,9 @@ pub async fn serve_with_worker_factory(
         shutdown_signal(),
         drain_after_signal(shutdown_timeout),
     )
-    .await?;
+    .await;
+    jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
+    serve_result?;
     Ok(())
 }
 

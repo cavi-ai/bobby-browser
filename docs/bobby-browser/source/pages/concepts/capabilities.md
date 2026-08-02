@@ -33,6 +33,7 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 | DeleteSession | `DELETE /v1/sessions/{id}` / `session_close` | `session:write` |
 | ReadSession | `GET /v1/sessions` / `session_list` | `session:read` |
 | OpenPage | `POST /v1/pages` / `page_open` | `page:write` |
+| ReadPage | `form_snapshot` | `page:read` |
 | SubmitCommand | `POST /v1/commands` / `command_execute` (+ flat MCP browser tools) | `browser:mutate` |
 | CreateCheckpoint | `POST /v1/checkpoints` / `checkpoint_save` | `recovery:write` |
 | ReadCheckpoint | `GET /v1/recovery/{id}` / `recovery_status` | `recovery:read` |
@@ -47,7 +48,7 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 MCP tools), not separate `/v1/pages/...` routes. Both still require
 `browser:mutate`. See [Accessibility snapshot](../guides/accessibility-snapshot.md).
 
-Some interface operations (`ReadPage`, `ClosePage`, `CaptureArtifact`) exist in
+Some interface operations (`ClosePage`, `CaptureArtifact`) exist in
 the type map for authority checks; prefer the documented HTTP/MCP surfaces
 above for public clients.
 

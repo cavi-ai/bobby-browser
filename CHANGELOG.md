@@ -1,13 +1,21 @@
 # Changelog
 
+## Unreleased
+- Add `networkLog` (MCP `network_log`): always-on bounded per-page network capture (512 entries) on Chromium (CDP Network events) and Firefox (BiDi network events), dumped as a HAR 1.2 artifact.
+- Add broker job API `POST|GET|DELETE /v1/jobs` (`job:submit|read|cancel`) with in-process scheduler + optional `scheduler_journal_path`, and CLI `bobby jobs submit|status|cancel`. New bootstrap credentials include `job:*`; `bobby doctor` ensures the scheduler journal dir and warns when bootstrap lacks `job:submit`. Builtin handlers: `echo`, `sleep`.
+
+
 ## 0.3.1 - 2026-08-01
-
 ### Documentation
-
 - Publish a new immutable docs artifact that names `@cavi-ai/bobby-browser`
   throughout (the `v0.3.0` release asset still referenced `@bobby-browser/sdk`).
 - Carry forward post-`0.3.0` doc coverage already on main (`recovery_status`,
   MCP agent-surface catalog fixes, truncation ordinal notes) into `v0.3.1`.
+## Unreleased
+- Add cookie primitives (`getCookies`, `setCookies`, `deleteCookies`) on Chromium (CDP Network) and Firefox (BiDi storage), exposed as MCP `cookie_get`/`cookie_set`/`cookie_delete` with `cookieState` evidence.
+- Add `printToPdf` (MCP `pdf`) on Chromium (CDP `Page.printToPDF`) and Firefox (BiDi `browsingContext.print`), producing a verified `application/pdf` artifact.
+- Add `handleDialog` (MCP `dialog`): waits for a JavaScript dialog with a bounded timeout and accepts or dismisses it, returning dialog type/message/action evidence. Chromium via CDP dialog events, Firefox via BiDi user prompts.
+- Add `emulate` (MCP `emulate`): viewport size and geolocation overrides. Chromium via CDP Emulation, Firefox via BiDi viewport and geolocation override.
 
 ## 0.3.0 - 2026-08-01
 

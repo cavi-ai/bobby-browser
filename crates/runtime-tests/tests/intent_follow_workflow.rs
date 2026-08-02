@@ -112,9 +112,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )),
+            executable: Some(PathBuf::from(&chrome_executable())),
             profiles_dir: root.join("profiles"),
             headless: true,
             max_active: 1,
@@ -130,6 +128,7 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
             journal_path: root.join("commands.jsonl"),
             checkpoints_dir: root.join("checkpoints"),
             authority_path: root.join("authority.json"),
+            scheduler_journal_path: root.join("scheduler-jobs.jsonl"),
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
@@ -141,6 +140,14 @@ async fn build_runtime(root: &std::path::Path) -> RuntimeService {
 /// Live Chromium proof: FollowIntent activates a same-tab link and verifies the
 /// destination, for both the non-boundary (ordinary navigation) and boundary
 /// (caller-flagged, checkpoint-gated) cases.
+fn chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_states() {
@@ -261,7 +268,7 @@ async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_state
                 page_id: page.id.clone(),
                 restart_url: fixture.base_url(),
                 current_url: current_url.clone(),
-                cursor: Some(inspect_id),
+                cursor: Some(inspect_id.clone()),
                 boundary_command_id: Some(boundary_follow_id.clone()),
                 recovery_class: CommandClass::Boundary,
                 invariants: vec![
@@ -274,7 +281,7 @@ async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_state
                 recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
-            observed,
+            vec![inspect_id],
         )
         .await
         .unwrap();

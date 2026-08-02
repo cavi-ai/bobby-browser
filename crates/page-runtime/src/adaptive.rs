@@ -7,9 +7,10 @@ use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ErrorCode, ErrorLayer,
-    Evidence, ExecutionPath, ExecutionReason, PageId, PageState, PrimitiveCommand, RuntimeCommand,
-    TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ControlActionCommand,
+    ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason, PageId, PageState,
+    PrimitiveCommand, RuntimeCommand, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitForCommand,
 };
 use worker_pool::WorkerLease;
 
@@ -69,6 +70,14 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.lease.worker().upload_files(page_id, command).await
+    }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.lease.worker().control_action(page_id, command).await
     }
 
     async fn wait_for(
@@ -513,6 +522,12 @@ async fn browser_execute(
                 .type_text(page_id.expect("validated page id"), command)
                 .await?
         }
+        PrimitiveCommand::ControlAction(command) => {
+            lease
+                .worker()
+                .control_action(page_id.expect("validated page id"), command)
+                .await?
+        }
         PrimitiveCommand::UploadFiles(command) => {
             lease
                 .worker()
@@ -572,6 +587,48 @@ async fn browser_execute(
             lease
                 .worker()
                 .evaluate_javascript(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::NetworkLog(command) => {
+            lease
+                .worker()
+                .network_log(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::Emulate(command) => {
+            lease
+                .worker()
+                .emulate(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::HandleDialog(command) => {
+            lease
+                .worker()
+                .handle_dialog(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::PrintToPdf(command) => {
+            lease
+                .worker()
+                .print_to_pdf(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::GetCookies(command) => {
+            lease
+                .worker()
+                .get_cookies(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::SetCookies(command) => {
+            lease
+                .worker()
+                .set_cookies(page_id.expect("validated page id"), command)
+                .await?
+        }
+        PrimitiveCommand::DeleteCookies(command) => {
+            lease
+                .worker()
+                .delete_cookies(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::ExtractStructured(_) => {

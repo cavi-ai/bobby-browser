@@ -32,6 +32,11 @@ const client = new BrowserRuntimeClient({
 });
 ```
 
+Use `client.formSnapshot(sessionId, pageId, { maxControls })` for a read-only,
+validated `FormSnapshot`. `maxControls` is optional and bounded from 1 through
+512. The client calls the PageRead HTTP surface directly; it does not create a
+mutating command envelope.
+
 `baseUrl` should be the broker origin without a trailing `/v1` (the client
 strips a trailing `/v1` if present). Bearer is the plaintext from `bobby init`
 / bootstrap (conventional env name `AUTOMATION_RUNTIME_TOKEN`).
@@ -65,6 +70,10 @@ Pass `options.idempotencyKey` on mutating POSTs for replay-safe retries.
 
 There is no principals helper on the client today — mint/revoke with raw HTTP
 (see [Authentication](../guides/auth.md)).
+
+Use `controlActionRuntimeCommand(target, action)` to build the typed primitive
+for `submit()`. The semantic target comes directly from `formSnapshot()`; no
+CSS selector or test ID is accepted by this primitive.
 
 ## Intents
 

@@ -19,6 +19,12 @@ if [[ ! -d "$BOBBY_FIREFOX_PROFILE" ]]; then
   echo "BOBBY_FIREFOX_PROFILE must name a dedicated Firefox profile directory" >&2
   exit 2
 fi
+if command -v lsof >/dev/null 2>&1 && lsof "$BOBBY_FIREFOX_PROFILE/.parentlock" >/dev/null 2>&1; then
+  echo "BOBBY_FIREFOX_PROFILE is already in use by a running Firefox." >&2
+  echo "Quit that instance (dedicated dogfood profile must be exclusive), then retry." >&2
+  lsof "$BOBBY_FIREFOX_PROFILE/.parentlock" >&2 || true
+  exit 2
+fi
 pnpm --filter @bobby-browser/firefox-companion build
 if [[ ! -f "$BOBBY_COMPANION_EXTENSION/manifest.json" ]]; then
   echo "BOBBY_COMPANION_EXTENSION must name the companion extension build directory" >&2
