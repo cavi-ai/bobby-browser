@@ -96,7 +96,7 @@ jobs:
 
       - name: Runtime live tests
         run: >-
-          cargo test -p runtime-tests --locked --
+          cargo test -p runtime-tests --locked
           --test adaptive_http
           --test agentic_interaction
           --test browser_vertical_slice
@@ -109,7 +109,7 @@ jobs:
           --test interface_capacity
           --test interface_recovery
           --test interface_security
-          --ignored --test-threads=1
+          -- --ignored --test-threads=1
 
       - name: Conformance live tests
         run: cargo test -p interface-conformance --test javascript_evaluation --locked -- --ignored --test-threads=1
