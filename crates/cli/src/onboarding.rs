@@ -23,7 +23,11 @@ pub enum EmitFormat {
     Json,
 }
 
-const GATEWAY_COMMAND: &str = "mcp-gateway";
+const GATEWAY_COMMAND: &str = if cfg!(windows) {
+    "mcp-gateway.exe"
+} else {
+    "mcp-gateway"
+};
 
 fn bootstrap_env_placeholders() -> serde_json::Value {
     serde_json::json!({
@@ -346,10 +350,7 @@ pub fn install_skill(project: bool, project_root: &Path) -> Result<PathBuf> {
 /// `bobby mcp-stdio`: point an agent host at this and nothing else. Loads the
 /// bootstrap credential (process env wins, then the bootstrap.env file) and
 /// execs the stdio gateway, replacing this process.
-#[cfg(unix)]
 pub fn exec_mcp_stdio(bootstrap_path: &Path) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
     if broker::StartupCredential::from_env().is_err() {
         let env =
             crate::bootstrap_local::load_bootstrap_env_map(bootstrap_path).with_context(|| {
@@ -365,8 +366,28 @@ pub fn exec_mcp_stdio(bootstrap_path: &Path) -> Result<()> {
         }
     }
     let gateway = resolve_gateway()?;
-    let error = Command::new(&gateway).exec();
+    exec_gateway(&gateway)
+}
+
+/// Unix replaces this process outright, so the agent host keeps talking to a
+/// single pid over the stdio pipes it already opened.
+#[cfg(unix)]
+fn exec_gateway(gateway: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let error = Command::new(gateway).exec();
     Err(anyhow!("failed to exec {}: {error}", gateway.display()))
+}
+
+/// Windows has no exec. Stay resident as a thin parent instead: the child
+/// inherits this process's stdio, so the agent host still sees one stream, and
+/// the gateway's exit status becomes ours.
+#[cfg(windows)]
+fn exec_gateway(gateway: &Path) -> Result<()> {
+    let status = Command::new(gateway)
+        .status()
+        .with_context(|| format!("failed to run {}", gateway.display()))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 /// One toggleable line of the interactive installer.

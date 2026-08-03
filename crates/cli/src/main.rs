@@ -443,10 +443,13 @@ impl OwnedDescriptorFile {
         #[cfg(unix)]
         let owned = current == self.identity;
         #[cfg(not(unix))]
-        let owned = std::fs::read(&self.path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
-            .is_some_and(|descriptor| descriptor.ownership_id == self.ownership_id);
+        let owned = {
+            let _ = metadata;
+            std::fs::read(&self.path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
+                .is_some_and(|descriptor| descriptor.ownership_id == self.ownership_id)
+        };
         if owned {
             std::fs::remove_file(&self.path)?;
         }
@@ -1707,7 +1710,10 @@ fn verify_exact_file(path: &Path, contents: &[u8], mode: u32) -> std::io::Result
         metadata.permissions().mode() & 0o777 == mode
     };
     #[cfg(not(unix))]
-    let mode_matches = true;
+    let mode_matches = {
+        let _ = mode;
+        true
+    };
     if metadata.file_type().is_file() && std::fs::read(path)? == contents && mode_matches {
         Ok(())
     } else {
@@ -1736,7 +1742,10 @@ impl CreatedInstallFile {
             })
         }
         #[cfg(not(unix))]
-        Ok(Self {})
+        {
+            let _ = metadata;
+            Ok(Self {})
+        }
     }
 
     fn rollback(self, path: &Path) {
