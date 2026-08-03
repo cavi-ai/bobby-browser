@@ -62,6 +62,33 @@ jobs:
         # the workspace catches a drift between those two.
         run: cargo test -p fingerprinting --test default_profile_golden --locked -- --ignored
 
+  windows:
+    name: windows · build shipped binary
+    # Every v* tag builds bobby for windows-msvc in release-binaries, but CI was
+    # ubuntu-only. A #[cfg(unix)]-gated exec_mcp_stdio therefore reached the
+    # v0.4.0 tag and broke the Windows binary after the release was cut. Compile
+    # the same crate the release ships so the break lands on the PR instead.
+    if: ${{ !github.event.repository.private }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build -p bobby-browser --locked
+
   chromium:
     name: chromium · live browser tests
     if: ${{ !github.event.repository.private }}
