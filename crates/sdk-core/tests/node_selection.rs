@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use config::{NodeConfig, NodeKind};
-use intent_engine::{VisionAction, VisionAssist, VisionProposal, VisionProposeRequest};
+use intent_engine::{StuckKind, VisionAction, VisionAssist, VisionProposal, VisionProposeRequest};
 use node_registry::{NodeError, NodeRegistry};
 use page_runtime::NodeSelection;
 use sdk_core::RuntimeService;
@@ -209,5 +209,68 @@ fn an_unresolved_node_does_not_fall_back_to_the_installed_provider() {
         calls.load(Ordering::SeqCst),
         0,
         "selection called a provider; it only chooses one"
+    );
+}
+
+/// The privacy property the registry exists for: when the session names a
+/// loopback node, page material goes to that node and nowhere else. A second
+/// loopback listener stands in for a remote provider — if selection ever
+/// substitutes or fans out, its counter moves.
+#[tokio::test]
+async fn a_local_session_sends_page_material_only_to_its_loopback_node() {
+    async fn mock_node(hits: Arc<AtomicUsize>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0_u8; 8192];
+                let _ = socket.read(&mut request).await;
+                let body = br#"{"confidence":0.9,"action":{"kind":"click","x":1.0,"y":1.0}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    String::from_utf8_lossy(body),
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                hits.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        format!("http://{address}/propose")
+    }
+
+    let local_hits = Arc::new(AtomicUsize::new(0));
+    let decoy_hits = Arc::new(AtomicUsize::new(0));
+    let local_url = mock_node(Arc::clone(&local_hits)).await;
+    let decoy_url = mock_node(Arc::clone(&decoy_hits)).await;
+
+    let registry = registry(&[
+        ("local", node(NodeKind::Vision, &local_url)),
+        ("upstream", node(NodeKind::Vision, &decoy_url)),
+    ]);
+    let proposal = registry
+        .vision("local")
+        .expect("the named node resolves")
+        .propose(VisionProposeRequest {
+            purpose: "Continue".into(),
+            intent_kind: "locate".into(),
+            screenshot_png: b"page-material".to_vec(),
+            stuck: StuckKind::TargetMissing,
+        })
+        .await
+        .expect("the loopback node answers");
+    assert!(proposal.confidence > 0.0);
+
+    // The response arriving means the loopback server finished the request;
+    // its counter is already incremented by then.
+    assert_eq!(
+        local_hits.load(Ordering::SeqCst),
+        1,
+        "the session's node did not receive the proposal"
+    );
+    assert_eq!(
+        decoy_hits.load(Ordering::SeqCst),
+        0,
+        "page material reached a node the session did not name"
     );
 }
