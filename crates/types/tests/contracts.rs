@@ -510,6 +510,42 @@ fn intent_and_vision_capabilities_round_trip() {
 }
 
 #[test]
+fn every_capability_round_trips_its_wire_string_through_from_str() {
+    // The workspace accepts capabilities through one FromStr table; a variant
+    // added without a table entry fails here instead of at some gateway's
+    // startup weeks later.
+    for capability in [
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageRead,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::FileUpload,
+        Capability::FileDownload,
+        Capability::JavascriptEvaluate,
+        Capability::IntentExecute,
+        Capability::VisionAssist,
+        Capability::ArtifactRead,
+        Capability::ArtifactCapture,
+        Capability::RecoveryRead,
+        Capability::RecoveryWrite,
+        Capability::JobSubmit,
+        Capability::JobRead,
+        Capability::JobCancel,
+        Capability::AuthorityAdmin,
+        Capability::BrowserFingerprint,
+        Capability::BrowserHumanize,
+    ] {
+        let parsed: Capability = capability
+            .as_str()
+            .parse()
+            .expect("every wire string parses back to its variant");
+        assert_eq!(parsed, capability);
+    }
+    assert!("not:a-capability".parse::<Capability>().is_err());
+}
+
+#[test]
 fn execution_policy_defaults_deny_vision() {
     let policy = ExecutionPolicy::default();
     assert!(!policy.javascript_evaluation);

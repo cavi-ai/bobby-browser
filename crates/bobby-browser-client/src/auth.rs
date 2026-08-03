@@ -102,6 +102,48 @@ impl Capability {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CapabilitySet(BTreeSet<Capability>);
 
+impl std::str::FromStr for Capability {
+    type Err = UnknownCapability;
+
+    /// Parses the wire string. This is the ONE parse table: bootstrap files,
+    /// broker startup credentials, and every stdio gateway all accept exactly
+    /// these strings, so a new capability is accepted everywhere the day its
+    /// variant lands. The previous shape — a hand-maintained match per binary
+    /// — drifted twice in a week (a gateway rejected `job:*`, then bootstrap
+    /// rejected `browser:*`), both times failing closed against a credential
+    /// `bobby init` itself had written.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "session:read" => Self::SessionRead,
+            "session:write" => Self::SessionWrite,
+            "page:read" => Self::PageRead,
+            "page:write" => Self::PageWrite,
+            "browser:mutate" => Self::BrowserMutate,
+            "file:upload" => Self::FileUpload,
+            "file:download" => Self::FileDownload,
+            "javascript:evaluate" => Self::JavascriptEvaluate,
+            "intent:execute" => Self::IntentExecute,
+            "vision:assist" => Self::VisionAssist,
+            "artifact:read" => Self::ArtifactRead,
+            "artifact:capture" => Self::ArtifactCapture,
+            "recovery:read" => Self::RecoveryRead,
+            "recovery:write" => Self::RecoveryWrite,
+            "job:submit" => Self::JobSubmit,
+            "job:read" => Self::JobRead,
+            "job:cancel" => Self::JobCancel,
+            "authority:admin" => Self::AuthorityAdmin,
+            "browser:fingerprint" => Self::BrowserFingerprint,
+            "browser:humanize" => Self::BrowserHumanize,
+            _ => return Err(UnknownCapability(value.to_owned())),
+        })
+    }
+}
+
+/// A capability wire string no variant claims.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown capability: {0}")]
+pub struct UnknownCapability(pub String);
+
 impl CapabilitySet {
     pub fn new(capabilities: impl IntoIterator<Item = Capability>) -> Self {
         capabilities.into_iter().collect()
