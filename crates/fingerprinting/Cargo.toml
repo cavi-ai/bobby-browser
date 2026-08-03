@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 hex.workspace = true
-rand = { version = "0.9", features = ["std", "std_rng"] }
+rand = { version = "0.10", features = ["std", "std_rng"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
