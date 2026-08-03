@@ -53,7 +53,27 @@ test("renderPopup disables fingerprint when host-owned", () => {
   assert.equal(toggle.disabled, true);
   assert.equal(toggle.checked, true);
   assert.match(document.getElementById("fingerprint-status")!.textContent ?? "", /Managed by Bobby/);
-  assert.match(document.getElementById("humanize-status")!.textContent ?? "", /unknown/i);
+  assert.equal(
+    document.getElementById("humanize-status")!.textContent,
+    "Unknown — set by session policy",
+  );
+});
+
+test("renderPopup host-owned shows checked and disabled when enabled is false", () => {
+  const document = mount();
+  renderPopup(document, {
+    paired: true,
+    companionId: "c1",
+    profileId: "p1",
+    leaseCount: 1,
+    nativeConnected: true,
+    fingerprint: { enabled: false, owner: "host", sessionId: "fp_1", seedHex: "2a" },
+    humanize: "unknown",
+    protocolVersion: 1,
+  });
+  const toggle = document.getElementById("toggle") as HTMLInputElement;
+  assert.equal(toggle.disabled, true);
+  assert.equal(toggle.checked, true);
 });
 
 test("renderPopup shows unpaired reason when not paired", () => {

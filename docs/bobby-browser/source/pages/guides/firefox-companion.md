@@ -146,7 +146,8 @@ The toolbar popup is the day-to-day operator panel for the companion:
   session id and seed hex appear here too.
 - **Fingerprint** — toggle for popup-owned spoofing; disabled and read-only
   when a Bobby worker session claims host ownership (BiDi owns spoofing).
-- **Humanize** — shows `unknown` until a host status channel exists.
+- **Humanize** — status only; shows `Unknown — set by session policy` when not
+  reported by the active session.
 - **Debug** — native port connected/disconnected, protocol version, and last
   error when present.
 

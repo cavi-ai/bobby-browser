@@ -52,7 +52,7 @@ function humanizeLabel(humanize: PopupStatus["humanize"]): string {
     case "off":
       return "Off";
     case "unknown":
-      return "Unknown — host channel not connected";
+      return "Unknown — set by session policy";
   }
 }
 
@@ -101,8 +101,13 @@ export function renderPopup(root: ParentNode, status: PopupStatus): void {
   const toggle = root.querySelector("#toggle") as HTMLInputElement | null;
   const fingerprintStatus = root.querySelector("#fingerprint-status");
   if (toggle) {
-    toggle.checked = status.fingerprint.enabled;
-    toggle.disabled = status.fingerprint.owner === "host";
+    if (status.fingerprint.owner === "host") {
+      toggle.checked = true;
+      toggle.disabled = true;
+    } else {
+      toggle.checked = status.fingerprint.enabled;
+      toggle.disabled = false;
+    }
   }
   if (fingerprintStatus) {
     fingerprintStatus.textContent = fingerprintStatusText(status.fingerprint);
