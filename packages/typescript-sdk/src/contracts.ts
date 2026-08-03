@@ -1,4 +1,11 @@
-/** Exact JSON contracts for broker interface version 2026-07-23. */
+/**
+ * Wire contracts for the Bobby Browser `/v1` interface.
+ *
+ * Types here are the JSON shapes exchanged with a running runtime. Keep
+ * {@link INTERFACE_VERSION} aligned with the server you call.
+ */
+
+/** Interface version negotiated via the `x-interface-version` request header. */
 export const INTERFACE_VERSION = "2026-07-23" as const;
 
 export type Id = string;
@@ -8,7 +15,7 @@ export interface RuntimeInfo { version: string; capabilities: string[]; active_s
 export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean }; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
-/** Matches types::ExecutionPolicy (deny-by-default when omitted). */
+/** Session execution policy. Omitted fields default to denied. */
 export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; visionNode?: string; }
 export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; }
 export interface OpenPageRequest { session_id: Id; }
@@ -31,9 +38,9 @@ export interface InterfaceError {
 export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed";
 export interface CommandError { code: CommandErrorCode; message: string; layer: ErrorLayer; retryable: boolean; }
 
-/** Byte bound for IntentCommand purpose strings (types::MAX_INTENT_PURPOSE_BYTES). */
+/** Maximum UTF-8 byte length for intent `purpose` strings. */
 export const MAX_INTENT_PURPOSE_BYTES = 256 as const;
-/** Matches types::DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS. */
+/** Default timeout (ms) when `DismissObstructionIntent.timeoutMs` is omitted. */
 export const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS = 5_000 as const;
 
 export type ExecutionPath = "directHttp" | "chromium" | "chromiumFallback";
@@ -91,7 +98,7 @@ export interface ExecutionRecord {
   visionProposalSha256: string | null;
 }
 
-/** Every serde(tag = "kind") Evidence variant in the committed Rust contract. */
+/** Discriminated evidence payloads returned on command outcomes (`kind` tag). */
 export type Evidence =
   | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
   | { kind: "navigation"; url: string; title: string }
@@ -115,7 +122,7 @@ export type Evidence =
   | { kind: "humanization"; engine: string; actions: number; synthesizedMs: number }
   | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 
-/** Every serde(tag = "status") CommandOutcome variant in the committed Rust contract. */
+/** Result of `POST /v1/commands`, discriminated by `status`. */
 export type CommandOutcome =
   | { status: "completed"; commandId: Id; evidence: Evidence[] }
   | { status: "retryableFailure"; commandId: Id; error: CommandError }
@@ -161,7 +168,7 @@ export interface AccessibilityNode {
   children?: AccessibilityNode[];
 }
 
-/** Canonical, engine-neutral form observation contract. */
+/** Schema version for {@link FormSnapshot} payloads. */
 export const FORM_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 export type FormControlKind = "text" | "email" | "password" | "search" | "number" | "checkbox" | "radio" | "switch" | "selectOne" | "selectMultiple" | "date" | "time" | "dateTimeLocal" | "range" | "file" | "contentEditable" | "combobox" | "listbox" | "submit" | "reset" | "other";
 export type FormControlOperation = "setText" | "setChecked" | "selectOne" | "selectMany" | "setFiles" | "clear" | "activate";
@@ -234,21 +241,29 @@ export interface CompleteFormField { name: string; purpose: string; hints?: Inte
 export interface CompleteFormIntent { purpose: string; fields: CompleteFormField[]; }
 export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }
-/** boundary mirrors ClickCommand.boundary: set true when activating the control may perform a mutating/side-effecting action. */
+/**
+ * Follow a control and wait for the expected destination.
+ * Set `boundary` when activation may mutate state or trigger a side effect
+ * (same meaning as {@link ClickCommand.boundary}).
+ */
 export interface FollowIntent { purpose: string; hints?: IntentHints; expectedDestination: WaitForCommand; boundary?: boolean; }
-/** No boundary flag: dismissing an obstruction is always CommandClass.Reconciliable. Verification is built in (target must become detached or hidden), not caller-supplied. */
+/**
+ * Dismiss an obstruction (overlay, cookie banner, etc.).
+ * Always treated as reconciliable; verification (target detached or hidden)
+ * is built in — callers do not supply a wait condition.
+ */
 export interface DismissObstructionIntent { purpose: string; hints?: IntentHints; timeoutMs?: number; }
-/** Href is a named convenience over the common attribute="href" case. */
+/** Value to extract: plain text, a named attribute, or `href` shorthand. */
 export type ExtractValueKind =
   | { kind: "text" }
   | { kind: "attribute"; attribute: string }
   | { kind: "href" };
-/** One named field, resolved independently of every other field in the same ExtractIntent. */
+/** One named field within an {@link ExtractIntent}; resolved independently of siblings. */
 export interface ExtractField { name: string; purpose: string; hints?: IntentHints; value: ExtractValueKind; }
 /**
- * Schema-bounded structured extraction: always CommandClass.Replayable (never mutates the page).
- * Resolution is best-effort per field, not all-or-nothing: a field that cannot be resolved is
- * reported missing in that field's Extraction evidence rather than failing the whole command.
+ * Structured extraction intent. Replayable (does not mutate the page).
+ * Fields resolve independently: a missing field is reported in that field's
+ * extraction evidence rather than failing the whole command.
  */
 export interface ExtractIntent { purpose: string; fields: ExtractField[]; }
 export type IntentCommand =
@@ -261,11 +276,15 @@ export type IntentCommand =
   | { kind: "dismissObstruction"; input: DismissObstructionIntent }
   | { kind: "extract"; input: ExtractIntent };
 
-/** Nested RuntimeCommand wire shape: `{ kind: "intent"|"primitive", input: … }`. */
+/**
+ * Nested command wire shape:
+ * `{ kind: "intent" | "primitive", input: … }`.
+ */
 export type RuntimeCommand =
   | { kind: "primitive"; input: PrimitiveCommand }
   | { kind: "intent"; input: IntentCommand };
 
+/** Envelope submitted to `POST /v1/commands`. */
 export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id | null; deadline: string; command: RuntimeCommand; }
 
 export type CommandClass = "replayable" | "reconciliable" | "boundary";
@@ -287,21 +306,42 @@ export type RecoveryDecision =
  */
 export interface CheckpointRequest { checkpoint: WorkflowCheckpoint; evidenceRefs?: Id[]; }
 
-/** The /v1/events batch envelope, matching interface_core::Event rather than an invented schema. */
+/** Single event from `GET /v1/events`. */
 export interface InterfaceEvent { cursor: number; kind: string; payload: unknown; }
+/** Successful events batch body. */
 export interface EventBatch { events: InterfaceEvent[]; latestAvailable: number; }
 export type EventGapReason = "historyLost" | "invalidLimit" | "invalidCursor";
+/** Cursor gap details when event history cannot resume from the requested cursor. */
 export interface EventGap { reason: EventGapReason; earliestAvailable: number; }
+/** HTTP `409` body for an event cursor gap. */
 export interface EventGapEnvelope { error: InterfaceError; gap: EventGap; }
 
+/** Reference returned by the runtime for a stored artifact. */
 export interface ArtifactReference { referenceId: Id; artifactId: string; sha256: string; bytes: number; mediaType: string; }
-export interface RequestOptions { signal?: AbortSignal; deadline?: Date | string; timeoutMs?: number; correlationId?: Id; idempotencyKey?: string; }
-export interface FormSnapshotOptions extends RequestOptions { maxControls?: number; }
+/** Per-request options shared by client methods. */
+export interface RequestOptions {
+  /** AbortSignal cancelled by the caller. */
+  signal?: AbortSignal;
+  /** Absolute deadline; combined with `timeoutMs` as the earlier of the two. */
+  deadline?: Date | string;
+  /** Relative timeout in milliseconds (default 30_000 when neither deadline nor timeout is set). */
+  timeoutMs?: number;
+  /** Value for `x-correlation-id` (generated UUID when omitted). */
+  correlationId?: Id;
+  /** Value for `idempotency-key` when the operation supports it. */
+  idempotencyKey?: string;
+}
+/** Options for {@link BrowserRuntimeClient.formSnapshot}. */
+export interface FormSnapshotOptions extends RequestOptions {
+  /** Cap on returned controls (1–512). */
+  maxControls?: number;
+}
+/** Options for {@link BrowserRuntimeClient.events}. */
 export interface EventOptions extends RequestOptions {
-  /** Broker batch bound: a safe integer from 1 through 256. */
+  /** Batch size: safe integer from 1 through 256 (default 100). */
   limit?: number;
-  /** Safe GET-only transport retries: a safe integer from 0 through 10. */
+  /** Transport-only retries for GET: safe integer from 0 through 10 (default 2). */
   maxTransportRetries?: number;
-  /** Delay between safe retries: a safe integer from 0 through 60,000 milliseconds. */
+  /** Delay between transport retries: safe integer from 0 through 60_000 ms (default 50). */
   retryDelayMs?: number;
 }

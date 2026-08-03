@@ -1,5 +1,11 @@
 import type { ControlAction, FormControlTarget, RuntimeCommand } from "./contracts.js";
 
+/**
+ * Build a `controlAction` primitive {@link RuntimeCommand}.
+ *
+ * Requires `target.role` and `target.accessibleName`. Validates `selectMany`
+ * uniqueness and non-empty `setFiles` paths.
+ */
 export function controlActionRuntimeCommand(
   target: FormControlTarget,
   action: ControlAction,

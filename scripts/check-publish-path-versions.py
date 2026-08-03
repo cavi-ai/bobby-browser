@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if publishable workspace crates use path deps without a version."""
+"""Fail if the crates.io SDK crate uses path deps or is marked publish=false."""
 
 from __future__ import annotations
 
@@ -8,32 +8,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CLOSURE = {
-    "artifact-store",
-    "bobby-browser",
-    "bobby-browser-client",
-    "broker",
-    "checkpoint-store",
-    "companion-core",
-    "companion-protocol",
-    "config",
-    "dom-engine",
-    "firefox-companion",
-    "intent-engine",
-    "interface-core",
-    "js-engine",
-    "mcp-gateway",
-    "network-engine",
-    "observability",
-    "page-runtime",
-    "sdk-core",
-    "session-manager",
-    "skill-runtime",
-    "test-site",
-    "types",
-    "worker-pool",
-    "workflow-journal",
-}
+# Sole Rust library published to crates.io (CLI `bobby-browser` is separate).
+SDK = "bobby-browser-client"
 
 PATH_DEP = re.compile(
     r'\{[^{}]*path\s*=\s*"[^"]+"[^{}]*\}',
@@ -42,27 +18,21 @@ PATH_DEP = re.compile(
 
 
 def main() -> int:
+    path = ROOT / "crates" / SDK / "Cargo.toml"
+    text = path.read_text()
     errors: list[str] = []
-    for name in sorted(CLOSURE):
-        if name == "bobby-browser":
-            path = ROOT / "crates" / "cli" / "Cargo.toml"
-        else:
-            path = ROOT / "crates" / name / "Cargo.toml"
-        text = path.read_text()
-        if "publish = true" not in text and "publish = false" not in text:
-            # default publish true — treat as publishable if in closure
-            pass
-        if re.search(r"^publish\s*=\s*false\s*$", text, re.M):
-            errors.append(f"{path}: expected publish = true")
-            continue
-        for match in PATH_DEP.finditer(text):
-            block = match.group(0)
-            if "version" not in block:
-                errors.append(f"{path}: path dep missing version: {block}")
+    if re.search(r"^publish\s*=\s*false\s*$", text, re.M):
+        errors.append(f"{path}: expected publish = true")
+    for match in PATH_DEP.finditer(text):
+        errors.append(f"{path}: crates.io SDK must not use path deps: {match.group(0)}")
+    types_toml = ROOT / "crates" / "types" / "Cargo.toml"
+    types_text = types_toml.read_text()
+    if not re.search(r"^publish\s*=\s*false\s*$", types_text, re.M):
+        errors.append(f"{types_toml}: expected publish = false (wire types live in {SDK})")
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
-    print(f"ok: {len(CLOSURE)} publishable crates have versioned path deps")
+    print(f"ok: {SDK} is path-dep-free and types is publish = false")
     return 0
 
 
