@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Capability parsing is now a single `FromStr` table on `types::Capability`, replacing five hand-maintained per-binary parse tables that drifted twice in a week (a gateway rejected `job:*`, then bootstrap rejected `browser:*` — both times against credentials `bobby init` itself wrote). A round-trip test fails if a new variant misses the table.
 - `bobby install` gains a Browser companions item: installs the Firefox companion (extension copied into the bobby config dir, native-host wrapper + manifest into Mozilla's per-platform directory) and prints the one remaining step (start Firefox with `--remote-debugging-port`, run `bobby enroll-firefox-profile`). On by default when a Firefox binary is found; `--companion`/`--extension` for non-interactive use. `make install` builds the extension first.
 - Add `bobby mcp-stdio`: the MCP entrypoint agent hosts point at — it loads the bootstrap credential from `bootstrap.env` itself and execs the stdio gateway, so host configs carry no secrets and no env wiring.
 - Add `bobby install` (and `make install`): one-command agent setup — bootstrap credential, MCP config merge into Claude Code / Zed / VS Code (preserving existing entries), and agent-skill installation. Interactive checklist with toggles by default; `--host`/`--skill`/`--yes` for non-interactive use.
