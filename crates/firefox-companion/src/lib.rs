@@ -2,6 +2,7 @@
 
 pub mod bidi;
 mod fingerprint_host;
+pub mod selection;
 mod worker;
 
 pub use bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
