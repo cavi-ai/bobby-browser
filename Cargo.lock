@@ -4784,6 +4784,7 @@ dependencies = [
  "anyhow",
  "artifact-store",
  "async-trait",
+ "behavioral-engine",
  "bobby-chromiumoxide",
  "companion-protocol",
  "config",

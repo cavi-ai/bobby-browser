@@ -6,6 +6,10 @@ use std::time::Instant;
 
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
+use behavioral_engine::{
+    generate_session_seed, BehavioralConfig, BezierMouseSimulator, SessionRandom, TypingAction,
+    TypingSimulator,
+};
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig};
 use chromiumoxide::cdp::browser_protocol::browser::{
     DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
@@ -155,6 +159,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             }
         });
 
+        let behavioral_config = BehavioralConfig::default().sanitize();
         Ok(Arc::new(ChromiumWorker {
             id: worker_id,
             profile_dir,
@@ -179,6 +184,11 @@ impl WorkerFactory for ChromiumWorkerFactory {
             fingerprint: Mutex::new(self.fingerprint.clone()),
             fingerprint_enabled: AtomicBool::new(self.fingerprint.enabled),
             fingerprint_plan: Mutex::new(None),
+            humanization_enabled: AtomicBool::new(false),
+            typing_simulator: TypingSimulator::new(behavioral_config.typing),
+            mouse_simulator: BezierMouseSimulator::new(behavioral_config.mouse),
+            session_jitter: behavioral_config.session_jitter,
+            session_random: Mutex::new(SessionRandom::new(generate_session_seed())),
         }))
     }
 }
@@ -259,6 +269,14 @@ struct ChromiumWorker {
     fingerprint_enabled: AtomicBool,
     /// Cached apply plan for the current fingerprint config (rebuilt on invalidate).
     fingerprint_plan: Mutex<Option<std::sync::Arc<FingerprintApplyPlan>>>,
+    /// Whether input is synthesized through `behavioral-engine` rather than
+    /// driven directly. The runtime writes `ExecutionPolicy.humanize` onto
+    /// every lease, so a session that did not opt in must not be slowed down.
+    humanization_enabled: AtomicBool,
+    typing_simulator: TypingSimulator,
+    mouse_simulator: BezierMouseSimulator,
+    session_jitter: Duration,
+    session_random: Mutex<SessionRandom>,
 }
 
 #[derive(Default)]
@@ -285,6 +303,240 @@ impl ChromiumWorker {
             shadow_path: target.shadow_path.iter().map(segment).collect(),
             ..Default::default()
         }
+    }
+
+    /// Humanized click: a curved approach over the target's clickable point,
+    /// hover dwell, then the press — the same shape the Firefox worker
+    /// produces through BiDi, here over CDP mouse events.
+    async fn humanized_click(
+        &self,
+        page: &Page,
+        resolved: &crate::targeting::ResolvedTarget,
+    ) -> Result<(), CommandError> {
+        let target = resolved.clickable_point(page).await?.ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "target has no clickable point",
+            )
+        })?;
+        let path = {
+            let mut random = self.session_random.lock().await;
+            self.mouse_simulator.generate_approach_path(&mut random)
+        };
+        let mut previous_ts = 0u64;
+        for point in &path.points {
+            let delta = point.timestamp_ms.saturating_sub(previous_ts);
+            previous_ts = point.timestamp_ms;
+            if delta > 0 {
+                tokio::time::sleep(Duration::from_millis(delta)).await;
+            }
+            page.move_mouse(Point {
+                x: target.x + point.x,
+                y: target.y + point.y,
+            })
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        }
+        if path.hover_dwell_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(path.hover_dwell_ms)).await;
+        }
+        page.click(target)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(())
+    }
+
+    /// Humanized typing: focus the target, then replay `behavioral-engine`
+    /// key actions over CDP with their synthesized delays. Returns
+    /// `(action_count, synthesized_ms)` for the `Humanization` evidence —
+    /// emitted only when this path actually ran, same honesty rule as the
+    /// Firefox worker.
+    async fn humanized_type_text(
+        &self,
+        page: &Page,
+        resolved: &crate::targeting::ResolvedTarget,
+        value: &str,
+        clear_first: bool,
+    ) -> Result<(u32, u64), CommandError> {
+        // Headless pages have no focus by default; without this the element
+        // click cannot focus the input and every key event lands on <body>.
+        page.activate().await.map_err(command_failed)?;
+        resolved.click(page).await?;
+        let actions = {
+            let mut random = self.session_random.lock().await;
+            let mut actions = Vec::new();
+            let config = BehavioralConfig {
+                session_jitter: self.session_jitter,
+                ..BehavioralConfig::default()
+            };
+            let pause_ms =
+                behavioral_engine::session_pause(&mut random, &config).as_millis() as u64;
+            if pause_ms > 0 {
+                actions.push(TypingAction::Pause {
+                    duration_ms: pause_ms,
+                });
+            }
+            actions.extend(self.typing_simulator.generate_with_clear(
+                &mut random,
+                value,
+                clear_first,
+            ));
+            actions
+        };
+        // Ctrl/Cmd+A loops against Chrome's command pipeline (245+ phantom
+        // keydowns for one chord, framing doesn't matter). A human who can't
+        // chord backspaces over the text instead — same effect, clean events.
+        let actions = if clear_first {
+            let existing = resolved.value(page).await?.unwrap_or_default();
+            let backspaces = u32::try_from(existing.chars().count()).unwrap_or(u32::MAX);
+            actions
+                .into_iter()
+                .filter(|action| !matches!(action, TypingAction::SelectAll { .. }))
+                .map(|action| match action {
+                    TypingAction::Backspace { delay_ms, .. } => TypingAction::Backspace {
+                        count: backspaces.saturating_add(1).max(1),
+                        delay_ms,
+                    },
+                    other => other,
+                })
+                .collect()
+        } else {
+            actions
+        };
+        let synthesized_ms = behavioral_engine::synthesized_total_ms(&actions);
+        let count = u32::try_from(actions.len()).unwrap_or(u32::MAX);
+        for action in &actions {
+            self.replay_typing_action(page, action).await?;
+        }
+        Ok((count, synthesized_ms))
+    }
+
+    async fn replay_typing_action(
+        &self,
+        page: &Page,
+        action: &TypingAction,
+    ) -> Result<(), CommandError> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        let delay = |ms: u64| async move {
+            if ms > 0 {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
+        };
+        let key_event = |key: &str, event_type: DispatchKeyEventType, modifiers: i64| {
+            let is_key_down = matches!(event_type, DispatchKeyEventType::KeyDown);
+            let definition = chromiumoxide::keys::get_key_definition(key);
+            let mut params = DispatchKeyEventParams::builder().r#type(event_type);
+            if let Some(definition) = definition {
+                params = params
+                    .key(definition.key)
+                    .code(definition.code)
+                    .windows_virtual_key_code(definition.key_code)
+                    .native_virtual_key_code(definition.key_code);
+            } else {
+                params = params.key(key);
+            }
+            // Text insertion needs an explicit `text` on the keyDown, and this
+            // fork's key table leaves `text` empty for plain letters — fall
+            // back to the character itself for single printable characters.
+            // Without it Chrome sees an unidentified held key: auto-repeat
+            // storms and no inserted text.
+            if is_key_down {
+                let text = definition
+                    .and_then(|definition| definition.text)
+                    .or_else(|| {
+                        let mut chars = key.chars();
+                        match (chars.next(), chars.next()) {
+                            (Some(character), None) if !character.is_control() => Some(key),
+                            _ => None,
+                        }
+                    });
+                if let Some(text) = text {
+                    params = params.text(text).unmodified_text(text);
+                }
+                params = params.auto_repeat(false);
+            }
+            if modifiers != 0 {
+                params = params.modifiers(modifiers);
+            }
+            params.build().expect("key event params are valid")
+        };
+        match action {
+            TypingAction::KeyDown {
+                character,
+                delay_ms,
+            } => {
+                page.execute(key_event(character, DispatchKeyEventType::KeyDown, 0))
+                    .await
+                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                delay(*delay_ms).await;
+            }
+            TypingAction::KeyUp {
+                character,
+                delay_ms,
+            } => {
+                page.execute(key_event(character, DispatchKeyEventType::KeyUp, 0))
+                    .await
+                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                delay(*delay_ms).await;
+            }
+            TypingAction::SelectAll { delay_ms } => {
+                // Cmd on macOS, Ctrl elsewhere — the browser runs on this
+                // machine, so the worker's OS is the browser's OS. The
+                // modifier needs its own down/up events: releasing only `a`
+                // leaves the modifier logically held and every later key
+                // becomes a phantom chord.
+                // A coherent chord: both events carry the modifier mask, so
+                // Chrome's key state sees the chord open and close. Releasing
+                // `a` unmasked leaves the modifier logically held, and sending
+                // the physical modifier key storms unidentified events.
+                let mask = if cfg!(target_os = "macos") { 4 } else { 2 };
+                page.execute(key_event("a", DispatchKeyEventType::KeyDown, mask))
+                    .await
+                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                page.execute(key_event("a", DispatchKeyEventType::KeyUp, mask))
+                    .await
+                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                delay(*delay_ms).await;
+            }
+            TypingAction::Backspace { count, delay_ms } => {
+                // N backspaces at CDP speed is a sub-millisecond burst — the
+                // most synthetic cadence there is. Pace the repetitions.
+                for index in 0..*count {
+                    page.execute(key_event("Backspace", DispatchKeyEventType::RawKeyDown, 0))
+                        .await
+                        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                    page.execute(key_event("Backspace", DispatchKeyEventType::KeyUp, 0))
+                        .await
+                        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                    if index + 1 < *count {
+                        let pause = {
+                            let mut random = self.session_random.lock().await;
+                            random.next_f64(30.0, 90.0) as u64
+                        };
+                        delay(pause).await;
+                    }
+                }
+                delay(*delay_ms).await;
+            }
+            TypingAction::CopyPaste { text, delay_ms } => {
+                // A paste produces no key events for the pasted content —
+                // replaying it as a 1ms-per-key burst is exactly what a
+                // behavioral detector flags. Insert as text, the way the
+                // clipboard path presents it.
+                delay(*delay_ms).await;
+                page.execute(
+                    chromiumoxide::cdp::browser_protocol::input::InsertTextParams::new(text),
+                )
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            }
+            TypingAction::Pause { duration_ms } => {
+                delay(*duration_ms).await;
+            }
+        }
+        Ok(())
     }
 
     /// Lazily attaches the per-page HAR collector: three CDP network event
@@ -467,6 +719,17 @@ impl BrowserWorker for ChromiumWorker {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    async fn set_humanization_enabled(&self, enabled: bool) -> Result<(), CommandError> {
+        self.humanization_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn humanization_enabled(&self) -> bool {
+        self.humanization_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         let mut browser_guard = self.browser.lock().await;
         let browser = browser_guard.as_mut().ok_or_else(closed_error)?;
@@ -579,7 +842,11 @@ impl BrowserWorker for ChromiumWorker {
             .resolve_target(page_id, page, &command.selector, command.target.as_ref())
             .await?;
         let text = resolved.inner_text(page).await.ok().flatten();
-        resolved.click(page).await?;
+        if self.humanization_enabled() {
+            self.humanized_click(page, &resolved).await?;
+        } else {
+            resolved.click(page).await?;
+        }
         Ok(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -635,6 +902,7 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, page, &command.selector, command.target.as_ref())
             .await?;
+        let mut humanization_evidence = None;
         let observed = if resolved.is_checkable(page).await? {
             let checked = command.value.parse::<bool>().map_err(|_| {
                 driver_error(
@@ -646,13 +914,24 @@ impl BrowserWorker for ChromiumWorker {
         } else if resolved.is_select(page).await? {
             resolved.select_option(page, &command.value).await?
         } else {
-            resolved
-                .type_text(page, &command.value, command.clear_first)
-                .await?;
+            if self.humanization_enabled() {
+                let synthesized = self
+                    .humanized_type_text(page, &resolved, &command.value, command.clear_first)
+                    .await?;
+                humanization_evidence = Some(Evidence::Humanization {
+                    engine: "behavioral-engine".to_owned(),
+                    actions: synthesized.0,
+                    synthesized_ms: synthesized.1,
+                });
+            } else {
+                resolved
+                    .type_text(page, &command.value, command.clear_first)
+                    .await?;
+            }
             resolved.value(page).await?.unwrap_or_default()
         };
         let validity = resolved.form_control_validity(page).await?;
-        Ok(vec![
+        let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: Some(observed),
@@ -666,7 +945,11 @@ impl BrowserWorker for ChromiumWorker {
                 value: validity.validation_message,
             },
             resolved.evidence,
-        ])
+        ];
+        if let Some(humanization) = humanization_evidence {
+            evidence.push(humanization);
+        }
+        Ok(evidence)
     }
 
     async fn upload_files(

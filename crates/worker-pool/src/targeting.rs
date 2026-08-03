@@ -15,6 +15,7 @@ use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 use chromiumoxide::cdp::js_protocol::runtime::{
     EvaluateParams, ExecutionContextId, RemoteObjectId,
 };
+use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Element, Page};
 use dom_engine::{
@@ -79,6 +80,31 @@ pub struct FormControlValidity {
 impl ResolvedTarget {
     fn execution_page<'a>(&'a self, fallback: &'a Page) -> &'a Page {
         self.execution_page.as_ref().unwrap_or(fallback)
+    }
+
+    /// The center of the target's border box, for CDP mouse input. `None`
+    /// when the element reports no usable rect.
+    pub async fn clickable_point(&self, page: &Page) -> Result<Option<Point>, CommandError> {
+        if let Some(element) = &self.native {
+            return element.clickable_point().await.map(Some).map_err(cdp_error);
+        }
+        #[derive(serde::Deserialize)]
+        struct Rect {
+            x: f64,
+            y: f64,
+            width: f64,
+            height: f64,
+        }
+        let rect: Option<Rect> = self
+            .eval(
+                page,
+                "const r=el.getBoundingClientRect();if(!r||r.width<=0||r.height<=0)return null;return {x:r.x,y:r.y,width:r.width,height:r.height}",
+            )
+            .await?;
+        Ok(rect.map(|rect| Point {
+            x: rect.x + rect.width / 2.0,
+            y: rect.y + rect.height / 2.0,
+        }))
     }
 
     pub async fn click(&self, page: &Page) -> Result<(), CommandError> {
