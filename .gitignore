@@ -14,3 +14,27 @@ node_modules/
 bootstrap.env
 **/.bobby-browser/
 .worktrees/
+.mcp.json
+AGENTS.md
+# Added by code-review-graph
+.code-review-graph/
+.codebuddy/
+.vscode/
+
+.claude/
+.gemini/
+.kiro/
+.qoder/
+
+
+QODER.md
+AGENTS.md
+CODEBUDDY.md
+GEMINI.md
+KIRO.md
+CLAUDE.md
+
+opencode.jsonc
+
+# Test-run artifacts: the scheduler journal a broker fixture opens on start.
+crates/interface-conformance/data/

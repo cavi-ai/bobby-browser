@@ -251,6 +251,22 @@ pub enum Evidence {
     IntentExecution {
         record: ExecutionRecord,
     },
+    /// Input timing the runtime synthesized rather than observed, emitted when
+    /// the session opted into `executionPolicy.humanize`.
+    ///
+    /// Without this, humanization is invisible to the layer that decides
+    /// whether an action happened: `intent-engine` verifies an effect against
+    /// what it asked the browser to do, and synthesized pauses, key-by-key
+    /// timing, and approach paths mean the browser did something with a
+    /// materially different shape. Recording the count and the total scripted
+    /// delay keeps verification and reality talking about the same event.
+    ///
+    /// Carries no typed text — action counts and durations only.
+    Humanization {
+        engine: String,
+        actions: u32,
+        synthesized_ms: u64,
+    },
     /// Result of resolving one named field of an `ExtractIntent`. Emitted
     /// once per field, in field order, alongside a `Resolution` evidence
     /// entry when the field resolved (deterministically or via vision).

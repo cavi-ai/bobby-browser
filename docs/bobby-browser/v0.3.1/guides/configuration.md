@@ -43,6 +43,7 @@ Engine choice is **not** a TOML field — use
 | Field | Default | Meaning |
 |---|---|---|
 | `journal_path` | `./data/storage/commands.jsonl` | Append-only command journal |
+| `scheduler_journal_path` | `./data/storage/scheduler-jobs.jsonl` | Append-only job scheduler journal |
 | `checkpoints_dir` | `./data/storage/checkpoints` | Journal checkpoints |
 | `authority_path` | `./data/storage/authority.json` | Authority storage |
 
@@ -65,6 +66,41 @@ escalation is unavailable even when the bearer and session opt in.
 
 Request / response shapes and confidence floor: [Intent commands](intents.md#vision-provider).
 Capability + session gates: [Capabilities](../concepts/capabilities.md).
+
+`[vision]` is the single-provider form. `[nodes]` supersedes it — see below.
+
+## `[nodes.<name>]`
+
+Named, separately addressable nodes. A session picks one by name through
+`executionPolicy.visionNode`; nothing is process-wide.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `kind` | required | `vision` — proposes an action from a screenshot. The only kind today; an unknown kind fails config load rather than being ignored. |
+| `endpoint_url` | required | Node URL — **https**, or **http only on loopback** |
+| `token_env` | unset | Env var name holding the node bearer (never store the token here) |
+| `timeout_ms` | `15000` | Per-call HTTP timeout |
+
+```toml
+[nodes.local-vision]
+kind = "vision"
+endpoint_url = "http://127.0.0.1:8080/propose"
+```
+
+A session that names no node escalates to no node. A session that names a node
+which is not configured is declined: the runtime never substitutes a different
+node, and never falls back to a remote default.
+
+Retained page context — what `context_ask` answers from — is held in-process,
+not in a node. There is deliberately no `kind = "context"`: an operator could
+write it and it would reach nothing.
+
+Locality comes from the address, not from a setting. A session bound to a
+loopback node cannot have its screenshots or page text leave the machine.
+
+When both `[vision]` and `[nodes]` are present, `[nodes]` wins and `[vision]`
+is ignored with a startup warning. With only `[vision]` set, that endpoint is
+reachable as a node named `vision`.
 
 ## `[interface]`
 

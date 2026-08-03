@@ -79,6 +79,10 @@ pub struct AppConfig {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub vision: VisionConfig,
+    /// Named nodes, selected per session. Absent means no node of any kind is
+    /// reachable — see `NodeConfig`.
+    #[serde(default)]
+    pub nodes: std::collections::BTreeMap<String, NodeConfig>,
 }
 
 /// Vision-assist provider configuration. Deny by default: no endpoint means
@@ -326,6 +330,13 @@ pub struct StorageConfig {
     pub journal_path: PathBuf,
     pub checkpoints_dir: PathBuf,
     pub authority_path: PathBuf,
+    /// Append-only JSONL journal for the in-process task scheduler.
+    #[serde(default = "default_scheduler_journal_path")]
+    pub scheduler_journal_path: PathBuf,
+}
+
+fn default_scheduler_journal_path() -> PathBuf {
+    PathBuf::from("./data/storage/scheduler-jobs.jsonl")
 }
 
 impl Default for AppConfig {
@@ -337,7 +348,9 @@ impl Default for AppConfig {
                 shutdown_timeout_ms: 10_000,
             },
             browser: BrowserConfig {
-                executable: None,
+                executable: std::env::var_os("BOBBY_CHROME_EXECUTABLE")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from),
                 profiles_dir: PathBuf::from("./data/profiles"),
                 headless: true,
                 max_active: 8,
@@ -353,17 +366,73 @@ impl Default for AppConfig {
                 journal_path: PathBuf::from("./data/storage/commands.jsonl"),
                 checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
                 authority_path: PathBuf::from("./data/storage/authority.json"),
+                scheduler_journal_path: default_scheduler_journal_path(),
             },
             http: HttpConfig::default(),
             interface: InterfaceConfig::default(),
             observability: ObservabilityConfig::default(),
             vision: VisionConfig::default(),
+            nodes: std::collections::BTreeMap::new(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A node kind that does not exist must fail to load rather than parse
+    /// into something.
+    ///
+    /// `context` is the one that matters. The runtime does retain page
+    /// context, in-process, so `kind = "context"` reads as supported to an
+    /// operator — and would then reach nothing. Config that silently does
+    /// nothing is worse than config that is rejected.
+    #[test]
+    fn an_unknown_node_kind_is_rejected() {
+        for kind in ["context", "Vision", "planner", ""] {
+            let text = format!(
+                "{}\n[nodes.helper]\nkind = \"{kind}\"\nendpoint_url = \"http://127.0.0.1:8081/x\"\n",
+                MINIMAL_CONFIG
+            );
+            assert!(
+                toml::from_str::<super::AppConfig>(&text).is_err(),
+                "kind = {kind:?} parsed instead of being rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_vision_node_kind_loads() {
+        let text = format!(
+            "{}\n[nodes.helper]\nkind = \"vision\"\nendpoint_url = \"http://127.0.0.1:8081/x\"\n",
+            MINIMAL_CONFIG
+        );
+        let config: super::AppConfig = toml::from_str(&text).expect("vision node loads");
+        assert_eq!(config.nodes.len(), 1);
+    }
+
+    const MINIMAL_CONFIG: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 7777
+shutdown_timeout_ms = 1000
+[browser]
+profiles_dir = "p"
+headless = true
+max_active = 1
+upload_roots = []
+downloads_dir = "d"
+artifacts_dir = "a"
+max_artifact_bytes = 1
+max_screenshot_dimension = 1
+max_js_result_bytes = 1
+max_js_timeout_ms = 1
+[storage]
+journal_path = "j"
+checkpoints_dir = "c"
+authority_path = "au"
+scheduler_journal_path = "s"
+"#;
+
     use super::{
         AppConfig, BrowserEngineConfig, BrowserSelectionConfig, ConfigLoadError,
         EnginePreferenceConfig, InterfaceConfig,
@@ -505,6 +574,15 @@ mod tests {
     }
 
     #[test]
+    fn default_includes_scheduler_journal_path() {
+        let config = AppConfig::default();
+        assert_eq!(
+            config.storage.scheduler_journal_path,
+            std::path::PathBuf::from("./data/storage/scheduler-jobs.jsonl")
+        );
+    }
+
+    #[test]
     fn from_toml_str_round_trips_the_default_config() {
         let text = toml::to_string(&AppConfig::default()).unwrap();
         let parsed = AppConfig::from_toml_str(&text).unwrap();
@@ -591,4 +669,54 @@ pub enum LogFormat {
 pub enum LogSink {
     #[default]
     Stdout,
+}
+
+/// One addressable node: a separate process with a bounded contract, reached
+/// over HTTP.
+///
+/// Nodes replace the single `[vision]` endpoint. The privacy property a node
+/// carries comes from its *address*, not from trusting whoever runs it: a node
+/// on loopback cannot send page pixels or page text off the machine, and
+/// [`NodeConfig::is_local`] is the check the runtime records and reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConfig {
+    /// What contract this node speaks.
+    pub kind: NodeKind,
+    #[serde(alias = "endpointUrl")]
+    pub endpoint_url: String,
+    /// Environment variable holding the node's bearer token. The token itself
+    /// is never stored in the config file.
+    #[serde(default, alias = "tokenEnv")]
+    pub token_env: Option<String>,
+    #[serde(default = "default_vision_timeout_ms", alias = "timeoutMs")]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodeKind {
+    /// Proposes an action from a screenshot. The `VisionAssist` contract.
+    Vision,
+    // There is deliberately no `Context` variant yet. Retained page structure
+    // is answered in-process by `page_runtime::ContextGraph`, so a
+    // `kind = "context"` entry would be configuration an operator can write
+    // that reaches nothing — worse than an unsupported key, because it reads
+    // as supported. `kind` stays an enum so adding one later is additive, and
+    // an unknown kind fails to load with the legal values named.
+}
+
+impl NodeConfig {
+    /// Whether this node's address is on the local machine.
+    ///
+    /// Parsing failures answer `false`. A node whose address cannot be parsed
+    /// is not a node whose locality has been established, and the caller uses
+    /// this to decide whether page material leaves the machine.
+    pub fn is_local(&self) -> bool {
+        url::Url::parse(&self.endpoint_url).is_ok_and(|url| {
+            matches!(
+                url.host_str(),
+                Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+            )
+        })
+    }
 }

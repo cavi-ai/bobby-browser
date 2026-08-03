@@ -114,6 +114,57 @@ A `-32602` response carries `data` describing what failed:
 value. Example: a `session_create` call with no `profile` returns
 `{"reason":"schemaViolation","pointer":"/profile","constraint":"required"}`.
 
+## Tool metadata
+
+Every tool carries a human-readable `title` and MCP `annotations`
+(`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so a
+host can gate or confirm calls without knowing the tool vocabulary. Read-only
+tools (`inspect`, `a11y_snapshot`, `cookie_get`, …) are marked
+`readOnlyHint: true`; boundary tools such as `intent_submit_and_verify` are
+marked destructive/non-idempotent accordingly.
+
+Tools that return structured content declare an `outputSchema` (always
+`type: object`), so a client can validate or render results without
+reverse-engineering evidence shapes.
+
+## Resources
+
+Four static resources ship with the gateway (`resources/list` /
+`resources/read`, both gated by `artifact:read`):
+
+| URI | Contents |
+|---|---|
+| `bobby://capabilities` | What each capability gates, including double gates not visible in `tools/list` |
+| `bobby://failure-taxonomy` | Error codes, protocol-layer rejections, and the repair action for each |
+| `bobby://intents` | The eight intent tools: preconditions, class, and verification |
+| `bobby://primitives` | The flat browser tools and the commands they mint |
+
+Captured screenshots and downloads also become readable `artifact://<id>`
+resources when the principal holds `artifact:capture`.
+
+## Prompts
+
+`prompts/list` / `prompts/get` expose three working loops, each taking
+`sessionId` and `pageId` arguments:
+
+- `fill_and_submit_form`
+- `extract_from_page`
+- `recover_workflow`
+
+## Notifications
+
+After `initialize`, the server pushes JSON-RPC notifications (no `id`) on the
+same channel — stdio sessions are subscribed automatically; MCP over HTTP
+delivers them on the `GET /v1/mcp` SSE stream:
+
+| Method | Meaning |
+|---|---|
+| `notifications/bobby/event` | A runtime event for this principal, same body as `GET /v1/events` entries. Delivery follows the event-store cursor: fall behind retention and you get a gap, resync via `events_read` |
+| `notifications/tools/list_changed` | The principal's capability set changed; the last `tools/list` is stale |
+
+`initialize` advertises `tools.listChanged: true`; resources and prompts do
+not change at runtime.
+
 Compact accessibility trees (including form-control state):
 [Accessibility snapshot](../guides/accessibility-snapshot.md).
 

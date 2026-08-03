@@ -40,8 +40,13 @@ and [MCP tools](mcp-tools.md).
 Shapes use camelCase JSON. Do not invent fields; follow the TypeScript SDK
 validators / Rust types.
 
-- **POST `/v1/sessions`** — `{ profile, proxy, executionPolicy? }` where
-  `executionPolicy` defaults to `{ javascriptEvaluation: false, visionAssist: false }`
+- **POST `/v1/sessions`** — `{ profile, proxy, executionPolicy? }`. Every
+  `executionPolicy` flag is deny-by-default, so an omitted policy is
+  `{ javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false }`.
+  `fingerprint` applies fingerprint spoofing to workers leased for this
+  session; `humanize` synthesizes human-like input timing and reports what it
+  synthesized as `humanization` evidence. Both are written to the worker on
+  every lease, so one session's opt-in never carries into another's.
 - **DELETE `/v1/sessions/{sessionId}`** — empty body; `204` on success
 - **POST `/v1/pages`** — `{ session_id }` (snake_case on this request; session/page state also uses `id` / `session_id` / `page_ids`)
 - **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,
@@ -50,7 +55,12 @@ validators / Rust types.
   Primitive `accessibilitySnapshot` uses
   `{ kind: "accessibilitySnapshot", input: { maxNodes? } }` (default 256,
   max 2048; see [Accessibility snapshot](../guides/accessibility-snapshot.md)).
-- **POST `/v1/checkpoints`** — checkpoint request with verified evidence (see SDK `CheckpointRequest`)
+- **POST `/v1/checkpoints`** — `{ checkpoint, evidenceRefs }` (see SDK
+  `CheckpointRequest`). `evidenceRefs` is a bounded list (max 128) of command
+  ids whose evidence the runtime already journaled; it resolves them itself.
+  Evidence is never supplied by the caller, and an id naming a command this
+  principal does not own, or one with no terminal journal record, fails the
+  checkpoint.
 - **GET `/v1/recovery/{workflow}`** — `RecoveryStatus`
   (`{ workflowId, checkpoint, receipts }`); requires `recovery:read` and session
   ownership of the workflow. Missing / unowned → not found.

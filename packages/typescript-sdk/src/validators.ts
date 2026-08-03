@@ -161,9 +161,11 @@ export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
 }
 
 function isSessionExecutionPolicy(value: unknown): value is SessionState["execution_policy"] {
-  return hasExactKeys(value, ["javascriptEvaluation", "visionAssist"])
+  return hasExactKeys(value, ["javascriptEvaluation", "visionAssist", "fingerprint", "humanize"])
     && typeof value.javascriptEvaluation === "boolean"
-    && typeof value.visionAssist === "boolean";
+    && typeof value.visionAssist === "boolean"
+    && typeof value.fingerprint === "boolean"
+    && typeof value.humanize === "boolean";
 }
 
 export function isSessionState(value: unknown): value is SessionState {
@@ -297,6 +299,10 @@ export function isEvidence(value: unknown): value is Evidence {
     case "browserExecution": return hasExactKeys(value, ["kind", "engine", "browserVersion", "profileId", "interactionPath"]) && isString(value.engine) && isString(value.browserVersion) && isString(value.profileId) && isString(value.interactionPath);
     case "javaScriptResult": return hasExactKeys(value, ["kind", "value", "truncated"]) && isJsonValue(value.value) && typeof value.truncated === "boolean";
     case "intentExecution": return hasExactKeys(value, ["kind", "record"]) && isExecutionRecord(value.record);
+    case "humanization": return hasExactKeys(value, ["kind", "engine", "actions", "synthesizedMs"])
+      && isString(value.engine)
+      && isSafeUnsigned(value.actions, 65_535)
+      && isSafeUnsigned(value.synthesizedMs, 600_000);
     case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
     case "controlAction": return hasExactKeys(value, ["kind", "action"]) && isControlActionEvidence(value.action);

@@ -21,6 +21,8 @@ types = { path = "../types" }
 
 [dev-dependencies]
 async-trait.workspace = true
+axum.workspace = true
+tower.workspace = true
 artifact-store = { path = "../artifact-store" }
 sdk-core = { path = "../sdk-core" }
 interface-core = { path = "../interface-core" }

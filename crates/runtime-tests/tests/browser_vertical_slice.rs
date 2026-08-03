@@ -96,7 +96,7 @@ async fn submit_boundary(
                 page_id: page_id.clone(),
                 restart_url: url.clone(),
                 current_url: url.clone(),
-                cursor: Some(inspect_id),
+                cursor: Some(inspect_id.clone()),
                 boundary_command_id: Some(command_id.clone()),
                 recovery_class: CommandClass::Boundary,
                 invariants: vec![
@@ -109,7 +109,7 @@ async fn submit_boundary(
                 recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
-            observed,
+            vec![inspect_id],
         )
         .await
         .unwrap();
@@ -129,6 +129,14 @@ async fn submit_boundary(
         CommandOutcome::Completed { evidence, .. } => evidence,
         outcome => panic!("boundary command failed: {outcome:?}"),
     }
+}
+
+fn chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
 }
 
 #[tokio::test]
@@ -153,9 +161,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(PathBuf::from(
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            )),
+            executable: Some(PathBuf::from(&chrome_executable())),
             profiles_dir: profiles_dir.clone(),
             headless: true,
             max_active: 8,
@@ -171,10 +177,12 @@ async fn completes_dynamic_form_with_durable_evidence() {
             journal_path: journal_path.clone(),
             checkpoints_dir: root.path().join("checkpoints"),
             authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
         },
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
+        nodes: Default::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
     let first_session = runtime
@@ -360,7 +368,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
                 recovery_receipts: Vec::new(),
                 created_at: Utc::now(),
             },
-            observed,
+            vec![command_ids.last().unwrap().clone()],
         )
         .await
         .unwrap();

@@ -56,8 +56,18 @@ pub enum Capability {
     RecoveryRead,
     #[serde(rename = "recovery:write")]
     RecoveryWrite,
+    #[serde(rename = "job:submit")]
+    JobSubmit,
+    #[serde(rename = "job:read")]
+    JobRead,
+    #[serde(rename = "job:cancel")]
+    JobCancel,
     #[serde(rename = "authority:admin")]
     AuthorityAdmin,
+    #[serde(rename = "browser:fingerprint")]
+    BrowserFingerprint,
+    #[serde(rename = "browser:humanize")]
+    BrowserHumanize,
 }
 
 impl Capability {
@@ -77,7 +87,12 @@ impl Capability {
             Self::ArtifactCapture => "artifact:capture",
             Self::RecoveryRead => "recovery:read",
             Self::RecoveryWrite => "recovery:write",
+            Self::JobSubmit => "job:submit",
+            Self::JobRead => "job:read",
+            Self::JobCancel => "job:cancel",
             Self::AuthorityAdmin => "authority:admin",
+            Self::BrowserFingerprint => "browser:fingerprint",
+            Self::BrowserHumanize => "browser:humanize",
         }
     }
 }

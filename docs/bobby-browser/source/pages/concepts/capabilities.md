@@ -20,7 +20,10 @@ Wire strings (camelCase JSON uses these exact values):
 | Vision assist | `vision:assist` |
 | Artifact read / capture | `artifact:read` / `artifact:capture` |
 | Recovery read / write | `recovery:read` / `recovery:write` |
+| Job submit / read / cancel | `job:submit` / `job:read` / `job:cancel` |
 | Authority admin | `authority:admin` |
+| Browser fingerprint | `browser:fingerprint` |
+| Browser humanize | `browser:humanize` |
 
 ## Operation → capability matrix
 
@@ -42,6 +45,9 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 | ReadArtifact | `GET /v1/artifacts/{id}` | `artifact:read` |
 | IssuePrincipal | `POST /v1/principals` | `authority:admin` |
 | RevokePrincipal | `DELETE /v1/principals/{id}` | `authority:admin` |
+| SubmitJob | `POST /v1/jobs` | `job:submit` |
+| ReadJob | `GET /v1/jobs/{id}` | `job:read` |
+| CancelJob | `DELETE /v1/jobs/{id}` | `job:cancel` |
 
 `activatePage` / MCP `page_activate` and `accessibilitySnapshot` / MCP
 `a11y_snapshot` are **primitive commands** (via `command_execute` or the flat
@@ -65,5 +71,7 @@ Submitting a command still requires `browser:mutate`. Nested commands add:
 | Intent + file fill (`fill` / `completeForm` with `files`) | `intent:execute` and `file:upload` |
 | Vision escalation | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
 | Structured extraction (`extractStructured` / MCP `extract_structured`) | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
+| Fingerprint spoofing | `browser:fingerprint` at session creation (+ session `executionPolicy.fingerprint`) |
+| Humanized input timing | `browser:humanize` at session creation (+ session `executionPolicy.humanize`) |
 
 Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` set when known.

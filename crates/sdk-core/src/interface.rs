@@ -11,8 +11,8 @@ use interface_core::{
     SessionOwnershipRecorder,
 };
 use types::{
-    Capability, CommandEnvelope, CommandOutcome, CreateSessionRequest, ErrorLayer, Evidence,
-    FillValue, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
+    Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
+    Evidence, FillValue, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
     OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeCommand,
     RuntimeError, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint, WorkflowId,
 };
@@ -108,6 +108,19 @@ impl AuthenticatedRuntime {
         ctx: &RequestContext,
         req: CreateSessionRequest,
     ) -> InterfaceResult<SessionState> {
+        // `executionPolicy` flags that change what the browser presents to the
+        // page are privileged: the session opt-in alone is not enough, the
+        // principal must also hold the matching capability (same double gate
+        // as `vision:assist`). Checked before the session exists so a denied
+        // principal cannot even materialize a flagged session.
+        if req.execution_policy.fingerprint {
+            self.authorization
+                .require_capability(ctx, Capability::BrowserFingerprint)?;
+        }
+        if req.execution_policy.humanize {
+            self.authorization
+                .require_capability(ctx, Capability::BrowserHumanize)?;
+        }
         let ownership_reservation = self
             .session_ownership
             .as_ref()
@@ -150,7 +163,7 @@ impl AuthenticatedRuntime {
     ) -> InterfaceResult<WorkflowCheckpoint> {
         self.checkpoint_dispatches.fetch_add(1, Ordering::AcqRel);
         self.inner
-            .checkpoint(checkpoint, evidence)
+            .checkpoint_with_evidence(checkpoint, evidence)
             .await
             .map_err(|_| internal_error(ctx))
     }
@@ -183,11 +196,24 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::DeleteSession)?;
         self.require_owned_session(&ctx, &session)?;
+        // Read the session's pages before deleting it: afterwards there is no
+        // record of which pages it owned, and the context graph would retain
+        // their structure for the life of the process. Retention is bounded by
+        // session lifetime, so the eviction happens here, at the one point both
+        // facts are still available.
+        let pages = self
+            .inner
+            .sessions
+            .get(&session)
+            .await
+            .map(|state| state.page_ids)
+            .unwrap_or_default();
         self.inner
             .sessions
             .delete(&session)
             .await
             .map_err(|error| map_runtime_error(&ctx, error))?;
+        self.inner.pages.context().forget_all(&pages);
         if let Some(ownership) = &self.session_ownership {
             ownership.release_authenticated_session(&ctx.principal_id, &session);
         }
@@ -388,6 +414,62 @@ impl RuntimeInterface for AuthenticatedRuntime {
                 }
             }
         }
+    }
+
+    /// Evidence the runtime recorded for already-run commands, resolved by
+    /// command id. Used by the MCP surface's `checkpoint_save`, which names
+    /// commands rather than supplying `Evidence` directly — the raw-evidence
+    /// path (`checkpoint`, above) remains the HTTP surface's unchanged
+    /// contract.
+    ///
+    /// The journal these ids resolve against is shared across every
+    /// authenticated principal (one `RuntimeService`, one `PageRuntime`, per
+    /// `broker::bootstrap_listener_with`), so a command id is not itself
+    /// proof of ownership — a UUIDv4 being hard to guess is exactly the
+    /// assumption `require_owned_session` exists so nothing else has to rely
+    /// on. Each referenced command's owning session (from the runtime's own
+    /// journal, `PageRuntime::command_session`, never the caller's say-so) is
+    /// checked against this principal before its evidence is resolved at
+    /// all; a command this principal does not own is rejected with the same
+    /// opaque "not found" every other cross-principal lookup in this file
+    /// uses, not silently dropped.
+    async fn resolve_command_evidence(
+        &self,
+        ctx: RequestContext,
+        command_ids: Vec<CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        let mut evidence = Vec::new();
+        for command_id in command_ids {
+            let session_id = self
+                .inner
+                .pages
+                .command_session(&command_id)
+                .await
+                .map_err(|_| {
+                    error_with(
+                        &ctx,
+                        InterfaceErrorCode::NotFound,
+                        "runtime resource was not found",
+                    )
+                })?;
+            self.require_owned_session(&ctx, &session_id)?;
+            let items = self
+                .inner
+                .pages
+                .evidence_for_command(command_id)
+                .await
+                .map_err(|_| {
+                    error_with(
+                        &ctx,
+                        InterfaceErrorCode::NotFound,
+                        "runtime resource was not found",
+                    )
+                })?;
+            evidence.extend(items);
+        }
+        Ok(evidence)
     }
 
     async fn recovery_status(

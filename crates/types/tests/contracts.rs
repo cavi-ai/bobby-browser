@@ -487,6 +487,26 @@ fn intent_and_vision_capabilities_round_trip() {
     );
     assert_eq!(Capability::IntentExecute.as_str(), "intent:execute");
     assert_eq!(Capability::VisionAssist.as_str(), "vision:assist");
+    assert_eq!(Capability::JobSubmit.as_str(), "job:submit");
+    assert_eq!(Capability::JobRead.as_str(), "job:read");
+    assert_eq!(Capability::JobCancel.as_str(), "job:cancel");
+    assert_eq!(
+        Capability::BrowserFingerprint.as_str(),
+        "browser:fingerprint"
+    );
+    assert_eq!(Capability::BrowserHumanize.as_str(), "browser:humanize");
+    assert_eq!(
+        serde_json::to_string(&Capability::BrowserFingerprint).unwrap(),
+        "\"browser:fingerprint\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::BrowserHumanize).unwrap(),
+        "\"browser:humanize\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::JobSubmit).unwrap(),
+        "\"job:submit\""
+    );
 }
 
 #[test]
@@ -517,17 +537,34 @@ fn intent_error_codes_round_trip() {
 
 #[test]
 fn execution_policy_defaults_to_deny() {
-    assert!(!ExecutionPolicy::default().javascript_evaluation);
+    let default = ExecutionPolicy::default();
+    assert!(!default.javascript_evaluation);
+    assert!(!default.vision_assist);
+    assert!(!default.fingerprint);
+    assert!(!default.humanize);
 
-    let value = serde_json::to_value(ExecutionPolicy::default()).unwrap();
+    // Asserting the whole object, not just the flags read above, is what makes
+    // this a deny-by-default guard rather than a spot check: a new privileged
+    // flag added with any default other than `false` fails here.
+    let value = serde_json::to_value(&default).unwrap();
     assert_eq!(
         value,
-        json!({"javascriptEvaluation": false, "visionAssist": false})
+        json!({
+            "javascriptEvaluation": false,
+            "visionAssist": false,
+            "fingerprint": false,
+            "humanize": false
+        })
     );
+    for (name, flag) in value.as_object().expect("policy is an object") {
+        assert_eq!(flag, &json!(false), "{name} does not default to denied");
+    }
 
     let explicit_grant: ExecutionPolicy =
         serde_json::from_value(json!({"javascriptEvaluation": true})).unwrap();
     assert!(explicit_grant.javascript_evaluation);
+    assert!(!explicit_grant.fingerprint);
+    assert!(!explicit_grant.humanize);
 }
 
 #[test]

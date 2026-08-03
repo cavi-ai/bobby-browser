@@ -9,11 +9,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
 use tokio::sync::RwLock;
-use types::{CommandPhase, OpenPageRequest, PageId, PageMode, PageState, RuntimeError, SessionId};
+use types::{
+    CommandId, CommandOutcome, CommandPhase, Evidence, OpenPageRequest, PageId, PageMode,
+    PageState, RuntimeError, SessionId,
+};
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
-pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, VisionGate};
+mod context;
+
+pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, NodeSelection, SessionGate, VisionGate};
+pub use context::{ContextAnswer, ContextGraph, CONTEXT_CONFIDENCE_FLOOR};
 pub use executor::ExecutorError;
 pub use intent_engine::VisionAssist;
 pub use recovery::{
@@ -40,9 +46,19 @@ pub struct PageRuntime {
     checkpoints: Option<CheckpointStore>,
     adaptive: AdaptivePageEngine,
     phase_observer: Option<Arc<dyn ExecutionPhaseObserver>>,
+    /// Page structure retained for context-node answers. Always present: the
+    /// graph is inert until something records into it, and an `Option` here
+    /// would add a "did we bother to invalidate" branch to the one code path
+    /// where forgetting to invalidate is the bug.
+    context: Arc<ContextGraph>,
 }
 
 impl PageRuntime {
+    /// The context graph this runtime records page structure into.
+    pub fn context(&self) -> &Arc<ContextGraph> {
+        &self.context
+    }
+
     pub fn new(journal: Arc<dyn CommandJournal>, workers: Arc<WorkerPool>) -> Self {
         Self {
             inner: Arc::default(),
@@ -51,6 +67,7 @@ impl PageRuntime {
             checkpoints: None,
             adaptive: AdaptivePageEngine::browser_only(),
             phase_observer: None,
+            context: Arc::new(ContextGraph::new()),
         }
     }
 
@@ -66,6 +83,7 @@ impl PageRuntime {
             checkpoints: Some(checkpoints),
             adaptive: AdaptivePageEngine::browser_only(),
             phase_observer: None,
+            context: Arc::new(ContextGraph::new()),
         }
     }
 
@@ -82,6 +100,7 @@ impl PageRuntime {
             checkpoints,
             adaptive,
             phase_observer: None,
+            context: Arc::new(ContextGraph::new()),
         }
     }
 
@@ -102,6 +121,70 @@ impl PageRuntime {
 
     pub async fn open(&self, req: OpenPageRequest) -> PageState {
         self.register_page(req.session_id).await
+    }
+
+    /// Evidence the runtime itself recorded for a command.
+    ///
+    /// The journal is the only authority here: an agent naming a command it
+    /// never ran, or one that never reached a terminal outcome, gets an
+    /// error rather than an empty vector it could mistake for success.
+    pub async fn evidence_for_command(
+        &self,
+        command_id: CommandId,
+    ) -> Result<Vec<Evidence>, RecoveryError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        let scan = journal
+            .history(command_id.clone())
+            .await
+            .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        scan.records
+            .into_iter()
+            .rev()
+            .find_map(|record| match record.outcome {
+                Some(CommandOutcome::Completed { evidence, .. })
+                | Some(CommandOutcome::NeedsReconciliation { evidence, .. }) => Some(evidence),
+                _ => None,
+            })
+            .ok_or(RecoveryError::CommandOutcomeMissing(command_id))
+    }
+
+    /// The session a command was submitted under, per the runtime's own
+    /// journal.
+    ///
+    /// Every command's first journal record (`CommandPhase::Accepted`) always
+    /// stores its `CommandEnvelope` — see `executor.rs`'s `execute_with_vision_gate`,
+    /// which journals it before anything else can fail — so this is available
+    /// for any command that has a journal record at all. Callers use this to
+    /// verify a command referenced only by id (e.g. `checkpoint_save`'s
+    /// `evidenceRefs`) belongs to a session they are authorized to see,
+    /// before its evidence is ever resolved or trusted: the journal itself
+    /// has no notion of principal, so that check has to happen here, keyed
+    /// on the session the command actually ran under, not on which session
+    /// the caller merely claims.
+    pub async fn command_session(
+        &self,
+        command_id: &CommandId,
+    ) -> Result<SessionId, RecoveryError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?;
+        let scan = journal
+            .history(command_id.clone())
+            .await
+            .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        scan.records
+            .iter()
+            .find_map(|record| {
+                record
+                    .envelope
+                    .as_ref()
+                    .map(|envelope| envelope.session_id.clone())
+            })
+            .ok_or_else(|| RecoveryError::CommandOutcomeMissing(command_id.clone()))
     }
 
     pub async fn open_browser(&self, session_id: SessionId) -> Result<PageState, RuntimeError> {

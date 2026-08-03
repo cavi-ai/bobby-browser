@@ -25,11 +25,13 @@ use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use config::BrowserConfig;
+use fingerprinting::{FingerprintApplyPlan, FingerprintConfig, FingerprintHost};
 use futures::StreamExt;
 use network_engine::state::{
     HttpCookie, HttpCookiePartitionKey, HttpStateSnapshot, ResponseStateDelta,
 };
 use sha2::{Digest, Sha256};
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use types::{
@@ -53,6 +55,7 @@ use crate::{
 pub struct ChromiumWorkerFactory {
     config: BrowserConfig,
     pid_registry_dir: PathBuf,
+    fingerprint: FingerprintConfig,
 }
 
 impl ChromiumWorkerFactory {
@@ -68,6 +71,7 @@ impl ChromiumWorkerFactory {
         Self {
             config,
             pid_registry_dir,
+            fingerprint: FingerprintConfig::default(),
         }
     }
 
@@ -84,7 +88,13 @@ impl ChromiumWorkerFactory {
         Self {
             config,
             pid_registry_dir,
+            fingerprint: FingerprintConfig::default(),
         }
+    }
+
+    pub fn with_fingerprint(mut self, fingerprint: FingerprintConfig) -> Self {
+        self.fingerprint = fingerprint;
+        self
     }
 }
 
@@ -102,12 +112,26 @@ impl WorkerFactory for ChromiumWorkerFactory {
 
         let mut builder = ChromiumConfig::builder()
             .user_data_dir(profile_dir.clone())
-            .launch_timeout(Duration::from_secs(20));
+            .launch_timeout(Duration::from_secs(20))
+            // Strip --enable-automation + disable AutomationControlled so
+            // navigator.webdriver is natively false (CreepJS webDriverIsOn).
+            .hide();
         if let Some(executable) = &self.config.executable {
             builder = builder.chrome_executable(executable);
         }
         if !self.config.headless {
             builder = builder.with_head();
+        }
+        // Chrome's sandbox requires root or unprivileged user namespaces;
+        // hosted CI has neither. Honor an explicit opt-out rather than
+        // guessing from uid (runners are unprivileged but still blocked).
+        #[cfg(unix)]
+        {
+            let blocked = unsafe { libc::geteuid() } == 0
+                || std::env::var_os("BOBBY_CHROME_NO_SANDBOX").is_some();
+            if blocked {
+                builder = builder.no_sandbox();
+            }
         }
         let config = builder
             .build()
@@ -152,6 +176,9 @@ impl WorkerFactory for ChromiumWorkerFactory {
             har_tasks: Mutex::new(HashMap::new()),
             http_state: Mutex::new(HttpBridgeState::default()),
             handler_task: Mutex::new(Some(handler_task)),
+            fingerprint: Mutex::new(self.fingerprint.clone()),
+            fingerprint_enabled: AtomicBool::new(self.fingerprint.enabled),
+            fingerprint_plan: Mutex::new(None),
         }))
     }
 }
@@ -228,6 +255,10 @@ struct ChromiumWorker {
     har_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
     http_state: Mutex<HttpBridgeState>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
+    fingerprint: Mutex<FingerprintConfig>,
+    fingerprint_enabled: AtomicBool,
+    /// Cached apply plan for the current fingerprint config (rebuilt on invalidate).
+    fingerprint_plan: Mutex<Option<std::sync::Arc<FingerprintApplyPlan>>>,
 }
 
 #[derive(Default)]
@@ -356,6 +387,7 @@ impl ChromiumWorker {
     }
 
     async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
+        self.apply_fingerprint_to_page(&page).await?;
         let tracker = crate::network_quiet::NetworkQuietTracker::start(&page)
             .await
             .map_err(command_failed)?;
@@ -365,6 +397,45 @@ impl ChromiumWorker {
             .insert(page_id.clone(), tracker);
         self.pages.lock().await.insert(page_id, page);
         Ok(())
+    }
+
+    async fn apply_fingerprint_to_page(&self, page: &Page) -> Result<(), CommandError> {
+        if !self
+            .fingerprint_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(());
+        }
+        let plan = {
+            let cached = self.fingerprint_plan.lock().await;
+            if let Some(plan) = cached.as_ref() {
+                plan.clone()
+            } else {
+                drop(cached);
+                let config = {
+                    let mut config = self.fingerprint.lock().await.clone();
+                    config.enabled = true;
+                    config
+                };
+                let plan = match FingerprintApplyPlan::from_config(&config) {
+                    Ok(Some(plan)) => std::sync::Arc::new(plan),
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        return Err(driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            error.to_string(),
+                        ))
+                    }
+                };
+                let mut cached = self.fingerprint_plan.lock().await;
+                *cached = Some(plan.clone());
+                plan
+            }
+        };
+        crate::fingerprint_host::ChromiumPageHost { page }
+            .apply_fingerprint(plan.as_ref())
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))
     }
 
     async fn unregister_page(&self, page_id: &PageId) -> Option<Page> {
@@ -381,6 +452,19 @@ impl BrowserWorker for ChromiumWorker {
 
     fn profile_dir(&self) -> &Path {
         &self.profile_dir
+    }
+
+    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
+        self.fingerprint_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        // Drop cached plan so the next apply rebuilds with current config/enabled state.
+        *self.fingerprint_plan.lock().await = None;
+        Ok(())
+    }
+
+    fn fingerprint_enabled(&self) -> bool {
+        self.fingerprint_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
@@ -704,14 +788,24 @@ impl BrowserWorker for ChromiumWorker {
         command: &OpenPageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page_id = PageId::new();
-        let browser = self.browser.lock().await;
-        let browser = browser.as_ref().ok_or_else(closed_error)?;
-        let page = browser
-            .new_page(command.url.as_deref().unwrap_or("about:blank"))
-            .await
-            .map_err(command_failed)?;
-        let evidence = page_evidence(page_id.clone(), &page).await?;
-        self.register_page(page_id, page).await?;
+        let page = {
+            let browser = self.browser.lock().await;
+            let browser = browser.as_ref().ok_or_else(closed_error)?;
+            // Always start blank so init scripts register before first real document.
+            browser
+                .new_page("about:blank")
+                .await
+                .map_err(command_failed)?
+        };
+        self.register_page(page_id.clone(), page).await?;
+        if let Some(url) = command.url.as_deref() {
+            let pages = self.pages.lock().await;
+            let page = pages.get(&page_id).ok_or_else(page_missing)?;
+            page.goto(url).await.map_err(command_failed)?;
+        }
+        let pages = self.pages.lock().await;
+        let page = pages.get(&page_id).ok_or_else(page_missing)?;
+        let evidence = page_evidence(page_id, page).await?;
         Ok(vec![Evidence::Page {
             page_id: evidence.page_id,
             url: evidence.url,

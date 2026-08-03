@@ -433,6 +433,9 @@ impl BrowserConfig {
         }
 
         if self.hidden {
+            // Puppeteer DEFAULT_ARGS include --enable-automation; strip it when
+            // hiding so navigator.webdriver stays false without JS redefines.
+            builder.remove("enable-automation");
             builder.arg(Arg::value("disable-blink-features", "AutomationControlled"));
         }
 
@@ -486,3 +489,29 @@ static DEFAULT_ARGS: [ArgConst; 24] = [
     ArgConst::values("enable-blink-features", &["IdleDetection"]),
     ArgConst::values("lang", &["en_US"]),
 ];
+
+#[cfg(test)]
+mod hide_args_tests {
+    use super::super::argument::{Arg, ArgsBuilder};
+
+    #[test]
+    fn removing_enable_automation_and_adding_blink_hide() {
+        let mut builder = ArgsBuilder::new();
+        builder.arg(Arg::key("enable-automation"));
+        builder.arg(Arg::key("no-first-run"));
+        builder.remove("enable-automation");
+        builder.arg(Arg::value("disable-blink-features", "AutomationControlled"));
+        let args: Vec<String> = builder.into_iter().collect();
+        assert!(
+            !args.iter().any(|a| a == "--enable-automation"),
+            "enable-automation must be stripped when hidden: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| {
+                a.contains("disable-blink-features") && a.contains("AutomationControlled")
+            }),
+            "AutomationControlled must be set: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--no-first-run"));
+    }
+}

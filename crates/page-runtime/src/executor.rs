@@ -4,11 +4,12 @@ use chrono::Utc;
 use thiserror::Error;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
-    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand, RuntimeCommand,
+    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand, RuntimeCommand, TextMatch,
+    WaitCondition, WaitForCommand,
 };
 use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
-use crate::{PageRuntime, VisionGate};
+use crate::{PageRuntime, SessionGate, VisionGate};
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
@@ -115,7 +116,7 @@ impl PageRuntime {
     }
 
     pub async fn execute(&self, envelope: CommandEnvelope) -> CommandOutcome {
-        self.execute_with_vision_gate(envelope, VisionGate::default())
+        self.execute_with_session_gate(envelope, SessionGate::default())
             .await
     }
 
@@ -123,6 +124,15 @@ impl PageRuntime {
         &self,
         envelope: CommandEnvelope,
         vision_gate: VisionGate,
+    ) -> CommandOutcome {
+        self.execute_with_session_gate(envelope, vision_gate.into())
+            .await
+    }
+
+    pub async fn execute_with_session_gate(
+        &self,
+        envelope: CommandEnvelope,
+        gate: SessionGate,
     ) -> CommandOutcome {
         let command_id = envelope.command_id.clone();
         if let Err(error) = self.validate(&envelope).await {
@@ -182,6 +192,25 @@ impl PageRuntime {
                     .await;
             }
         };
+        // Apply the session's policy to the worker before it runs anything.
+        // Workers are pooled and re-leased across sessions, so the previous
+        // lease's settings are still in place here — writing both flags on
+        // every lease is what stops one session's opt-in from leaking into
+        // the next session's worker.
+        if let Err(error) = lease
+            .worker()
+            .set_fingerprint_enabled(gate.fingerprint)
+            .await
+        {
+            return self
+                .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
+                .await;
+        }
+        if let Err(error) = lease.worker().set_humanization_enabled(gate.humanize).await {
+            return self
+                .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
+                .await;
+        }
         let page_state = match envelope.page_id.as_ref() {
             Some(page_id) => match self.get(page_id).await {
                 Ok(page) => Some(page),
@@ -202,7 +231,7 @@ impl PageRuntime {
         };
         let mut execution = match self
             .adaptive
-            .execute(&envelope, &lease, page_state, vision_gate)
+            .execute(&envelope, &lease, page_state, &gate)
             .await
         {
             Ok(execution) => execution,
@@ -308,9 +337,40 @@ impl PageRuntime {
                 }
             }
             RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(command)) => {
+                self.context().forget(&command.page_id);
                 self.remove_page(&command.page_id).await
             }
             RuntimeCommand::Primitive(_) | RuntimeCommand::Intent(_) => {}
+        }
+
+        // Keep the context graph honest about this command before anything can
+        // read from it.
+        //
+        // Ordering matters: invalidate first, record second. A snapshot command
+        // is replayable, so it does not invalidate, and its result is what the
+        // graph should now hold. Any other command may have changed the page,
+        // so whatever the graph held is no longer answerable — and this runs on
+        // the success path *and* nowhere else it could be skipped, because a
+        // command that did not complete cannot be assumed not to have touched
+        // the page either. That is why `finish_failure` invalidates too.
+        if let Some(page_id) = envelope.page_id.as_ref() {
+            self.context().invalidate_for(page_id, &envelope.command);
+            for item in &evidence {
+                if let Evidence::AccessibilitySnapshot {
+                    page_id: observed,
+                    nodes,
+                    truncated,
+                } = item
+                {
+                    // A truncated snapshot is not the page. Recording it would
+                    // let the graph answer "not found" for a control that
+                    // exists past the truncation point, which reads to the
+                    // caller exactly like a control that is genuinely absent.
+                    if !*truncated {
+                        self.context().record(observed, nodes.clone());
+                    }
+                }
+            }
         }
 
         if let Err(error) = journal
@@ -487,12 +547,22 @@ impl PageRuntime {
             }
             PrimitiveCommand::Click(command) => {
                 if let Some(expected_url) = &command.expected_url {
+                    let page_id = page_id.expect("validated page id");
+                    let _ = lease
+                        .worker()
+                        .wait_for(
+                            page_id,
+                            &WaitForCommand {
+                                condition: WaitCondition::Url {
+                                    matcher: TextMatch::Exact(expected_url.clone()),
+                                },
+                                timeout_ms: 5_000,
+                            },
+                        )
+                        .await;
                     let verification = lease
                         .worker()
-                        .inspect(
-                            page_id.expect("validated page id"),
-                            &InspectCommand::default(),
-                        )
+                        .inspect(page_id, &InspectCommand::default())
                         .await?;
                     let matches = verification.iter().any(|item| {
                         matches!(item, Evidence::Inspection { url, .. } if url == expected_url)
@@ -730,6 +800,15 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
     ) -> CommandOutcome {
+        // A command that failed is not a command that did nothing. A click that
+        // timed out waiting for navigation may still have navigated, and
+        // `NeedsReconciliation` exists precisely because the runtime cannot
+        // tell. The context graph inherits that uncertainty: on any
+        // non-replayable failure it forgets, rather than keeping an
+        // observation that predates a change it cannot rule out.
+        if let Some(page_id) = envelope.page_id.as_ref() {
+            self.context().invalidate_for(page_id, &envelope.command);
+        }
         let Some(journal) = &self.journal else {
             return outcome;
         };

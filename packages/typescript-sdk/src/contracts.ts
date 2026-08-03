@@ -16,12 +16,12 @@ export interface SessionState { id: Id; profile: string; proxy: string | null; p
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
 /** Session execution policy. Omitted fields default to denied. */
-export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; }
+export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; visionNode?: string; }
 export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; }
 export interface OpenPageRequest { session_id: Id; }
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
-export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture";
+export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture" | "job:submit" | "job:read" | "job:cancel" | "authority:admin" | "browser:fingerprint" | "browser:humanize";
 export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "internal";
 export interface InterfaceError {
   code: InterfaceErrorCode;
@@ -119,6 +119,7 @@ export type Evidence =
   | { kind: "formSnapshot"; snapshot: FormSnapshot }
   | { kind: "controlAction"; action: ControlActionEvidence }
   | { kind: "intentExecution"; record: ExecutionRecord }
+  | { kind: "humanization"; engine: string; actions: number; synthesizedMs: number }
   | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
 
 /** Result of `POST /v1/commands`, discriminated by `status`. */
@@ -295,7 +296,14 @@ export type RecoveryDecision =
   | { status: "resumed"; checkpointId: Id; attemptId: Id; evidence: Evidence[] }
   | { status: "needsReconciliation"; checkpointId: Id; attemptId: Id; reason: string; evidence: Evidence[] }
   | { status: "restarted"; checkpointId: Id; lineage: { workflowId: Id; abandonedAttemptId: Id; attemptId: Id; reason: string }; evidence: Evidence[] };
-export interface CheckpointRequest { checkpoint: WorkflowCheckpoint; evidence?: Evidence[]; }
+/**
+ * A checkpoint plus the command ids whose evidence the runtime already
+ * recorded. The runtime resolves each id against its own journal; a caller
+ * cannot hand in evidence for work it did not perform, and an id with no
+ * terminal journal record fails the checkpoint. Same contract as the MCP
+ * `checkpoint_save` tool.
+ */
+export interface CheckpointRequest { checkpoint: WorkflowCheckpoint; evidenceRefs?: Id[]; }
 
 /** Single event from `GET /v1/events`. */
 export interface InterfaceEvent { cursor: number; kind: string; payload: unknown; }

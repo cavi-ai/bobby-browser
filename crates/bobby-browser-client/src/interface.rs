@@ -76,6 +76,10 @@ impl CorrelationId {
     pub fn from_uuid(value: Uuid) -> Self {
         Self(value)
     }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
 }
 
 impl Default for CorrelationId {
@@ -212,6 +216,9 @@ pub enum InterfaceOperation {
     ReadArtifact,
     CaptureArtifact,
     SubscribeEvents,
+    SubmitJob,
+    ReadJob,
+    CancelJob,
     IssuePrincipal,
     RevokePrincipal,
 }
@@ -233,6 +240,9 @@ impl InterfaceOperation {
             Self::ReadArtifact => &[Capability::ArtifactRead],
             Self::CaptureArtifact => &[Capability::ArtifactCapture],
             Self::SubscribeEvents => &[Capability::SessionRead],
+            Self::SubmitJob => &[Capability::JobSubmit],
+            Self::ReadJob => &[Capability::JobRead],
+            Self::CancelJob => &[Capability::JobCancel],
             Self::IssuePrincipal => &[Capability::AuthorityAdmin],
             Self::RevokePrincipal => &[Capability::AuthorityAdmin],
         }
