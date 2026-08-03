@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Add `bobby init --emit <claude|zed|vscode|json>`: prints the MCP client config fragment for the host with `${VAR}` credential placeholders, never the secret. Add `skill/SKILL.md`, the agent skill package for driving the runtime.
+- `bobby doctor` now runs a live MCP handshake (`initialize` + `tools/list`) against the stdio gateway and reports tool count and catalog bytes against the 128 KiB budget; a missing gateway is a warning, a failed handshake a failure.
+- Fix `mcp-gateway` startup rejecting bootstrap credentials that carry `job:*` capabilities (the parse table predated the jobs API, so the stdio gateway could not start with a current `bobby init` file).
 - **Breaking:** `executionPolicy.fingerprint` and `executionPolicy.humanize` now require the new `browser:fingerprint` and `browser:humanize` capabilities at session creation; a principal without them gets `missingCapability` and no session is created. `bobby init` bootstrap credentials include both, matching the `vision:assist` double-gate precedent.
 - Document the MCP surface depth shipped in v0.3.1: per-tool `outputSchema`, `title` + `annotations`, the four `bobby://` resources, `artifact://` capture resources, the three working-loop prompts, and `notifications/bobby/event` + `notifications/tools/list_changed` push channels. Document `job:*` capabilities and the `browser:fingerprint` / `browser:humanize` gates in the capabilities concept page.
 - Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.
