@@ -1451,3 +1451,130 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
 
     worker.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn humanized_input_reaches_the_page_with_synthesized_timing() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    // The probe counts keydowns and clicks: synthesized input that never
+    // reaches the page fails here, not in a Rust-side assertion.
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<title>Humanize</title><input id='name'><button id='go'>Go</button><script>window.keydowns=0;window.repeats=0;window.lastkey='';window.clicks=0;document.addEventListener('keydown',(e)=>{window.keydowns++;if(e.repeat)window.repeats++;window.lastkey=e.key;if(!window.t0)window.t0=e.timeStamp;window.t1=e.timeStamp;const b=Math.floor(e.timeStamp/50)*50;window.hist[b]=(window.hist[b]||0)+1;});document.getElementById('go').addEventListener('click',()=>window.clicks++);</script>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 30_000,
+            },
+        )
+        .await
+        .unwrap();
+    worker.set_humanization_enabled(true).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let evidence = worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                selector: "#name".into(),
+                target: None,
+                value: "Ada".into(),
+                clear_first: true,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    let typed_ms = started.elapsed().as_millis();
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Humanization { engine, actions, synthesized_ms }
+                if engine == "behavioral-engine" && *actions > 0 && *synthesized_ms > 0
+        )),
+        "no Humanization evidence for synthesized typing: {evidence:?}"
+    );
+    assert!(
+        typed_ms >= 300,
+        "typing three characters with clear finished in {typed_ms}ms; a human burst cannot be instant"
+    );
+
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: "#go".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let evidence = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "JSON.stringify({keydowns: window.keydowns, clicks: window.clicks, value: document.getElementById('name').value})".into(),
+                timeout_ms: 10_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    let probe = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::JavaScriptResult { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+        .expect("javascript result evidence");
+    let probe: serde_json::Value =
+        serde_json::from_str(probe.as_str().expect("probe json")).unwrap();
+    assert!(
+        probe["keydowns"].as_u64().unwrap_or(0) >= 3,
+        "page saw too few keydowns: {probe}"
+    );
+    assert_eq!(probe["clicks"].as_u64().unwrap_or(0), 1, "probe: {probe}");
+    assert_eq!(probe["value"].as_str().unwrap_or_default(), "Ada");
+
+    // Off means off: no Humanization evidence and direct input speed.
+    worker.set_humanization_enabled(false).await.unwrap();
+    let direct = worker
+        .type_text(
+            &page_id,
+            &TypeTextCommand {
+                selector: "#name".into(),
+                target: None,
+                value: "Bo".into(),
+                clear_first: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        !direct
+            .iter()
+            .any(|item| matches!(item, Evidence::Humanization { .. })),
+        "Humanization evidence emitted with humanize off: {direct:?}"
+    );
+    worker.close().await.unwrap();
+}

@@ -16,6 +16,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true
 config = { path = "../config", version = "0.3.1" }
+behavioral-engine = { path = "../behavioral-engine", version = "0.3.1" }
 dom-engine = { path = "../dom-engine", version = "0.3.1" }
 fingerprinting = { path = "../fingerprinting", version = "0.3.1" }
 js-engine = { path = "../js-engine", version = "0.3.1" }
