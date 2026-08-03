@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- **Breaking (MCP):** `session_list` `structuredContent` is `{"sessions": [...]}`, was a bare array. MCP types `structuredContent` as an object; a conforming client rejects the entire `tools/list` on a non-object `outputSchema`, so all 43 tools failed to load. `outputSchema` is object-shaped to match and the `ARRAY_SHAPED_OUTPUT` exception is removed. `GET /v1/sessions` is unchanged.
+
 ## 0.4.0 - 2026-08-03
 - **Naming:** one scope, one prefix, one tag. Internal npm packages move off the unowned `@bobby-browser` scope to `@cavi-ai/bobby-gauntlet`, `@cavi-ai/bobby-firefox-companion`, `@cavi-ai/bobby-interface-conformance`; `@cavi-ai/bobby-browser` is unchanged, so nothing published breaks. 25 internal crates are `publish = false` — only `bobby-browser-client` and `bobby-browser` are products, and names like `types`, `config`, and `broker` are not claimed on crates.io. `sdk-v*` and `crate-v*` collapse into `v*`: one tag ships binaries, npm, and the crate.
 - `publish-crates.yml` publishes. It was named "Publish crates (dry-run)" and only ever ran `cargo publish --dry-run`, which is why crates.io is empty. The dry run stays as a pre-flight on every trigger; the real publish is gated on a `v*` tag, so `workflow_dispatch` remains a safe rehearsal.

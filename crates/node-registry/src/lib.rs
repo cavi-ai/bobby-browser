@@ -1,22 +1,14 @@
 //! Named, separately addressable nodes, selected per session.
 //!
-//! The runtime used to have exactly one semantic helper: a single `[vision]`
-//! endpoint, global to the process, with no way for a session to choose it or
-//! to know where it was. Every session that opted into vision escalation sent
-//! its screenshots wherever the operator had pointed that one setting.
+//! A session names a node; the registry resolves the name against
+//! configuration, or declines. Two properties this must preserve:
 //!
-//! A registry replaces it. A session names a node; the registry resolves the
-//! name against configuration, or declines. The two properties that matter:
-//!
-//! - **Local-first, and provable.** [`ResolvedNode::is_local`] comes from the
-//!   node's address, not from trusting its operator. A session bound to a
-//!   loopback node cannot have its page material leave the machine, and that
-//!   is checkable rather than promised.
-//! - **No silent fallback.** A name that is not configured, or is configured
-//!   with the wrong kind, resolves to an error. It never falls back to another
-//!   node, and never to a remote default. That is the whole point of naming
-//!   one: a session that asked for a local node and got a remote one has had
-//!   its privacy property revoked without being told.
+//! - **Local-first, and provable.** [`ResolvedNode::is_local`] is derived from
+//!   the node's address, never from trusting its operator, so a session bound
+//!   to a loopback node is checkably confined to this machine.
+//! - **No silent fallback.** An unconfigured name, or one configured with the
+//!   wrong kind, resolves to an error: never another node, never a remote
+//!   default. Falling back would silently revoke a session's privacy property.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,9 +22,9 @@ use types::{CommandError, ErrorCode, ErrorLayer};
 pub enum NodeError {
     #[error("no node named {0} is configured")]
     Unknown(String),
-    /// Unreachable while `NodeKind` has a single variant. Kept, with the check
-    /// in `resolve`, because the moment a second kind exists the absence of
-    /// this guard would silently hand one kind of node out as another.
+    /// Unreachable while `NodeKind` has a single variant. Keep it, and the
+    /// check in `resolve`: without it a second kind would silently be handed
+    /// out as another.
     #[error("node {name} is a {configured:?} node, not {requested:?}")]
     WrongKind {
         name: String,
@@ -46,12 +38,10 @@ pub enum NodeError {
 impl NodeError {
     /// The declined-escalation error this fault produces.
     ///
-    /// Deliberately *not* a `From<NodeError> for CommandError` impl: adding
-    /// another `From` for `CommandError` makes `?` ambiguous in unrelated
-    /// crates that already convert several error types into it, and a
-    /// conversion used in one place is not worth breaking inference across the
-    /// workspace for. Every variant is a configuration or addressing fault
-    /// that no retry fixes, and all of them decline rather than act.
+    /// Deliberately not a `From<NodeError> for CommandError` impl: another
+    /// `From` for `CommandError` makes `?` ambiguous in crates that already
+    /// convert several error types into it. Every variant is a configuration
+    /// or addressing fault that no retry fixes.
     pub fn into_command_error(self) -> CommandError {
         CommandError {
             code: ErrorCode::VisionAssistFailed,
@@ -91,10 +81,9 @@ impl NodeRegistry {
     /// Builds the registry from configuration.
     ///
     /// A `[vision]` endpoint with no `[nodes]` table is carried forward as a
-    /// node named `vision`, so an existing deployment keeps working and gets a
-    /// name it can select. When both are present `[nodes]` wins and `[vision]`
-    /// is ignored: silently merging two sources of truth for the same endpoint
-    /// is how a session ends up talking to a provider nobody chose.
+    /// node named `vision`. When both are present `[nodes]` wins and `[vision]`
+    /// is ignored: merging two sources of truth for one endpoint is how a
+    /// session ends up talking to a provider nobody chose.
     pub fn from_config(config: &AppConfig) -> Self {
         if !config.nodes.is_empty() {
             if config.vision.endpoint_url.is_some() {
@@ -150,10 +139,9 @@ impl NodeRegistry {
 
     /// Builds a vision provider for the named node.
     ///
-    /// Note what this does *not* do: there is no `None` branch that returns a
-    /// default provider. A session that names no node has no vision provider,
-    /// and the intent engine's existing deny-by-default double gate is what
-    /// turns that into a declined escalation.
+    /// There is deliberately no default-provider branch: a session that names
+    /// no node has no vision provider, which the intent engine's
+    /// deny-by-default double gate turns into a declined escalation.
     pub fn vision(&self, name: &str) -> Result<Arc<dyn VisionAssist>, NodeError> {
         let resolved = self.resolve(name, NodeKind::Vision)?;
         let node = self.nodes.get(name).expect("resolve found it");

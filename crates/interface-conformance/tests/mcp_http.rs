@@ -1,13 +1,7 @@
-//! End-to-end acceptance test for the fleet-multi-principal epic, exercised through the
-//! PRODUCTION bootstrap path (`broker::serve`, which wires `PersistentAuthority` and a
-//! real `RuntimeService::build`) rather than `broker::testing`'s router — that module
-//! builds its own `AppState` by hand and is a fine unit-test harness for the broker
-//! crate itself, but it does not prove the production wiring (`bootstrap_listener_with`
-//! / `serve`) actually boots. This test binds a real loopback TCP listener, speaks
-//! HTTP/1.1 over it by hand (mirroring `crates/broker/tests/connection_limits.rs`, the
-//! only other place in this workspace that talks to a live broker listener — this
-//! workspace has no HTTP client dependency, so a hand-rolled request/response reader is
-//! the house idiom rather than a new dependency), and proves:
+//! Multi-principal acceptance test over the production bootstrap path (`broker::serve`,
+//! which wires `PersistentAuthority` and a real `RuntimeService::build`). It binds a real
+//! loopback TCP listener and speaks HTTP/1.1 over it by hand, since this workspace has no
+//! HTTP client dependency. Proves:
 //!
 //! - admin (`authority:admin`) issues two independently-capable principals over
 //!   `POST /v1/principals`,
@@ -59,10 +53,8 @@ impl RunningBroker {
 }
 
 /// Grabs a free loopback port by binding then immediately dropping a listener. `serve`
-/// only exposes a config-driven `host:port` (it does not hand back the bound address),
-/// so this is the only way to learn an ephemeral port before calling it — the same
-/// TOCTOU tradeoff every "let the OS pick a port for me" test harness accepts; the gap
-/// between drop and rebind here is microseconds on loopback in a single test process.
+/// takes a config-driven `host:port` and never reports the bound address, so the port has
+/// to be known before the call.
 async fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -73,12 +65,9 @@ async fn free_port() -> u16 {
         .port()
 }
 
-/// Boots the runtime through the real production path: `broker::serve`, which internally
-/// runs `bootstrap_listener_with` (validated `StartupCredential`, `PersistentAuthority`
-/// wrapping `EnrolledAuthority` at `authority_path`, and a real `RuntimeService::build`).
-/// `broker::testing::app_with_admin` cannot stand in for this: it hand-builds an
-/// `AppState` inside the broker crate and never binds a socket, so it cannot exercise
-/// `serve`/`bootstrap_listener_with` at all.
+/// Boots through the production path: `broker::serve`, which runs `bootstrap_listener_with`
+/// (validated `StartupCredential`, `PersistentAuthority` wrapping `EnrolledAuthority` at
+/// `authority_path`, real `RuntimeService::build`) on a bound socket.
 async fn boot_production(
     authority_path: &Path,
     data_root: &Path,
@@ -125,17 +114,13 @@ async fn boot_production(
 
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid address");
     let task = tokio::spawn(async move {
-        // The production entry point: internally calls `bootstrap_listener_with`
-        // (credential validation, `PersistentAuthority::open`, `RuntimeService::build`)
-        // then `serve_listener_with_rejection_limit` on a real bound `TcpListener`.
         let _ = broker::serve(config, startup).await;
     });
     wait_for_healthz(address).await;
     RunningBroker { address, task }
 }
 
-/// Polls `GET /healthz` until the listener answers 200, per the task's guidance to poll
-/// rather than sleep for listener readiness.
+/// Polls `GET /healthz` until the listener answers 200.
 async fn wait_for_healthz(address: SocketAddr) {
     let deadline = Instant::now() + StdDuration::from_secs(10);
     loop {
@@ -157,11 +142,8 @@ async fn wait_for_healthz(address: SocketAddr) {
 }
 
 /// Sends one HTTP/1.1 request by hand over a fresh `TcpStream` and returns the parsed
-/// status code and JSON body. Mirrors `crates/broker/tests/connection_limits.rs`'s raw
-/// socket approach (the only precedent for talking to a live broker listener in this
-/// workspace) rather than pulling in an HTTP client dependency this workspace does not
-/// otherwise have. Always sends `Connection: close` so reading to EOF is a correct way
-/// to know the response is complete.
+/// status code and JSON body. Always sends `Connection: close`, so reading to EOF is a
+/// correct completeness signal.
 async fn send(
     address: SocketAddr,
     method: &str,
@@ -302,11 +284,8 @@ fn tool_call_request(id: i64, name: &str, arguments: Value) -> Value {
     })
 }
 
-/// Runs a full, independent MCP lifecycle for one principal against a live listener:
-/// `initialize` (asserting the negotiated protocol version), `notifications/initialized`
-/// (asserting the transport's 202-with-no-response-object convention for notifications),
-/// then `tools/call runtime_info` (asserting a clean, error-free result). Returns the
-/// `runtime_info` tool result for the caller to inspect further if needed.
+/// Runs one principal's full MCP lifecycle: `initialize`, `notifications/initialized`
+/// (202 with no response object), then `tools/call runtime_info`. Returns the tool result.
 async fn mcp_lifecycle_runtime_info(address: SocketAddr, bearer: &str) -> Value {
     let (status, body) = post_mcp(address, bearer, initialize_request(1)).await;
     assert_eq!(status, 200, "initialize failed: {body}");
@@ -335,10 +314,8 @@ async fn mcp_lifecycle_runtime_info(address: SocketAddr, bearer: &str) -> Value 
     body["result"]["structuredContent"].clone()
 }
 
-/// Fleet-multi-principal end-to-end acceptance: two independently capable principals
-/// (issued at runtime, not baked into a test harness's `AppState`), driven entirely over
-/// real HTTP against the production `broker::serve` bootstrap path, including a full
-/// process restart against the same persisted authority store.
+/// Two independently capable principals, issued at runtime and driven over real HTTP
+/// against `broker::serve`, including a restart against the same persisted authority store.
 #[tokio::test]
 async fn multi_principal_mcp_over_http_acceptance() {
     let root = tempfile::tempdir().expect("create acceptance root");
@@ -381,11 +358,9 @@ async fn multi_principal_mcp_over_http_acceptance() {
     )
     .await;
 
-    // Concurrent, independent lifecycles: A and B each run
-    // initialize -> notifications/initialized -> tools/call runtime_info over the same
-    // `/v1/mcp` route, driven concurrently. Each principal gets its own cached
-    // `mcp_gateway::Server` (`broker::mcp_http::McpServers`), so neither's lifecycle
-    // state machine observes the other's `initialize`.
+    // Each principal gets its own cached `mcp_gateway::Server`
+    // (`broker::mcp_http::McpServers`), so neither lifecycle state machine observes the
+    // other's `initialize`.
     let (result_a, result_b) = tokio::join!(
         mcp_lifecycle_runtime_info(broker_one.address, &bearer_a),
         mcp_lifecycle_runtime_info(broker_one.address, &bearer_b),
@@ -393,18 +368,10 @@ async fn multi_principal_mcp_over_http_acceptance() {
     assert!(result_a.is_object(), "A's runtime_info result: {result_a}");
     assert!(result_b.is_object(), "B's runtime_info result: {result_b}");
 
-    // B was never granted `recovery:write`, so `workflow_recover` (which requires it,
-    // per `types::InterfaceOperation::RecoverWorkflow`) is not among B's tools and
-    // calling it fails closed with a JSON-RPC "method not found" — the same interface
-    // authorization-failure surface `mcp_gateway::Server::call_tool` produces for any
-    // tool a principal's capability set does not cover (see
-    // `crates/interface-conformance/tests/mcp.rs`'s
-    // `mcp_server_observes_live_capability_filtered_json_rpc_boundary`, which asserts
-    // the identical -32601 shape for a zero-capability principal). This denial is
-    // decided by `Server::tool_available`/`call_tool` purely from the principal's
-    // capability set before any runtime or browser dispatch — see
-    // `crates/mcp-gateway/src/server.rs`'s `call_tool`, which authorizes strictly
-    // before matching on `call.name` to dispatch.
+    // B was never granted `recovery:write`, which `workflow_recover` requires per
+    // `types::InterfaceOperation::RecoverWorkflow`. `Server::tool_available`/`call_tool`
+    // decide this from the capability set alone, before any dispatch, so the call fails
+    // closed as JSON-RPC "method not found" (-32601).
     let (status, denial) = post_mcp(
         broker_one.address,
         &bearer_b,
@@ -457,10 +424,8 @@ async fn multi_principal_mcp_over_http_acceptance() {
 
     broker_one.shutdown().await;
 
-    // --- Restart leg: a fresh process, same `authority_path`, same bootstrap
-    // credential. A's bearer must still authenticate and get a brand new MCP
-    // lifecycle (PersistentAuthority restores it from disk); B's must stay revoked
-    // (revocation is compacted into, and restored from, the same file).
+    // Restart: fresh process, same `authority_path` and bootstrap credential.
+    // `PersistentAuthority` restores A's bearer and B's revocation from the same file.
     let broker_two = boot_production(&authority_path, &root.path().join("boot-2"), 4, 2).await;
 
     let restarted_result = mcp_lifecycle_runtime_info(broker_two.address, &bearer_a).await;

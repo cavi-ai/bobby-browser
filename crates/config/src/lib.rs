@@ -79,8 +79,7 @@ pub struct AppConfig {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub vision: VisionConfig,
-    /// Named nodes, selected per session. Absent means no node of any kind is
-    /// reachable — see `NodeConfig`.
+    /// Named nodes, selected per session. Absent means no node is reachable.
     #[serde(default)]
     pub nodes: std::collections::BTreeMap<String, NodeConfig>,
 }
@@ -209,8 +208,8 @@ impl InterfaceConfig {
 /// Error returned when loading or parsing an [`AppConfig`] from TOML fails.
 #[derive(Debug)]
 pub enum ConfigLoadError {
-    /// The config file could not be read (other than a missing file, which
-    /// is not an error — see [`AppConfig::load`]).
+    /// The config file could not be read; a missing file is not an error,
+    /// see [`AppConfig::load`].
     Io(std::io::Error),
     /// The file contents were not valid TOML, or did not match the
     /// [`AppConfig`] schema.
@@ -319,9 +318,9 @@ pub struct BrowserConfig {
     pub max_artifact_bytes: usize,
     pub max_screenshot_dimension: u32,
     pub max_js_result_bytes: usize,
-    /// Hard upper bound, in milliseconds, on a single `EvaluateJavaScript` command's
-    /// `timeout_ms`. Requests exceeding this are clamped, not rejected — a caller cannot
-    /// pin a worker lease open indefinitely by requesting an unbounded timeout.
+    /// Upper bound, in milliseconds, on a single `EvaluateJavaScript` command's
+    /// `timeout_ms`. Larger requests are clamped, not rejected, so a caller cannot
+    /// pin a worker lease open indefinitely.
     pub max_js_timeout_ms: u64,
 }
 
@@ -381,11 +380,6 @@ impl Default for AppConfig {
 mod tests {
     /// A node kind that does not exist must fail to load rather than parse
     /// into something.
-    ///
-    /// `context` is the one that matters. The runtime does retain page
-    /// context, in-process, so `kind = "context"` reads as supported to an
-    /// operator — and would then reach nothing. Config that silently does
-    /// nothing is worse than config that is rejected.
     #[test]
     fn an_unknown_node_kind_is_rejected() {
         for kind in ["context", "Vision", "planner", ""] {
@@ -674,10 +668,9 @@ pub enum LogSink {
 /// One addressable node: a separate process with a bounded contract, reached
 /// over HTTP.
 ///
-/// Nodes replace the single `[vision]` endpoint. The privacy property a node
-/// carries comes from its *address*, not from trusting whoever runs it: a node
-/// on loopback cannot send page pixels or page text off the machine, and
-/// [`NodeConfig::is_local`] is the check the runtime records and reports.
+/// The privacy property comes from the node's *address*, not from trusting
+/// whoever runs it: a loopback node cannot send page pixels or page text off
+/// the machine, and [`NodeConfig::is_local`] is the check the runtime records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// What contract this node speaks.
@@ -697,20 +690,16 @@ pub struct NodeConfig {
 pub enum NodeKind {
     /// Proposes an action from a screenshot. The `VisionAssist` contract.
     Vision,
-    // There is deliberately no `Context` variant yet. Retained page structure
-    // is answered in-process by `page_runtime::ContextGraph`, so a
-    // `kind = "context"` entry would be configuration an operator can write
-    // that reaches nothing — worse than an unsupported key, because it reads
-    // as supported. `kind` stays an enum so adding one later is additive, and
-    // an unknown kind fails to load with the legal values named.
+    // No `Context` variant: retained page structure is answered in-process by
+    // `page_runtime::ContextGraph`, so `kind = "context"` would reach nothing.
+    // An unknown kind fails to load with the legal values named.
 }
 
 impl NodeConfig {
     /// Whether this node's address is on the local machine.
     ///
-    /// Parsing failures answer `false`. A node whose address cannot be parsed
-    /// is not a node whose locality has been established, and the caller uses
-    /// this to decide whether page material leaves the machine.
+    /// An address that cannot be parsed answers `false`: callers use this to
+    /// decide whether page material leaves the machine.
     pub fn is_local(&self) -> bool {
         url::Url::parse(&self.endpoint_url).is_ok_and(|url| {
             matches!(

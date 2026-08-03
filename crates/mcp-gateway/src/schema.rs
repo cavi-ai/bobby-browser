@@ -14,8 +14,8 @@ const MAX_NETWORK_IGNORE_SUBSTRINGS: usize = 32;
 const MAX_NETWORK_IGNORE_SUBSTRING_BYTES: usize = 512;
 const MAX_NETWORK_IGNORE_RESOURCE_TYPES: usize = 32;
 const MAX_EXCLUDED_CLASSES: usize = 64;
-// Output-only (Task 6): bounds for definitions reachable solely from
-// `structuredContent`, never from a tool argument.
+// Output-only: bounds for definitions reachable solely from `structuredContent`,
+// never from a tool argument.
 const MAX_RECOVERY_RECEIPTS: usize = 64;
 
 pub(crate) fn validate_tool_arguments(
@@ -375,19 +375,13 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 /// The schema advertised in `tools/list`, distinct from the schema
 /// `validate_tool_arguments` enforces at dispatch.
 ///
-/// For every tool but `command_execute` these are identical. For
-/// `command_execute`, `envelope.command` advertises as an opaque object
-/// instead of the full `PrimitiveCommand`/`IntentCommand` union — that union
-/// is 13,783 bytes across both enums, and all eight `IntentCommand` variants
-/// plus all but four `PrimitiveCommand` variants have a named tool that builds
-/// the envelope for the caller. The four with no named tool
+/// Identical to `tool_schema` for every tool but `command_execute`, whose
+/// `envelope.command` advertises as an opaque object instead of the 13,783-byte
+/// `PrimitiveCommand`/`IntentCommand` union. Only advertisement narrows: `tool_schema`
+/// and `definitions()` keep the full union, so a malformed nested command still fails
+/// `-32602` before reaching the runtime. The four primitives with no named tool
 /// (`clickAndWaitForPopup`, `clickAndWaitForDownload`, `setFocusEmulation`,
-/// `setEmulatedMedia`) stay reachable only through this tool, and are
-/// documented in the `bobby://primitives` resource (`crate::resources`) rather
-/// than paid for by every principal on every connect. Validation is untouched:
-/// `tool_schema` (and the `definitions()` table it reads) keeps the full union,
-/// so a malformed nested command still fails with `-32602` before it reaches
-/// the runtime. Only what this tool *advertises on connect* narrows.
+/// `setEmulatedMedia`) are documented in the `bobby://primitives` resource.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     if name != "command_execute" {
         return tool_schema(name);
@@ -409,14 +403,10 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     schema
 }
 
-/// The shape of a tool's `structuredContent`, built through the same
-/// `reachable_definitions` closure as the input schemas: a blanket `$defs`
-/// here would undo the payload reduction the input side already paid for.
-///
-/// Every tool returns *some* structured content — there is no tool whose
-/// dispatch arm skips `tool_success`/`structuredContent` — so this returns
-/// `Value` rather than `Option<Value>`. An `Option` that is never `None` is
-/// just a `Value` with extra ceremony at the call site.
+/// The shape of a tool's `structuredContent`, resolved through the same
+/// `reachable_definitions` closure as the input schemas: a blanket `$defs` here would
+/// undo the payload reduction the input side pays for. Every tool returns structured
+/// content, hence `Value` and not `Option<Value>`.
 pub(crate) fn tool_output_schema(name: &str) -> Value {
     let mut schema = match name {
         "runtime_info" => object(
@@ -437,43 +427,25 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
                 "credentialExpiresAt",
             ],
         ),
-        // `session_list`'s real `structuredContent` is a bare JSON array of
-        // `SessionState` — `Vec<SessionState>` serialized directly, with no
-        // wrapper key — pinned by `interface_security.rs`'s
-        // `mcp_foreign_session_checks`, which asserts
-        // `structuredContent.as_array()`. Declaring `"type":"object"` here
-        // (to satisfy this task's own blanket
-        // `tools_that_return_structured_content_declare_an_output_schema`)
-        // would be a false contract: an agent validating a real response
-        // against it would reject every one. `session_list` is the one
-        // documented exception to that blanket assertion (see its `budget.rs`
-        // test) rather than wrapping the payload in an object, which would
-        // mean changing the actual wire contract `interface_security.rs`
-        // pins, not just its schema.
-        "session_list" => json!({
-            "type":"array",
-            "items":{"$ref":"#/$defs/SessionState"}
-        }),
+        // MCP types `structuredContent` as an object, so the array is wrapped
+        // under `sessions`. `GET /v1/sessions` still returns a bare array.
+        "session_list" => object(
+            json!({"sessions":{"type":"array","items":{"$ref":"#/$defs/SessionState"}}}),
+            &["sessions"],
+        ),
         "session_create" => output_ref("SessionState"),
         "session_close" => object(
             json!({"closed":{"type":"boolean","const":true}}),
             &["closed"],
         ),
-        // Real shape is `PageState`'s own fields plus `navigationOutcome`
-        // (present whenever `url` was given) and, only when that navigation
-        // did not complete, `cleanupOutcome` and `pageClosed`. The latter
-        // three are declared but not required, matching that conditionality.
+        // `PageState`'s own fields plus `navigationOutcome` (present whenever `url`
+        // was given) and, only if that navigation did not complete, `cleanupOutcome`
+        // and `pageClosed`. Those three are declared but not required.
         //
-        // Inlined into `page_state()`'s own `properties` map rather than
-        // `allOf`-ing a `$ref` to it: in JSON Schema 2020-12,
-        // `additionalProperties` is not annotation-aware across `allOf` —
-        // `PageState`'s own `additionalProperties:false` only ever sees its
-        // own `properties`, never a sibling schema's, so a `$ref`'d
-        // `PageState` next to these three properties would reject
-        // `navigationOutcome` on every navigated open even though the
-        // dispatch (`server.rs`) always inserts it when a URL is given.
-        // `page_state()` has no nested `$ref` of its own, so inlining costs
-        // nothing extra in `$defs`.
+        // Must be inlined into `page_state()`'s `properties`, not `allOf`-ed as a
+        // `$ref`: JSON Schema 2020-12 `additionalProperties` is not annotation-aware
+        // across `allOf`, so `PageState`'s `additionalProperties:false` would reject
+        // `navigationOutcome` on every navigated open.
         "page_open" => {
             let mut schema = page_state();
             merge_properties(
@@ -521,21 +493,10 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         // like every primitive/intent command below, so their real output
         // is `CommandOutcome` plus `workflowId`, not a `PageState`.
         "form_snapshot" => output_ref("FormSnapshot"),
-        // Every other tool (~30 of them: every primitive/intent command plus
-        // `command_execute` itself) submits a command envelope through
-        // `submit_envelope`, which returns the envelope's `CommandOutcome`
-        // with `workflowId` always inserted at the top level. See
-        // `command_outcome_properties` for why this stays self-contained
-        // (no `$ref`, no `$defs`) rather than reusing a shared, fully-typed
-        // definition.
-        //
-        // No per-schema `description` here (there used to be one): it was
-        // identical, byte-for-byte, across all ~31 of these tools' own
-        // self-contained output schemas — nothing MCP requires and nothing
-        // any test reads, just 210 bytes replicated 31 times. The tool-level
-        // `description` (`tool_description`, `server.rs`) already explains
-        // the behaviour in prose; this comment carries the schema-level
-        // rationale instead.
+        // Every other tool (~30) submits a command envelope through `submit_envelope`,
+        // which returns the envelope's `CommandOutcome` with `workflowId` inserted at
+        // the top level. Stays self-contained (no `$ref`, no `$defs`) for the reason
+        // given on `command_outcome_properties`.
         _ => object(
             {
                 let mut properties = command_outcome_properties();
@@ -546,13 +507,10 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         ),
     };
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
-    // `definitions()`'s `Evidence` keeps the full, fully-fielded union so
-    // validation and the drift guard see the truth (see the comment there),
-    // but that fidelity alone blows the connect budget once reached from an
-    // output schema — see `evidence_variant_tags`. Patch a copy of the table
-    // down to the tag-only projection before resolving what this output
-    // schema can reach, the same technique `advertised_tool_schema` uses to
-    // narrow `command_execute` without disturbing `definitions()` itself.
+    // `definitions()` keeps the full `Evidence` union for validation, but reaching it
+    // from an output schema blows the connect budget. Patch a copy of the table down to
+    // the tag-only projection before resolving reachability, leaving `definitions()`
+    // itself untouched.
     let mut patched = definitions();
     let patched = patched.as_object_mut().expect("definitions is an object");
     patched.insert(
@@ -566,11 +524,9 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
     schema
 }
 
-/// A top-level schema whose entire value equals one named definition. JSON
-/// Schema 2020-12 treats `$ref` as an ordinary applicator (unlike draft-4,
-/// where a sibling `type` would be ignored), so `type` and `$ref` both apply
-/// here — satisfying the blanket "every outputSchema has `type: object`"
-/// requirement without inventing a wrapper key the real payload never has.
+/// A top-level schema whose entire value equals one named definition. JSON Schema
+/// 2020-12 treats `$ref` as an ordinary applicator, so a sibling `type` still applies,
+/// satisfying "every outputSchema has `type: object`" without a wrapper key.
 fn output_ref(def_name: &str) -> Value {
     json!({"type":"object","$ref":format!("#/$defs/{def_name}")})
 }
@@ -616,28 +572,20 @@ fn merge_properties(properties: &mut Value, extra: Value) {
     target.extend(extra);
 }
 
-/// Emits only the definitions a tool can actually reach.
+/// Emits only the definitions a tool can actually reach; a full `$defs` block on every
+/// schema pushes `tools/list` past the frame cap.
 ///
-/// Every schema used to carry the complete `$defs` block, so zero-argument
-/// tools like `runtime_info` paid for `AccessibilityNode` (32 inlined depth
-/// levels) and the full command union. Across a full-capability catalog that
-/// pushed `tools/list` past the frame cap. `validate` resolves `$ref` against
-/// `root.$defs` and fails closed on a missing target, so the closure must be
-/// transitive — a partial one would reject valid arguments rather than
-/// silently accept invalid ones.
+/// The closure must stay transitive: `validate` resolves `$ref` against `root.$defs` and
+/// fails closed on a missing target, so a partial closure rejects valid arguments.
 fn reachable_definitions(schema: &Value) -> Value {
     let all = definitions();
     let all = all.as_object().expect("definitions is an object");
     reachable_definitions_from(schema, all)
 }
 
-/// Same closure walk as [`reachable_definitions`], but sourced from an
-/// explicit definitions map rather than the shared [`definitions()`] table.
-///
-/// [`advertised_tool_schema`] uses this with a locally patched copy of the
-/// table so it can narrow what `command_execute` advertises without
-/// disturbing [`definitions()`] itself, which [`tool_schema`] still relies on
-/// unmodified for edge validation.
+/// Same closure walk as [`reachable_definitions`], sourced from an explicit definitions
+/// map so a caller can narrow what it advertises without disturbing [`definitions()`],
+/// which [`tool_schema`] needs unmodified for edge validation.
 fn reachable_definitions_from(schema: &Value, all: &Map<String, Value>) -> Value {
     let mut pending = BTreeSet::new();
     collect_refs(schema, &mut pending);
@@ -678,8 +626,7 @@ fn collect_refs(value: &Value, found: &mut BTreeSet<String>) {
     }
 }
 
-/// Test-only accessor for the full `definitions()` table — see
-/// `mcp_gateway::definitions_for_test`.
+/// Test-only accessor for the full `definitions()` table.
 pub(crate) fn definitions_for_test() -> Value {
     definitions()
 }
@@ -753,26 +700,17 @@ fn definitions() -> Value {
             "decision":{"$ref":"#/$defs/RecoveryDecision"}
         }), &["recordedAt","decision"]),
         "WorkflowCheckpoint": workflow_checkpoint(),
-        // --- Output-only definitions (Task 6) ---------------------------------
-        // Everything below here describes `structuredContent`, never a tool
-        // argument. `Evidence` was deleted from this table by Task 3 because
-        // `checkpoint_save` stopped accepting it as input; it is restored here,
-        // full and fully-fielded (`types::Evidence` field-for-field), so
-        // validation and the drift guard both see the truth, and so
-        // `recovery_decisions()`'s `$ref:"#/$defs/Evidence"` (used by
-        // `RecoveryDecision`, now reachable from `workflow_recover`'s output)
-        // resolves instead of silently dropping out of `$defs`. Every
-        // *advertised* output schema resolves a byte-frugal, tag-only
-        // projection instead — see `evidence_variant_tags` and
-        // `tool_output_schema`'s patched copy of this table — so this full
-        // union itself never reaches an actual `tools/list` payload.
+        // --- Output-only definitions ------------------------------------------
+        // Everything below describes `structuredContent`, never a tool argument.
+        // `Evidence` is kept here full and field-for-field with `types::Evidence` so
+        // validation and the drift guard see the truth, and so
+        // `recovery_decisions()`'s `$ref:"#/$defs/Evidence"` resolves. Advertised
+        // output schemas resolve the tag-only `evidence_variant_tags` projection
+        // instead, so this union never reaches a `tools/list` payload.
         //
-        // `CommandOutcome` itself has no named definition: ~31 tools submit a
-        // command envelope and would each carry it (see `command_execute`'s
-        // budget test), so `tool_output_schema`'s fallback arm and `page_open`
-        // both inline `command_outcome_properties()` instead of `$ref`-ing a
-        // shared one — self-contained and paid for once per tool rather than
-        // once per tool plus a `$defs` entry that only saves a few bytes.
+        // `CommandOutcome` has no named definition: ~31 tools submit a command
+        // envelope and would each carry the `$ref`, so `tool_output_schema`'s fallback
+        // arm and `page_open` inline `command_outcome_properties()` instead.
         "Evidence": {"oneOf": evidence_variants()},
         "SessionState": session_state(),
         "PageState": page_state(),
@@ -797,14 +735,11 @@ fn workflow_checkpoint() -> Value {
                 "recoveryClass":{"type":"string","enum":["replayable","reconciliable","boundary"]},
                 "invariants":array(json!({"$ref":"#/$defs/CheckpointInvariant"}), MAX_COLLECTION_ITEMS),
                 "replayableInputs":array(string(0, MAX_STRING_BYTES), MAX_COLLECTION_ITEMS),
-                // `checkpoint_save` resolves evidence from `evidenceRefs` server-side
-                // (`RecoveryCoordinator::save_verified` overwrites this field
-                // unconditionally), and recovery history is only ever appended by
-                // the runtime's own recovery flow — never authored by the caller of
-                // a fresh checkpoint. Both are forced empty here, same as
-                // `recoveryReceipts` below, which drops `Evidence` (and
-                // `RecoveryDecision`/`RecoveryRecord`) out of this tool's reachable
-                // `$defs` entirely.
+                // Caller-authored values are never honored: `RecoveryCoordinator::
+                // save_verified` overwrites `evidence` from `evidenceRefs`, and the
+                // runtime alone appends recovery history. Forcing all three empty also
+                // drops `Evidence`/`RecoveryDecision`/`RecoveryRecord` out of this
+                // tool's reachable `$defs`.
                 "evidence":{"type":"array","maxItems":0},
                 "recoveryHistory":{"type":"array","maxItems":0},
                 "recoveryReceipts":{"type":"array","maxItems":0},
@@ -1615,40 +1550,26 @@ fn recovery_decisions() -> Vec<Value> {
     ]
 }
 
-// --- Output-only schema helpers (Task 6) ----------------------------------
+// --- Output-only schema helpers -------------------------------------------
 //
-// Everything below describes `structuredContent` — what a tool call actually
-// returns — never a tool argument. Only `tool_output_schema` reads these.
+// Everything below describes `structuredContent`, never a tool argument. Only
+// `tool_output_schema` reads these.
 
-/// A flattened, self-contained approximation of `types::CommandOutcome`
-/// (`tag = "status"`, 7 variants) — every field any variant carries, at the
-/// top level, all optional except `status`/`commandId`. Used inline
-/// (`object(command_outcome_properties(), …)`) everywhere a `CommandOutcome`
-/// needs to appear in an output schema, rather than a shared named
-/// definition: ~31 tools submit a command envelope and would each carry the
-/// $ref, and the fully-typed union (`status`-discriminated, each variant
-/// with its own required/`error`/`retryAfterMs`/`evidence` shape) costs
-/// ~3.8 KB on its own — replicated that many times it alone blows the
-/// connect budget. `error`/`evidence` are left as generic objects for the
-/// same reason `CheckpointRecord` and the `_` fallback below keep them
-/// generic: full fidelity belongs on `workflow_recover`'s `RecoveryDecision`,
-/// the one low-multiplicity path that models `Evidence` for real.
+/// A flattened, self-contained approximation of `types::CommandOutcome` (`tag =
+/// "status"`, 7 variants): every field any variant carries, at the top level, all
+/// optional except `status`/`commandId`. Inlined rather than shared as a named
+/// definition because the fully-typed union costs ~3.8 KB and ~31 tools would each
+/// carry it, which alone exceeds the connect budget. `error`/`evidence` stay generic
+/// objects; full `Evidence` fidelity lives only on `workflow_recover`'s
+/// `RecoveryDecision`.
 ///
-/// `object()` always closes the schema (`additionalProperties:false`), so
-/// every field a real `CommandOutcome` can carry has to be declared here —
-/// `priorAttemptId`/`attemptId` (only `status: "restarted"` carries them)
-/// used to be left out to save bytes, which meant a closed schema rejecting
-/// the one real value it exists to describe. Declared now; still optional,
-/// since only one status carries them.
+/// `object()` closes the schema (`additionalProperties:false`), so every field a real
+/// `CommandOutcome` can carry must be declared here, including `priorAttemptId` and
+/// `attemptId` (optional, only `status: "restarted"` carries them).
 ///
-/// `artifactRegistration` is a separate top-level key `submit_envelope`
-/// (`server.rs`) inserts via `ArtifactAdmission::apply_to_mcp_value`
-/// (`resources.rs`) whenever screenshot/download evidence was attempted and
-/// did not fully admit — not part of `types::CommandOutcome` itself, but
-/// still a real field on the wire for any of these ~31 tools. Left generic
-/// (`{"type":"object"}`) for the exact same reason `error`/`evidence` are:
-/// its full 7-property shape, inlined and closed, costs real bytes times 31
-/// tools for a field most calls never carry at all.
+/// `artifactRegistration` is not part of `types::CommandOutcome`: `submit_envelope`
+/// inserts it via `ArtifactAdmission::apply_to_mcp_value` whenever screenshot or
+/// download evidence did not fully admit. Kept generic for the same byte reason.
 fn command_outcome_properties() -> Value {
     json!({
         "status":{"type":"string","enum":["completed","retryableFailure","needsReconciliation","policyDenied","resourceExhausted","restarted","failed"]},
@@ -1663,40 +1584,18 @@ fn command_outcome_properties() -> Value {
     })
 }
 
-/// A byte-frugal projection of [`evidence_variants()`]'s full, fully-fielded
-/// union: every `kind` tag it actually serializes, no more and no fewer, but
-/// none of its fields.
+/// A byte-frugal projection of [`evidence_variants()`]: every `kind` tag it serializes,
+/// none of its fields. A field-by-field replica puts `tools/list` past the 128 KiB frame
+/// budget (`tools_list_stays_within_the_connect_budget`, `tests/budget.rs`) as soon as a
+/// single tool reaches it.
 ///
-/// Reachable only from the recovery-path outputs (`CheckpointRecord`,
-/// `RecoveryDecision`) — see the comment on `Evidence` in `definitions()` —
-/// yet even after every field that referenced a shared definition
-/// (`TargetSpec`, `WaitCondition`, `AccessibilityNode`, `ExecutionRecord`,
-/// `CookieRecord`, the whole form-control subsystem) was inlined down to a
-/// generic object, a field-by-field replica of every variant still put
-/// `tools/list` well past the hard 128 KiB frame budget
-/// (`tools_list_stays_within_the_connect_budget` in `tests/budget.rs`) once
-/// it was reachable from even a single tool. Each variant here keeps only
-/// its `kind` — everything the drift guard in `tests/budget.rs`
-/// (`evidence_variants_match_the_wire_type`) checks, and the one piece of
-/// information this schema exists to guarantee an agent doesn't have to call
-/// the tool to learn.
+/// `types::Evidence` is `#[serde(tag = "kind")]`, so real fields sit flat next to `kind`
+/// and never under a `data` key. The schema must therefore stay OPEN: declare and require
+/// `kind` only, leave `additionalProperties` unset, so real fields pass through. A closed
+/// `{kind, data}` shape rejects every real evidence object.
 ///
-/// `types::Evidence` is `#[serde(tag = "kind", rename_all_fields =
-/// "camelCase")]` — an internally tagged enum, so every real field
-/// (`url`/`title`/…) sits FLAT at the top level next to `kind`, never
-/// wrapped in a `data` key. A closed, `tagged_fields`-built `{kind, data}`
-/// shape (the original version of this function) would reject every real
-/// evidence object twice over — `data` absent, every real field
-/// "additional" — so this builds a plain, OPEN object schema instead: only
-/// `kind` is declared and required, `additionalProperties` is left unset
-/// (permissive), so whatever fields the real variant carries pass through
-/// unvalidated. That is also smaller than the old `{kind, data:{}}` shape.
-///
-/// Built by transforming [`evidence_variants()`] rather than a second
-/// hand-written tag list: a hand-maintained second list is exactly the drift
-/// this schema has already paid for twice (`Configuration`,
-/// `BrowserExecution`, and `JavaScriptResult` each silently fell out of one
-/// before; `harArtifact` would have been a third).
+/// Derived from [`evidence_variants()`] rather than a second hand-written tag list, which
+/// would drift.
 fn evidence_variant_tags() -> Vec<Value> {
     evidence_variants()
         .into_iter()
@@ -1773,12 +1672,9 @@ fn page_state() -> Value {
     )
 }
 
-/// The persisted `types::WorkflowCheckpoint` as `checkpoint_save` and
-/// `recovery_status` actually return it — distinct from the `WorkflowCheckpoint`
-/// *input* definition (`workflow_checkpoint()`), which forces
-/// `evidence`/`recoveryHistory`/`recoveryReceipts` to empty arrays because the
-/// caller may not author them. The runtime populates all three before
-/// returning, so the output shape says so.
+/// The persisted `types::WorkflowCheckpoint` as `checkpoint_save` and `recovery_status`
+/// return it. Distinct from the input definition (`workflow_checkpoint()`), which forces
+/// `evidence`/`recoveryHistory`/`recoveryReceipts` empty; the runtime populates all three.
 fn checkpoint_record() -> Value {
     object(
         json!({
@@ -1789,14 +1685,9 @@ fn checkpoint_record() -> Value {
             "recoveryClass":{"type":"string","enum":["replayable","reconciliable","boundary"]},
             "invariants":array(json!({"$ref":"#/$defs/CheckpointInvariant"}), MAX_COLLECTION_ITEMS),
             "replayableInputs":array(string(0, MAX_STRING_BYTES), MAX_COLLECTION_ITEMS),
-            // `evidence` and `recoveryHistory` are deliberately generic rather
-            // than `Evidence`/`RecoveryRecord` $refs: those pull in the
-            // accessibility and form-control subsystems, which would
-            // otherwise be duplicated into both `checkpoint_save` and
-            // `recovery_status`'s own `$defs` on top of the one place this
-            // task keeps the fully-typed `Evidence` union —
-            // `workflow_recover`'s `RecoveryDecision` (see the comment on
-            // `Evidence` in `definitions()`).
+            // Generic rather than `Evidence`/`RecoveryRecord` `$ref`s: those pull the
+            // accessibility and form-control subsystems into both `checkpoint_save`
+            // and `recovery_status`'s `$defs`.
             "evidence":array(
                 json!({"type":"object","required":["kind"],"properties":{"kind":{"type":"string"}}}),
                 MAX_EVIDENCE_ITEMS
@@ -1813,9 +1704,8 @@ fn checkpoint_record() -> Value {
                 MAX_COLLECTION_ITEMS
             ),
             // `RecoveryReceipt` also carries a `CommandOutcome`, a `SkillOutcome`,
-            // and a `SkillDecision` — none modeled here. Kept generic rather than
-            // dragging in a third type subsystem for a field an agent
-            // reconciling a workflow rarely needs at this depth.
+            // and a `SkillDecision`, none modeled here; kept generic to avoid
+            // dragging in a third type subsystem.
             "recoveryReceipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
             "createdAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64}
         }),
@@ -1861,11 +1751,9 @@ fn form_snapshot_schema() -> Value {
     )
 }
 
-/// Must match `types::FormDescriptor`. `groups`/`validity` are generic
-/// rather than `FormGroup`/`FormValidity` `$ref`s — both are small, but
-/// `form_snapshot` is already the single most expensive tool descriptor in
-/// the connect budget, and neither carries information a `FormControl`'s own
-/// `id`/`groupId`/`validity` fields don't already surface.
+/// Must match `types::FormDescriptor`. `groups`/`validity` stay generic rather than
+/// `FormGroup`/`FormValidity` `$ref`s: `form_snapshot` is the most expensive tool
+/// descriptor in the connect budget, and `FormControl` already surfaces the same fields.
 fn form_descriptor() -> Value {
     object(
         json!({
@@ -1912,10 +1800,9 @@ fn form_control() -> Value {
             "placeholder":nullable(string(0, 2048)),
             "autocomplete":nullable(string(0, 2048)),
             "state":{"$ref":"#/$defs/FormControlState"},
-            // Generic rather than `$ref:"#/$defs/FormControlConstraints"`:
-            // the 11-field constraint object is rarely what an agent needs
-            // to decide *how* to fill a control — `controlKind` and
-            // `validity` (kept fully typed) carry more of that weight.
+            // Generic rather than `$ref:"#/$defs/FormControlConstraints"`: the
+            // 11-field constraint object costs bytes that `controlKind` and
+            // `validity`, both kept fully typed, already earn.
             "constraints":{"type":"object"},
             "validity":{"$ref":"#/$defs/FormControlValidity"},
             "options":array(json!({"$ref":"#/$defs/FormOption"}), 512),
@@ -1944,11 +1831,9 @@ fn form_control() -> Value {
     )
 }
 
-/// Must match `types::FormControlTarget`. `framePath`/`shadowPath` (arrays
-/// of `SemanticTargetSegment`) are generic rather than a `$ref`: they are
-/// rarely populated (most controls are not cross-frame) and the shape is
-/// the same three scalar fields as this struct's own `role`/`accessibleName`
-/// /`ordinal`.
+/// Must match `types::FormControlTarget`. `framePath`/`shadowPath` (arrays of
+/// `SemanticTargetSegment`) stay generic rather than a `$ref`: rarely populated, and the
+/// same three scalar fields as `role`/`accessibleName`/`ordinal` here.
 fn form_control_target() -> Value {
     object(
         json!({
@@ -2087,7 +1972,7 @@ fn nonempty_array(items: Value, max: usize) -> Value {
 fn nullable(schema: Value) -> Value {
     json!({"oneOf":[schema,{"type":"null"}]})
 }
-/// An unconstrained schema (no `type`, `oneOf`, `const`, or `enum`) — `validate` accepts
+/// An unconstrained schema (no `type`, `oneOf`, `const`, or `enum`); `validate` accepts
 /// any JSON value against it. Used for `Evidence::JavaScriptResult.value`, which carries
 /// an arbitrary `serde_json::Value` produced by evaluated JavaScript.
 fn any_value() -> Value {
@@ -2100,13 +1985,9 @@ fn positive_number() -> Value {
     json!({"type":"number","exclusiveMinimum":0.0,"maximum":1000000000.0})
 }
 
-/// Why a tool argument was rejected, and where.
-///
-/// Callers used to get a bare `"Invalid params"` with no `data`, which gives an
-/// agent nothing to repair: the schemas are large and every failure looked
-/// identical. `pointer` is a JSON Pointer into the arguments; `constraint`
-/// names the keyword that failed. Neither ever carries the offending value, so
-/// this leaks no more than the published schema already does.
+/// Why a tool argument was rejected, and where. `pointer` is a JSON Pointer into the
+/// arguments; `constraint` names the keyword that failed. Neither ever carries the
+/// offending value, so this leaks no more than the published schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaViolation {
     pub(crate) pointer: String,
@@ -2137,17 +2018,10 @@ fn validate(root: &Value, schema: &Value, value: &Value) -> Validated {
     validate_at(root, schema, value, 0, "")
 }
 
-/// Bounds validator recursion independently of schema shape.
-///
-/// Schemas used to bound themselves: `AccessibilityNode` inlined 32 depth
-/// levels, so recursion stopped when the schema ran out. That cost ~40 KiB in
-/// every tool carrying `Evidence`. The definition is now self-referential, so
-/// the guard has to live here — without it a deeply nested argument within the
-/// 256 KiB input cap would exhaust the stack.
-///
-/// Generous enough for the deepest legitimate argument (a `checkpoint_save`
-/// accessibility tree, which spends two levels per node) and far below any
-/// stack concern.
+/// Bounds validator recursion independently of schema shape. `AccessibilityNode` is
+/// self-referential, so without this guard a deeply nested argument within the 256 KiB
+/// input cap would exhaust the stack. Sized above the deepest legitimate argument (a
+/// `checkpoint_save` accessibility tree, two levels per node).
 const MAX_VALIDATION_DEPTH: usize = 128;
 
 fn validate_at(
@@ -2337,14 +2211,11 @@ fn validate_string(schema: &Value, value: &str, pointer: &str) -> Validated {
     {
         return Err(SchemaViolation::at(pointer, "format"));
     }
-    // `pattern` does NOT evaluate the declared regex. There is no regex engine
-    // in this crate, and the only `pattern` any schema declares is `sha256()`'s
-    // `^[0-9a-f]{64}$` (the length half of which `minLength`/`maxLength` above
-    // already enforce), so this hardcodes that one expression's character
-    // class. Adding a second, different `pattern` anywhere would silently get
-    // this check instead of the one it declared —
-    // `budget.rs::the_only_declared_pattern_is_the_one_the_validator_implements`
-    // fails the build if that happens.
+    // `pattern` does NOT evaluate the declared regex: this crate has no regex engine, so
+    // the character class of the one declared pattern, `sha256()`'s `^[0-9a-f]{64}$`, is
+    // hardcoded here. A second, different `pattern` would silently get this check;
+    // `budget.rs::the_only_declared_pattern_is_the_one_the_validator_implements` fails
+    // the build if one is added.
     if schema.get("pattern").is_some()
         && !value
             .bytes()
@@ -2383,11 +2254,8 @@ fn validate_number(schema: &Value, number: Option<f64>, pointer: &str) -> Valida
     Ok(())
 }
 
-/// Self-referential rather than depth-inlined.
-///
-/// Inlining 32 levels made this definition ~40 KiB, which every tool carrying
-/// `Evidence` paid for. Recursion is now bounded by `MAX_VALIDATION_DEPTH` in
-/// the validator instead of by the shape of the schema.
+/// Self-referential rather than depth-inlined; depth-inlining costs ~40 KiB per tool
+/// carrying `Evidence`. Recursion is bounded by `MAX_VALIDATION_DEPTH`, not by shape.
 fn accessibility_node() -> Value {
     let mut schema = object(
         json!({

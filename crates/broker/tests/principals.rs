@@ -269,7 +269,7 @@ async fn principals_do_not_share_the_first_callers_binding() {
         &["session:read", "session:write"],
     )
     .await;
-    // Admin touches the runtime first (this used to freeze the binding).
+    // Admin touches the runtime first.
     let first = app
         .clone()
         .oneshot(
@@ -314,9 +314,8 @@ async fn create_session(app: &axum::Router, bearer: &str) -> SessionId {
     serde_json::from_value(json["id"].clone()).expect("session response carries an id")
 }
 
-/// A command envelope that references a page which was never opened. The runtime's own
-/// validation rejects it deterministically (`page does not exist`), which is enough to
-/// exercise idempotency replay without needing a real Chromium worker.
+/// A command envelope referencing a page that was never opened. Runtime validation rejects
+/// it deterministically, so idempotency replay is exercised without a Chromium worker.
 fn inspect_envelope(session_id: SessionId) -> CommandEnvelope {
     CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
@@ -352,17 +351,10 @@ async fn submit_command(
     )
 }
 
-/// Regression test for the cached-runtime fix: idempotency replay/conflict detection
-/// only works if the same `AuthenticatedRuntime` (and thus the same `IdempotencyStore`)
-/// serves a principal's requests across the whole HTTP call, not just within one call.
-///
-/// Per `interface_core::idempotency`, a non-retryable outcome (like the validation
-/// failure this test triggers) is retained by the store: a same-key/same-digest replay
-/// returns the stored outcome, and a same-key/different-digest request conflicts
-/// (`InterfaceErrorCode::IdempotencyConflict`, HTTP 409). The conflict case is the
-/// decisive check here — it is observable *only* if the first request's reservation is
-/// still present when the second request runs, which requires the store to have
-/// survived between two separate HTTP round trips.
+/// One `AuthenticatedRuntime`, and thus one `IdempotencyStore`, must serve a principal
+/// across separate HTTP requests. Per `interface_core::idempotency` a non-retryable outcome
+/// is retained: same key + same digest replays it, same key + different digest is a 409
+/// `IdempotencyConflict`.
 #[tokio::test]
 async fn idempotent_command_replay_persists_and_is_scoped_per_principal() {
     let (app, _authority, admin_bearer) = app_with_admin(16).await;
@@ -387,31 +379,23 @@ async fn idempotent_command_replay_persists_and_is_scoped_per_principal() {
     let key = "shared-idempotency-key-across-principals";
     let envelope = inspect_envelope(session_a.clone());
 
-    // First submission fails validation (page was never opened) with a non-retryable
-    // error, which the idempotency store retains for future replay.
+    // Non-retryable validation failure; the idempotency store retains it for replay.
     let (status1, body1) = submit_command(&app, &bearer_a, &envelope, key).await;
     assert_eq!(status1, StatusCode::UNPROCESSABLE_ENTITY, "{body1}");
 
-    // Replay: identical key, identical envelope (same canonical digest) -> the stored
-    // outcome is returned verbatim.
+    // Same key, same canonical digest: the stored outcome is returned verbatim.
     let (status2, body2) = submit_command(&app, &bearer_a, &envelope, key).await;
     assert_eq!(status2, status1);
     assert_eq!(body2, body1);
 
-    // Same key, a DIFFERENT envelope (fresh command id -> different canonical digest)
-    // under the SAME principal: this can only produce a 409 if the first request's
-    // reservation is still live, i.e. the IdempotencyStore genuinely persisted across
-    // separate HTTP requests. Before the fix (a fresh AuthenticatedRuntime, and thus a
-    // fresh IdempotencyStore, built on every bind call) this reservation would never
-    // survive to be observed here — it would just execute independently.
+    // Same key, different digest, same principal: 409 only if the first reservation is
+    // still live, i.e. the IdempotencyStore persisted across separate HTTP requests.
     let mismatched = inspect_envelope(session_a);
     let (status3, body3) = submit_command(&app, &bearer_a, &mismatched, key).await;
     assert_eq!(status3, StatusCode::CONFLICT, "{body3}");
     assert_eq!(body3["error"]["code"], "idempotencyConflict");
 
-    // Principal B reusing the exact same idempotency-key string on its own session is
-    // unaffected: each principal is bound to its own cached runtime / IdempotencyStore
-    // instance, so there is no shared keyspace to collide in.
+    // Keyspace is per principal: B reusing the same key string cannot collide with A.
     let envelope_b = inspect_envelope(session_b);
     let (status4, body4) = submit_command(&app, &bearer_b, &envelope_b, key).await;
     assert_eq!(status4, StatusCode::UNPROCESSABLE_ENTITY, "{body4}");
@@ -436,11 +420,8 @@ fn upload_files_envelope(session_id: SessionId) -> CommandEnvelope {
     }
 }
 
-/// Security regression: `submit_command` (`POST /v1/commands`) authorizes only the coarse
-/// `browser:mutate` capability via `InterfaceOperation::SubmitCommand` before this fix, so
-/// a principal holding `browser:mutate` (but not `file:upload`) could smuggle a privileged
-/// `UploadFiles` primitive through the HTTP surface. This exercises the fix end-to-end
-/// through the broker's real HTTP route, not just the sdk-core unit boundary.
+/// `POST /v1/commands` must require `file:upload` for an `UploadFiles` primitive, not just
+/// the coarse `browser:mutate` capability.
 #[tokio::test]
 async fn upload_files_over_http_requires_file_upload_capability_not_just_browser_mutate() {
     let (app, _authority, admin_bearer) = app_with_admin(8).await;

@@ -1,8 +1,7 @@
 //! Bounded, synchronous shaping of JavaScript evaluation results.
 //!
-//! This crate has no I/O and no async surface: it exists to keep result-size
-//! policy (how big a `JavaScriptResult` evidence payload is allowed to be) out
-//! of the worker implementations that produce the raw value.
+//! No I/O and no async surface. Result-size policy for `JavaScriptResult`
+//! evidence payloads lives here, not in the workers producing the raw value.
 
 /// Serialize `value` and, if it fits within `max_bytes`, return it unchanged
 /// with `truncated = false`.
@@ -26,9 +25,8 @@ pub fn bound_result(value: serde_json::Value, max_bytes: usize) -> (serde_json::
 }
 
 fn truncated_marker(serialized: &str, max_bytes: usize) -> serde_json::Value {
-    // `max_bytes` is a char budget here, not a byte-exact cutoff: we take a
-    // prefix on a char boundary so multi-byte UTF-8 sequences are never
-    // split, then flag the result as truncated regardless.
+    // `max_bytes` is a char budget here, not a byte-exact cutoff: the prefix
+    // stops on a char boundary so multi-byte UTF-8 is never split.
     let prefix: String = serialized.chars().take(max_bytes).collect();
     serde_json::Value::String(format!("{prefix}…[truncated]"))
 }
@@ -60,8 +58,8 @@ mod tests {
 
     #[test]
     fn boundary_exactly_at_max_is_not_truncated() {
-        // `serde_json::to_string(&json!("aa"))` serializes to `"aa"` (4 bytes
-        // including quotes) — pick max_bytes to match exactly.
+        // `serde_json::to_string(&json!("aa"))` serializes to `"aa"`, 4 bytes
+        // including quotes: max_bytes matches exactly.
         let value = json!("aa");
         let serialized_len = serde_json::to_string(&value).unwrap().len();
         let (result, truncated) = bound_result(value.clone(), serialized_len);

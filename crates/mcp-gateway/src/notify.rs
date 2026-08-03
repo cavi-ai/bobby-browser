@@ -10,31 +10,16 @@
 //! Both are JSON-RPC *notifications*: they carry no `id`. A frame with an `id`
 //! is a request, and a client will try to answer it.
 //!
-//! # Why this is not a single broadcast channel
+//! Events are never re-broadcast through a lossy ring: the event half of a
+//! subscription is a per-subscriber cursor read off `EventStore`, the same call
+//! `GET /v1/events` and the `events_read` tool make, with the same gap
+//! semantics. The broadcast carries only the stateless control frames.
 //!
-//! The obvious shape — fan every frame out through one bounded
-//! `tokio::sync::broadcast` — would build a second, weaker lag mechanism on top
-//! of the one `EventStore` already has. `EventStore` is a cursor-addressed
-//! retained log: `read_after_for` blocks until the principal has an event after
-//! the reader's cursor, and reports an `EventGap` when retention has already
-//! evicted past it. Re-broadcasting those events through a lossy ring would mean
-//! a subscriber could fall behind for a reason the store knows nothing about,
-//! with no cursor to report and no way to resynchronize.
-//!
-//! So the event half of a subscription is a per-subscriber cursor read straight
-//! off `EventStore` — the same call `GET /v1/events` and the `events_read` tool
-//! make, with the same gap semantics — and the broadcast carries only the rare,
-//! stateless control frames (`tools/list_changed`), where every subscriber must
-//! see the same thing and there is no cursor to keep.
-//!
-//! # Principal scoping
-//!
-//! A [`NotificationSink`] is built from the owning `Server`'s own
-//! `CapabilityHandle`, and the only read path it can reach is
+//! Principal scoping: a [`NotificationSink`] is built from the owning `Server`'s
+//! own `CapabilityHandle`, and the only read path it can reach is
 //! `EventStore::read_after_for`, which filters to that principal's audience.
-//! There is no constructor that takes an arbitrary principal and no unscoped
-//! read anywhere in this module: a subscription cannot be pointed at another
-//! principal's events even by mistake.
+//! Keep it that way: no constructor taking an arbitrary principal, no unscoped
+//! read anywhere in this module.
 
 use std::collections::VecDeque;
 
@@ -81,22 +66,17 @@ impl NotificationSink {
         }
     }
 
-    /// Opens a subscription, positioned at the store's tail: it delivers every
-    /// event appended for this principal from this moment on, and no history.
+    /// Opens a subscription positioned at the store's tail: every event appended
+    /// for this principal from this moment on, and no history.
     ///
-    /// Starting at [`EventCursor::ZERO`] instead is not a matter of taste, it is
-    /// broken. `EventStore`'s `HistoryLost` test compares a reader's cursor
-    /// against the *store-wide* front of retention, and the log is shared by
-    /// every principal — so after `max_event_retention` appends across all of
-    /// them (16,384 by default) a cursor-`ZERO` subscription gaps on its very
-    /// first read. Since MCP gives the client no way to name a resume cursor,
-    /// reconnecting reproduces it identically: on any broker that has been up
-    /// long enough, every client would get one gap frame and never a runtime
-    /// event again.
+    /// Must not start at [`EventCursor::ZERO`]. `HistoryLost` is judged against
+    /// the *store-wide* front of retention and the log is shared by every
+    /// principal, so after `max_event_retention` appends (16,384 by default) a
+    /// cursor-`ZERO` subscription gaps on its first read, unrecoverably: MCP
+    /// gives the client no way to name a resume cursor.
     ///
-    /// Seeding here rather than on the first `recv` is deliberate: an event
-    /// appended between `subscribe` and the first `recv` must still be
-    /// delivered.
+    /// Seed here, not on the first `recv`, so an event appended in between is
+    /// still delivered.
     pub async fn subscribe(&self) -> NotificationStream {
         NotificationStream {
             control: self.control.subscribe(),
@@ -119,11 +99,10 @@ impl NotificationSink {
 
 /// One client's view of a [`NotificationSink`].
 ///
-/// Held by the transport, never by the `Server`: over streamable HTTP that is
-/// what makes a capability rotation observable. `McpServers` replaces the
-/// cached `Server` on a rotated handle, the old sink's sender drops, and this
-/// stream delivers the buffered `tools/list_changed` and then ends — telling
-/// the client to reconnect rather than silently serving a stale tool list.
+/// Must be held by the transport, never by the `Server`: that is what makes a
+/// capability rotation observable. `McpServers` replaces the cached `Server` on
+/// a rotated handle, the old sink's sender drops, and this stream delivers the
+/// buffered `tools/list_changed` and then ends.
 pub struct NotificationStream {
     control: broadcast::Receiver<Value>,
     events: EventStore,
@@ -140,10 +119,9 @@ pub struct NotificationStream {
 impl NotificationStream {
     /// Drops the event half of this subscription, leaving control frames only.
     ///
-    /// Used by a transport that authenticated a principal which is not
-    /// authorized for `SubscribeEvents`: the MCP channel still has to exist
-    /// (clients open it before they will POST) but it must not carry event data
-    /// the `events_read` tool and `GET /v1/events` would both refuse.
+    /// For a principal not authorized for `SubscribeEvents`: the MCP channel
+    /// still has to exist (clients open it before they will POST) but must not
+    /// carry event data `events_read` and `GET /v1/events` would both refuse.
     pub fn control_only(mut self) -> Self {
         self.events_open = false;
         self
@@ -152,21 +130,16 @@ impl NotificationStream {
     /// The next frame to write to the client, or `None` once the owning
     /// `Server` is gone.
     ///
-    /// Cancel-safe: all three `await`s inside are cancel-safe primitives —
-    /// `broadcast::Receiver::recv`, a cursor-addressed `EventStore` read that
-    /// is re-issued from the same cursor, and `EventStore::latest_cursor`,
-    /// which only reads the tail and is re-issued while `reseek` stays set —
-    /// and frames already decoded are parked in `queued` rather than held
-    /// across an await. Dropping the future mid-poll — which both transports
-    /// do, one in a `select!` and one in a keep-alive `timeout` — loses
-    /// nothing.
+    /// Cancel-safe, and must stay so: both transports drop this future mid-poll.
+    /// All three inner `await`s are cancel-safe primitives re-issued from the
+    /// same cursor, and decoded frames are parked in `queued` rather than held
+    /// across an await.
     pub async fn recv(&mut self) -> Option<Value> {
         loop {
-            // Ahead of the queue drain, not after it: the gap frame queued below
-            // is returned on the very next turn of this loop, and anything
-            // appended between that return and the following `recv` would be
-            // skipped if the cursor were still stale. Re-seeking here keeps the
-            // whole gap-and-resume sequence inside one `recv` call.
+            // Re-seek ahead of the queue drain, not after it, so the whole
+            // gap-and-resume sequence stays inside one `recv` call. Otherwise
+            // anything appended between the gap frame's return and the next
+            // `recv` is skipped on a stale cursor.
             if self.reseek {
                 self.cursor = self.events.latest_cursor().await;
                 self.reseek = false;
@@ -202,19 +175,12 @@ impl NotificationStream {
                                 }
                             }
                             Err(gap) => {
-                                // Retention passed this subscriber. Report it —
-                                // the client must never silently miss events —
-                                // and then re-arm from the store's tail.
-                                //
-                                // Latching the stream closed here instead would
-                                // be terminal for the *process* over stdio:
-                                // `Server::serve` subscribes once, outside its
-                                // loop, and a stdio session cannot reconnect
-                                // the way an HTTP client re-issues `GET
-                                // /v1/mcp`. One transient gap would silence
-                                // notifications for the rest of the session.
-                                // The contract is "you were told what you
-                                // lost", not "you get nothing further".
+                                // Retention passed this subscriber: report the
+                                // gap, then re-arm from the store's tail. Do
+                                // not latch the stream closed instead. Over
+                                // stdio `Server::serve` subscribes once and
+                                // cannot reconnect, so one transient gap would
+                                // silence notifications for the whole session.
                                 queued.push_back(gap_frame(*cursor, gap));
                                 *reseek = true;
                             }
@@ -236,9 +202,8 @@ fn drain_control(
 ) {
     match received {
         Ok(frame) => queued.push_back(frame),
-        // Control frames are never dropped silently. `tools/list_changed` is
-        // the only one and it is idempotent, so re-synthesizing it on lag is
-        // exactly the recovery the client needs.
+        // Control frames are never dropped silently. `tools/list_changed` is the
+        // only one and it is idempotent, so re-synthesize it on lag.
         Err(broadcast::error::RecvError::Lagged(_)) => queued.push_back(tools_list_changed_frame()),
         Err(broadcast::error::RecvError::Closed) => *control_open = false,
     }

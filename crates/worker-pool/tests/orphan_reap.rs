@@ -20,9 +20,8 @@ fn browser_config(root: &std::path::Path) -> BrowserConfig {
     }
 }
 
-/// SAFETY: `pid` was read moments earlier from this test's own PID registry
-/// entry for a worker it just launched; signaling it can at worst fail
-/// harmlessly (ESRCH) if the process already exited.
+/// SAFETY: `pid` comes from this test's own PID registry entry for a worker it
+/// just launched; signaling it can at worst fail with ESRCH.
 unsafe fn force_kill(pid: i32) -> i32 {
     libc::kill(pid, libc::SIGKILL)
 }
@@ -35,13 +34,10 @@ fn chrome_executable() -> std::path::PathBuf {
         })
 }
 
-/// Simulates the exact scenario the orphan-reaping registry exists for: a
-/// prior runtime instance's Chrome process outlives it because that
-/// instance was killed before `close`/`terminate` (and chromiumoxide's
-/// `kill_on_drop`) ever ran. Kills the Chrome child directly — bypassing
-/// `BrowserWorker::close`/`terminate` entirely, the same way a SIGKILL to
-/// the whole process would — then constructs a *new* factory against the
-/// same registry directory and confirms it reaps the leftover process.
+/// A prior runtime instance's Chrome process outlives it, killed before
+/// `close`/`terminate` (and chromiumoxide's `kill_on_drop`) ran. Kills the
+/// Chrome child directly, then constructs a new factory against the same
+/// registry directory and confirms it reaps the leftover process.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn new_factory_reaps_a_chrome_process_orphaned_by_a_prior_instance() {
@@ -70,23 +66,17 @@ async fn new_factory_reaps_a_chrome_process_orphaned_by_a_prior_instance() {
         .parse()
         .unwrap();
 
-    // Bypass `terminate`/`close` entirely: this is what happens to a real
-    // Chrome child when the parent runtime process is SIGKILLed before it
-    // gets a chance to run its own cleanup. This test process remains the
-    // Chrome process's OS-level parent throughout (unlike a genuine orphan,
-    // which gets reparented once its real parent exits), so the killed
-    // process becomes a zombie here rather than disappearing outright —
-    // `kill(pid, 0)` stays "successful" for a zombie's PID until something
-    // reaps it. That's still a faithful proxy for "the process is no
-    // longer doing anything": what matters for this test is that the
-    // signal was delivered, and that a new factory clears the stale
-    // registration regardless of exactly when the OS finishes tearing the
-    // process down.
+    // Bypasses `terminate`/`close`, as when the parent runtime is SIGKILLed
+    // before its cleanup runs. This test process stays the Chrome process's
+    // OS-level parent, so the killed child becomes a zombie and `kill(pid, 0)`
+    // keeps succeeding for its PID until something reaps it. What matters here
+    // is that the signal was delivered and a new factory clears the stale
+    // registration.
     let killed = unsafe { force_kill(pid) };
     assert_eq!(killed, 0, "SIGKILL must be deliverable to our own child");
     tokio::time::sleep(Duration::from_millis(200)).await;
-    // The orphaned entry must still be on disk — nothing ran the worker's
-    // own cleanup path.
+    // The orphaned entry must still be on disk: nothing ran the worker's own
+    // cleanup path.
     assert!(registry_entries[0].exists());
 
     // A brand-new factory, as if the runtime had just restarted, must find

@@ -985,9 +985,8 @@ async fn execute_follow(
     IntentOutcome::Completed { evidence }
 }
 
-/// Interval between re-resolution polls while waiting for a dismissed
-/// obstruction to leave the DOM or become hidden. Mirrors the 25ms cadence
-/// `worker-pool`'s `wait_for` primitive already uses.
+/// Re-resolution poll interval while waiting for a dismissed obstruction to leave the DOM
+/// or become hidden. Matches `worker-pool`'s `wait_for` cadence.
 const DISMISS_POLL_INTERVAL_MS: u64 = 25;
 
 async fn execute_dismiss_obstruction(
@@ -1094,9 +1093,8 @@ async fn execute_dismiss_obstruction(
     let click = ClickCommand {
         selector,
         target: Some(action_target),
-        // DismissObstructionIntent has no caller-supplied boundary flag: it is
-        // always CommandClass::Reconciliable, so the underlying act never
-        // needs a pre-established checkpoint.
+        // DismissObstructionIntent is always CommandClass::Reconciliable, so the act needs
+        // no pre-established checkpoint and takes no caller-supplied boundary flag.
         boundary: false,
         expected_url: None,
     };
@@ -1154,11 +1152,9 @@ async fn execute_dismiss_obstruction(
     IntentOutcome::Completed { evidence }
 }
 
-/// Polls the same target that was just acted on until it is gone — either
-/// removed from the DOM entirely, or still present but no longer visible.
-/// Unlike `WaitCondition::Element`, this checks both `Detached` and `Hidden`
-/// semantics in one pass, since real dismiss affordances do either (remove
-/// the node vs. toggle a hidden class) and callers supply no expectation.
+/// Polls the acted-on target until it is detached or no longer visible. Both are checked in
+/// one pass, unlike `WaitCondition::Element`: dismiss affordances do either and callers
+/// supply no expectation.
 async fn wait_until_gone(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -1188,12 +1184,9 @@ async fn is_gone(page_id: &PageId, browser: &dyn IntentBrowser, target: &TargetS
     }
 }
 
-/// Schema-bounded structured extraction. Each field is resolved and read
-/// independently: a field that cannot be resolved (deterministically, or via
-/// vision when permitted) is recorded as missing in its own `Extraction`
-/// evidence rather than failing the whole command, so this always returns
-/// `Completed` — the caller inspects per-field evidence to see what came
-/// back.
+/// Schema-bounded structured extraction. Each field resolves independently and an
+/// unresolvable field is recorded as missing in its own `Extraction` evidence, so this
+/// always returns `Completed`; the caller inspects per-field evidence.
 async fn execute_extract(
     intent: &IntentCommand,
     page_id: &PageId,
@@ -1243,10 +1236,9 @@ async fn execute_extract(
     IntentOutcome::Completed { evidence }
 }
 
-/// Resolves and reads one `ExtractIntent` field. Always returns evidence
-/// ending in exactly one `Evidence::Extraction` for `field.name`, preceded by
-/// a `Evidence::Resolution` when the field was found (deterministically or
-/// via vision).
+/// Resolves and reads one `ExtractIntent` field. Always returns evidence ending in exactly
+/// one `Evidence::Extraction` for `field.name`, preceded by an `Evidence::Resolution` when
+/// the field was found.
 async fn resolve_extract_field(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -1311,11 +1303,9 @@ async fn resolve_extract_field(
     }
 }
 
-/// Attempts a vision-proposed value for a field the deterministic resolver
-/// could not place, under the same double-gate rule every other intent's
-/// vision fallback uses. Unlike the click-oriented escalation path, success
-/// here never touches the page — the proposal's text becomes the field's
-/// value directly.
+/// Vision-proposed value for a field the deterministic resolver could not place, under the
+/// same double-gate rule as every other vision fallback. Success never touches the page:
+/// the proposal's text becomes the field value.
 async fn escalate_extract_field_with_vision(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -1507,9 +1497,8 @@ async fn stuck_outcome(
     stuck_outcome_with_prior_evidence(report, page_id, browser, vision, Vec::new()).await
 }
 
-/// Same as `stuck_outcome`, but preserves evidence already gathered before the
-/// intent got stuck (e.g. resolution + a completed act that did not have its
-/// intended effect, as with `DismissObstructionIntent`'s post-click check).
+/// Same as `stuck_outcome`, but preserves evidence gathered before the intent got stuck,
+/// such as a resolution plus a completed act that had no effect.
 async fn stuck_outcome_with_prior_evidence(
     report: StuckReport<'_>,
     page_id: &PageId,
@@ -1626,9 +1615,7 @@ async fn escalate_with_vision(
         candidates,
         verification,
     } = report;
-    // `stuck_evidence` documents why the deterministic path failed; callers
-    // only need that record when the intent still fails after vision, so it
-    // is only prefixed onto failure evidence, not the final Completed one.
+    // `stuck_evidence` is prefixed onto failure evidence only, never onto a Completed one.
     let mut base_evidence = prior_evidence.clone();
     base_evidence.push(stuck_evidence);
 
@@ -1785,9 +1772,8 @@ async fn execute_vision_action(
                 )
                 .await
         }
-        // `ExtractValue` is read-only and only ever consumed directly by
-        // `resolve_extract_field`'s own vision path, never by this
-        // act-on-the-page dispatcher.
+        // `ExtractValue` is read-only: `resolve_extract_field` consumes it directly, this
+        // act-on-the-page dispatcher never does.
         VisionAction::ExtractValue { .. } => Err(CommandError {
             code: ErrorCode::VisionAssistFailed,
             message: "extractValue vision action is not an actionable page operation".into(),

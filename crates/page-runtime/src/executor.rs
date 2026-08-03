@@ -193,10 +193,8 @@ impl PageRuntime {
             }
         };
         // Apply the session's policy to the worker before it runs anything.
-        // Workers are pooled and re-leased across sessions, so the previous
-        // lease's settings are still in place here — writing both flags on
-        // every lease is what stops one session's opt-in from leaking into
-        // the next session's worker.
+        // Workers are pooled and re-leased across sessions, so both flags must
+        // be written on every lease or one session's opt-in leaks into the next.
         if let Err(error) = lease
             .worker()
             .set_fingerprint_enabled(gate.fingerprint)
@@ -343,20 +341,13 @@ impl PageRuntime {
             RuntimeCommand::Primitive(_) | RuntimeCommand::Intent(_) => {}
         }
 
-        // Keep the context graph honest about this command before anything can
-        // read from it.
-        //
-        // Ordering matters: invalidate first, record second. A snapshot command
-        // is replayable, so it does not invalidate, and its result is what the
-        // graph should now hold. Any other command may have changed the page,
-        // so whatever the graph held is no longer answerable — and this runs on
-        // the success path *and* nowhere else it could be skipped, because a
-        // command that did not complete cannot be assumed not to have touched
-        // the page either. That is why `finish_failure` invalidates too.
+        // Ordering matters: invalidate first, record second. A replayable
+        // snapshot does not invalidate, and its result is what the graph should
+        // hold; any other command may have changed the page. `finish_failure`
+        // invalidates for the same reason.
         if let Some(page_id) = envelope.page_id.as_ref() {
-            // Record *that* this command produced evidence against this page,
-            // before invalidation. What happened does not go stale when the
-            // page changes — only where things are does — so this outlives the
+            // Recorded before invalidation: which command produced evidence
+            // does not go stale when the page changes, so it outlives the
             // generation bump below.
             if !evidence.is_empty() {
                 self.context()
@@ -370,10 +361,9 @@ impl PageRuntime {
                     truncated,
                 } = item
                 {
-                    // A truncated snapshot is not the page. Recording it would
+                    // A truncated snapshot is not the page: recording it would
                     // let the graph answer "not found" for a control that
-                    // exists past the truncation point, which reads to the
-                    // caller exactly like a control that is genuinely absent.
+                    // exists past the truncation point.
                     if !*truncated {
                         self.context().record(observed, nodes.clone());
                     }
@@ -808,12 +798,9 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
     ) -> CommandOutcome {
-        // A command that failed is not a command that did nothing. A click that
-        // timed out waiting for navigation may still have navigated, and
-        // `NeedsReconciliation` exists precisely because the runtime cannot
-        // tell. The context graph inherits that uncertainty: on any
-        // non-replayable failure it forgets, rather than keeping an
-        // observation that predates a change it cannot rule out.
+        // A failed command may still have changed the page (a click that timed
+        // out waiting for navigation may have navigated), so the context graph
+        // forgets on any non-replayable failure.
         if let Some(page_id) = envelope.page_id.as_ref() {
             self.context().invalidate_for(page_id, &envelope.command);
         }

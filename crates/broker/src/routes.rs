@@ -178,11 +178,9 @@ async fn submit_command(
     Ok(outcome_response(outcome))
 }
 
-/// The caller names commands whose evidence the runtime already recorded; it
-/// does not hand evidence in. `deny_unknown_fields` is what makes the old
-/// `evidence` key a hard rejection rather than a silently ignored payload, so a
-/// client that was authoring its own evidence learns it at the boundary instead
-/// of persisting a checkpoint nothing verified.
+/// Callers name commands whose evidence the runtime already recorded; they
+/// never hand evidence in. `deny_unknown_fields` rejects an `evidence` key at
+/// the boundary rather than persisting a checkpoint nothing verified.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CheckpointRequest {
@@ -191,8 +189,8 @@ struct CheckpointRequest {
     evidence_refs: Vec<types::CommandId>,
 }
 
-/// Matches `mcp_gateway::schema::MAX_EVIDENCE_ITEMS`. Both surfaces resolve
-/// through the same journal, so both bound the work the same way.
+/// Must match `mcp_gateway::schema::MAX_EVIDENCE_ITEMS`: both surfaces resolve
+/// through the same journal and bound the work the same way.
 const MAX_EVIDENCE_REFS: usize = 128;
 
 async fn checkpoint(
@@ -206,9 +204,9 @@ async fn checkpoint(
             request.context.correlation_id,
         ));
     }
-    // Resolve first, exactly as `mcp-gateway` does: `resolve_command_evidence`
-    // is the layer that checks each command's owning session, so a reference to
-    // another principal's command fails here rather than contributing evidence.
+    // Resolve before checkpointing: `resolve_command_evidence` checks each
+    // command's owning session, so a reference to another principal's command
+    // fails here rather than contributing evidence.
     let evidence = request
         .runtime
         .resolve_command_evidence(request.context.clone(), input.evidence_refs)
@@ -288,10 +286,10 @@ async fn events(
 
 const EVENT_STREAM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Server-sent-event stream of the principal-scoped event history. Each event
-/// is sent with `id` set to its cursor so clients resume with `after` (or the
-/// standard `Last-Event-ID` header). A cursor gap is terminal: an `event.gap`
-/// notification is emitted and the stream closes, matching the 409 poll path.
+/// Server-sent-event stream of the principal-scoped event history. Each event's
+/// `id` is its cursor, so clients resume with `after` or `Last-Event-ID`. A
+/// cursor gap is terminal: an `event.gap` notification is emitted and the
+/// stream closes, matching the 409 poll path.
 fn event_stream_response(
     store: interface_core::EventStore,
     principal: types::PrincipalId,

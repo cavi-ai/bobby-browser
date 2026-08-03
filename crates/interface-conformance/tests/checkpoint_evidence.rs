@@ -1,15 +1,9 @@
 //! Evidence authorship is a runtime property, not a per-adapter one.
 //!
-//! `checkpoint_save` over MCP was changed to take `evidenceRefs` — command ids
-//! the runtime resolves against its own journal — precisely so a caller cannot
-//! author evidence for work it never performed. That property is worthless if
-//! another adapter still accepts `Evidence` straight off the wire, and the
-//! existing conformance suites (capability, idempotency, event ordering) do not
-//! cover it: they assert that adapters agree on *outcomes*, not that they agree
-//! on *who is trusted to describe them*.
-//!
-//! This file asserts the property directly, on every adapter that exposes
-//! checkpointing to a principal.
+//! Checkpointing takes `evidenceRefs`, command ids the runtime resolves against
+//! its own journal, so a caller cannot author evidence for work it never
+//! performed. Asserted here on every adapter that exposes checkpointing to a
+//! principal.
 
 use std::sync::Arc;
 
@@ -85,9 +79,8 @@ fn checkpoint() -> WorkflowCheckpoint {
     }
 }
 
-/// Evidence a caller could plausibly fabricate. This must deserialize cleanly
-/// as a real `types::Evidence` — otherwise the surface rejects it for being
-/// malformed and the test proves nothing about who is trusted to author it.
+/// Evidence a caller could plausibly fabricate. Must deserialize as a real
+/// `types::Evidence`, or a rejection only proves the payload was malformed.
 fn fabricated_evidence() -> Value {
     let evidence = vec![Evidence::Navigation {
         url: "https://example.test/thank-you".to_owned(),
@@ -96,8 +89,8 @@ fn fabricated_evidence() -> Value {
     serde_json::to_value(&evidence).expect("evidence serializes")
 }
 
-/// Guards the guard: if `Evidence`'s wire shape changes and the fixture stops
-/// round-tripping, every rejection below would pass for the wrong reason.
+/// If `Evidence`'s wire shape changes and the fixture stops round-tripping,
+/// every rejection below passes for the wrong reason.
 #[test]
 fn the_fabricated_evidence_fixture_is_a_valid_evidence_payload() {
     let parsed: Vec<Evidence> =
@@ -178,11 +171,10 @@ async fn post_checkpoint(body: Value) -> (StatusCode, String) {
     (status, code)
 }
 
-/// Asserting on the error *code*, not merely on non-200, is what makes this
-/// bite. `RuntimeService` in this fixture has no recovery coordinator, so a
-/// checkpoint that reaches the runtime fails either way — with `notFound`.
-/// Only a body rejected at the boundary produces `invalidRequest`, and that is
-/// exactly the claim: `evidence` is not an argument this surface accepts.
+/// Asserts the error *code*, not merely non-200: this fixture's
+/// `RuntimeService` has no recovery coordinator, so a checkpoint that reaches
+/// the runtime fails with `notFound`. Only a body rejected at the boundary
+/// produces `invalidRequest`.
 #[tokio::test]
 async fn http_refuses_caller_authored_checkpoint_evidence() {
     let (status, code) =
@@ -195,8 +187,8 @@ async fn http_refuses_caller_authored_checkpoint_evidence() {
     );
 }
 
-/// The other half of the same claim: `evidenceRefs` *is* accepted, so the test
-/// above cannot pass by the surface rejecting every checkpoint body.
+/// `evidenceRefs` is accepted, so the test above cannot pass by the surface
+/// rejecting every checkpoint body.
 #[tokio::test]
 async fn http_accepts_evidence_refs() {
     let (status, code) =
@@ -209,10 +201,8 @@ async fn http_accepts_evidence_refs() {
     );
 }
 
-/// The adapters must not merely both reject — they must reject for the same
-/// reason, which is that the argument does not exist on either surface. A
-/// surface that accepted the key and silently dropped it would pass a
-/// "rejects fabricated evidence" test while still lying to its caller.
+/// Both adapters must reject because the argument does not exist on either
+/// surface, not by accepting the key and silently dropping it.
 #[tokio::test]
 async fn no_adapter_advertises_a_caller_supplied_evidence_argument() {
     let server = mcp_server().await;
@@ -238,9 +228,8 @@ async fn no_adapter_advertises_a_caller_supplied_evidence_argument() {
     );
 }
 
-/// `evidenceRefs` naming a command with no journal record resolves to nothing
-/// and fails the checkpoint, rather than persisting one with empty evidence.
-/// Both adapters must agree on that too.
+/// `evidenceRefs` naming a command with no journal record fails the checkpoint
+/// on both adapters, rather than persisting one with empty evidence.
 #[tokio::test]
 async fn both_adapters_reject_evidence_refs_with_no_journal_record() {
     let unrecorded = CommandId::new();

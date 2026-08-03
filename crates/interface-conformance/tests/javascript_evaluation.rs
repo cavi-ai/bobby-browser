@@ -1,19 +1,15 @@
-//! F7: end-to-end acceptance for the JavaScript-evaluation feature's deny-by-default
-//! invariant, driven over the real MCP JSON-RPC surface (`mcp_gateway::Server`) — the
-//! same dispatch code (`schema::tool_schema`/`validate_tool_arguments`, `Server::call_tool`)
-//! that `broker`'s `/v1/mcp` route wires up in production.
+//! End-to-end acceptance for JavaScript evaluation's deny-by-default invariant,
+//! driven over the real MCP JSON-RPC surface (`mcp_gateway::Server`).
 //!
-//! Two independent gates must both pass before `EvaluateJavaScript` ever reaches a
-//! worker:
+//! Two independent gates must both pass before `EvaluateJavaScript` reaches a worker:
 //!   1. token capability gate (`javascript:evaluate`), enforced in
 //!      `AuthenticatedRuntime::submit` before any session lookup.
 //!   2. per-session `execution_policy.javascript_evaluation` gate, enforced in
 //!      `RuntimeService::submit` before `PageRuntime::execute`.
 //!
-//! Gate A and Gate B are provable without a real browser: `RuntimeService::default()`
-//! carries no worker pool, so `SessionManager::create` never leases (never launches
-//! Chromium — see `crates/worker-pool/src/lib.rs::WorkerPool::lease`), and both gates
-//! fire strictly before any worker dispatch. Only the happy path needs Chromium.
+//! Both fire strictly before worker dispatch, so `RuntimeService::default()` (no
+//! worker pool, never launches Chromium) proves them. Only the happy path needs
+//! Chromium.
 
 use std::sync::Arc;
 
@@ -79,9 +75,8 @@ async fn call_tool(server: &Server, id: u64, name: &str, arguments: Value) -> Va
         .unwrap()
 }
 
-/// Builds an `EvaluateJavaScript` `command_execute` tool-call payload the same way the
-/// other MCP conformance/lifecycle tests build command envelopes: `schemaVersion`, fresh
-/// ids, a near-future `deadline`, and `command: {kind, input}`.
+/// Builds an `EvaluateJavaScript` `command_execute` tool-call payload: `schemaVersion`,
+/// fresh ids, a near-future `deadline`, and `command: {kind, input}`.
 fn evaluate_javascript_arguments(session_id: &str, page_id: Option<&str>) -> Value {
     json!({
         "envelope": {
@@ -108,10 +103,9 @@ fn evaluate_javascript_arguments(session_id: &str, page_id: Option<&str>) -> Val
     })
 }
 
-/// Gate A (capability): a token WITHOUT `javascript:evaluate` (only
-/// session/page/browser:mutate) creates a JS-enabled session, then a `command_execute`
-/// of `EvaluateJavaScript` must fail as a JSON-RPC/HTTP denial carrying
-/// `MissingCapability` — before dispatch, no browser needed.
+/// Gate A (capability): a token without `javascript:evaluate` creates a JS-enabled
+/// session, then `EvaluateJavaScript` must fail with `MissingCapability` before
+/// dispatch.
 #[tokio::test]
 async fn gate_a_missing_javascript_evaluate_capability_denies_before_dispatch() {
     let server = fixture_server(vec![
@@ -127,8 +121,7 @@ async fn gate_a_missing_javascript_evaluate_capability_denies_before_dispatch() 
         "session_create",
         json!({
             "profile": "gate-a",
-            // The session itself is fully opted into JS: this isolates the assertion to
-            // the capability gate, independent of the session policy gate (Gate B).
+            // Session opted into JS, isolating the assertion to the capability gate.
             "executionPolicy": {"javascriptEvaluation": true}
         }),
     )
@@ -157,10 +150,9 @@ async fn gate_a_missing_javascript_evaluate_capability_denies_before_dispatch() 
     );
 }
 
-/// Gate B (session policy): a token WITH `javascript:evaluate` creates a session
-/// WITHOUT `executionPolicy` (deny-by-default), then a `command_execute` of
-/// `EvaluateJavaScript` must produce a `PolicyDenied` outcome — before dispatch, no
-/// browser needed.
+/// Gate B (session policy): a token with `javascript:evaluate` creates a session
+/// without `executionPolicy` (deny-by-default), then `EvaluateJavaScript` must
+/// produce a `PolicyDenied` outcome before dispatch.
 #[tokio::test]
 async fn gate_b_session_without_execution_policy_grant_is_policy_denied_before_dispatch() {
     let server = fixture_server(vec![
@@ -197,10 +189,9 @@ async fn gate_b_session_without_execution_policy_grant_is_policy_denied_before_d
     );
 }
 
-/// Happy path (needs a real Chrome/Chromium install): a token WITH
-/// `javascript:evaluate`, a session WITH `executionPolicy.javascriptEvaluation = true`,
-/// and an `EvaluateJavaScript` command actually runs and returns
-/// `Evidence::JavaScriptResult { value: 42, .. }`.
+/// Happy path (needs a real Chrome/Chromium install): with the capability and
+/// `executionPolicy.javascriptEvaluation = true`, `EvaluateJavaScript` runs and
+/// returns `Evidence::JavaScriptResult { value: 42, .. }`.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn happy_path_evaluate_javascript_runs_on_real_chrome_and_returns_the_result() {

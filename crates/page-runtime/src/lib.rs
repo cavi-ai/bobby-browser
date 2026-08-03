@@ -46,9 +46,8 @@ pub struct PageRuntime {
     checkpoints: Option<CheckpointStore>,
     adaptive: AdaptivePageEngine,
     phase_observer: Option<Arc<dyn ExecutionPhaseObserver>>,
-    /// Page structure retained for context-node answers. Always present: the
-    /// graph is inert until something records into it, and an `Option` here
-    /// would add a "did we bother to invalidate" branch to the one code path
+    /// Page structure retained for context-node answers. Never optional: the graph is inert
+    /// until something records into it, and an `Option` would add a branch to the one path
     /// where forgetting to invalidate is the bug.
     context: Arc<ContextGraph>,
 }
@@ -125,9 +124,8 @@ impl PageRuntime {
 
     /// Evidence the runtime itself recorded for a command.
     ///
-    /// The journal is the only authority here: an agent naming a command it
-    /// never ran, or one that never reached a terminal outcome, gets an
-    /// error rather than an empty vector it could mistake for success.
+    /// The journal is the only authority: a command that never ran, or never reached a
+    /// terminal outcome, returns an error rather than an empty vector.
     pub async fn evidence_for_command(
         &self,
         command_id: CommandId,
@@ -151,19 +149,14 @@ impl PageRuntime {
             .ok_or(RecoveryError::CommandOutcomeMissing(command_id))
     }
 
-    /// The session a command was submitted under, per the runtime's own
-    /// journal.
+    /// The session a command was submitted under, per the runtime's own journal.
     ///
-    /// Every command's first journal record (`CommandPhase::Accepted`) always
-    /// stores its `CommandEnvelope` — see `executor.rs`'s `execute_with_vision_gate`,
-    /// which journals it before anything else can fail — so this is available
-    /// for any command that has a journal record at all. Callers use this to
-    /// verify a command referenced only by id (e.g. `checkpoint_save`'s
-    /// `evidenceRefs`) belongs to a session they are authorized to see,
-    /// before its evidence is ever resolved or trusted: the journal itself
-    /// has no notion of principal, so that check has to happen here, keyed
-    /// on the session the command actually ran under, not on which session
-    /// the caller merely claims.
+    /// Every command's first journal record (`CommandPhase::Accepted`) stores its
+    /// `CommandEnvelope`, so this is available for any command with a journal record.
+    ///
+    /// Authorization keys on this, never on a caller-supplied session: the journal has no
+    /// notion of principal, so a command referenced only by id must be checked against the
+    /// session it actually ran under before its evidence is resolved or trusted.
     pub async fn command_session(
         &self,
         command_id: &CommandId,

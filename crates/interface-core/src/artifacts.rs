@@ -20,8 +20,7 @@ use crate::{CapabilityHandle, SessionOwnershipAuthority};
 
 // The on-disk artifact boundary is Unix-only: every reader below opens through
 // handle-relative `openat` so no path is ever re-resolved. Non-Unix builds fail
-// closed instead, so the names that only describe that layout compile away with
-// it rather than sitting in the binary unread.
+// closed, so these names compile away with the layout they describe.
 #[cfg(unix)]
 const OWNERSHIP_DIRECTORY: &str = ".interface-artifact-ownership";
 #[cfg(unix)]
@@ -88,10 +87,9 @@ pub trait ArtifactBoundaryTestObserver: Send + Sync {
     fn before_artifact_read(&self) {}
 }
 
-// Still constructed on non-Unix — the reader holds one — but nothing reads the
-// counters there, because the quota they bound is only enforced by the
-// handle-relative scan. Narrow to that platform so a genuinely dead counter on
-// Unix still trips the lint.
+// Constructed on non-Unix but never read there: the quota it bounds is only
+// enforced by the handle-relative scan. Narrowed to that platform so a
+// genuinely dead counter on Unix still trips the lint.
 #[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default)]
 struct OwnershipUsage {

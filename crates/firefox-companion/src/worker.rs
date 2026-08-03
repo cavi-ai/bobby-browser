@@ -3661,10 +3661,8 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ];
-        // Synthesized timing is only evidence when it was actually synthesized:
-        // a session that did not opt in drives input directly, and claiming a
-        // humanization record for it would be the same class of lie the
-        // evidence contract exists to prevent.
+        // Only record humanization evidence when timing was actually
+        // synthesized; a session that did not opt in drives input directly.
         if humanize {
             evidence.push(Evidence::Humanization {
                 engine: "behavioral-engine".to_owned(),
@@ -5126,9 +5124,8 @@ impl FirefoxCompanionWorker {
     }
 
     /// Bounded, server-generated statement execution for operations Firefox
-    /// Bounded, server-generated statement execution for operations Firefox
-    /// BiDi does not cover on this build (cookie mutation). Statements are
-    /// constructed from validated parameters only — never from caller strings.
+    /// BiDi does not cover on this build (cookie mutation). Statements must be
+    /// built from validated parameters only, never from caller strings.
     async fn evaluate_page_script(
         &self,
         context: &str,

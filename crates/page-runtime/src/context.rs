@@ -1,28 +1,17 @@
-//! A node that holds a session's page structure so the driving agent does not
-//! have to.
+//! Holds a session's page structure so the driving agent does not have to.
+//! A caller asks "where is the control described as X" and gets a bound target
+//! plus a confidence score instead of a full accessibility snapshot.
 //!
-//! Today an agent calls `a11y_snapshot`, receives up to 2048 nodes, and reasons
-//! over them in its own context — on top of the whole tool surface. Against a
-//! context node it asks "where is the control described as X" and receives a
-//! bound target plus a confidence score. Same answer, materially less context.
+//! A stale graph does not fail loudly, it answers confidently and wrongly.
+//! Three things contain that:
 //!
-//! # The failure this module is mostly about
-//!
-//! Inverting the data flow moves a correctness risk with it. A stale graph does
-//! not fail loudly; it answers *confidently and wrongly*, which is worse than
-//! not answering, because the caller has no signal to distrust. The spec calls
-//! this out as the highest correctness risk in the node program.
-//!
-//! Three things contain it:
-//!
-//! 1. [`ContextGraph`] tracks a generation per page. Recording an observation
-//!    stamps it with the generation it was taken under, and an answer drawn
-//!    from an older generation is not returned.
+//! 1. [`ContextGraph`] tracks a generation per page. An observation is stamped
+//!    with the generation it was taken under, and an answer drawn from an older
+//!    generation is not returned.
 //! 2. Every navigation and every non-replayable command bumps the generation,
-//!    so the default on any state change is to forget rather than to keep.
-//! 3. The runtime's existing target-drift detection stays the backstop. A node
-//!    answer is a proposal; `intent-engine` verification remains the authority
-//!    on whether the action happened.
+//!    so the default on any state change is to forget.
+//! 3. A node answer is a proposal; `intent-engine` verification stays the
+//!    authority on whether the action happened.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -32,39 +21,27 @@ use types::{
     RuntimeCommand,
 };
 
-/// Below this, a context answer is not worth acting on and is discarded rather
-/// than returned with a low score. Matches the vision confidence floor: both
-/// are "a proposal the runtime will act on", and having two different floors
-/// for the same decision invites picking whichever is convenient.
+/// Answers scoring below this are discarded, not returned with a low score.
+/// Kept equal to the vision confidence floor: same decision, one threshold.
 pub const CONTEXT_CONFIDENCE_FLOOR: f32 = 0.75;
 
 /// The most pages the graph retains at once.
 ///
-/// A page is normally evicted when it closes or when its session is deleted.
-/// This bound covers what those miss: a worker that died mid-session, a client
-/// that opened pages and never closed them, a crash between open and close.
-/// Without it the map is a slow leak of page text for the lifetime of the
-/// process — and page text is exactly the material a local node exists to keep
-/// bounded.
+/// Pages are normally evicted on close or session delete. This bound covers
+/// what those miss (a worker killed mid-session, a client that never closes),
+/// which would otherwise leak page text for the life of the process.
 pub const MAX_RETAINED_PAGES: usize = 256;
 
-/// Command ids retained per page. Bounded for the same reason pages are: this
-/// grows with workflow length, not with anything self-limiting.
+/// Command ids retained per page. Bounded because this grows with workflow
+/// length, not with anything self-limiting.
 pub const MAX_RETAINED_COMMANDS: usize = 64;
 
 /// Page structure retained for a session, keyed by page.
-///
-/// In-process by design for now: the contract is what matters, and a graph that
-/// lives behind an HTTP hop has exactly the same staleness problem with a
-/// network in the middle. Moving it into a separate process is a transport
-/// change against this same interface.
 #[derive(Default)]
 pub struct ContextGraph {
     pages: Mutex<HashMap<PageId, PageContext>>,
-    /// Monotonic recording counter, used to pick an eviction victim. A
-    /// timestamp would be the obvious choice and is the wrong one: two
-    /// recordings inside the same clock tick would be indistinguishable, and
-    /// the clock can move backwards.
+    /// Monotonic recording counter used to pick an eviction victim. Not a
+    /// timestamp: same-tick recordings tie and the clock can move backwards.
     sequence: std::sync::atomic::AtomicU64,
 }
 
@@ -78,11 +55,8 @@ struct PageContext {
     /// Command ids whose evidence the runtime recorded against this page,
     /// newest last, capped at [`MAX_RETAINED_COMMANDS`].
     ///
-    /// The ids, deliberately, and not the evidence. An agent asking "did this
-    /// already happen" needs to reach the journal entry, which is the runtime's
-    /// own record; copying evidence in here would create a second copy that can
-    /// disagree with it, and the whole point of `evidenceRefs` is that there is
-    /// one authority on what happened.
+    /// Ids only, never the evidence: the journal stays the single authority on
+    /// what happened, and a copy here could disagree with it.
     commands: Vec<CommandId>,
     nodes: Vec<AccessibilityNode>,
 }
@@ -99,10 +73,8 @@ impl ContextGraph {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut pages = self.lock();
         if !pages.contains_key(page) && pages.len() >= MAX_RETAINED_PAGES {
-            // Full, and this page is new. Evict the least-recently-recorded
-            // entry rather than refusing the new one: a graph that stops
-            // learning at the bound answers nothing for every page opened
-            // after it, which a caller cannot tell from permanent staleness.
+            // Evict the least-recently-recorded entry rather than refusing the
+            // new page: refusing would leave every later page unanswerable.
             if let Some(stalest) = pages
                 .iter()
                 .min_by_key(|(_, context)| context.recorded_seq)
@@ -125,11 +97,9 @@ impl ContextGraph {
 
     /// Records that `command` produced evidence against `page`.
     ///
-    /// Unlike [`Self::record`], this does not depend on the page having been
+    /// Unlike [`Self::record`], this does not require the page to have been
     /// observed, and it survives invalidation: what happened on a page stays
-    /// true after the page changes. That is the difference between "where is
-    /// the control" — which goes stale — and "did this already happen", which
-    /// does not.
+    /// true after the page changes.
     pub fn record_command(&self, page: &PageId, command: CommandId) {
         let seq = self
             .sequence
@@ -164,11 +134,8 @@ impl ContextGraph {
             .unwrap_or_default()
     }
 
-    /// Drops every page in `pages`, on session close.
-    ///
-    /// Retention is bounded by session lifetime: once the session that owned
-    /// these pages is gone, keeping its page structure retains material nobody
-    /// can still ask about.
+    /// Drops every page in `pages`, on session close. Retention is bounded by
+    /// session lifetime.
     pub fn forget_all(&self, pages: &[PageId]) {
         let mut retained = self.lock();
         for page in pages {
@@ -183,10 +150,9 @@ impl ContextGraph {
 
     /// Invalidates everything known about `page`.
     ///
-    /// Bumps the generation rather than clearing the nodes: an answer must be
-    /// refused because it is *old*, and keeping the observation with its stamp
-    /// makes that check total. Clearing would work too, right up until a
-    /// concurrent `record` lands between the clear and the next observation.
+    /// Bumps the generation rather than clearing the nodes. Keeping the stamped
+    /// observation makes the staleness check total; clearing would race a
+    /// concurrent `record` landing before the next observation.
     pub fn invalidate(&self, page: &PageId) {
         let mut pages = self.lock();
         if let Some(entry) = pages.get_mut(page) {
@@ -197,18 +163,12 @@ impl ContextGraph {
     /// Invalidates `page` unless `command` is known to leave page structure
     /// alone.
     ///
-    /// `CommandClass` is the obvious signal here and it is the wrong one.
-    /// `Navigate` is `Replayable` — replaying it lands on the same URL, so the
-    /// classification is right — while replacing the entire document.
-    /// `Emulate` is `Replayable` and reflows the page. Classification answers
-    /// "is it safe to replay this", which is a different question from "did
-    /// the DOM change".
+    /// Do not switch this to `CommandClass`: `Navigate` and `Emulate` are both
+    /// `Replayable` yet both change the DOM. Classification answers "safe to
+    /// replay", not "did the DOM change".
     ///
-    /// So this is an explicit allowlist with an invalidating default: a
-    /// primitive added later invalidates until someone deliberately adds it
-    /// below. The costs are asymmetric — a graph that forgets too eagerly
-    /// costs one extra snapshot, one that forgets too late hands out a
-    /// confident wrong target.
+    /// Explicit allowlist with an invalidating default, so a primitive added
+    /// later invalidates until someone deliberately adds it below.
     pub fn invalidate_for(&self, page: &PageId, command: &RuntimeCommand) {
         if !preserves_page_structure(command) {
             self.invalidate(page);
@@ -225,8 +185,7 @@ impl ContextGraph {
     ///
     /// `None` covers every uncertain case: nothing recorded, the recording is
     /// stale, no node matched, the match was ambiguous, or the score was under
-    /// the floor. A context node that guesses is worse than one that declines,
-    /// because the caller cannot tell the two apart.
+    /// the floor.
     pub fn ask(&self, page: &PageId, description: &str) -> Option<ContextAnswer> {
         let pages = self.lock();
         let entry = pages.get(page)?;
@@ -260,18 +219,16 @@ impl ContextGraph {
         }
         let (confidence, target) = best?;
         if best_is_tied {
-            // Two controls describe themselves the same way. The caller asked
-            // "which one" and the honest answer is that this graph cannot say.
+            // Two controls describe themselves the same way; which one is
+            // unanswerable.
             return None;
         }
         (confidence >= CONTEXT_CONFIDENCE_FLOOR).then_some(ContextAnswer { target, confidence })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PageId, PageContext>> {
-        // A poisoned lock means a previous holder panicked mid-update, so the
-        // map may be inconsistent. Recovering the guard and carrying on is
-        // right here: every read re-checks the generation stamp, so a torn
-        // entry answers `None` rather than answering wrongly.
+        // Poison recovery is safe here: every read re-checks the generation
+        // stamp, so a torn entry answers `None` rather than answering wrongly.
         self.pages
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -280,13 +237,11 @@ impl ContextGraph {
 
 /// Whether `command` is known to leave the page's structure as it was.
 ///
-/// Read-only primitives only. Everything else — including every intent, which
-/// compiles to primitives the engine chooses at runtime — invalidates.
+/// Read-only primitives only. Everything else invalidates, including every
+/// intent.
 fn preserves_page_structure(command: &RuntimeCommand) -> bool {
     let RuntimeCommand::Primitive(primitive) = command else {
-        // Intents are compiled to a sequence the engine picks; treating any of
-        // them as structure-preserving would mean trusting a decision made
-        // after this check.
+        // An intent compiles to a sequence the engine picks after this check.
         return false;
     };
     matches!(
@@ -304,11 +259,9 @@ fn preserves_page_structure(command: &RuntimeCommand) -> bool {
 /// Scores how well a described control matches a node, or `None` if it does not
 /// match at all.
 ///
-/// Exact accessible-name equality is the only thing scored at full confidence.
-/// Everything softer is scored below the floor on purpose: the point of this
-/// node is to remove page material from the agent's context, not to guess on
-/// its behalf, and a substring hit on a long label is exactly the kind of
-/// plausible-but-wrong answer the module header warns about.
+/// Only exact accessible-name equality scores at full confidence. Softer
+/// matches score below the floor on purpose, so a substring hit on a long
+/// label cannot become a confident wrong answer.
 fn score_match(
     needle: &str,
     target: &AccessibilityTarget,
@@ -403,9 +356,7 @@ mod tests {
         RuntimeCommand::Primitive(command)
     }
 
-    /// The commands that must NOT invalidate. Anything read-only staying
-    /// answerable is what makes the node worth having: a workflow that
-    /// inspects between steps would otherwise throw the graph away every time.
+    /// The commands that must NOT invalidate.
     #[test]
     fn read_only_primitives_leave_the_graph_answerable() {
         for command in [
@@ -432,9 +383,8 @@ mod tests {
         }
     }
 
-    /// `Navigate` and `Emulate` are both `CommandClass::Replayable`, and both
-    /// change what is on the page. They are the reason this is an allowlist
-    /// over commands rather than a check on command class.
+    /// `Navigate` and `Emulate` are both `Replayable` and both change the page,
+    /// which is why invalidation allowlists commands, not command classes.
     #[test]
     fn replayable_commands_that_change_the_page_still_invalidate() {
         for command in [
@@ -463,8 +413,8 @@ mod tests {
         }
     }
 
-    /// An intent compiles to primitives the engine picks at runtime, so it can
-    /// never be treated as structure-preserving.
+    /// An intent compiles to primitives picked at runtime, so it is never
+    /// structure-preserving.
     #[test]
     fn every_intent_invalidates() {
         let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
@@ -534,9 +484,8 @@ mod tests {
         );
     }
 
-    /// Pages are normally evicted on close or on session delete. The bound
-    /// covers what those miss — a killed worker, a client that never closes —
-    /// so the map cannot grow for the life of the process.
+    /// The bound covers what close and session delete miss, so the map cannot
+    /// grow for the life of the process.
     #[test]
     fn retention_is_bounded() {
         let graph = ContextGraph::new();
@@ -549,9 +498,7 @@ mod tests {
         assert_eq!(graph.retained_pages(), MAX_RETAINED_PAGES);
     }
 
-    /// Eviction must drop the stalest entry, not refuse the new one: a graph
-    /// that stops learning at the bound answers nothing for every page opened
-    /// after it, which is indistinguishable from being permanently stale.
+    /// Eviction must drop the stalest entry, not refuse the new one.
     #[test]
     fn eviction_drops_the_stalest_page_not_the_newest() {
         let graph = ContextGraph::new();
@@ -580,9 +527,8 @@ mod tests {
         assert_eq!(graph.ask(&page, "Email address"), None);
     }
 
-    /// Answers must agree with what `a11y_snapshot` would return for the same
-    /// page: the node is a cheaper route to the same target, not a second
-    /// opinion about it.
+    /// Answers must be a target from the recorded snapshot, matching what
+    /// `a11y_snapshot` would return for the same page.
     #[test]
     fn an_answer_is_a_target_from_the_recorded_snapshot() {
         let snapshot = vec![

@@ -11,9 +11,9 @@ const MAX_TEXT_BYTES: usize = 4096;
 
 /// Vision-assist provider over HTTP. The endpoint receives the intent
 /// context plus a base64 PNG and returns a confidence-scored action.
-/// Any transport, schema, or confidence-contract failure is a
-/// `VisionAssistFailed` error — the intent engine then declines the
-/// escalation rather than acting on an unverifiable proposal.
+/// Any transport, schema, or confidence-contract failure raises
+/// `VisionAssistFailed`, which declines the escalation rather than
+/// acting on an unverifiable proposal.
 pub struct HttpVisionAssist {
     client: reqwest::Client,
     endpoint: String,

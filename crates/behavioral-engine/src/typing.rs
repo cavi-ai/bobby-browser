@@ -363,10 +363,9 @@ pub fn compose_typed_text(actions: &[TypingAction]) -> String {
 impl TypingAction {
     /// The scripted delay this action contributes, in milliseconds.
     ///
-    /// `Backspace` multiplies by `count` because the executor issues that many
-    /// key events, each waiting `delay_ms`. Summing this across a plan is what
-    /// `Evidence::Humanization.synthesized_ms` reports, so it has to match
-    /// what the executor actually waits, not the plan's length.
+    /// `Backspace` multiplies by `count`: the executor issues that many key
+    /// events, each waiting `delay_ms`. Must match what the executor waits,
+    /// since the sum is reported as `Evidence::Humanization.synthesized_ms`.
     pub fn synthesized_ms(&self) -> u64 {
         match self {
             Self::KeyDown { delay_ms, .. }

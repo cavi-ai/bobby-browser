@@ -1,7 +1,6 @@
-//! Persists issued-token records (hashes only, never bearers) to disk so they survive a
-//! broker restart. [`PersistentAuthority`] wraps an [`EnrolledAuthority`], delegating
-//! authentication and in-memory enrollment to it while additionally mirroring every
-//! non-expired, non-revoked record to a JSON file on disk.
+//! Persists issued-token records (hashes only, never bearers) so they survive a broker
+//! restart. [`PersistentAuthority`] wraps an [`EnrolledAuthority`] and mirrors every
+//! non-expired, non-revoked record to a JSON file.
 
 use std::path::PathBuf;
 
@@ -18,8 +17,8 @@ use types::{
 
 use crate::auth::EnrolledAuthority;
 
-/// One persisted record. Deliberately carries only the token hash, never the bearer
-/// itself — the bearer is regenerated on `issue()` and never written to disk.
+/// One persisted record: token hash only. The bearer is regenerated on `issue()` and is
+/// never written to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PersistedRecord {
@@ -37,20 +36,14 @@ pub struct PersistentAuthority {
 }
 
 impl PersistentAuthority {
-    /// Loads `path` (an empty record set if it does not exist yet), drops any record that
-    /// is already revoked or expired (see `compact`), and re-enrolls the rest into
-    /// `inner`'s live [`interface_core::AuthorityStore`] via
-    /// [`EnrolledAuthority::enroll_restored`]. The startup credential itself is never part
-    /// of this file — it is re-supplied by the caller on every boot.
+    /// Loads `path` (empty if absent), drops revoked or expired records, and re-enrolls the
+    /// rest into `inner`'s live [`interface_core::AuthorityStore`]. The startup credential
+    /// is never part of this file; the caller re-supplies it on every boot.
     ///
-    /// If restoring hits the store's capacity (e.g. `max_principals` was lowered since the
-    /// file was written, or the +1 startup headroom leaves fewer free slots than the file
-    /// has live records), restoration stops early: the remaining records stay in
-    /// `self.records` (so a later `revoke()` on them still works and a later `persist()`
-    /// still compacts them out once they expire) but are not enrolled into the live store,
-    /// so they simply fail closed at `authenticate()` until an operator revokes older
-    /// principals or raises `max_principals` and reissues. A skipped token failing closed
-    /// is the acceptable outcome here — refusing to boot the runtime over it is not.
+    /// If the store is at capacity, restoration stops early rather than failing the boot.
+    /// The unenrolled records stay in `self.records` (so `revoke()` and later compaction
+    /// still cover them) and fail closed at `authenticate()` until `max_principals` is
+    /// raised and they are reissued.
     pub async fn open(inner: EnrolledAuthority, path: PathBuf) -> anyhow::Result<Self> {
         let loaded = match tokio::fs::read(&path).await {
             Ok(bytes) => serde_json::from_slice::<Vec<PersistedRecord>>(&bytes)?,
@@ -97,20 +90,14 @@ impl PersistentAuthority {
         })
     }
 
-    /// Compacts `records` in place (drops revoked/expired entries) and writes the result
-    /// to `self.path` atomically: a temp file (`<path>.json.tmp`, created with permissions
-    /// `0600` on unix from the start, never widened after) followed by a rename over the
-    /// target path.
+    /// Compacts `records` in place (drops revoked/expired entries) and writes the result to
+    /// `self.path` atomically: a temp file (`<path>.json.tmp`, created `0600` on unix and
+    /// never widened) followed by a rename over the target path.
     ///
-    /// Callers must hold `self.records`'s lock across this call (not just across the
-    /// mutation that precedes it) — `tokio::sync::Mutex` is safe to hold across an
-    /// `.await`, and doing so here is what keeps concurrent `issue`/`revoke` calls
-    /// strictly serialized. Cloning a snapshot and persisting after releasing the lock
-    /// would let two concurrent writers interleave their disk writes in an order that
-    /// does not match the order their mutations actually committed, so a later write from
-    /// a call that started (and read) before an earlier-committing call's mutation could
-    /// still land on disk after it — silently reverting that mutation (e.g. resurrecting a
-    /// revoked principal) once the file is next read back after a restart.
+    /// Callers must hold `self.records`'s lock across this call, not just across the
+    /// preceding mutation; that is what serializes concurrent `issue`/`revoke`. Persisting
+    /// a cloned snapshot after releasing the lock lets disk writes land out of commit
+    /// order, silently reverting a mutation such as a revoke on the next reload.
     async fn persist(&self, records: &mut Vec<PersistedRecord>) -> Result<(), InterfaceError> {
         compact(records, Utc::now());
         let json = serde_json::to_vec_pretty(records.as_slice()).map_err(|_| internal_error())?;
@@ -124,11 +111,8 @@ impl PersistentAuthority {
 
         let mut open_options = tokio::fs::OpenOptions::new();
         open_options.write(true).create(true).truncate(true);
-        // `tokio::fs::OpenOptions` exposes `.mode()` as an inherent method on unix
-        // (mirroring `std::os::unix::fs::OpenOptionsExt`), so no extra trait import is
-        // needed here. Setting it up front means the file is 0600 from the moment it is
-        // created — there is no window where a broader-permission temp file exists on
-        // disk waiting to be tightened by a later `set_permissions` call.
+        // Set before create so the temp file is 0600 from the moment it exists; a later
+        // `set_permissions` would leave a window with broader permissions on disk.
         #[cfg(unix)]
         open_options.mode(0o600);
         let mut file = open_options
@@ -146,10 +130,9 @@ impl PersistentAuthority {
     }
 }
 
-/// Drops any record that is already revoked or expired as of `now`. A dropped record can
-/// never authenticate again (the live `AuthorityStore` — not this file — is the only
-/// runtime source of truth), so keeping it on disk serves no purpose and only lets the
-/// file grow without bound across the life of a long-running broker.
+/// Drops any record revoked or expired as of `now`. The live `AuthorityStore`, not this
+/// file, is the runtime source of truth, so retaining dead records only grows the file
+/// without bound.
 fn compact(records: &mut Vec<PersistedRecord>, now: DateTime<Utc>) {
     records.retain(|record| !record.revoked && record.expires_at > now);
 }
@@ -172,7 +155,7 @@ impl Authority for PersistentAuthority {
                 record.revoked = true;
             }
         }
-        // Holds `records` across the persist await — see `persist`'s doc comment.
+        // Holds `records` across the persist await; see `persist`'s doc comment.
         self.persist(&mut records).await
     }
 
@@ -199,7 +182,7 @@ impl Authority for PersistentAuthority {
             expires_at,
             revoked: false,
         });
-        // Holds `records` across the persist await — see `persist`'s doc comment.
+        // Holds `records` across the persist await; see `persist`'s doc comment.
         self.persist(&mut records).await?;
 
         Ok(IssuedToken::from_bearer(bearer))
@@ -335,8 +318,7 @@ mod tests {
             .unwrap();
         assert!(reloaded.authenticate(&bearer, Utc::now()).await.is_err());
 
-        // Loading must not rewrite the file merely because a record was skipped as
-        // expired — persistence only happens on issue()/revoke().
+        // Loading must not rewrite the file; persistence only happens on issue()/revoke().
         let bytes_after = tokio::fs::read(&path).await.unwrap();
         assert_eq!(bytes_before, bytes_after);
     }
@@ -380,9 +362,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Issue the principal we will race a revoke against, plus a few interleaved
-        // "other" issuances, so the concurrent operations really do race on the shared
-        // `records` state rather than touching disjoint principals in isolation.
+        // Race a revoke against interleaved issuances so they contend on shared `records`
+        // rather than on disjoint principals.
         let target_bearer = authority
             .issue(
                 target_principal.clone(),
@@ -421,8 +402,7 @@ mod tests {
             issue_three.unwrap().expose_once(),
         ];
 
-        // In-memory truth: the target principal must be unauthenticatable, the three
-        // concurrently issued principals must still authenticate.
+        // In-memory truth.
         assert!(authority
             .authenticate(&target_bearer, Utc::now())
             .await
@@ -433,9 +413,7 @@ mod tests {
 
         drop(authority);
 
-        // Disk truth must match: reload from the file the concurrent calls left behind
-        // and confirm the revocation was not clobbered by a slower, stale snapshot from
-        // one of the concurrent issue() calls.
+        // Disk truth: a stale concurrent write must not have clobbered the revocation.
         let reloaded_enrolled = EnrolledAuthority::enroll(startup(), 64).await.unwrap();
         let reloaded = PersistentAuthority::open(reloaded_enrolled, path.clone())
             .await
@@ -453,8 +431,7 @@ mod tests {
                 .is_err(),
             "revoked principal must not resurrect after reload"
         );
-        // The revoked principal's record must not remain live in the file at all —
-        // `compact` guarantees a persisted revoke drops the record outright.
+        // `compact` drops a revoked record outright, so its hash must be gone from the file.
         let raw = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(
             !raw.contains(&target_hash_hex),
@@ -467,9 +444,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("authority.json");
 
-        // Seed a file with more live records than a small store will have room for once
-        // opened, simulating `max_principals` having been lowered (or the file having
-        // accumulated more live records than fit) since the file was last written.
+        // Seed more live records than the store will have room for.
         let now = Utc::now();
         let mut seed_records = Vec::new();
         let mut bearers = Vec::new();
@@ -489,9 +464,8 @@ mod tests {
             .await
             .unwrap();
 
-        // `max_principals: 1` means store capacity 2 (1 issued slot + the startup
-        // credential's own reserved slot): only 1 of the 3 seeded records can be
-        // restored. `open()` must still succeed rather than failing the whole boot.
+        // `max_principals: 1` gives capacity 2 (1 issued slot plus the startup credential),
+        // so only 1 of the 3 seeded records restores. `open()` must still succeed.
         let enrolled = EnrolledAuthority::enroll(startup(), 1).await.unwrap();
         let authority = PersistentAuthority::open(enrolled, path.clone())
             .await
@@ -572,8 +546,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Any subsequent persist() (here, a second issue()) must compact out the record
-        // that has since expired, even though nothing acted on it directly.
+        // Any later persist(), here a second issue(), must compact out the expired record.
         authority
             .issue(
                 long_lived,

@@ -108,11 +108,10 @@ impl AuthenticatedRuntime {
         ctx: &RequestContext,
         req: CreateSessionRequest,
     ) -> InterfaceResult<SessionState> {
-        // `executionPolicy` flags that change what the browser presents to the
-        // page are privileged: the session opt-in alone is not enough, the
-        // principal must also hold the matching capability (same double gate
-        // as `vision:assist`). Checked before the session exists so a denied
-        // principal cannot even materialize a flagged session.
+        // `executionPolicy` flags that change what the browser presents to the page
+        // are double-gated like `vision:assist`: the session opt-in is not enough,
+        // the principal must also hold the matching capability. Must run before the
+        // session exists so a denied principal cannot materialize a flagged session.
         if req.execution_policy.fingerprint {
             self.authorization
                 .require_capability(ctx, Capability::BrowserFingerprint)?;
@@ -191,10 +190,9 @@ impl AuthenticatedRuntime {
                 .submit_with_vision_grant(envelope, vision_capability_ok, one_shot_vision_consent)
                 .await);
         };
-        // Consent changes what the exact same command may do. It is therefore
-        // part of the idempotency identity: an ordinary denial must not replay
-        // into an approved retry, and an approved result must not replay into
-        // a later ordinary submission.
+        // Consent changes what the same command may do, so it is part of the
+        // idempotency identity: a denial must not replay into an approved retry,
+        // nor an approved result into a later ordinary submission.
         let digest = if one_shot_vision_consent {
             canonical_sha256(&(&envelope, true))?
         } else {
@@ -300,11 +298,9 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::DeleteSession)?;
         self.require_owned_session(&ctx, &session)?;
-        // Read the session's pages before deleting it: afterwards there is no
-        // record of which pages it owned, and the context graph would retain
-        // their structure for the life of the process. Retention is bounded by
-        // session lifetime, so the eviction happens here, at the one point both
-        // facts are still available.
+        // Read the session's pages before deleting it: afterwards there is no record
+        // of which pages it owned and the context graph would retain their structure
+        // for the life of the process.
         let pages = self
             .inner
             .sessions
@@ -475,23 +471,16 @@ impl RuntimeInterface for AuthenticatedRuntime {
         }
     }
 
-    /// Evidence the runtime recorded for already-run commands, resolved by
-    /// command id. Used by the MCP surface's `checkpoint_save`, which names
-    /// commands rather than supplying `Evidence` directly — the raw-evidence
-    /// path (`checkpoint`, above) remains the HTTP surface's unchanged
-    /// contract.
+    /// Evidence the runtime recorded for already-run commands, resolved by command
+    /// id. Used by the MCP surface's `checkpoint_save`; `checkpoint` above remains
+    /// the HTTP surface's raw-evidence path.
     ///
-    /// The journal these ids resolve against is shared across every
-    /// authenticated principal (one `RuntimeService`, one `PageRuntime`, per
-    /// `broker::bootstrap_listener_with`), so a command id is not itself
-    /// proof of ownership — a UUIDv4 being hard to guess is exactly the
-    /// assumption `require_owned_session` exists so nothing else has to rely
-    /// on. Each referenced command's owning session (from the runtime's own
-    /// journal, `PageRuntime::command_session`, never the caller's say-so) is
-    /// checked against this principal before its evidence is resolved at
-    /// all; a command this principal does not own is rejected with the same
-    /// opaque "not found" every other cross-principal lookup in this file
-    /// uses, not silently dropped.
+    /// SECURITY: the journal these ids resolve against is shared across every
+    /// authenticated principal, so a command id is not proof of ownership. Each
+    /// command's owning session is read from the runtime's own journal
+    /// (`PageRuntime::command_session`), never the caller, and checked against this
+    /// principal before any evidence is resolved; a command this principal does not
+    /// own is rejected with the same opaque "not found" used elsewhere here.
     async fn resolve_command_evidence(
         &self,
         ctx: RequestContext,
@@ -585,11 +574,10 @@ impl RuntimeInterface for AuthenticatedRuntime {
 }
 
 /// Capabilities required beyond `Capability::BrowserMutate` (already enforced by
-/// `InterfaceOperation::SubmitCommand`) to submit this command. `SubmitCommand`
-/// authorizes the coarse "can mutate the browser" grant only; privileged primitives and
-/// all intents need additional, explicit capabilities. The match is exhaustive by variant
-/// so that adding a new command forces a deliberate decision here rather than silently
-/// inheriting `browser:mutate` as sufficient authorization.
+/// `InterfaceOperation::SubmitCommand`) to submit this command.
+///
+/// The match must stay exhaustive by variant: a new command that falls through
+/// would silently inherit `browser:mutate` as sufficient authorization.
 fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
     match command {
         RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(_)) => {

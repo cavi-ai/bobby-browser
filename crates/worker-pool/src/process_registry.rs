@@ -1,13 +1,7 @@
-//! Generic self-healing registry for OS processes that a `WorkerFactory`
-//! spawns and exclusively owns (e.g. `ChromiumWorkerFactory`'s
-//! `chromiumoxide::Browser` child). Not every engine needs this: Firefox
-//! support (`firefox-companion`) connects to an already-running, externally
-//! managed browser over WebSocket/native messaging and never spawns or owns
-//! a process, so it has nothing to register here. This module exists so any
-//! *future* engine that does launch and own its own browser process (a
-//! managed-Firefox or managed-WebKit launch mode, for example) can reuse the
-//! same reap-on-startup mechanism instead of reimplementing it — nothing
-//! here is Chrome-specific.
+//! Self-healing registry for OS processes that a `WorkerFactory` spawns and exclusively
+//! owns, such as `ChromiumWorkerFactory`'s `chromiumoxide::Browser` child. Engine-agnostic:
+//! an engine that attaches to an externally managed browser (`firefox-companion`) owns no
+//! process and registers nothing.
 
 use std::path::{Path, PathBuf};
 
@@ -15,12 +9,10 @@ fn registration_path(registry_dir: &Path, key: &str) -> PathBuf {
     registry_dir.join(format!("{key}.pid"))
 }
 
-/// Records `pid` under `key` within `registry_dir`, so a *future* process
-/// (the next run, or the runtime restarting after a crash) can recognize and
-/// reap it if this process never gets a chance to run its own clean-shutdown
-/// path. Returns `None` on any I/O failure — recording is best-effort and
-/// must never block a launch. `key` should uniquely identify the owning
-/// worker within `registry_dir` (callers typically use their `WorkerId`).
+/// Records `pid` under `key` within `registry_dir`, so a later process can recognize and
+/// reap it when this one never runs its clean-shutdown path. Best-effort: returns `None`
+/// on any I/O failure rather than blocking a launch. `key` must be unique within
+/// `registry_dir`; callers typically use their `WorkerId`.
 pub fn register_pid(registry_dir: &Path, key: &str, pid: u32) -> Option<PathBuf> {
     std::fs::create_dir_all(registry_dir).ok()?;
     let path = registration_path(registry_dir, key);
@@ -34,19 +26,14 @@ pub fn unregister_pid(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// Self-healing backstop for processes orphaned by a previous instance of
-/// this runtime (or its test suite) that exited without running its own
-/// cleanup — a SIGKILL, an OOM kill, or a crash all skip the owning worker's
-/// `close`/`terminate` path alike, since none of that teardown code ever
-/// gets to run. There is no portable way for *this* process to guarantee its
-/// own children die when it is killed (Linux's `PR_SET_PDEATHSIG` isn't
-/// available on macOS), so instead every launch registers its PID here and
-/// whichever process starts next sweeps `registry_dir`: `owns_process` must
-/// positively verify a candidate PID actually belongs to the expected
-/// process family before `kill` is called on it, so a PID that has since
-/// been reused by an unrelated process is never touched. Every registry
-/// entry is removed regardless of the verification result, since a stale
-/// entry left behind (verified or not) would otherwise persist forever.
+/// Sweeps `registry_dir` for processes orphaned by an instance that died without running
+/// its teardown (SIGKILL, OOM kill, crash). No portable way exists to make children die
+/// with the parent (`PR_SET_PDEATHSIG` is Linux-only), so each launch registers its PID
+/// and the next start reaps.
+///
+/// `owns_process` must positively verify a candidate PID belongs to the expected process
+/// family before `kill` runs, so a reused PID is never signalled. Every entry is removed
+/// regardless of the verification result, or stale entries persist forever.
 pub fn reap_orphaned_processes(
     registry_dir: &Path,
     owns_process: impl Fn(u32) -> bool,
@@ -71,11 +58,10 @@ pub fn reap_orphaned_processes(
     }
 }
 
-/// Lowercased `comm` (process name) for `pid` per `ps`, or `None` if the
-/// process doesn't exist or `ps` itself failed. Callers should match this
-/// against an engine-specific needle (e.g. "chrom") rather than an exact
-/// name, since browser binaries vary by platform and channel
-/// (`google-chrome-stable`, `Google Chrome`, `chromium`, ...).
+/// Lowercased `comm` (process name) for `pid` per `ps`, or `None` if the process does
+/// not exist or `ps` failed. Match it against a substring needle such as "chrom", not an
+/// exact name: browser binaries vary by platform and channel (`google-chrome-stable`,
+/// `Google Chrome`, `chromium`).
 #[cfg(unix)]
 pub fn process_command_name(pid: u32) -> Option<String> {
     let output = std::process::Command::new("ps")
@@ -96,10 +82,9 @@ pub fn process_command_name(_pid: u32) -> Option<String> {
 #[cfg(unix)]
 pub fn kill_process(pid: u32) {
     if let Ok(pid) = i32::try_from(pid) {
-        // SAFETY: `kill` is a plain signal-delivery syscall; passing a
-        // caller-supplied PID can at worst fail with ESRCH/EPERM, which is
-        // deliberately ignored (best-effort reap of an already-verified
-        // process).
+        // SAFETY: `kill` is a plain signal-delivery syscall; a caller-supplied PID can
+        // at worst fail with ESRCH/EPERM, ignored here since the process was already
+        // verified and the reap is best-effort.
         unsafe {
             libc::kill(pid, libc::SIGKILL);
         }

@@ -279,9 +279,8 @@ impl ScrollSimulator {
             actions.extend(self.generate_actions_inner(random, delta, viewport_height, false));
         }
 
-        // Doc contract: exactly one settle pause at the end. A final chunk may
-        // still have emitted a probabilistic read pause — drop trailing pauses
-        // so we do not stack settle on top of them.
+        // Exactly one settle pause at the end: drop trailing pauses so settle
+        // never stacks on a chunk's probabilistic read pause.
         while matches!(actions.last(), Some(ScrollAction::Pause { .. })) {
             actions.pop();
         }
