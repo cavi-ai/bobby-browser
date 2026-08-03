@@ -1578,3 +1578,157 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
     );
     worker.close().await.unwrap();
 }
+
+/// Dogfood the Chromium humanized stream as a detector would: inter-key
+/// intervals must vary like a human's (no machine-uniform cadence, no
+/// zero-ms chords), and the mouse path must not be a straight line.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn dogfood_humanized_stream_biometrics() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<title>Dogfood</title><input id='f' style='position:absolute;left:400px;top:300px;width:200px'><script>window.keys=[];window.moves=[];document.addEventListener('keydown',e=>window.keys.push({k:e.key,t:e.timeStamp}));document.addEventListener('mousemove',e=>window.moves.push({x:e.clientX,y:e.clientY,t:e.timeStamp}));</script>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 30_000,
+            },
+        )
+        .await
+        .unwrap();
+    worker.set_humanization_enabled(true).await.unwrap();
+    // Pool several rounds: per-round statistics are small-sample flaky, a
+    // detector's cadence check is only meaningful on a pooled stream.
+    for value in ["stream", "behavior", "input", "human"] {
+        worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: "#f".into(),
+                    target: None,
+                    value: value.into(),
+                    clear_first: true,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: "#f".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "JSON.stringify({keys: window.keys, moves: window.moves})".into(),
+                timeout_ms: 10_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    let probe = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::JavaScriptResult { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+        .expect("probe");
+    let probe: serde_json::Value = serde_json::from_str(probe.as_str().unwrap()).unwrap();
+
+    let keys = probe["keys"].as_array().expect("keys");
+    // Rounds may legitimately produce bursts (a paste has no keydowns) or
+    // typo corrections (extra keydowns); the detector-relevant floor is a
+    // pooled stream big enough to measure cadence on.
+    assert!(keys.len() >= 12, "too few key events: {keys:?}");
+    let intervals: Vec<f64> = keys
+        .windows(2)
+        .map(|pair| pair[1]["t"].as_f64().unwrap() - pair[0]["t"].as_f64().unwrap())
+        .collect();
+    eprintln!("inter-key intervals (ms): {intervals:?}");
+    assert!(
+        intervals.iter().all(|interval| *interval > 10.0),
+        "zero/burst intervals look synthetic: {intervals:?}"
+    );
+    let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
+    let variance = intervals
+        .iter()
+        .map(|interval| (interval - mean).powi(2))
+        .sum::<f64>()
+        / intervals.len() as f64;
+    assert!(
+        variance.sqrt() > mean * 0.15,
+        "uniform cadence (mean={mean:.1} sd={:.1}) fails a detector's variance check",
+        variance.sqrt()
+    );
+
+    let moves = probe["moves"].as_array().expect("moves");
+    eprintln!("mouse path: {} points", moves.len());
+    assert!(
+        moves.len() >= 4,
+        "a real approach has curved intermediate points, got {moves:?}"
+    );
+    // Collinearity over the approach segment: walk back from the final move
+    // to the last point away from the target; a straight-line approach has
+    // every intermediate point on that segment, a bezier does not.
+    let last = &moves[moves.len() - 1];
+    let (tx, ty) = (last["x"].as_f64().unwrap(), last["y"].as_f64().unwrap());
+    // Landings are clicks ending on the target; the approach is the widest
+    // run of off-target moves between two of them (focus clicks have no
+    // intermediates, the bezier approach does).
+    let landings: Vec<usize> = moves
+        .iter()
+        .enumerate()
+        .filter(|(_, point)| {
+            (point["x"].as_f64().unwrap() - tx).abs() <= 1.0
+                && (point["y"].as_f64().unwrap() - ty).abs() <= 1.0
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let (start, end) = landings
+        .windows(2)
+        .max_by_key(|pair| pair[1] - pair[0])
+        .map(|pair| (pair[0] + 1, pair[1]))
+        .filter(|(start, end)| end - start >= 2)
+        .expect("an approach segment with intermediates");
+    let first = &moves[start];
+    let (x1, y1) = (first["x"].as_f64().unwrap(), first["y"].as_f64().unwrap());
+    let last = &moves[end];
+    let (x2, y2) = (last["x"].as_f64().unwrap(), last["y"].as_f64().unwrap());
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let off_line = moves[start + 1..end].iter().any(|point| {
+        let px = point["x"].as_f64().unwrap() - x1;
+        let py = point["y"].as_f64().unwrap() - y1;
+        (dx * py - dy * px).abs() > 1.0
+    });
+    assert!(off_line, "mouse path is a straight line: {moves:?}");
+    worker.close().await.unwrap();
+}

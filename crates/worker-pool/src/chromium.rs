@@ -501,29 +501,36 @@ impl ChromiumWorker {
                 delay(*delay_ms).await;
             }
             TypingAction::Backspace { count, delay_ms } => {
-                for _ in 0..*count {
+                // N backspaces at CDP speed is a sub-millisecond burst — the
+                // most synthetic cadence there is. Pace the repetitions.
+                for index in 0..*count {
                     page.execute(key_event("Backspace", DispatchKeyEventType::RawKeyDown, 0))
                         .await
                         .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
                     page.execute(key_event("Backspace", DispatchKeyEventType::KeyUp, 0))
                         .await
                         .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                    if index + 1 < *count {
+                        let pause = {
+                            let mut random = self.session_random.lock().await;
+                            random.next_f64(30.0, 90.0) as u64
+                        };
+                        delay(pause).await;
+                    }
                 }
                 delay(*delay_ms).await;
             }
             TypingAction::CopyPaste { text, delay_ms } => {
-                // Insert the burst as characters, never a bare Ctrl+V against
-                // an empty clipboard (same rule as the Firefox translator).
+                // A paste produces no key events for the pasted content —
+                // replaying it as a 1ms-per-key burst is exactly what a
+                // behavioral detector flags. Insert as text, the way the
+                // clipboard path presents it.
                 delay(*delay_ms).await;
-                for character in text.chars() {
-                    let character = character.to_string();
-                    page.execute(key_event(&character, DispatchKeyEventType::KeyDown, 0))
-                        .await
-                        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-                    page.execute(key_event(&character, DispatchKeyEventType::KeyUp, 0))
-                        .await
-                        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-                }
+                page.execute(
+                    chromiumoxide::cdp::browser_protocol::input::InsertTextParams::new(text),
+                )
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
             }
             TypingAction::Pause { duration_ms } => {
                 delay(*duration_ms).await;
