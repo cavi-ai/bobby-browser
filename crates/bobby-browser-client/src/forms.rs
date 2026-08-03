@@ -1,9 +1,12 @@
+//! Form snapshot and control-action wire types.
+
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::PageId;
 
+/// Schema version for [`FormSnapshot`] payloads.
 pub const FORM_SNAPSHOT_SCHEMA_VERSION: u16 = 1;
 pub const MAX_FORM_SNAPSHOT_FORMS: usize = 64;
 pub const MAX_FORM_SNAPSHOT_CONTROLS: usize = 512;
@@ -199,6 +202,7 @@ pub struct FormDescriptor {
     pub validity: FormValidity,
 }
 
+/// Semantic form observation returned by form-snapshot endpoints and evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(

@@ -1,3 +1,5 @@
+//! Command envelopes, primitives, intents, and session create/open requests.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,8 +9,10 @@ use crate::{
     MAX_FORM_VALUE_BYTES,
 };
 
+/// Maximum UTF-8 byte length for intent `purpose` strings.
 pub const MAX_INTENT_PURPOSE_BYTES: usize = 256;
 
+/// Envelope submitted to `POST /v1/commands`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -26,8 +30,8 @@ pub struct CommandEnvelope {
 impl CommandEnvelope {
     pub const SCHEMA_VERSION: u16 = 2;
 
-    /// Returns an envelope suitable for durable journals and diagnostics.
-    /// The live envelope must remain in memory for execution.
+    /// Returns a copy safe for durable journals (URLs sanitized).
+    /// Keep the live envelope in memory for execution.
     pub fn journal_safe(&self) -> Self {
         let mut safe = self.clone();
         safe.command.sanitize_urls();
@@ -35,6 +39,7 @@ impl CommandEnvelope {
     }
 }
 
+/// Nested command wire shape: `{ kind: "intent" | "primitive", input: … }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", content = "input", rename_all = "camelCase")]
@@ -92,10 +97,8 @@ impl IntentCommand {
     }
 }
 
-/// Every field is optional, and `#[serde(default)]` is what makes that true on
-/// the wire. Without it a caller sending `{"role":"textbox"}` — exactly what
-/// the published schema says is valid, since no hint is required — fails
-/// deserialization on the missing collection and boolean fields.
+/// Optional targeting hints for intents. All fields are optional on the wire
+/// (`#[serde(default)]`); a body like `{"role":"textbox"}` must deserialize.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", default)]
@@ -185,12 +188,10 @@ pub struct WaitForStateIntent {
     pub timeout_ms: u64,
 }
 
-/// Activate a described link/control and verify the resulting destination.
+/// Follow a control and wait for the expected destination.
 ///
-/// `boundary` mirrors `ClickCommand.boundary`: the caller judges whether the
-/// activated control may perform a mutating/side-effecting action (e.g. "Sign
-/// out") and therefore needs the pre-established checkpoint gate, or is
-/// ordinary navigation that can run without one.
+/// Set `boundary` when activation may mutate state or trigger a side effect
+/// (same meaning as [`ClickCommand::boundary`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -209,15 +210,10 @@ fn default_dismiss_timeout_ms() -> u64 {
     DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS
 }
 
-/// Activate a described dismiss/close control to clear an obstruction (popup,
-/// overlay, cookie banner) and verify the target becomes detached or hidden.
+/// Dismiss an obstruction (overlay, cookie banner, etc.).
 ///
-/// There is no caller-supplied boundary flag: dismissing an obstruction is
-/// never treated as a mutating action, so this intent is always
-/// `CommandClass::Reconciliable`. Verification is built in — the engine
-/// re-resolves the same target after acting and requires it to be gone
-/// (removed from the DOM or no longer visible), not a caller-supplied
-/// expected post-dismiss state.
+/// Always reconciliable. Verification is built in: after acting, the same
+/// target must be detached or hidden.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -229,9 +225,8 @@ pub struct DismissObstructionIntent {
     pub timeout_ms: u64,
 }
 
-/// What to read off a resolved field's candidate. `Href` is a named
-/// convenience over the common "attribute=href" case; anything else goes
-/// through `Attribute` directly.
+/// Value to extract from a resolved field. `Href` is shorthand for
+/// `attribute = "href"`; other attributes use [`ExtractValueKind::Attribute`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -241,9 +236,7 @@ pub enum ExtractValueKind {
     Href,
 }
 
-/// One named field to extract, resolved independently of every other field
-/// in the same `ExtractIntent` — effectively a per-field `LocateIntent` that
-/// also names what to read off the result.
+/// One named field within an [`ExtractIntent`], resolved independently of siblings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -255,15 +248,10 @@ pub struct ExtractField {
     pub value: ExtractValueKind,
 }
 
-/// Schema-bounded structured extraction: resolve every named field and read
-/// its value. Never mutates the page, so this intent is always
-/// `CommandClass::Replayable`.
+/// Structured extraction intent. Replayable (does not mutate the page).
 ///
-/// Resolution is best-effort per field, not all-or-nothing: a field that
-/// cannot be resolved (deterministically, or via vision when permitted) is
-/// reported missing in that field's evidence rather than failing the whole
-/// command. Callers get whatever the page currently offers instead of a
-/// result blocked on the least-available field.
+/// Fields resolve independently: a missing field is reported in that field's
+/// evidence rather than failing the whole command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -521,11 +509,8 @@ pub struct TypeTextCommand {
     pub target: Option<TargetSpec>,
     pub value: String,
     pub clear_first: bool,
-    /// Optional page-identity confirmation: when set, the command fails before
-    /// typing unless the page's current URL matches. This is the type-side
-    /// counterpart of `ClickCommand.expected_url` — agents that navigate away
-    /// mid-flow (or address the wrong session) fail instead of typing into
-    /// the wrong page.
+    /// When set, fail before typing unless the page URL matches
+    /// (same role as [`ClickCommand::expected_url`]).
     #[serde(default)]
     pub expected_url: Option<String>,
 }
@@ -975,9 +960,8 @@ pub struct EvaluateJavaScriptCommand {
     pub await_promise: bool,
 }
 
-/// Per-session gate for privileged execution capabilities. Defaults to all-false
-/// (deny-by-default): a session must explicitly opt in to run JavaScript, even if
-/// the bearer token holds the `javascript:evaluate` capability.
+/// Per-session gate for privileged execution. Defaults to deny; a session must
+/// opt in even when the bearer token holds the matching capability.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -988,6 +972,7 @@ pub struct ExecutionPolicy {
     pub vision_assist: bool,
 }
 
+/// `POST /v1/sessions` body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -998,6 +983,7 @@ pub struct CreateSessionRequest {
     pub execution_policy: ExecutionPolicy,
 }
 
+/// `POST /v1/pages` body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpenPageRequest {

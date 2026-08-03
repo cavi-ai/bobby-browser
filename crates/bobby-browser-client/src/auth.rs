@@ -1,3 +1,5 @@
+//! Authentication and capability types for the `/v1` interface.
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeSet;
 use std::iter::FromIterator;
@@ -5,7 +7,7 @@ use uuid::Uuid;
 
 use crate::InterfaceOperation;
 
-/// An authenticated caller. This identifier intentionally carries no credential material.
+/// Authenticated caller id. Carries no credential material.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
@@ -21,6 +23,7 @@ impl PrincipalId {
     }
 }
 
+/// Capability granted by a token or policy.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
@@ -79,7 +82,7 @@ impl Capability {
     }
 }
 
-/// A verified, canonicalized capability set. It serializes in lexical wire order.
+/// Canonical capability set. Serializes in lexical wire order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CapabilitySet(BTreeSet<Capability>);

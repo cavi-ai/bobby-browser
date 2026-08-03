@@ -49,14 +49,34 @@ function contentType(response: Response): string | undefined {
   return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
 }
 
+/**
+ * Construction options for {@link BrowserRuntimeClient}.
+ *
+ * `baseUrl` is the runtime origin. A trailing slash and a trailing `/v1` are
+ * stripped so callers may pass either `http://127.0.0.1:7777` or `…/v1`.
+ */
 export interface BrowserRuntimeClientOptions {
+  /** Runtime origin (trailing `/` and `/v1` are stripped). */
   baseUrl: string;
+  /** Bearer token for `Authorization`. Never logged or retained on errors. */
   bearerToken: string;
+  /** Override `globalThis.fetch` (tests, custom agents). */
   fetch?: typeof fetch;
-  /** Positive safe integer capped at 256 MiB to bound the single verification buffer. */
+  /**
+   * Upper bound for a single artifact verification buffer.
+   * Must be a positive safe integer ≤ 256 MiB. Defaults to 64 MiB.
+   */
   maxArtifactBytes?: number;
 }
 
+/**
+ * Authenticated HTTP client for the Bobby Browser `/v1` runtime interface.
+ *
+ * Every request sends `Authorization`, `x-interface-version`,
+ * `x-correlation-id`, and `x-deadline`. Responses are shape-checked against
+ * the published contracts; mismatches surface as {@link RuntimeClientError}
+ * with `kind: "protocol"`.
+ */
 export class BrowserRuntimeClient {
   readonly #baseUrl: string;
   readonly #bearerToken: string;
@@ -74,11 +94,16 @@ export class BrowserRuntimeClient {
     if (!Number.isSafeInteger(this.#maxArtifactBytes) || this.#maxArtifactBytes <= 0 || this.#maxArtifactBytes > MAX_SDK_ARTIFACT_BYTES) throw this.#protocol("maxArtifactBytes must be a positive safe integer within the SDK allocation cap");
   }
 
+  /** Node inspect helper — never prints the bearer token. */
   [Symbol.for("nodejs.util.inspect.custom")](): string { return "BrowserRuntimeClient { bearerToken: [redacted] }"; }
 
+  /** `GET /v1/runtime` — version, capabilities, and load counters. */
   async runtimeInfo(options?: RequestOptions): Promise<RuntimeInfo> { return this.#json("GET", "/v1/runtime", undefined, options, isRuntimeInfo); }
+  /** `POST /v1/sessions` — create a browser session. */
   async createSession(input: CreateSessionRequest, options?: RequestOptions): Promise<SessionState> { return this.#json("POST", "/v1/sessions", input, options, isSessionState); }
+  /** `GET /v1/sessions` — list active sessions. */
   async listSessions(options?: RequestOptions): Promise<SessionState[]> { return this.#json("GET", "/v1/sessions", undefined, options, isSessionStateList); }
+  /** `DELETE /v1/sessions/{id}` — tear down a session (`204` on success). */
   async deleteSession(sessionId: string, options?: RequestOptions): Promise<void> {
     if (!isUuid(sessionId)) throw this.#protocol("session id must be a UUID");
     const scoped = await this.#request("DELETE", `/v1/sessions/${encodeURIComponent(sessionId)}`, undefined, options);
@@ -87,7 +112,12 @@ export class BrowserRuntimeClient {
       throw this.#responseError(scoped.response.status, await this.#readJson(scoped.response, scoped.scope));
     } finally { scoped.scope.dispose(); }
   }
+  /** `POST /v1/pages` — open a page in a session. */
   async openPage(input: OpenPageRequest, options?: RequestOptions): Promise<PageState> { return this.#json("POST", "/v1/pages", input, options, isPageState); }
+  /**
+   * `GET /v1/sessions/{sessionId}/pages/{pageId}/forms` — semantic form snapshot.
+   * @param options.maxControls Optional bound from 1 through 512.
+   */
   async formSnapshot(sessionId: string, pageId: string, options: FormSnapshotOptions = {}): Promise<FormSnapshot> {
     if (!isUuid(sessionId) || !isUuid(pageId)) throw this.#protocol("session and page ids must be UUIDs");
     const { maxControls, ...requestOptions } = options;
@@ -96,27 +126,44 @@ export class BrowserRuntimeClient {
     return this.#json("GET", `/v1/sessions/${encodeURIComponent(sessionId)}/pages/${encodeURIComponent(pageId)}/forms${query}`, undefined, requestOptions, isFormSnapshot);
   }
 
+  /**
+   * `POST /v1/commands` — submit a {@link CommandEnvelope} (primitive or intent).
+   * Validates that the HTTP status matches the outcome `status` mapping.
+   */
   async submit(input: CommandEnvelope, options?: RequestOptions): Promise<CommandOutcome> {
     return this.#consumeJson("POST", "/v1/commands", input, options, (response, payload) => {
       if (!isCommandOutcome(payload)) throw this.#responseError(response.status, payload);
-      if (commandStatus(payload) !== response.status) throw this.#protocol("command outcome status does not match broker mapping", response.status);
+      if (commandStatus(payload) !== response.status) throw this.#protocol("command outcome status does not match HTTP mapping", response.status);
       return payload;
     });
   }
 
+  /** `POST /v1/checkpoints` — persist a workflow checkpoint. */
   async checkpoint(input: CheckpointRequest, options?: RequestOptions): Promise<WorkflowCheckpoint> { return this.#json("POST", "/v1/checkpoints", input, options, isWorkflowCheckpoint); }
+  /** `GET /v1/recovery/{workflowId}` — current recovery status for a workflow. */
   async recoveryStatus(workflowId: string, options?: RequestOptions): Promise<RecoveryStatus> {
     if (!isUuid(workflowId)) throw this.#protocol("workflow id must be a UUID");
     return this.#json("GET", `/v1/recovery/${encodeURIComponent(workflowId)}`, undefined, options, isRecoveryStatus);
   }
+  /**
+   * `POST /v1/recovery/{workflowId}` — resume, reconcile, or restart a workflow.
+   * `needsReconciliation` maps to HTTP `409`; other decisions to `200`.
+   */
   async recover(workflowId: string, options?: RequestOptions): Promise<RecoveryDecision> {
     return this.#consumeJson("POST", `/v1/recovery/${encodeURIComponent(workflowId)}`, undefined, options, (response, payload) => {
       if (!isRecoveryDecision(payload)) throw this.#responseError(response.status, payload);
-      if ((payload.status === "needsReconciliation" ? 409 : 200) !== response.status) throw this.#protocol("recovery decision status does not match broker mapping", response.status);
+      if ((payload.status === "needsReconciliation" ? 409 : 200) !== response.status) throw this.#protocol("recovery decision status does not match HTTP mapping", response.status);
       return payload;
     });
   }
 
+  /**
+   * `GET /v1/events` — async iterator over interface events after `cursor`.
+   *
+   * Retries transport failures up to `maxTransportRetries` (default 2).
+   * A cursor gap yields {@link RuntimeClientError} with `kind: "http"`,
+   * status `409`, and an {@link EventGap} payload.
+   */
   async *events(cursor: number, options: EventOptions = {}): AsyncIterable<InterfaceEvent> {
     if (!validEventOptions(cursor, options)) throw this.#protocol("event cursor or retry options are outside SDK bounds");
     const scope = composeSignal(options.signal, deadlineFor(options, this.#redact), this.#redact);
@@ -145,6 +192,13 @@ export class BrowserRuntimeClient {
     }} finally { scope.dispose(); }
   }
 
+  /**
+   * `GET /v1/artifacts/{artifactId}` — verified artifact body as a byte stream.
+   *
+   * Checks `Content-Type` and `Content-Length` against the reference, then
+   * buffers within `reference.bytes` and verifies SHA-256 before any bytes
+   * are delivered to the caller.
+   */
   async artifact(reference: ArtifactReference, options?: RequestOptions): Promise<ReadableStream<Uint8Array>> {
     if (!validArtifactReference(reference, this.#maxArtifactBytes)) throw this.#protocol("artifact reference is outside the client hard bound");
     const scoped = await this.#request("GET", `/v1/artifacts/${encodeURIComponent(reference.artifactId)}`, undefined, options);
@@ -206,7 +260,7 @@ export class BrowserRuntimeClient {
 
   #responseError(status: number, payload: unknown): RuntimeClientError {
     if (hasExactKeys(payload, ["error"]) && isInterfaceError(payload.error)) {
-      if (!interfaceErrorStatusMatches(payload.error, status)) return this.#protocol("interface error status does not match broker mapping", status);
+      if (!interfaceErrorStatusMatches(payload.error, status)) return this.#protocol("interface error status does not match HTTP mapping", status);
       return new RuntimeClientError({ kind: "http", status, interfaceError: payload.error, redactor: this.#redact });
     }
     return this.#protocol("response has an unexpected status or shape", status);
@@ -316,8 +370,8 @@ function verifiedArtifactStream(source: ReadableStream<Uint8Array>, reference: A
   let delivered = false;
   let verification: Promise<void> | undefined;
   const verify = async () => {
-    // `reference.bytes` is the broker's declared, caller-supplied upper bound. We never
-    // retain more than that bounded amount, and do not expose any bytes before SHA-256 passes.
+    // `reference.bytes` is the declared upper bound. Buffer at most that many
+    // bytes and do not deliver any until SHA-256 verification succeeds.
     let bytes = 0;
     const buffered = new Uint8Array(reference.bytes);
     while (true) {
@@ -346,7 +400,7 @@ function verifiedArtifactStream(source: ReadableStream<Uint8Array>, reference: A
       } catch (error) {
         const failure = scope.signal.aborted ? scopeError(scope) : error instanceof RuntimeClientError ? error : artifactProtocolError(scope);
         controller.error(failure);
-        try { await reader.cancel(failure); } catch { /* body-source failures never replace the sanitized surface */ }
+        try { await reader.cancel(failure); } catch { /* keep the sanitized RuntimeClientError */ }
       } finally { scope.dispose(); }
     },
     async cancel() {

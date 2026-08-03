@@ -1,3 +1,5 @@
+//! Workflow checkpoint and recovery decision types.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,8 +13,7 @@ pub const MAX_RECOVERY_RECEIPTS: usize = 64;
 pub const MAX_RECOVERY_RECEIPT_EVIDENCE: usize = 32;
 pub const MAX_RECOVERY_RECEIPT_BYTES: usize = 256 * 1024;
 
-/// Read-model for recovery status: what the runtime durably knows about a
-/// workflow's checkpoint and recorded recovery receipts.
+/// Current recovery status for a workflow (`GET /v1/recovery/{id}`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
