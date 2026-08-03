@@ -38,11 +38,14 @@ HTTP runtime / TypeScript SDK.
 
 ## Client config example
 
+`bobby init --emit <claude|zed|vscode|json>` prints the right fragment for
+your host (no credential material — `${VAR}` placeholders only):
+
 ```json
 {
   "mcpServers": {
     "bobby-browser": {
-      "command": "/absolute/path/to/mcp-gateway",
+      "command": "mcp-gateway",
       "env": {
         "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN": "${AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN}",
         "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL": "${AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL}",
@@ -53,6 +56,11 @@ HTTP runtime / TypeScript SDK.
   }
 }
 ```
+
+`bobby doctor` runs a live handshake against the gateway (`initialize` +
+`tools/list`) and reports the tool count and byte size against the 128 KiB
+catalog budget, so a dead or oversized surface is caught before the agent
+sees it.
 
 ## Limits and lifecycle
 
