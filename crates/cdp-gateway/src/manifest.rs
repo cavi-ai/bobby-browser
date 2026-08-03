@@ -555,24 +555,5 @@ impl MethodRegistry {
 }
 
 fn parse_capability(value: &str) -> Option<Capability> {
-    Some(match value {
-        "session:read" => Capability::SessionRead,
-        "session:write" => Capability::SessionWrite,
-        "page:read" => Capability::PageRead,
-        "page:write" => Capability::PageWrite,
-        "browser:mutate" => Capability::BrowserMutate,
-        "file:upload" => Capability::FileUpload,
-        "file:download" => Capability::FileDownload,
-        "javascript:evaluate" => Capability::JavascriptEvaluate,
-        "intent:execute" => Capability::IntentExecute,
-        "vision:assist" => Capability::VisionAssist,
-        "artifact:read" => Capability::ArtifactRead,
-        "artifact:capture" => Capability::ArtifactCapture,
-        "recovery:read" => Capability::RecoveryRead,
-        "recovery:write" => Capability::RecoveryWrite,
-        "authority:admin" => Capability::AuthorityAdmin,
-        "browser:fingerprint" => Capability::BrowserFingerprint,
-        "browser:humanize" => Capability::BrowserHumanize,
-        _ => return None,
-    })
+    value.parse().ok()
 }
