@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **Breaking (Rust):** the `/v1` wire types moved from the `types` crate into `bobby-browser-client`, which is now the single published Rust crate (`cargo publish` dry-run verified; `types` remains in the workspace as a `publish = false` re-export shim over the moved modules). crates.io publishing is now the one `bobby-browser-client` crate instead of the 25-crate ordered closure.
+- TypeScript SDK source now carries JSDoc on the public surface (client, contracts, errors, events, intents, validators).
 - **Breaking:** `executionPolicy.fingerprint` and `executionPolicy.humanize` now require the new `browser:fingerprint` and `browser:humanize` capabilities at session creation; a principal without them gets `missingCapability` and no session is created. `bobby init` bootstrap credentials include both, matching the `vision:assist` double-gate precedent.
 - Document the MCP surface depth shipped in v0.3.1: per-tool `outputSchema`, `title` + `annotations`, the four `bobby://` resources, `artifact://` capture resources, the three working-loop prompts, and `notifications/bobby/event` + `notifications/tools/list_changed` push channels. Document `job:*` capabilities and the `browser:fingerprint` / `browser:humanize` gates in the capabilities concept page.
 - Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.

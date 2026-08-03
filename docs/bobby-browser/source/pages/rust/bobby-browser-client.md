@@ -6,18 +6,16 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 **Tier: Supported**
 
-Typed HTTP client for a running `bobby serve` instance. Mirrors
-`@cavi-ai/bobby-browser` (`BrowserRuntimeClient`) for the common `/v1` path.
+The Rust SDK on crates.io: typed HTTP client plus `/v1` wire types for a
+running `bobby serve` instance. Mirrors `@cavi-ai/bobby-browser`.
 
 ```bash
 cargo add bobby-browser-client
-# or from this repo:
-cargo test -p bobby-browser-client
+cargo add bobby-browser-client --features schema   # optional JsonSchema
 ```
 
 ```rust,no_run
-use bobby_browser_client::BrowserRuntimeClient;
-use types::CreateSessionRequest;
+use bobby_browser_client::{BrowserRuntimeClient, CreateSessionRequest};
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let client = BrowserRuntimeClient::new(
@@ -52,11 +50,11 @@ Every request sends `Authorization: Bearer …`, `x-interface-version`,
 | `open_page` | `POST /v1/pages` |
 | `submit` | `POST /v1/commands` |
 
-Events, artifacts, checkpoints, and recovery helpers may still be missing
-versus the TypeScript SDK — use raw HTTP or extend the crate when needed.
+Wire types (`CreateSessionRequest`, `CommandEnvelope`, `CURRENT_INTERFACE_VERSION`,
+…) are re-exported from this crate. Events, artifacts, checkpoints, and recovery
+helpers may still be missing versus the TypeScript SDK.
 
 ## Next
 
-- [types](types.md)
 - [HTTP API](../surfaces/http-api.md)
 - [Rust SDK overview](../surfaces/rust-sdk.md)

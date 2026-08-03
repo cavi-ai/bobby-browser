@@ -11,7 +11,7 @@
 - Document session teardown (`deleteSession`), page activation, and
   accessibility-snapshot helpers including `intentHintsFromAccessibilityTarget`.
 - Add `recoveryStatus(workflowId)` for `GET /v1/recovery/{id}`.
-- Intent envelope helpers remain the HTTP/TS path; MCP clients should prefer
+- Intent envelope helpers remain the HTTP/TypeScript path; MCP clients can use
   dedicated `intent_*` tools when available.
 
 ## 0.2.1
