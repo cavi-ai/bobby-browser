@@ -1,28 +1,43 @@
 # bobby-browser
 
-A browser automation runtime with authenticated, capability-scoped control
-surfaces: Rust and TypeScript SDKs, MCP (stdio and streamable HTTP), and
-Playwright/Puppeteer over authenticated CDP. All adapters share the same
-capability, idempotency, evidence, checkpoint, and event contracts.
-Authentication fails closed; credentials are never accepted in URLs or query
-strings.
+A browser automation runtime for agents, with authenticated, capability-scoped
+control surfaces: MCP (stdio and streamable HTTP), ACP over stdio, Rust and
+TypeScript SDKs, and Playwright/Puppeteer over authenticated CDP. All adapters
+share the same capability, idempotency, evidence, checkpoint, and event
+contracts. Authentication fails closed; credentials are never accepted in URLs
+or query strings.
 
-## Run the runtime
+## Install
+
+One command builds the runtime, mints a local credential, wires your agent host,
+and installs the agent skill:
 
 ```bash
-cargo build -p bobby-browser --release
-./target/release/bobby --help
-./target/release/bobby init
-./target/release/bobby doctor
-./target/release/bobby serve --config ./config.toml
+make install
 ```
 
-Then open `http://127.0.0.1:7777/healthz`. CLI details:
-[docs CLI reference](docs/bobby-browser/source/pages/guides/cli.md).
+It runs an interactive checklist. For CI or scripted setup:
+
+```bash
+cargo build --release -p bobby-browser
+./target/release/bobby install --host claude --skill --yes
+```
+
+`bobby install` merges into an existing Claude Code, Zed, or VS Code MCP config
+rather than replacing it, and writes no secrets into host config — the host
+points at `bobby mcp-stdio`, which loads the credential itself.
+
+Verify, then run:
+
+```bash
+bobby doctor          # config, credential, storage, browsers, MCP handshake
+bobby serve           # http://127.0.0.1:7777/healthz
+```
+
+[CLI reference](docs/bobby-browser/source/pages/guides/cli.md) ·
+[Run the server](docs/bobby-browser/source/pages/guides/run.md)
 
 ## Use from TypeScript
-
-Package: `@cavi-ai/bobby-browser` (publish via `sdk-v*` tag / Publish npm workflow).
 
 ```bash
 npm install @cavi-ai/bobby-browser
@@ -37,22 +52,10 @@ const client = new BrowserRuntimeClient({
 });
 ```
 
-Until the package is on the public registry, build from this repo:
-
-```bash
-pnpm install
-pnpm --filter @cavi-ai/bobby-browser test
-```
-
-## Use from Rust (HTTP)
-
-Package: `bobby-browser-client` (crates.io after publish). Crate book:
-[docs/bobby-browser/source/pages/rust/index.md](docs/bobby-browser/source/pages/rust/index.md).
+## Use from Rust
 
 ```bash
 cargo add bobby-browser-client
-# from this repo:
-cargo test -p bobby-browser-client
 ```
 
 ```rust,no_run
@@ -77,9 +80,24 @@ let _session = client
 # Ok(()) }
 ```
 
-> **Alpha.** The interfaces and contracts described here are stable enough to
-> build against, but may still change before 1.0. See
-> [SECURITY.md](SECURITY.md) for the security model and reporting.
+[Crate book](docs/bobby-browser/source/pages/rust/index.md)
+
+## Published artifacts
+
+One version, one `v*` tag, three artifacts:
+
+| Artifact | Name |
+|---|---|
+| Binary | `bobby` — GitHub release assets |
+| npm | [`@cavi-ai/bobby-browser`](https://www.npmjs.com/package/@cavi-ai/bobby-browser) |
+| crates.io | `bobby-browser-client` |
+
+Everything else in `crates/` and `packages/` is implementation and is not
+published. `scripts/check-version-agreement.py` enforces this in CI.
+
+> **Alpha.** The interfaces and contracts here are stable enough to build
+> against, but may still change before 1.0. See [SECURITY.md](SECURITY.md) for
+> the security model and reporting.
 
 **Documentation:** [Online docs](https://cavi-ai.xyz/docs/bobby-browser) ·
 [Overview](docs/bobby-browser/source/pages/introduction/overview.md) ·
@@ -94,7 +112,6 @@ These pages are also served at
 
 - [Authentication](docs/bobby-browser/source/pages/guides/auth.md)
 - [Configuration](docs/bobby-browser/source/pages/guides/configuration.md)
-- [Run the server](docs/bobby-browser/source/pages/guides/run.md)
 - [JavaScript evaluation](docs/bobby-browser/source/pages/guides/javascript-eval.md)
 - [Intents](docs/bobby-browser/source/pages/guides/intents.md)
 - [Bobby skills](docs/bobby-browser/source/pages/guides/skills.md)
@@ -106,6 +123,15 @@ These pages are also served at
 - [Capabilities](docs/bobby-browser/source/pages/concepts/capabilities.md) ·
   [Evidence and checkpoints](docs/bobby-browser/source/pages/concepts/evidence-checkpoints.md) ·
   [Multi-principal](docs/bobby-browser/source/pages/concepts/multi-principal.md)
+
+## Contributing
+
+```bash
+make build            # workspace + gateways
+make test             # workspace tests
+make lint             # clippy -D warnings + fmt check
+pnpm install && pnpm --filter @cavi-ai/bobby-browser test
+```
 
 The CDP allowlist is published in
 [`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into

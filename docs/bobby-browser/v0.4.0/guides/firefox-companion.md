@@ -31,7 +31,7 @@ esbuild src/background.ts src/content.ts --bundle --format=iife \
 cp manifest.json dist/manifest.json
 ```
 
-(or `pnpm --filter @bobby-browser/firefox-companion build`)
+(or `pnpm --filter @cavi-ai/bobby-firefox-companion build`)
 
 ### 2. Create a dedicated profile and sideload the extension
 

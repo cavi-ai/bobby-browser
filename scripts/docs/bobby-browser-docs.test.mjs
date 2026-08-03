@@ -171,7 +171,7 @@ test("generated docs publish the Bobby skill and gauntlet operator guides", asyn
       path.join(fixtureRoot, OUTPUT_REL, "guides/gauntlet.md"),
       "utf8",
     );
-    assert.match(gauntlet, /@bobby-browser\/gauntlet/);
+    assert.match(gauntlet, /@cavi-ai\/bobby-gauntlet/);
     assert.match(gauntlet, /BOBBY_CHAMPIONSHIP_ENGINE/);
     assert.match(gauntlet, /target\/bobby-championship/);
   });
