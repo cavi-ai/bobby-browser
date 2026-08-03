@@ -407,8 +407,56 @@ impl std::fmt::Debug for IdempotencyPermit {
     }
 }
 
+/// A digest that is stable across any reordering of JSON object keys.
+///
+/// This is the identity of an idempotent request: two submissions that mean
+/// the same thing must produce the same digest, or a retry executes a second
+/// time instead of replaying the retained result. On a boundary command that
+/// is a duplicate side effect.
+///
+/// The ordering has to be established here rather than inherited. `serde_json`
+/// backs `Map` with a `BTreeMap` by default — which sorts, making key order
+/// canonical for free — but with the `preserve_order` feature it is an
+/// `IndexMap` that keeps insertion order instead. That feature is not ours to
+/// control: any dependency anywhere in the graph can turn it on, and Cargo
+/// feature unification then applies it to the whole workspace. A digest whose
+/// canonicality depends on which crates happen to be linked is not canonical.
+///
+/// So keys are sorted explicitly, recursively, before hashing. The result is
+/// identical under both `serde_json` configurations, which is the property the
+/// name claims.
 pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<[u8; 32], InterfaceError> {
-    let bytes = serde_json::to_vec(value).map_err(|_| InterfaceError {
+    let value = serde_json::to_value(value).map_err(|_| canonicalization_error())?;
+    let bytes = serde_json::to_vec(&canonicalize(value)).map_err(|_| canonicalization_error())?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+/// Recursively rewrites every object so its keys are in sorted order.
+///
+/// Rebuilding the map is what does the work under `preserve_order`, where
+/// insertion order is retained: inserting in sorted order makes iteration
+/// sorted. Under the default `BTreeMap` the rebuild is redundant and harmless.
+fn canonicalize(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize(value)))
+                .collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            serde_json::Value::Object(entries.into_iter().collect())
+        }
+        // Arrays are ordered by meaning, so their order is part of the value
+        // and must not be touched. Only their elements are canonicalized.
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize).collect())
+        }
+        scalar => scalar,
+    }
+}
+
+fn canonicalization_error() -> InterfaceError {
+    InterfaceError {
         code: InterfaceErrorCode::InvalidRequest,
         layer: ErrorLayer::Interface,
         message: "request cannot be canonicalized".to_owned(),
@@ -418,8 +466,7 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<[u8; 32], InterfaceEr
         retry_after_ms: None,
         reconciliation_required: false,
         required_capability: None,
-    })?;
-    Ok(Sha256::digest(bytes).into())
+    }
 }
 
 fn cleanup_expired<O>(state: &mut StoreState<O>, now: DateTime<Utc>) {
