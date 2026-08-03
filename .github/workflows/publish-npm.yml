@@ -31,4 +31,16 @@ jobs:
         run: pnpm build && npm pack --dry-run
       - name: Publish
         working-directory: packages/typescript-sdk
+        # `setup-node` with `registry-url` writes an .npmrc pointing at
+        # ${NODE_AUTH_TOKEN}. Without that env var the token is empty and npm
+        # answers `404 Not Found - PUT` rather than 401, which reads like a
+        # missing package. This workflow had never once succeeded — five runs,
+        # five failures — and @cavi-ai/bobby-browser@0.3.1 reached the registry
+        # by hand.
+        #
+        # `id-token: write` stays: npm prefers OIDC trusted publishing when the
+        # package has a trusted publisher configured, and falls back to this
+        # token when it does not.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
