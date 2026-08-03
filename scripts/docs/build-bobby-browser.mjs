@@ -61,6 +61,15 @@ export async function buildBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
     path.join(sourceRoot, "navigation.json"),
     path.join(outputRoot, "navigation.json"),
   );
+  try {
+    await cp(path.join(sourceRoot, "openapi"), path.join(outputRoot, "openapi"), {
+      recursive: true,
+    });
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
   await stampTree(outputRoot);
 
   const relativePaths = await listFilesRecursive(outputRoot, outputRoot);

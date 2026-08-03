@@ -127,9 +127,10 @@ command `resourceExhausted` outcomes return **HTTP 429** with:
 Treat 429 as retryable after the indicated delay. Do not spin. Connection /
 accept limits on the listener can also emit 429 with `Retry-After`.
 
-HTTP **503** may appear for retryable command failures; those responses do
-**not** currently set `Retry-After` — back off using the client’s own policy
-and the failure taxonomy (`bobby://failure-taxonomy` over MCP).
+HTTP **503** appears for retryable command failures (`retryableFailure`). Those
+responses now include `Retry-After: 1` (one second) as a default backoff when
+the outcome does not carry an explicit millisecond hint. Prefer that header
+over spinning.
 
 ## Clients
 

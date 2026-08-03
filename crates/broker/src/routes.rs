@@ -1070,11 +1070,17 @@ fn deadline_error(correlation_id: &CorrelationId) -> ProtocolError {
 }
 
 fn outcome_response(outcome: CommandOutcome) -> Response {
+    // Default backoff for 503 retryable command failures when the outcome has
+    // no explicit `retry_after_ms` (unlike ResourceExhausted).
+    const RETRYABLE_FAILURE_RETRY_AFTER_MS: u64 = 1_000;
     let (status, retry_after_ms) = match &outcome {
         CommandOutcome::Completed { .. } | CommandOutcome::Restarted { .. } => {
             (StatusCode::OK, None)
         }
-        CommandOutcome::RetryableFailure { .. } => (StatusCode::SERVICE_UNAVAILABLE, None),
+        CommandOutcome::RetryableFailure { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(RETRYABLE_FAILURE_RETRY_AFTER_MS),
+        ),
         CommandOutcome::NeedsReconciliation { .. } => (StatusCode::CONFLICT, None),
         CommandOutcome::PolicyDenied { .. } => (StatusCode::FORBIDDEN, None),
         CommandOutcome::ResourceExhausted { retry_after_ms, .. } => {
