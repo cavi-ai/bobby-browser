@@ -392,10 +392,8 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
         if let Some(command_envelope) = patched.get_mut("CommandEnvelope") {
             command_envelope["properties"]["command"] = json!({
                 "type": "object",
-                "description": "One command. Prefer the named tools — navigate, click, \
-            type_text, control_action, dialog, emulate, and the intent_* family — which \
-            build this envelope for you. Accepted here as {\"kind\":\"primitive\"|\"intent\", \
-            \"input\":{…}} for callers that need to mint their own envelope."
+                "description": "One command as {\"kind\":\"primitive\"|\"intent\",\"input\":{…}}. \
+            Prefer named tools for common actions; they build this envelope."
             });
         }
         let seed = json!({"properties": schema["properties"], "required": schema["required"]});
@@ -408,48 +406,19 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     schema
 }
 
-/// Compact argument templates for high-traffic tools. Kept off the validation
+/// Compact argument templates for the first-run tools. Kept off the validation
 /// schema path so `validate_tool_arguments` stays lean; only `tools/list`
-/// advertises them.
+/// advertises them. Limit these to the setup sequence so the full surface keeps
+/// enough room for another small tool.
 fn tool_argument_example(name: &str) -> Option<Value> {
     let session = "10000000-0000-4000-8000-000000000001";
-    let page = "20000000-0000-4000-8000-000000000002";
     Some(match name {
         "session_create" => json!({
-            "profile": "default",
-            "executionPolicy": {
-                "javascriptEvaluation": false,
-                "visionAssist": false,
-                "fingerprint": false,
-                "humanize": false
-            }
+            "profile": "default"
         }),
         "page_open" => json!({
             "sessionId": session,
             "url": "https://example.test/"
-        }),
-        "a11y_snapshot" => json!({
-            "sessionId": session,
-            "pageId": page,
-            "maxNodes": 256
-        }),
-        "intent_fill" => json!({
-            "sessionId": session,
-            "pageId": page,
-            "purpose": "email",
-            "value": {"kind": "text", "text": "ada@example.test", "clearFirst": true}
-        }),
-        "intent_submit_and_verify" => json!({
-            "sessionId": session,
-            "pageId": page,
-            "purpose": "submit",
-            "expectedState": {
-                "condition": {
-                    "kind": "url",
-                    "matcher": {"kind": "contains", "value": "/done"}
-                },
-                "timeoutMs": 15000
-            }
         }),
         _ => return None,
     })
