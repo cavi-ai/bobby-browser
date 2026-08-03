@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Add the node-locality proof test: a session naming a loopback node sends its escalation traffic only to that node; a second listener standing in for a remote provider records zero hits.
 - **Breaking (Rust):** the `/v1` wire types moved from the `types` crate into `bobby-browser-client`, which is now the single published Rust crate (`cargo publish` dry-run verified; `types` remains in the workspace as a `publish = false` re-export shim over the moved modules). crates.io publishing is now the one `bobby-browser-client` crate instead of the 25-crate ordered closure.
 - TypeScript SDK source now carries JSDoc on the public surface (client, contracts, errors, events, intents, validators).
 - Add `bobby init --emit <claude|zed|vscode|json>`: prints the MCP client config fragment for the host with `${VAR}` credential placeholders, never the secret. Add `skill/SKILL.md`, the agent skill package for driving the runtime.
