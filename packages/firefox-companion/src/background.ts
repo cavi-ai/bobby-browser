@@ -16,8 +16,13 @@ import { syncFingerprintRegistration } from "./fingerprint-registration.js";
 import {
   claimFingerprintHostOwnership,
   releaseFingerprintHostOwnership,
+  getFingerprintEnabled,
+  getFingerprintOwner,
+  getFingerprintProfile,
   type FingerprintProfile,
+  type FingerprintStorage,
 } from "./fingerprint.js";
+import { buildPopupStatus, type PopupStatus } from "./popup-status.js";
 
 export const MAX_PAGE_LEASES = 256;
 export const PAGE_LEASE_TTL_MS = 60_000;
@@ -67,6 +72,7 @@ type Transport = {
   start(listener: (message: unknown) => void | Promise<void>): void;
   send(message: unknown): void;
   stop(): void;
+  isConnected?: () => boolean;
 };
 
 export type BackgroundDependencies = {
@@ -187,6 +193,8 @@ export class CompanionBackground {
   #options: BackgroundConnectOptions | undefined;
   #paired = false;
   #started = false;
+  #lastError: { code: string; message: string } | undefined;
+  #unpairedReason = "waiting to pair";
 
   constructor(dependencies: BackgroundDependencies) {
     this.#dependencies = dependencies;
@@ -200,6 +208,8 @@ export class CompanionBackground {
     }
     this.#options = structuredClone(options);
     this.#paired = false;
+    this.#unpairedReason = "waiting to pair";
+    this.#lastError = undefined;
     this.#leases.clear();
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
@@ -220,12 +230,39 @@ export class CompanionBackground {
 
   stop(): void {
     this.#paired = false;
+    this.#unpairedReason = "disconnected";
     this.#leases.clear();
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
     this.#tabLifecycles.clear();
     void this.#setFingerprintManagedByHost(false);
     this.#dependencies.transport.stop();
+  }
+
+  async getPopupStatus(storage: FingerprintStorage): Promise<PopupStatus> {
+    const enabled = await getFingerprintEnabled(storage);
+    const owner = await getFingerprintOwner(storage);
+    let sessionId: string | undefined;
+    let sessionSeed: number | undefined;
+    if (owner === "host") {
+      const profile = await getFingerprintProfile(storage);
+      sessionId = profile.sessionId;
+      sessionSeed = profile.sessionSeed;
+    }
+    return buildPopupStatus({
+      paired: this.#paired,
+      unpairedReason: this.#paired ? undefined : this.#unpairedReason,
+      companionId: this.#options?.companionId,
+      profileId: this.#options?.profileId,
+      leaseCount: this.#leases.size,
+      nativeConnected: this.#dependencies.transport.isConnected?.() ?? false,
+      fingerprintEnabled: enabled,
+      fingerprintOwner: owner,
+      fingerprintSessionId: sessionId,
+      fingerprintSessionSeed: sessionSeed,
+      lastError: this.#lastError,
+      protocolVersion: PROTOCOL_VERSION,
+    });
   }
 
   async receiveRuntimeMessage(
@@ -479,6 +516,7 @@ export class CompanionBackground {
       throw new Error("paired identity does not match the requested profile");
     }
     this.#paired = true;
+    this.#lastError = undefined;
     this.#leases.clear();
     this.#targets.clear();
     this.#targetIdsByRoute.clear();
@@ -597,6 +635,7 @@ export class CompanionBackground {
     message: string,
     effectUncertain: boolean,
   ): void {
+    this.#lastError = { code, message };
     const event: CompanionEvent = {
       kind: "actionFailed",
       output: { commandId, code, message, effectUncertain },
@@ -760,6 +799,14 @@ export async function startProductionBackground(
       message.type === "fingerprintSync"
     ) {
       return syncFingerprintRegistration(browserApi);
+    }
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === "popupStatus"
+    ) {
+      return background.getPopupStatus(browserApi.storage);
     }
     void background
       .receiveRuntimeMessage(message, _sender, browserApi.runtime.id)

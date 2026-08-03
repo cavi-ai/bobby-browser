@@ -65,7 +65,7 @@ export type FingerprintProfile = {
 /** Golden-locked to Rust create_session — see default-fingerprint-profile.json. */
 export const DEFAULT_FINGERPRINT_PROFILE: FingerprintProfile = DEFAULT_PROFILE_RAW;
 
-type FingerprintStorage = {
+export type FingerprintStorage = {
   local: {
     get(keys: readonly string[]): Promise<Record<string, unknown>>;
     set(values: Record<string, unknown>): Promise<void>;

@@ -305,6 +305,10 @@ export class NativeCompanionTransport {
     port?.disconnect();
   }
 
+  isConnected(): boolean {
+    return this.#port !== undefined;
+  }
+
   #connect(): void {
     if (!this.#running) return;
     try {
