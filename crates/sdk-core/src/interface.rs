@@ -183,11 +183,24 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::DeleteSession)?;
         self.require_owned_session(&ctx, &session)?;
+        // Read the session's pages before deleting it: afterwards there is no
+        // record of which pages it owned, and the context graph would retain
+        // their structure for the life of the process. Retention is bounded by
+        // session lifetime, so the eviction happens here, at the one point both
+        // facts are still available.
+        let pages = self
+            .inner
+            .sessions
+            .get(&session)
+            .await
+            .map(|state| state.page_ids)
+            .unwrap_or_default();
         self.inner
             .sessions
             .delete(&session)
             .await
             .map_err(|error| map_runtime_error(&ctx, error))?;
+        self.inner.pages.context().forget_all(&pages);
         if let Some(ownership) = &self.session_ownership {
             ownership.release_authenticated_session(&ctx.principal_id, &session);
         }
