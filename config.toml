@@ -72,7 +72,11 @@ max_concurrent_requests = 8
 
 [vision]
 # Vision-assist provider (disabled when endpoint_url is unset).
-# endpoint_url = "https://vision.example.test/propose"
+# For local/dev with OpenAI, run a loopback adapter:
+#   export BOBBY_VISION_TOKEN=…   # bobby → proxy bearer
+#   export OPENAI_API_KEY=…      # proxy → OpenAI
+#   bobby vision-proxy           # default http://127.0.0.1:9100/vision
+# endpoint_url = "http://127.0.0.1:9100/vision"
 # token_env = "BOBBY_VISION_TOKEN"
 # timeout_ms = 15000
 

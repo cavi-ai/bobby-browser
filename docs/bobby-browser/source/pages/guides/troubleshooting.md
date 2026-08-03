@@ -118,6 +118,14 @@ Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
 
 - Needs **all three**: `vision:assist` capability, session
   `executionPolicy.visionAssist = true`, and `[vision].endpoint_url`.
+- Capability + session opt-in alone does **not** make vision assist work — the
+  provider endpoint must be **reachable**. `bobby doctor` warns on
+  `vision-endpoint` when the configured URL does not accept a connection (for
+  example when `bobby vision-proxy` is not running).
+- For local OpenAI: set `BOBBY_VISION_TOKEN` and `OPENAI_API_KEY`, run
+  `bobby vision-proxy` (default `http://127.0.0.1:9100/vision`), then set
+  `[vision].endpoint_url` and `token_env = "BOBBY_VISION_TOKEN"` before
+  `bobby serve`.
 - Token lives in the env named by `token_env` — never in `config.toml`.
 - Endpoint must be https (or http on loopback). Bad proposals fail closed.
 - Guide: [Intent commands](intents.md#vision-provider) /
