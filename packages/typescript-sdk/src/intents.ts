@@ -1,9 +1,10 @@
 /**
- * Helpers that build CommandEnvelope wire shapes for unified intents.
+ * Builders for intent {@link RuntimeCommand} and {@link CommandEnvelope} values.
  *
- * Over HTTP / TypeScript, submit via `BrowserRuntimeClient.submit`. Over MCP,
- * prefer the dedicated `intent_*` tools; `command_execute` remains the escape
- * hatch for nested envelopes. Nested shape matches Rust serde:
+ * Pass envelopes to {@link BrowserRuntimeClient.submit}. Prefer these helpers
+ * over hand-rolling nested `{ kind, input }` shapes.
+ *
+ * Nested wire shape:
  * `{ kind: "intent", input: { kind: "locate", input: { … } } }`.
  */
 import {
@@ -27,13 +28,16 @@ import {
   type WaitForStateIntent,
 } from "./contracts.js";
 
+/** Identifiers and deadline shared by intent envelope helpers. */
 export interface IntentEnvelopeMeta {
   commandId: Id;
   workflowId: Id;
   attemptId: Id;
   sessionId: Id;
   pageId?: Id | null;
+  /** ISO-8601 deadline stamped on the envelope. */
   deadline: string;
+  /** Envelope schema version (default `2`). */
   schemaVersion?: number;
 }
 
@@ -41,6 +45,7 @@ function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
+/** Throws if `purpose` is empty or exceeds {@link MAX_INTENT_PURPOSE_BYTES}. */
 export function assertIntentPurpose(purpose: string): void {
   if (purpose.length === 0) {
     throw new Error("intent purpose must be non-empty");
@@ -61,6 +66,7 @@ function defaultHints(): IntentHints {
   };
 }
 
+/** Map an accessibility target into intent hints (`role` + exact `nearText`). */
 export function intentHintsFromAccessibilityTarget(target: AccessibilityTarget): IntentHints {
   return {
     role: target.role,
@@ -73,6 +79,7 @@ function withHints(hints?: IntentHints): IntentHints {
   return { ...defaultHints(), ...hints };
 }
 
+/** Build a `locate` intent command. */
 export function locateRuntimeCommand(input: LocateIntent): RuntimeCommand {
   assertIntentPurpose(input.purpose);
   return {
@@ -87,6 +94,7 @@ export function locateRuntimeCommand(input: LocateIntent): RuntimeCommand {
   };
 }
 
+/** Build a `fill` intent command. */
 export function fillRuntimeCommand(input: FillIntent): RuntimeCommand {
   assertIntentPurpose(input.purpose);
   return {
@@ -102,6 +110,7 @@ export function fillRuntimeCommand(input: FillIntent): RuntimeCommand {
   };
 }
 
+/** Build a `completeForm` intent command (1–128 uniquely named fields). */
 export function completeFormRuntimeCommand(input: CompleteFormIntent): RuntimeCommand {
   assertIntentPurpose(input.purpose);
   if (input.fields.length === 0) throw new Error("completeForm fields must not be empty");
@@ -124,6 +133,7 @@ function normalizeFillValue(value: FillValue): FillValue {
   return value;
 }
 
+/** Build a `submitAndVerify` intent command. */
 export function submitAndVerifyRuntimeCommand(input: SubmitAndVerifyIntent): RuntimeCommand {
   assertIntentPurpose(input.purpose);
   return {
@@ -139,6 +149,7 @@ export function submitAndVerifyRuntimeCommand(input: SubmitAndVerifyIntent): Run
   };
 }
 
+/** Build a `waitForState` intent command. */
 export function waitForStateRuntimeCommand(input: WaitForStateIntent): RuntimeCommand {
   return {
     kind: "intent",
@@ -152,6 +163,7 @@ export function waitForStateRuntimeCommand(input: WaitForStateIntent): RuntimeCo
   };
 }
 
+/** Build a `follow` intent command. */
 export function followRuntimeCommand(input: FollowIntent): RuntimeCommand {
   assertIntentPurpose(input.purpose);
   return {
@@ -168,6 +180,7 @@ export function followRuntimeCommand(input: FollowIntent): RuntimeCommand {
   };
 }
 
+/** Build a `dismissObstruction` intent command. */
 export function dismissObstructionRuntimeCommand(input: DismissObstructionIntent): RuntimeCommand {
   assertIntentPurpose(input.purpose);
   return {
@@ -183,6 +196,7 @@ export function dismissObstructionRuntimeCommand(input: DismissObstructionIntent
   };
 }
 
+/** Build an `extract` intent command (at least one uniquely named field). */
 export function extractRuntimeCommand(input: ExtractIntent): RuntimeCommand {
   assertIntentPurpose(input.purpose);
   if (input.fields.length === 0) {
@@ -218,6 +232,7 @@ export function extractRuntimeCommand(input: ExtractIntent): RuntimeCommand {
   };
 }
 
+/** Wrap an intent {@link RuntimeCommand} in a {@link CommandEnvelope}. */
 export function intentEnvelope(meta: IntentEnvelopeMeta, command: RuntimeCommand): CommandEnvelope {
   if (command.kind !== "intent") {
     throw new Error('intentEnvelope requires RuntimeCommand with kind "intent"');
@@ -234,14 +249,17 @@ export function intentEnvelope(meta: IntentEnvelopeMeta, command: RuntimeCommand
   };
 }
 
+/** Convenience: {@link locateRuntimeCommand} + {@link intentEnvelope}. */
 export function locateEnvelope(meta: IntentEnvelopeMeta, purpose: string, hints?: IntentHints): CommandEnvelope {
   return intentEnvelope(meta, locateRuntimeCommand({ purpose, hints }));
 }
 
+/** Convenience: {@link fillRuntimeCommand} + {@link intentEnvelope}. */
 export function fillEnvelope(meta: IntentEnvelopeMeta, purpose: string, value: FillValue, hints?: IntentHints): CommandEnvelope {
   return intentEnvelope(meta, fillRuntimeCommand({ purpose, value, hints }));
 }
 
+/** Convenience: {@link submitAndVerifyRuntimeCommand} + {@link intentEnvelope}. */
 export function submitAndVerifyEnvelope(
   meta: IntentEnvelopeMeta,
   purpose: string,
@@ -251,6 +269,7 @@ export function submitAndVerifyEnvelope(
   return intentEnvelope(meta, submitAndVerifyRuntimeCommand({ purpose, expectedState, hints }));
 }
 
+/** Convenience: {@link waitForStateRuntimeCommand} + {@link intentEnvelope}. */
 export function waitForStateEnvelope(
   meta: IntentEnvelopeMeta,
   condition: WaitCondition,
@@ -259,6 +278,7 @@ export function waitForStateEnvelope(
   return intentEnvelope(meta, waitForStateRuntimeCommand({ condition, timeoutMs }));
 }
 
+/** Convenience: {@link followRuntimeCommand} + {@link intentEnvelope}. */
 export function followEnvelope(
   meta: IntentEnvelopeMeta,
   purpose: string,
@@ -276,6 +296,7 @@ export function followEnvelope(
   );
 }
 
+/** Convenience: {@link dismissObstructionRuntimeCommand} + {@link intentEnvelope}. */
 export function dismissObstructionEnvelope(
   meta: IntentEnvelopeMeta,
   purpose: string,
@@ -291,6 +312,7 @@ export function dismissObstructionEnvelope(
   );
 }
 
+/** Convenience: {@link extractRuntimeCommand} + {@link intentEnvelope}. */
 export function extractEnvelope(
   meta: IntentEnvelopeMeta,
   purpose: string,

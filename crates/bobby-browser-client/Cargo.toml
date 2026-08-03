@@ -1,6 +1,6 @@
 [package]
 name = "bobby-browser-client"
-description = "Typed HTTP client for the Bobby Browser runtime (/v1)"
+description = "Typed HTTP client and /v1 wire types for the Bobby Browser runtime"
 readme = "README.md"
 keywords = ["browser", "automation", "http", "bobby-browser"]
 categories = ["api-bindings", "web-programming"]
@@ -14,11 +14,17 @@ publish = true
 [dependencies]
 chrono.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-types = { path = "../types", version = "0.3.1" }
+url.workspace = true
 uuid.workspace = true
+
+[features]
+default = []
+schema = ["schemars"]
 
 [dev-dependencies]
 axum.workspace = true

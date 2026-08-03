@@ -291,6 +291,29 @@ struct BootstrapEnvFields {
     expires_at: Option<String>,
 }
 
+/// Read all four bootstrap variables from a dotenv file as a map, for handing
+/// to a child process (the doctor MCP handshake spawns the gateway with them).
+/// Never log or print the returned values.
+pub fn load_bootstrap_env_map(path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    let fields = read_bootstrap_env_fields(path)?;
+    let mut map = std::collections::BTreeMap::new();
+    let mut insert = |key: &'static str, value: Option<String>| -> Result<()> {
+        let value = value.with_context(|| {
+            format!(
+                "bootstrap env {} missing required key {key}",
+                path.display()
+            )
+        })?;
+        map.insert(key.to_owned(), value);
+        Ok(())
+    };
+    insert(ENV_TOKEN, fields.token)?;
+    insert(ENV_PRINCIPAL, fields.principal)?;
+    insert(ENV_CAPABILITIES, fields.capabilities)?;
+    insert(ENV_EXPIRES_AT, fields.expires_at)?;
+    Ok(map)
+}
+
 fn read_bootstrap_env_fields(path: &Path) -> Result<BootstrapEnvFields> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read bootstrap env from {}", path.display()))?;

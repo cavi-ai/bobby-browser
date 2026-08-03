@@ -1,8 +1,11 @@
+//! Session and page runtime state returned by `/v1` endpoints.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{ExecutionPolicy, PageId, SessionId};
 
+/// Page rendering / interaction mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum PageMode {
@@ -11,6 +14,7 @@ pub enum PageMode {
     Render,
 }
 
+/// `GET /v1/runtime` body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeInfo {
@@ -21,6 +25,7 @@ pub struct RuntimeInfo {
     pub uptime_ms: u64,
 }
 
+/// Browser session returned by session create/list endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionState {
@@ -33,6 +38,7 @@ pub struct SessionState {
     pub execution_policy: ExecutionPolicy,
 }
 
+/// Page within a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PageState {
@@ -44,6 +50,7 @@ pub struct PageState {
     pub pending_requests: usize,
 }
 
+/// Result of a navigation command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NavigationResult {
@@ -52,6 +59,7 @@ pub struct NavigationResult {
     pub ready_state: String,
 }
 
+/// Result of a structured extract command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ExtractResult {

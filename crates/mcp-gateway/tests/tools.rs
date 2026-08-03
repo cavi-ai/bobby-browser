@@ -122,9 +122,18 @@ async fn tools_are_capability_filtered_sorted_and_have_closed_schemas() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
+    // `toolset_select` requires no capability: it changes what this connection
+    // is shown, not what it may do, and gating it would let a principal narrow
+    // into a phase it lacks the capability to leave.
     assert_eq!(
         names,
-        ["events_read", "page_open", "runtime_info", "session_list"]
+        [
+            "events_read",
+            "page_open",
+            "runtime_info",
+            "session_list",
+            "toolset_select"
+        ]
     );
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], "object");

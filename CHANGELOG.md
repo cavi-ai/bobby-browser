@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- **Breaking (Rust):** the `/v1` wire types moved from the `types` crate into `bobby-browser-client`, which is now the single published Rust crate (`cargo publish` dry-run verified; `types` remains in the workspace as a `publish = false` re-export shim over the moved modules). crates.io publishing is now the one `bobby-browser-client` crate instead of the 25-crate ordered closure.
+- TypeScript SDK source now carries JSDoc on the public surface (client, contracts, errors, events, intents, validators).
+- Add `bobby init --emit <claude|zed|vscode|json>`: prints the MCP client config fragment for the host with `${VAR}` credential placeholders, never the secret. Add `skill/SKILL.md`, the agent skill package for driving the runtime.
+- `bobby doctor` now runs a live MCP handshake (`initialize` + `tools/list`) against the stdio gateway and reports tool count and catalog bytes against the 128 KiB budget; a missing gateway is a warning, a failed handshake a failure.
+- Fix `mcp-gateway` startup rejecting bootstrap credentials that carry `job:*` capabilities (the parse table predated the jobs API, so the stdio gateway could not start with a current `bobby init` file).
+- Add MCP `toolset_select`: narrows `tools/list` to `explore`, `act`, `intent`, `verify`, or `full`. Default stays `full`, byte-for-byte the previous surface.
+- Narrow phases cut the connect payload from ~130 KB to 42–74 KB; selecting a phase emits `notifications/tools/list_changed`.
+- A phase changes what is advertised, never what is permitted: a hidden tool stays callable and capability gates remain the only authority.
+- Add MCP `context_ask` (`page:read`): asks the retained page context where a described control is, returning a bound target and confidence, or nothing.
 - **Breaking (idempotency digests):** `canonical_sha256` now sorts JSON object keys recursively before hashing, so a digest no longer depends on the order a client serialized keys in. It previously inherited ordering from `serde_json`'s default `BTreeMap` backend; any dependency enabling `serde_json/preserve_order` switched that to insertion order workspace-wide and two equivalent requests hashed differently, so a retry executed instead of replaying. Digests change once; in-flight idempotency records will not match across the upgrade.
 - Add `crates/acp-gateway` with the ACP permission-escalation gate: a `session/request_permission` prompt is only sent for a capability the principal already holds but session policy gates, and approval never mints a capability.
 - Add `crates/interface-conformance/tests/acp_permission.rs`, joining ACP to the conformance suite as a fourth adapter.
@@ -14,7 +23,7 @@
 - Retained page context is dropped when its session is deleted, and bounded at 256 pages so an unclosed page cannot leak page text for the life of the process.
 - Add a `[nodes.<name>]` config table: named, separately addressable nodes with `kind` (`vision`), `endpoint_url`, optional `token_env`, and `timeout_ms`. An unknown kind fails config load.
 - Add `executionPolicy.visionNode`, naming which registered node a session escalates to.
-- A named node that is unknown, or configured with the wrong kind, declines the escalation and never falls back to another node or to a process-wide provider.
+- A named node that is not configured declines the escalation and never falls back to another node or to a process-wide provider.
 - A `[vision]` endpoint with no `[nodes]` table is reachable as a node named `vision`; when both are set `[nodes]` wins and `[vision]` is ignored.
 - Node locality is derived from the node's address, so a session bound to a loopback node keeps page material on the machine.
 - **Breaking (HTTP):** `POST /v1/checkpoints` takes `evidenceRefs` (command ids, max 128) instead of `evidence`. The runtime resolves each id against its own journal and checks session ownership, so a caller can no longer author evidence for work it did not perform. Matches the MCP `checkpoint_save` contract. TypeScript SDK `CheckpointRequest.evidence` is replaced by `CheckpointRequest.evidenceRefs`.

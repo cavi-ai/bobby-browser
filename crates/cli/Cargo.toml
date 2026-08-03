@@ -37,6 +37,7 @@ companion-protocol = { path = "../companion-protocol", version = "0.3.1" }
 companion-core = { path = "../companion-core", version = "0.3.1" }
 firefox-companion = { path = "../firefox-companion", version = "0.3.1" }
 observability = { path = "../observability", version = "0.3.1" }
+mcp-gateway = { path = "../mcp-gateway", version = "0.3.1" }
 libc = "0.2"
 serde_json.workspace = true
 serde.workspace = true

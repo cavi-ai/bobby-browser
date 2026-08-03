@@ -3,14 +3,17 @@ import { hasExactKeys, isRecord, isUuid } from "./validators.js";
 
 export { isEventBatch, isEventGap, isRecord } from "./validators.js";
 
+/** Type guard for {@link InterfaceError} wire shapes. */
 export function isInterfaceError(value: unknown): value is InterfaceError {
   return hasExactKeys(value, ["code", "layer", "message", "correlationId", "commandId", "retryable", "retryAfterMs", "reconciliationRequired", "requiredCapability"]) && isInterfaceErrorCode(value.code) && isErrorLayer(value.layer) && typeof value.message === "string" && isUuid(value.correlationId) && (isUuid(value.commandId) || value.commandId === null) && typeof value.retryable === "boolean" && (value.retryAfterMs === null || (Number.isSafeInteger(value.retryAfterMs) && (value.retryAfterMs as number) >= 0)) && typeof value.reconciliationRequired === "boolean" && (value.requiredCapability === null || isCapability(value.requiredCapability));
 }
 
+/** Type guard for `InterfaceError.layer` values. */
 export function isErrorLayer(value: unknown): boolean {
   return value === "interface" || value === "broker" || value === "workflow" || value === "page" || value === "driver" || value === "browser" || value === "network" || value === "site" || value === "journal";
 }
 
+/** Type guard for `InterfaceError.code` values. */
 export function isInterfaceErrorCode(value: unknown): boolean {
   return value === "invalidRequest" || value === "unsupportedInterfaceVersion" || value === "invalidIdempotencyKey" || value === "idempotencyConflict" || value === "deadlineExceeded" || value === "authenticationFailed" || value === "tokenExpired" || value === "missingCapability" || value === "malformedScope" || value === "artifactDenied" || value === "unsupportedOperation" || value === "notFound" || value === "resourceExhausted" || value === "internal";
 }

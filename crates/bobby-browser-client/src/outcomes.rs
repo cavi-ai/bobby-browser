@@ -1,3 +1,5 @@
+//! Command outcomes, evidence, and accessibility snapshot nodes.
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -14,8 +16,7 @@ pub struct ControlActionEvidence {
     pub node_replaced: bool,
 }
 
-/// A minimal semantic target that can be copied directly into a command's
-/// `TargetSpec` without exposing engine-specific DOM identifiers.
+/// Semantic target for accessibility-based commands (role + accessible name).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -26,8 +27,20 @@ pub struct AccessibilityTarget {
     pub ordinal: Option<usize>,
 }
 
-/// One node of a compact accessibility tree as returned by the
-/// `accessibilitySnapshot` primitive on any engine.
+/// Where the retained page context says a described control is.
+///
+/// Lives in `types` rather than beside the graph because it crosses the wire:
+/// the crate-boundary guard requires every advertised shape to be a `types::`
+/// one so the schema parity guard covers it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextAnswer {
+    pub target: AccessibilityTarget,
+    pub confidence: f32,
+}
+
+/// One node in an `accessibilitySnapshot` result tree.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

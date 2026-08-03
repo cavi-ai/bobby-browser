@@ -4,17 +4,17 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Rust crate book
 
-This track documents Rust crates consumers may depend on from crates.io (or
-from this workspace). Product docs for operators stay under Introduction /
-Guides / Surfaces; this book is for embedding and HTTP clients in Rust.
+This track documents Rust crates for HTTP clients and in-process embedding.
+The sole crates.io **library** SDK is `bobby-browser-client` (client + wire types).
+The CLI package `bobby-browser` is separate.
 
 ## Stability tiers
 
 | Tier | Meaning |
 |---|---|
-| **Supported** | Documented consumer APIs for remote or shared use |
+| **Supported** | Documented consumer APIs (`bobby-browser-client`, CLI) |
 | **Embed** | Supported for in-process use; alpha may still break |
-| **Internal** | Published so `cargo install bobby-browser` works; do not treat as a public API |
+| **Internal** | Workspace-only; do not treat as a public API |
 
 Publishing is phased. Prefer building from this repo until `cargo add` /
 `cargo install` succeed for the version you want.
@@ -23,8 +23,8 @@ Publishing is phased. Prefer building from this repo until `cargo add` /
 
 | Page | Tier | Role |
 |---|---|---|
-| [bobby-browser-client](bobby-browser-client.md) | Supported | HTTP client over `/v1` |
-| [types](types.md) | Supported | Wire types and interface version |
+| [bobby-browser-client](bobby-browser-client.md) | Supported | crates.io SDK: HTTP `/v1` + wire types |
+| [Wire types](types.md) | Supported | Same types, via `bobby-browser-client` |
 | [interface-core](interface-core.md) | Embed | Authority, events, authorization |
 | [sdk-core](sdk-core.md) | Embed | Runtime service behind the broker |
 | [broker](broker.md) | Embed | HTTP `/v1` + MCP HTTP |

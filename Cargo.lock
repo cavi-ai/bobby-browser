@@ -504,6 +504,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "libc",
+ "mcp-gateway",
  "observability",
  "reqwest 0.12.28",
  "serde",
@@ -524,12 +525,14 @@ dependencies = [
  "axum",
  "chrono",
  "reqwest 0.12.28",
+ "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "tower",
- "types",
+ "url",
  "uuid",
 ]
 

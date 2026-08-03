@@ -1,3 +1,9 @@
+/**
+ * Strict structural validators for `/v1` JSON responses.
+ *
+ * Used by {@link BrowserRuntimeClient} to reject unexpected shapes before
+ * they reach application code.
+ */
 import type {
   AccessibilityTarget,
   RecoveryStatus,

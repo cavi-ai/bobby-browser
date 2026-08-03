@@ -1,3 +1,5 @@
+//! Interface versioning, correlation, errors, and operation authority.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -7,9 +9,10 @@ use crate::{
     ArtifactId, Capability, CapabilitySet, CommandId, CommandOutcome, ErrorLayer, PrincipalId,
 };
 
+/// Value of the `x-interface-version` header for this release.
 pub const CURRENT_INTERFACE_VERSION: &str = "2026-07-23";
 
-/// The only interface version accepted by this phase's wire contract.
+/// Marker for the sole supported interface version ([`CURRENT_INTERFACE_VERSION`]).
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct InterfaceVersion;
@@ -59,6 +62,7 @@ impl<'de> Deserialize<'de> for InterfaceVersion {
     }
 }
 
+/// Correlation id for a single request (`x-correlation-id`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
@@ -84,7 +88,7 @@ impl Default for CorrelationId {
     }
 }
 
-/// A caller-provided key that can safely identify a repeated request.
+/// Caller-provided key that identifies a repeated request (`idempotency-key`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct IdempotencyKey(String);
@@ -195,7 +199,7 @@ impl RequestContext {
     }
 }
 
-/// The complete transport-neutral operation list. Each variant must declare authority below.
+/// Transport-neutral interface operations and their required capabilities.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub enum InterfaceOperation {
     RuntimeInfo,
