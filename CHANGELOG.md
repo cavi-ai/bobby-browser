@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Remove the collector probe's `chromeRuntime` check. It failed whenever `window.chrome` existed without `chrome.runtime` — the state of stock Chrome on an ordinary page, and the state the injection deliberately produces, since CreepJS's `hasBadChromeRuntime` fingerprints the TypeError shape of a faked `chrome.runtime.sendMessage`. The probe asserted the opposite of the design it was probing. The real invariant is locked as a unit test instead, and all six `fingerprint_conformance` tests now run unskipped in CI.
 - `bobby install` gains a Browser companions item: installs the Firefox companion (extension copied into the bobby config dir, native-host wrapper + manifest into Mozilla's per-platform directory) and prints the one remaining step (start Firefox with `--remote-debugging-port`, run `bobby enroll-firefox-profile`). On by default when a Firefox binary is found; `--companion`/`--extension` for non-interactive use. `make install` builds the extension first.
 - Add `bobby mcp-stdio`: the MCP entrypoint agent hosts point at — it loads the bootstrap credential from `bootstrap.env` itself and execs the stdio gateway, so host configs carry no secrets and no env wiring.
 - Add `bobby install` (and `make install`): one-command agent setup — bootstrap credential, MCP config merge into Claude Code / Zed / VS Code (preserving existing entries), and agent-skill installation. Interactive checklist with toggles by default; `--host`/`--skill`/`--yes` for non-interactive use.
