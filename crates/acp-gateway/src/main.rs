@@ -8,7 +8,7 @@ use std::sync::Arc;
 use acp_gateway::AcpServer;
 use chrono::{DateTime, Utc};
 use config::AppConfig;
-use interface_core::AuthorityStore;
+use interface_core::{AuthorityStore, SessionOwnershipRegistry};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use sha2::{Digest, Sha256};
 use types::{Capability, PrincipalId};
@@ -35,7 +35,10 @@ async fn run() -> anyhow::Result<()> {
     if !handle.is_valid_at(Utc::now()) {
         anyhow::bail!("startup credential expired during runtime construction");
     }
-    let authenticated = Arc::new(AuthenticatedRuntime::new(runtime, handle));
+    let (_ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
+    let authenticated = Arc::new(AuthenticatedRuntime::with_session_ownership(
+        runtime, handle, recorder,
+    ));
     AcpServer::new(authenticated, capabilities).serve().await?;
     Ok(())
 }

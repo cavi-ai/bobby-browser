@@ -3431,6 +3431,7 @@ dependencies = [
  "checkpoint-store",
  "chrono",
  "config",
+ "dom-engine",
  "intent-engine",
  "interface-core",
  "network-engine",
