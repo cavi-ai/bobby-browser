@@ -5,6 +5,7 @@ import {
   getFingerprintProfile,
   setFingerprintEnabled,
 } from "./fingerprint.js";
+import type { PopupStatus } from "./popup-status.js";
 
 type BrowserApi = {
   storage: {
@@ -20,55 +21,179 @@ type BrowserApi = {
 
 declare const browser: BrowserApi;
 
-async function main(): Promise<void> {
-  const toggle = document.getElementById("toggle") as HTMLInputElement | null;
-  const status = document.getElementById("status");
-  if (!toggle || !status) return;
+function truncateId(id: string, max = 12): string {
+  if (id.length <= max) return id;
+  return `${id.slice(0, max)}…`;
+}
 
-  const owner = await getFingerprintOwner(browser.storage);
+function sectionStatus(root: ParentNode, id: string): HTMLElement | null {
+  const section = root.querySelector(`#${id} .status`);
+  if (!section || !("textContent" in section)) return null;
+  return section as HTMLElement;
+}
+
+function fingerprintStatusText(status: PopupStatus["fingerprint"]): string {
+  if (status.owner === "host") {
+    let text = "Managed by Bobby worker — BiDi owns spoofing";
+    if (status.sessionId !== undefined && status.seedHex !== undefined) {
+      text += `\nSession ${status.sessionId} · seed 0x${status.seedHex}`;
+    }
+    return text;
+  }
+  return status.enabled
+    ? "On — document_start script registered for new loads"
+    : "Off — real browser fingerprints exposed";
+}
+
+function humanizeLabel(humanize: PopupStatus["humanize"]): string {
+  switch (humanize) {
+    case "on":
+      return "On";
+    case "off":
+      return "Off";
+    case "unknown":
+      return "Unknown — host channel not connected";
+  }
+}
+
+export function renderPopup(root: ParentNode, status: PopupStatus): void {
+  const connection = sectionStatus(root, "connection");
+  if (connection) {
+    if (status.paired) {
+      const ids: string[] = [];
+      if (status.companionId) ids.push(`companion ${truncateId(status.companionId)}`);
+      if (status.profileId) ids.push(`profile ${truncateId(status.profileId)}`);
+      const idLine = ids.length > 0 ? `\n${ids.join(" · ")}` : "";
+      connection.innerHTML = `<span class="badge badge-paired">Paired</span>${idLine}`;
+    } else {
+      const reason = status.unpairedReason ?? "Not paired";
+      connection.innerHTML = `<span class="badge badge-unpaired">Unpaired</span>\n${reason}`;
+    }
+  }
+
+  const session = sectionStatus(root, "session");
+  if (session) {
+    let text = `Leases: ${status.leaseCount}`;
+    if (
+      status.fingerprint.sessionId !== undefined &&
+      status.fingerprint.seedHex !== undefined
+    ) {
+      text += `\nSeed session ${status.fingerprint.sessionId} · 0x${status.fingerprint.seedHex}`;
+    }
+    session.textContent = text;
+  }
+
+  const toggle = root.querySelector("#toggle") as HTMLInputElement | null;
+  const fingerprintStatus = root.querySelector("#fingerprint-status");
+  if (toggle) {
+    toggle.checked = status.fingerprint.enabled;
+    toggle.disabled = status.fingerprint.owner === "host";
+  }
+  if (fingerprintStatus) {
+    fingerprintStatus.textContent = fingerprintStatusText(status.fingerprint);
+  }
+
+  const humanizeStatus = root.querySelector("#humanize-status");
+  if (humanizeStatus) {
+    humanizeStatus.textContent = humanizeLabel(status.humanize);
+  }
+
+  const debug = sectionStatus(root, "debug");
+  if (debug) {
+    const lines = [
+      `Native: ${status.nativeConnected ? "connected" : "disconnected"}`,
+      `Protocol v${status.protocolVersion}`,
+    ];
+    if (status.lastError) {
+      lines.push(`Error: ${status.lastError.code} — ${status.lastError.message}`);
+    }
+    debug.textContent = lines.join("\n");
+  }
+}
+
+function showStatusUnavailable(root: ParentNode): void {
+  const connection = sectionStatus(root, "connection");
+  if (connection) {
+    connection.textContent = "Status unavailable";
+  }
+}
+
+async function loadStatus(browserApi: BrowserApi): Promise<PopupStatus | undefined> {
+  try {
+    return (await browserApi.runtime.sendMessage({ type: "popupStatus" })) as PopupStatus;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function bindFingerprintToggle(
+  browserApi: BrowserApi,
+  root: ParentNode,
+): Promise<void> {
+  const toggle = root.querySelector("#toggle") as HTMLInputElement | null;
+  const statusEl = root.querySelector("#fingerprint-status");
+  if (!toggle || !statusEl) return;
+
+  const owner = await getFingerprintOwner(browserApi.storage);
   if (owner === "host") {
     toggle.checked = true;
     toggle.disabled = true;
-    const stored = await browser.storage.local.get([FINGERPRINT_PROFILE_KEY]);
+    const stored = await browserApi.storage.local.get([FINGERPRINT_PROFILE_KEY]);
     const hasStoredProfile =
       stored[FINGERPRINT_PROFILE_KEY] !== undefined &&
       typeof stored[FINGERPRINT_PROFILE_KEY] === "object";
     let statusText = "Managed by Bobby worker — BiDi owns spoofing";
     if (hasStoredProfile) {
-      const profile = await getFingerprintProfile(browser.storage);
+      const profile = await getFingerprintProfile(browserApi.storage);
       const seedHex = profile.sessionSeed.toString(16);
       statusText += `\nSession ${profile.sessionId} · seed 0x${seedHex}`;
     }
-    status.textContent = statusText;
+    statusEl.textContent = statusText;
     return;
   }
 
-  const enabled = await getFingerprintEnabled(browser.storage);
+  const enabled = await getFingerprintEnabled(browserApi.storage);
   toggle.checked = enabled;
   toggle.disabled = false;
-  status.textContent = enabled
+  statusEl.textContent = enabled
     ? "On — document_start script registered for new loads"
     : "Off — real browser fingerprints exposed";
 
   toggle.addEventListener("change", async () => {
-    if ((await getFingerprintOwner(browser.storage)) === "host") {
+    if ((await getFingerprintOwner(browserApi.storage)) === "host") {
       toggle.checked = true;
       toggle.disabled = true;
-      status.textContent =
-        "Managed by Bobby worker — BiDi owns spoofing";
+      statusEl.textContent = "Managed by Bobby worker — BiDi owns spoofing";
       return;
     }
     const next = toggle.checked;
-    await setFingerprintEnabled(browser.storage, next);
+    await setFingerprintEnabled(browserApi.storage, next);
     try {
-      await browser.runtime.sendMessage({ type: "fingerprintSync" });
+      await browserApi.runtime.sendMessage({ type: "fingerprintSync" });
     } catch {
       /* background may be restarting */
     }
-    status.textContent = next
+    statusEl.textContent = next
       ? "On — document_start script registered for new loads"
       : "Off — real browser fingerprints exposed";
   });
 }
 
-void main();
+async function main(): Promise<void> {
+  const status = await loadStatus(browser);
+  if (!status) {
+    showStatusUnavailable(document);
+    await bindFingerprintToggle(browser, document);
+    return;
+  }
+  renderPopup(document, status);
+  if (status.fingerprint.owner === "popup") {
+    await bindFingerprintToggle(browser, document);
+  }
+}
+
+const inNodeTest =
+  typeof process !== "undefined" && process.env.NODE_TEST_CONTEXT !== undefined;
+if (!inNodeTest) {
+  void main();
+}
