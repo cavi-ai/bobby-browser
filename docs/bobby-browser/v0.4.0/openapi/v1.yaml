@@ -184,7 +184,6 @@ paths:
             schema:
               type: object
               required: [session_id]
-              additionalProperties: false
               properties:
                 session_id:
                   type: string
@@ -746,9 +745,8 @@ components:
         attemptId: { type: string, format: uuid }
         sessionId: { type: string, format: uuid }
         pageId:
-          type: string
+          type: [string, "null"]
           format: uuid
-          nullable: true
         deadline: { type: string, format: date-time }
         command:
           type: object
@@ -774,7 +772,7 @@ components:
       required: [profile]
       properties:
         profile: { type: string }
-        proxy: { type: string, nullable: true }
+        proxy: { type: [string, "null"] }
         executionPolicy:
           type: object
           properties:
