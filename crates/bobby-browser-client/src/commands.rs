@@ -972,30 +972,22 @@ pub struct ExecutionPolicy {
     pub vision_assist: bool,
     /// Whether workers leased for this session apply fingerprint spoofing.
     ///
-    /// Fingerprinting was a process-wide knob on the worker factory
-    /// (`ChromiumWorkerFactory::with_fingerprint`), which meant one operator
-    /// decision applied to every principal's sessions and no caller could see
-    /// or choose it. It belongs here for the same reason
-    /// `javascript_evaluation` does: it changes what the browser presents to
-    /// the page, so it is a per-session decision the caller makes explicitly
-    /// and the runtime records.
+    /// Per session, never process-wide: it changes what the browser presents to
+    /// the page, so the caller chooses it and the runtime records the choice.
     #[serde(default)]
     pub fingerprint: bool,
     /// Whether workers leased for this session synthesize human-like input
     /// timing (`behavioral-engine`) instead of driving the browser directly.
     ///
-    /// Off by default because it changes observable timing on the intent
-    /// execution path, and intent verification compares what it asked for
-    /// against what the browser did. When on, the synthesized timing is
-    /// carried in `Evidence::Humanization` so the two agree.
+    /// Off by default: it changes observable timing on the intent execution
+    /// path. When on, the synthesized timing is carried in
+    /// `Evidence::Humanization` so intent verification still agrees.
     #[serde(default)]
     pub humanize: bool,
     /// Name of the registered vision node this session escalates to.
     ///
-    /// `None` means no node, which means no escalation — not "use whichever
-    /// provider the operator configured globally". Naming a node that is not
-    /// configured also declines, so a session cannot be silently redirected to
-    /// a different provider than the one it chose.
+    /// `None` means no escalation, and naming an unconfigured node declines, so
+    /// a session is never redirected to a provider it did not choose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_node: Option<String>,
 }

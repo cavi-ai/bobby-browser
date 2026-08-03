@@ -1887,13 +1887,9 @@ mod tests {
         assert!(mac_script.contains("Segoe UI"));
     }
 
-    /// The injection must never create a `chrome.runtime` stub.
-    ///
-    /// CreepJS's `hasBadChromeRuntime` fingerprints the TypeError shape of
-    /// `new chrome.runtime.sendMessage`, so a faked `runtime` is a stronger
-    /// signal than an absent one — and absent is what stock Chrome shows on an
-    /// ordinary page anyway. This is a property of the emitted script, so it is
-    /// checked here rather than through a browser.
+    /// The injection must never create a `chrome.runtime` stub: CreepJS
+    /// `hasBadChromeRuntime` fingerprints the TypeError shape of
+    /// `new chrome.runtime.sendMessage`, so a fake is a stronger signal than absence.
     #[test]
     fn the_template_never_injects_a_chrome_runtime_stub() {
         for inject in [true, false] {
@@ -1914,8 +1910,7 @@ mod tests {
         }
     }
 
-    /// The collector probe must not assert the inverse of the injection. It did
-    /// once, and failed against real Chrome on every run.
+    /// The collector probe must not require a `chrome.runtime` the injection never creates.
     #[test]
     fn the_collector_probe_does_not_require_a_chrome_runtime() {
         assert!(

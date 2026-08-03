@@ -1,11 +1,8 @@
-//! Offline behavioral benchmark — CreepJS-analogue for interaction biometrics.
+//! Offline behavioral benchmark for interaction biometrics.
 //!
-//! CreepJS / FingerprintJS score *browser identity*. This module scores
-//! *generated interaction streams* (mouse, typing, scroll) against heuristics
-//! bot detectors use: curvature, velocity variance, keystroke CV, pause
-//! structure, and text integrity.
-//!
-//! All checks are deterministic given a seed and require no network.
+//! Scores generated interaction streams (mouse, typing, scroll) against the
+//! heuristics bot detectors use: curvature, velocity variance, keystroke CV,
+//! pause structure, text integrity. Deterministic given a seed; no network.
 
 use serde::{Deserialize, Serialize};
 
@@ -539,8 +536,7 @@ fn score_integrity(config: &BehavioralConfig, random: &mut SessionRandom) -> Vec
         70.0
     };
 
-    // Robot linear path should score poorly on curvature when compared — integrity that
-    // default config is not identical across seeds.
+    // Two seeds must not produce identical paths.
     let mut r2 = SessionRandom::new(random.seed().wrapping_add(99));
     let sim = BezierMouseSimulator::new(sanitized.mouse.clone());
     let a = sim.generate_path(random, 0.0, 0.0, 500.0, 300.0);

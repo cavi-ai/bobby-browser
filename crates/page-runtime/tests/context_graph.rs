@@ -1,13 +1,8 @@
 //! The context graph's staleness rules, driven through the executor rather
 //! than called directly.
 //!
-//! `crates/page-runtime/src/context.rs` unit-tests the graph in isolation.
-//! That proves the rules are right; it does not prove they are *wired*, and the
-//! wiring is where the risk lives — a graph that is never invalidated because
-//! the executor forgot to call it behaves exactly like a correct graph until
-//! the first mutation, then answers confidently and wrongly forever.
-//!
-//! Everything here therefore goes through `execute`.
+//! `crates/page-runtime/src/context.rs` unit-tests the graph in isolation;
+//! these cover the wiring, so everything here goes through `execute`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -220,9 +215,7 @@ async fn a_navigation_makes_the_graph_stop_answering() {
     );
 }
 
-/// The graph recovers rather than staying permanently blank: re-observing
-/// after a change makes it answerable again. Without this, "invalidate
-/// aggressively" would be indistinguishable from "never answer".
+/// Re-observing after a change makes the graph answerable again.
 #[tokio::test]
 async fn re_snapshotting_after_a_mutation_restores_answers() {
     let (runtime, _root) = runtime().await;
@@ -239,8 +232,8 @@ async fn re_snapshotting_after_a_mutation_restores_answers() {
     );
 }
 
-/// A read-only command must not invalidate, or every workflow that inspects
-/// between steps would throw the graph away and the node would save nothing.
+/// A read-only command must not invalidate the graph; workflows inspect
+/// between steps.
 #[tokio::test]
 async fn a_read_only_command_leaves_the_graph_answerable() {
     let (runtime, _root) = runtime().await;
@@ -266,9 +259,7 @@ async fn a_read_only_command_leaves_the_graph_answerable() {
     );
 }
 
-/// The answer has to be the same target `a11y_snapshot` would have handed the
-/// agent. A node that is cheaper but disagrees is not a context node, it is a
-/// second source of truth.
+/// The answer must be the same target `a11y_snapshot` would hand the agent.
 #[tokio::test]
 async fn the_graph_answer_matches_the_snapshot_evidence() {
     let (runtime, _root) = runtime().await;
@@ -301,10 +292,8 @@ async fn the_graph_answer_matches_the_snapshot_evidence() {
     assert_eq!(answer.target, from_evidence);
 }
 
-/// `forget_all` is unit-tested on the graph. This asserts the runtime actually
-/// calls it: retention bounded by session lifetime is only real if the
-/// deletion path knows which pages to drop, and that knowledge disappears the
-/// moment the session record is removed.
+/// The runtime calls `forget_all`: retention bounded by session lifetime needs
+/// the deletion path to drop the pages before the session record is removed.
 #[tokio::test]
 async fn deleting_a_session_evicts_its_pages_from_the_graph() {
     let (runtime, _root) = runtime().await;
@@ -322,11 +311,9 @@ async fn deleting_a_session_evicts_its_pages_from_the_graph() {
     assert!(runtime.context().ask(&page_id, "Email address").is_none());
 }
 
-/// C2 requires the context to retain prior evidence, not only page structure.
-/// It retains the command *ids*: an agent asking "did this already happen"
-/// resolves them through the journal, which stays the one authority on what
-/// happened. Copying evidence here would create a second copy that can
-/// disagree with it.
+/// The context retains command *ids*, not copies of evidence: an agent asking
+/// "did this already happen" resolves them through the journal, which stays the
+/// one authority.
 #[tokio::test]
 async fn the_graph_records_which_commands_produced_evidence() {
     let (runtime, _root) = runtime().await;
@@ -347,8 +334,8 @@ async fn the_graph_records_which_commands_produced_evidence() {
     );
 }
 
-/// The distinction that makes this worth having: where a control *is* goes
-/// stale when the page changes; what already *happened* does not.
+/// Where a control *is* goes stale when the page changes; what already
+/// *happened* does not.
 #[tokio::test]
 async fn recorded_commands_survive_invalidation() {
     let (runtime, _root) = runtime().await;

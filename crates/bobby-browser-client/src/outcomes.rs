@@ -29,9 +29,8 @@ pub struct AccessibilityTarget {
 
 /// Where the retained page context says a described control is.
 ///
-/// Lives in `types` rather than beside the graph because it crosses the wire:
-/// the crate-boundary guard requires every advertised shape to be a `types::`
-/// one so the schema parity guard covers it.
+/// Must stay in `types`: the crate-boundary guard requires every wire-advertised
+/// shape to be a `types::` one so the schema parity guard covers it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -265,28 +264,17 @@ pub enum Evidence {
         record: ExecutionRecord,
     },
     /// Input timing the runtime synthesized rather than observed, emitted when
-    /// the session opted into `executionPolicy.humanize`.
-    ///
-    /// Without this, humanization is invisible to the layer that decides
-    /// whether an action happened: `intent-engine` verifies an effect against
-    /// what it asked the browser to do, and synthesized pauses, key-by-key
-    /// timing, and approach paths mean the browser did something with a
-    /// materially different shape. Recording the count and the total scripted
-    /// delay keeps verification and reality talking about the same event.
-    ///
-    /// Carries no typed text — action counts and durations only.
+    /// the session opted into `executionPolicy.humanize`. Lets `intent-engine`
+    /// verify an effect against the timing actually issued. Carries no typed
+    /// text: action counts and durations only.
     Humanization {
         engine: String,
         actions: u32,
         synthesized_ms: u64,
     },
-    /// Result of resolving one named field of an `ExtractIntent`. Emitted
-    /// once per field, in field order, alongside a `Resolution` evidence
-    /// entry when the field resolved (deterministically or via vision).
-    /// `value: None` means the field could not be resolved; `errorCode`
-    /// then carries why (e.g. `targetNotFound`, `targetAmbiguous`,
-    /// `visionAssistDenied`, `visionAssistFailed`) without failing the rest
-    /// of the extraction.
+    /// Result of resolving one named field of an `ExtractIntent`, emitted once
+    /// per field in field order. `value: None` means unresolved, with the
+    /// reason in `errorCode`; the rest of the extraction still runs.
     Extraction {
         field: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

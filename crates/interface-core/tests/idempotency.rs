@@ -552,14 +552,10 @@ fn retryable_failed_helper_remains_explicit_for_future_outcomes() {
     assert!(matches!(restarted, CommandOutcome::Restarted { .. }));
 }
 
-/// The digest is the identity of an idempotent request, so it must not depend
-/// on the order a client happened to serialize object keys in — nor on which
-/// `serde_json` map backend the dependency graph selected.
-///
-/// `serde_json` uses a `BTreeMap` by default (sorted, so canonical for free)
-/// and an `IndexMap` under the `preserve_order` feature (insertion order). Any
-/// crate anywhere in the graph can enable that feature and Cargo applies it
-/// workspace-wide, so these assertions must hold under both.
+/// The digest is the identity of an idempotent request, so it must not depend on
+/// object key order, nor on which `serde_json` map backend is linked: `BTreeMap`
+/// by default (sorted), `IndexMap` under `preserve_order` (insertion order), which
+/// any crate in the graph can enable workspace-wide.
 #[test]
 fn the_digest_ignores_object_key_order() {
     let ascending: serde_json::Value =
@@ -591,9 +587,8 @@ fn the_digest_ignores_key_order_at_every_depth() {
     );
 }
 
-/// Array order carries meaning, so it must survive canonicalization. Without
-/// this, two genuinely different requests would share a digest and one would
-/// replay the other's result.
+/// Array order carries meaning and must survive canonicalization, or two
+/// different requests share a digest and one replays the other's result.
 #[test]
 fn the_digest_respects_array_order() {
     let forward: serde_json::Value = serde_json::from_str(r#"{"steps":[1,2,3]}"#).expect("valid");
@@ -605,8 +600,7 @@ fn the_digest_respects_array_order() {
     );
 }
 
-/// Different values still differ. A canonicalizer that returned a constant
-/// would pass every test above.
+/// Different values must produce different digests.
 #[test]
 fn the_digest_still_distinguishes_different_values() {
     let one: serde_json::Value = serde_json::from_str(r#"{"a":1}"#).expect("valid");

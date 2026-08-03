@@ -87,8 +87,7 @@ impl StartupCredential {
         Self::new(bearer, principal_id, capabilities, expires_at)
     }
 
-    /// When this credential stops working. Carries no bearer material, so
-    /// `bobby doctor` can warn before startup begins failing closed.
+    /// When this credential stops working. Exposes no bearer material.
     pub fn expires_at(&self) -> DateTime<Utc> {
         self.expires_at
     }
@@ -146,10 +145,8 @@ impl EnrolledAuthority {
         startup: StartupCredential,
         max_principals: usize,
     ) -> Result<Self, StartupCredentialError> {
-        // `+ 1` reserves a slot for the startup/admin credential itself, so
-        // `max_principals` means "how many *issued* team principals fit" rather than
-        // being silently reduced by one to make room for the startup credential that
-        // every `EnrolledAuthority` already carries.
+        // `+ 1` reserves a slot for the startup credential itself, so
+        // `max_principals` counts issued principals only.
         let store = AuthorityStore::with_capacity(max_principals + 1);
         let startup_handle = store
             .enroll_hash(
@@ -179,11 +176,9 @@ impl EnrolledAuthority {
         self.store.issue(principal, capabilities, expires_at).await
     }
 
-    /// Re-enrolls a record whose bearer already exists elsewhere (restored from disk by
-    /// `PersistentAuthority`, or a freshly generated bearer whose hash the caller already
-    /// computed) directly by hash, discarding the resulting `CapabilityHandle`. Delegates
-    /// to `AuthorityStore::enroll_hash`, so it is still subject to the same expiry check
-    /// and capacity bound as any other enrollment.
+    /// Enrolls a record directly by bearer hash, for bearers that already exist
+    /// elsewhere. Subject to the same expiry check and capacity bound as any
+    /// other enrollment.
     pub(crate) async fn enroll_restored(
         &self,
         hash: [u8; 32],
@@ -293,9 +288,8 @@ pub(crate) async fn authenticate(
                 Some(1_000),
             ))
             .into_response(),
-            // `_global_permit` and `_principal_permit` are both held across
-            // `next.run(request).await` below: they are dropped only once this match arm's
-            // value (the response) has been produced.
+            // Both permits are held across `next.run(request).await` below:
+            // they drop only once this arm has produced the response.
             Ok(_global_permit) => {
                 match acquire_principal_permit(&state, &principal_id, correlation_id.clone()).await
                 {
@@ -326,10 +320,9 @@ pub(crate) async fn authenticate(
     response
 }
 
-/// Acquires an owned permit from `principal`'s per-principal in-flight semaphore,
-/// creating it (bounded by `state.interface.max_in_flight_per_principal`) on first
-/// use. This keeps one team's request burst from starving every other principal's
-/// share of the interface's global in-flight capacity.
+/// Acquires an owned permit from `principal`'s in-flight semaphore, creating it
+/// on first use bounded by `state.interface.max_in_flight_per_principal`. Keeps
+/// one principal's burst from starving the others' share of global capacity.
 pub(crate) async fn acquire_principal_permit(
     state: &AppState,
     principal: &PrincipalId,
@@ -658,10 +651,8 @@ mod tests {
 
     #[tokio::test]
     async fn capacity_still_bounds_enrollment() {
-        // `max_principals: 1` reserves capacity for exactly one *issued* principal, on
-        // top of the startup credential's own reserved slot (see the `+ 1` in
-        // `EnrolledAuthority::enroll`): the first issuance must succeed and the second
-        // must fail.
+        // `max_principals: 1` allows exactly one issued principal on top of the
+        // startup credential's reserved slot.
         let authority = EnrolledAuthority::enroll(startup(), 1).await.unwrap();
         assert!(authority
             .issue(

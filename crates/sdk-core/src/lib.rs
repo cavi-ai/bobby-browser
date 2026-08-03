@@ -264,10 +264,9 @@ impl RuntimeService {
         self.submit_with_vision_capability(envelope, false).await
     }
 
-    /// Submit with an explicit vision capability flag from the authenticated principal.
-    /// Session `executionPolicy.visionAssist` is looked up here and threaded into
-    /// IntentEngine as `VisionContext.session_ok`. Vision is deny-by-default: both
-    /// this capability flag and the session grant must be true before the provider runs.
+    /// Submit with the authenticated principal's vision capability flag.
+    /// Deny-by-default: this flag and the session's `executionPolicy.visionAssist`
+    /// grant must both be true before the provider runs.
     pub async fn submit_with_vision_capability(
         &self,
         envelope: CommandEnvelope,
@@ -283,15 +282,14 @@ impl RuntimeService {
         vision_capability_ok: bool,
         one_shot_session_ok: bool,
     ) -> CommandOutcome {
-        // SECURITY(F4): per-session execution-policy gate. This is the authoritative
-        // deny-by-default check for `EvaluateJavaScript` — a session must have explicitly
-        // opted in (`ExecutionPolicy.javascript_evaluation == true`) or the command is
-        // refused here, before it ever reaches `self.pages.execute` / a worker. This is
-        // independent of (and runs after) the token capability gate enforced in
+        // SECURITY(F4): authoritative deny-by-default gate for `EvaluateJavaScript`.
+        // The session must have opted in (`ExecutionPolicy.javascript_evaluation ==
+        // true`) or the command is refused here, before reaching `self.pages.execute`
+        // or a worker. Independent of, and after, the token capability gate in
         // `AuthenticatedRuntime::submit`; both must pass. Fails closed: an unknown or
-        // absent session is treated as `javascript_evaluation == false`, not as "skip the
-        // gate" — `self.pages.execute` validates against its own independent page
-        // registry, not `SessionManager`, so it does not perform this check for us.
+        // absent session counts as `javascript_evaluation == false`. `self.pages.execute`
+        // validates against its own page registry, not `SessionManager`, so it does not
+        // perform this check.
         if matches!(
             &envelope.command,
             RuntimeCommand::Primitive(PrimitiveCommand::EvaluateJavaScript(_))
@@ -316,10 +314,9 @@ impl RuntimeService {
             }
         }
 
-        // One session lookup for the whole policy. Absent session means every
-        // flag is false, same fail-closed direction as the JavaScript gate
-        // above: a command whose session cannot be resolved does not get
-        // vision escalation, fingerprint spoofing, or humanized input.
+        // One session lookup for the whole policy. An absent session means every
+        // flag is false: no vision escalation, fingerprint spoofing, or
+        // humanized input.
         let policy = self
             .sessions
             .get(&envelope.session_id)
@@ -333,11 +330,10 @@ impl RuntimeService {
             },
             RuntimeCommand::Primitive(_) => VisionGate::default(),
         };
-        // Resolve the session's node here, where the session is visible, and
-        // fail closed on every negative path: no name, an unknown name, or a
-        // name of the wrong kind all produce `None`, and `None` means the
-        // intent engine declines the escalation. There is no branch that
-        // substitutes a different node for the one the session asked for.
+        // Fail closed on every negative path: no name, an unknown name, or a
+        // name of the wrong kind all make the intent engine decline the
+        // escalation. No branch substitutes a different node for the one the
+        // session asked for.
         let vision_node = match policy.vision_node.as_deref() {
             None => NodeSelection::NotRequested,
             Some(name) => match self.nodes.vision(name) {
@@ -358,10 +354,7 @@ impl RuntimeService {
         self.pages.execute_with_session_gate(envelope, gate).await
     }
 
-    /// Save a checkpoint whose evidence has already been verified by the
-    /// caller (the HTTP surface's contract: it submits `Evidence` it
-    /// collected directly, unlike the MCP surface's `checkpoint`, which
-    /// names commands instead).
+    /// Save a checkpoint whose evidence the caller has already verified.
     pub(crate) async fn checkpoint_with_evidence(
         &self,
         checkpoint: WorkflowCheckpoint,
@@ -388,27 +381,19 @@ impl RuntimeService {
     }
 
     /// Save a checkpoint, resolving its evidence from the journal by command
-    /// id rather than accepting `Evidence` directly from the caller: a command
-    /// id that has no journal record, or one that never reached a terminal
-    /// outcome, fails the checkpoint instead of letting the caller author
-    /// evidence for work it never performed.
+    /// id rather than accepting `Evidence` from the caller: an id with no
+    /// journal record, or one that never reached a terminal outcome, fails the
+    /// checkpoint.
     ///
-    /// **This method performs NO ownership check.** `resolve_evidence` reads
-    /// the journal by command id alone, and that journal is fleet-wide (one
-    /// `RuntimeService` is shared across every principal, per
-    /// `broker::bootstrap_listener_with`), so a command id belonging to
-    /// another principal resolves here exactly like one of the caller's own.
-    /// `RuntimeService` is the pre-authorization layer and has no principal to
-    /// check against — the check lives one layer up, in
-    /// `AuthenticatedRuntime::resolve_command_evidence`
-    /// (`crate::interface`), which looks up each command's owning session via
-    /// `PageRuntime::command_session` and runs `require_owned_session` before
-    /// any evidence is read.
+    /// **This method performs NO ownership check.** The journal is fleet-wide,
+    /// so another principal's command id resolves here exactly like one of the
+    /// caller's own. Ownership is checked one layer up, in
+    /// `AuthenticatedRuntime::resolve_command_evidence` (`crate::interface`),
+    /// which runs `require_owned_session` before any evidence is read.
     ///
-    /// Any authenticated surface must therefore reach checkpointing through
-    /// `AuthenticatedRuntime::checkpoint` (with evidence already resolved by
-    /// `AuthenticatedRuntime::resolve_command_evidence`), never by calling
-    /// this method with caller-supplied command ids.
+    /// Authenticated surfaces must reach checkpointing through
+    /// `AuthenticatedRuntime::checkpoint`, never by calling this method with
+    /// caller-supplied command ids.
     pub async fn checkpoint(
         &self,
         checkpoint: WorkflowCheckpoint,

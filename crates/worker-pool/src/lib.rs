@@ -177,10 +177,9 @@ pub trait BrowserWorker: Send + Sync {
     fn fingerprint_enabled(&self) -> bool {
         false
     }
-    /// Toggle human-like input synthesis (`behavioral-engine`). Engines that
-    /// drive input directly and have no synthesizer accept the call and stay
-    /// direct — the default below — so the executor can write the session's
-    /// policy onto every worker without knowing which engine it holds.
+    /// Toggle human-like input synthesis (`behavioral-engine`). Engines with no
+    /// synthesizer accept the call and stay direct (the default below), so the
+    /// executor can write session policy onto any worker.
     async fn set_humanization_enabled(&self, _enabled: bool) -> Result<(), CommandError> {
         Ok(())
     }
@@ -381,7 +380,7 @@ pub trait BrowserWorker: Send + Sync {
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
-    // ChromiumWorker overrides this (F3) via chromiumoxide EvaluateParams, bounded by
+    // ChromiumWorker overrides this via chromiumoxide EvaluateParams, bounded by
     // `timeout_ms` and result-shaped through `js_engine::bound_result`. Every other
     // worker keeps this default and refuses JS execution.
     async fn evaluate_javascript(
@@ -529,10 +528,9 @@ impl WorkerPool {
     }
 
     pub async fn lease(&self, session_id: SessionId) -> Result<WorkerLease, CommandError> {
-        // Worker identity and profile remain warm across calls, while the fair
-        // semaphore bounds only operations that are actively using a worker.
-        // Owned permits are cancellation-safe and return automatically when a
-        // command finishes, errors, or its task is aborted.
+        // Worker identity and profile stay warm across calls; the fair semaphore
+        // bounds only operations actively using a worker. Owned permits are
+        // cancellation-safe and return on finish, error, or abort.
         let session_gate = self.session_gate(&session_id).await;
         let session_use = session_gate.read_owned().await;
         let active_permit = self

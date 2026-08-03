@@ -409,22 +409,14 @@ impl std::fmt::Debug for IdempotencyPermit {
 
 /// A digest that is stable across any reordering of JSON object keys.
 ///
-/// This is the identity of an idempotent request: two submissions that mean
-/// the same thing must produce the same digest, or a retry executes a second
-/// time instead of replaying the retained result. On a boundary command that
-/// is a duplicate side effect.
+/// This is the identity of an idempotent request: two submissions that mean the same thing
+/// must produce the same digest, or a retry executes again instead of replaying the
+/// retained result, duplicating the side effect of a boundary command.
 ///
-/// The ordering has to be established here rather than inherited. `serde_json`
-/// backs `Map` with a `BTreeMap` by default — which sorts, making key order
-/// canonical for free — but with the `preserve_order` feature it is an
-/// `IndexMap` that keeps insertion order instead. That feature is not ours to
-/// control: any dependency anywhere in the graph can turn it on, and Cargo
-/// feature unification then applies it to the whole workspace. A digest whose
-/// canonicality depends on which crates happen to be linked is not canonical.
-///
-/// So keys are sorted explicitly, recursively, before hashing. The result is
-/// identical under both `serde_json` configurations, which is the property the
-/// name claims.
+/// Keys are sorted explicitly and recursively before hashing rather than relying on
+/// `serde_json`'s default `BTreeMap` backing: any dependency can enable the
+/// `preserve_order` feature, and Cargo feature unification then makes `Map` an
+/// insertion-ordered `IndexMap` for the whole workspace.
 pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<[u8; 32], InterfaceError> {
     let value = serde_json::to_value(value).map_err(|_| canonicalization_error())?;
     let bytes = serde_json::to_vec(&canonicalize(value)).map_err(|_| canonicalization_error())?;
@@ -433,9 +425,8 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<[u8; 32], InterfaceEr
 
 /// Recursively rewrites every object so its keys are in sorted order.
 ///
-/// Rebuilding the map is what does the work under `preserve_order`, where
-/// insertion order is retained: inserting in sorted order makes iteration
-/// sorted. Under the default `BTreeMap` the rebuild is redundant and harmless.
+/// Rebuilding the map is what sorts iteration under `preserve_order`. Under the default
+/// `BTreeMap` backing the rebuild is redundant and harmless.
 fn canonicalize(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -446,8 +437,7 @@ fn canonicalize(value: serde_json::Value) -> serde_json::Value {
             entries.sort_by(|left, right| left.0.cmp(&right.0));
             serde_json::Value::Object(entries.into_iter().collect())
         }
-        // Arrays are ordered by meaning, so their order is part of the value
-        // and must not be touched. Only their elements are canonicalized.
+        // Array order is part of the value; only the elements are canonicalized.
         serde_json::Value::Array(items) => {
             serde_json::Value::Array(items.into_iter().map(canonicalize).collect())
         }

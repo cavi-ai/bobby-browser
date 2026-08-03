@@ -1,15 +1,7 @@
 //! A session names the node it escalates to, and gets that node or nothing.
 //!
-//! The old shape was a single process-wide `[vision]` endpoint: every session
-//! that opted into vision escalation talked to whichever provider the operator
-//! had configured, with no way to select one and no way to tell where it was.
-//! The failure that mattered was silent — a session could not distinguish
-//! "escalated to the local node I asked for" from "escalated to a remote
-//! provider I did not know about".
-//!
-//! These tests pin the replacement: selection is per session, and every
-//! negative path (no name, unknown name, wrong kind) declines rather than
-//! substituting a different node.
+//! Selection is per session, and every negative path (no name, unknown name, wrong
+//! kind) declines rather than substituting a different node.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -138,14 +130,12 @@ fn every_unresolvable_selection_declines_rather_than_substituting() {
         ),
         "an unknown name resolved to something"
     );
-    // The positive control: with one vision node configured and named
-    // correctly, resolution succeeds — so the assertions above are not passing
-    // because resolution never works.
+    // Positive control: a correctly named node resolves, so the assertions above are
+    // not passing because resolution never works.
     assert!(registry.vision("local").is_ok());
 }
 
-/// Locality is the privacy property, and it has to come from the address
-/// rather than from a flag an operator sets next to a remote URL.
+/// Locality must be derived from the address, never from an operator-set flag.
 #[test]
 fn a_remote_node_cannot_be_labelled_local() {
     let registry = NodeRegistry::new(
@@ -165,9 +155,9 @@ fn a_remote_node_cannot_be_labelled_local() {
     );
 }
 
-/// The three resolution states must reach the engine as three different
-/// things. Collapsing "named a node that did not resolve" into "named no node"
-/// is what would let a typo silently escalate to the process-wide provider.
+/// The three resolution states must reach the engine as three different things.
+/// Collapsing "named a node that did not resolve" into "named no node" would let a typo
+/// silently escalate to the process-wide provider.
 #[test]
 fn an_unresolved_node_does_not_fall_back_to_the_installed_provider() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -212,9 +202,8 @@ fn an_unresolved_node_does_not_fall_back_to_the_installed_provider() {
     );
 }
 
-/// The privacy property the registry exists for: when the session names a
-/// loopback node, page material goes to that node and nowhere else. A second
-/// loopback listener stands in for a remote provider — if selection ever
+/// When the session names a loopback node, page material goes to that node and nowhere
+/// else. The second listener stands in for a remote provider: if selection ever
 /// substitutes or fans out, its counter moves.
 #[tokio::test]
 async fn a_local_session_sends_page_material_only_to_its_loopback_node() {

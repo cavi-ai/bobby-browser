@@ -36,11 +36,10 @@ pub struct ResolvedTarget {
 
 /// Where a [`JsLocator`]'s `find(root, id)` lookups are rooted.
 ///
-/// `ClosedRoot` anchors execution at a specific closed shadow root `Element`
-/// handle (resolved via CDP-native traversal, see [`discover_closed_shadow_roots`]
-/// and [`discover_closed_root_for_candidate`]) instead of a document/frame
-/// execution context, since `document.querySelector` and friends cannot see
-/// into closed shadow trees but a live handle already inside one can.
+/// `ClosedRoot` anchors execution at a closed shadow root `Element` handle
+/// (see [`discover_closed_shadow_roots`]) rather than a document/frame context:
+/// `document.querySelector` cannot see into a closed tree, a handle already
+/// inside one can.
 #[derive(Clone)]
 enum LocatorScope {
     Context(Option<ExecutionContextId>),
@@ -520,9 +519,8 @@ async fn open_target_scope(
             continue;
         }
 
-        // The candidate has no *open* root; check whether CDP-native pierce
-        // discovery can see a *closed* one directly on this host before
-        // giving up (see module docs on `discover_closed_root_for_candidate`).
+        // No open root on this candidate; CDP pierce discovery may still find a
+        // closed one on the same host.
         let discovered = discover_closed_root_for_candidate(
             &execution_page,
             &scope_ref,
@@ -557,10 +555,9 @@ async fn open_target_scope(
 }
 
 fn into_candidate(mut item: BrowserCandidate) -> Candidate {
-    // `data-bobby-target` is a per-gather instrumentation id we inject to
-    // locate elements within a single scan; it is re-assigned on every scan,
-    // so it must never be treated as a stable identity attribute or matched
-    // against in a later resolution pass.
+    // `data-bobby-target` is a per-gather instrumentation id, re-assigned on
+    // every scan. Never treat it as stable identity or match on it in a later
+    // resolution pass.
     item.attributes.remove("data-bobby-target");
     let css = item.css.filter(|css| !css.contains("data-bobby-target"));
     Candidate {
@@ -624,9 +621,8 @@ pub async fn resolve_target_with_visibility(
             Err(error) => return Err(error),
         }
     };
-    // Candidates gathered ambiently from a closed shadow root (see
-    // `collect_candidates_merged`) must be located relative to that root's
-    // own element handle, not the outer document/frame context.
+    // A candidate gathered from a closed shadow root must be located relative
+    // to that root's own element handle, not the outer document/frame context.
     let (locator_scope, locator_shadow_hosts) = match &owner {
         Some(element) => (LocatorScope::ClosedRoot(Arc::clone(element)), Vec::new()),
         None => (base_scope.clone(), scope.shadow_hosts.clone()),
@@ -720,10 +716,9 @@ async fn collect_candidates(
     .await
 }
 
-/// Same gather as [`collect_candidates`], but rooted at an already-resolved
-/// closed shadow root `Element` instead of `document` — a closed root's
-/// contents are invisible to plain `document.querySelector`, but this
-/// existing collector script works unchanged once bound as `this`.
+/// Same gather as [`collect_candidates`], rooted at an already-resolved closed
+/// shadow root `Element` instead of `document`. The collector script is bound
+/// as `this`, since a closed root is invisible to `document.querySelector`.
 async fn collect_candidates_within(
     element: &Element,
     shadow_hosts: &[String],
@@ -738,14 +733,11 @@ async fn collect_candidates_within(
     serde_json::from_value(value).map_err(|error| target_error(ErrorCode::InvalidRequest, error))
 }
 
-/// Gathers candidates at the given scope, then additionally discovers and
-/// gathers from every closed shadow root reachable within that scope (see
-/// [`discover_closed_shadow_roots`]), merging both into one candidate list
-/// so ordinary purpose-based matching sees inside closed shadow DOM the same
-/// way it already sees inside open shadow DOM. Returns the merged
-/// candidates alongside a map from candidate id to the closed-root `Element`
-/// it was gathered from (only populated for closed-root-origin candidates),
-/// so a winning candidate can be relocated for later Act calls.
+/// Gathers candidates at `scope` plus every closed shadow root reachable
+/// within it, merged into one list so purpose matching sees closed shadow DOM
+/// like open. Also returns candidate id to owning closed-root `Element`, so a
+/// winning candidate can be relocated for later Act calls. Only
+/// closed-root-origin candidates appear in that map.
 async fn collect_candidates_merged(
     page: &Page,
     scope: &LocatorScope,
@@ -776,9 +768,8 @@ async fn collect_candidates_merged(
 
 /// Discovers every closed shadow root reachable within the given scope via
 /// `DOM.describeNode(pierce: true)`, resolving each into a live `Element`
-/// handle. CDP can see closed roots at the backend level regardless of the
-/// JS-level "closed" restriction — this is exactly how DevTools itself
-/// inspects them — so this requires no page-prototype patching.
+/// handle. CDP sees closed roots at the backend level regardless of the
+/// JS-level restriction, so no page-prototype patching is needed.
 async fn discover_closed_shadow_roots(
     page: &Page,
     scope: &LocatorScope,
@@ -811,10 +802,9 @@ async fn discover_closed_shadow_roots(
 /// Walks a `DOM.describeNode(pierce: true)` tree collecting the
 /// `backendNodeId` of every *closed* shadow root found. Uses backend ids
 /// (not frontend `nodeId`s) because pierce trees return `nodeId`s that are
-/// not registered with the frontend. Deliberately never descends into
-/// `content_document` (iframe content), preserving the existing "frames
-/// require an explicit `frame_path`" boundary — only `.children` (same-tree
-/// DOM descendants) and `.shadow_roots` are followed.
+/// not registered with the frontend. Must never descend into
+/// `content_document`: iframes require an explicit `frame_path`. Only
+/// `.children` and `.shadow_roots` are followed.
 fn collect_closed_shadow_root_ids(node: &CdpNode, out: &mut Vec<BackendNodeId>) {
     if let Some(shadow_roots) = &node.shadow_roots {
         for root in shadow_roots {
@@ -831,11 +821,9 @@ fn collect_closed_shadow_root_ids(node: &CdpNode, out: &mut Vec<BackendNodeId>) 
     }
 }
 
-/// Checks whether a specific already-resolved candidate (identified by its
-/// per-gather `data-bobby-target` id) itself hosts a closed shadow root,
-/// used by the explicit `shadow_path` fallback when the open-root check
-/// (`!!root`) fails. Returns the closed root's `BackendNodeId` if one is
-/// attached.
+/// Returns the `BackendNodeId` of a closed shadow root attached to the
+/// candidate with this per-gather `data-bobby-target` id, if any. Used by the
+/// `shadow_path` fallback when the open-root check fails.
 async fn discover_closed_root_for_candidate(
     page: &Page,
     scope: &LocatorScope,
@@ -957,14 +945,11 @@ async fn find_oopif(
     Ok(Some((page, frame)))
 }
 
-/// The `find`-by-id helper plus the shadow_hosts descent loop, shared by
-/// both the document-rooted and closed-root-rooted expression builders.
-/// Leaves a mutable `root` binding in scope for the caller's `operation` to
-/// use, having already descended through any open shadow hosts named in
-/// `shadow_hosts`. Further-nested *open* shadow roots inside a closed root
-/// are handled transparently here too, since `el.shadowRoot` still resolves
-/// once you're already inside — only the outermost "closed" boundary needs
-/// CDP-native traversal to cross.
+/// The `find`-by-id helper plus the shadow_hosts descent loop, shared by the
+/// document-rooted and closed-root-rooted expression builders. Leaves a mutable
+/// `root` binding for the caller's `operation`, already descended through the
+/// open shadow hosts named in `shadow_hosts`. Open roots nested inside a closed
+/// root resolve here too; only the outermost closed boundary needs CDP.
 fn descend_shadow_hosts_snippet(shadow_hosts: &[String]) -> Result<String, CommandError> {
     let hosts = serde_json::to_string(shadow_hosts)
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;

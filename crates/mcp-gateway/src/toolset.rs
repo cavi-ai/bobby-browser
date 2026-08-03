@@ -1,40 +1,21 @@
-//! Phase-scoped toolsets: advertise the tools the current phase needs instead
-//! of all 41 at all times.
+//! Phase-scoped toolsets: `tools/list` advertises only the tools a phase needs,
+//! keeping the response inside the 131,072-byte budget.
 //!
-//! `tools/list` for a principal holding every capability is 126,257 bytes
-//! against a 131,072-byte budget — 96% used, with roughly one intent tool of
-//! headroom left. Every new primitive is charged to every principal on every
-//! connect, whether or not that principal is in a phase where it could call it.
+//! [`Toolset::Full`] is the default and lists everything the principal's
+//! capabilities allow. An agent opts into a narrower phase with
+//! `toolset_select`, which also emits `notifications/tools/list_changed` so the
+//! client re-reads.
 //!
-//! # Opt-in, not imposed
+//! Phases follow the runtime's working loop:
 //!
-//! Narrowing what an agent can see is a behaviour change for every existing
-//! client, and one that fails confusingly: a tool the agent used yesterday is
-//! simply absent, with nothing saying why. So [`Toolset::Full`] is the default
-//! and is exactly today's list. An agent that wants the smaller surface asks
-//! for it with `toolset_select`, and the server answers plus emits
-//! `notifications/tools/list_changed` so the client re-reads.
+//! - [`Toolset::Explore`]: open sessions and pages, read the page. No mutation.
+//! - [`Toolset::Act`]: the primitives that change the page.
+//! - [`Toolset::Intent`]: the `intent_*` family.
+//! - [`Toolset::Verify`]: evidence, checkpoints, recovery.
 //!
-//! This is what A6's `tools/list_changed` was built for. Until now nothing
-//! changed a principal's tool list mid-session, so the notification existed
-//! with no producer.
-//!
-//! # The phases
-//!
-//! Drawn from the working loop the runtime already documents
-//! (`a11y_snapshot` → intent → evidence check → checkpoint), not invented here:
-//!
-//! - [`Toolset::Explore`] — open sessions and pages, read the page. No mutation.
-//! - [`Toolset::Act`] — the primitives that change the page.
-//! - [`Toolset::Intent`] — the `intent_*` family.
-//! - [`Toolset::Verify`] — evidence, checkpoints, recovery.
-//!
-//! `Act` and `Intent` are separate because the eight `intent_*` tools are the
-//! largest schemas on the surface (5–6 KB apiece) and an agent driving through
-//! intents does not also need the raw primitives, nor the reverse. Folding them
-//! into one "do things" phase was the first shape tried and it advertised 35 of
-//! 43 tools — a phase that saves nothing is worse than no phase, because it
-//! costs a round trip to select.
+//! `Act` and `Intent` stay separate because the `intent_*` schemas are the
+//! largest on the surface (5-6 KB apiece); merging them advertises most of the
+//! list, which saves nothing and still costs a round trip to select.
 //!
 //! Session and runtime lifecycle tools appear in every phase, because an agent
 //! that cannot close what it opened leaks workers regardless of phase.
@@ -44,8 +25,7 @@ use std::fmt;
 /// Which tools `tools/list` advertises.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Toolset {
-    /// Everything the principal's capabilities allow. The default, and
-    /// byte-for-byte what the surface advertised before phases existed.
+    /// Everything the principal's capabilities allow.
     #[default]
     Full,
     Explore,
@@ -89,11 +69,8 @@ impl Toolset {
 
     /// Whether `tool` is advertised in this phase.
     ///
-    /// Capability filtering still runs on top of this and is unchanged: a phase
-    /// narrows what is *shown*, never what is *allowed*. A tool hidden by the
-    /// current phase is still callable — hiding it is a context optimisation,
-    /// and turning it into an enforcement boundary would put a second,
-    /// weaker authority next to the capability gates.
+    /// A phase narrows what is shown, never what is allowed: a hidden tool is
+    /// still callable, and capability gates stay the only enforcement boundary.
     pub fn advertises(self, tool: &str) -> bool {
         if self == Self::Full || ALWAYS.contains(&tool) {
             return true;
@@ -114,9 +91,8 @@ impl fmt::Display for Toolset {
     }
 }
 
-/// Present in every phase: lifecycle an agent needs regardless of what it is
-/// doing, plus the phase switch itself — without which an agent that narrowed
-/// to one phase could never leave it.
+/// Present in every phase: session and page lifecycle, plus `toolset_select`
+/// so a narrowed agent can always leave its phase.
 const ALWAYS: &[&str] = &[
     "runtime_info",
     "session_create",
@@ -141,9 +117,8 @@ const EXPLORE: &[&str] = &[
     "cookie_get",
 ];
 
-/// Raw primitives. `command_execute` lives here as the escape hatch for a
-/// caller minting its own envelope; it is absent from the other narrow phases
-/// because at ~1 KB it is pure overhead to an agent using named tools.
+/// Raw primitives. `command_execute` is the escape hatch for a caller minting
+/// its own envelope, and is absent from the other narrow phases.
 const ACT: &[&str] = &[
     "click",
     "type_text",
@@ -158,8 +133,7 @@ const ACT: &[&str] = &[
     "cookie_set",
     "cookie_delete",
     "command_execute",
-    // An agent that acts must be able to see what it did without changing
-    // phase; otherwise every check costs two `tools/list` round trips.
+    // Verification of an action without leaving the phase.
     "a11y_snapshot",
     "context_ask",
 ];
@@ -198,9 +172,8 @@ const VERIFY: &[&str] = &[
 mod tests {
     use super::*;
 
-    /// Every tool the gateway advertises. Kept here rather than imported so a
-    /// tool added to `list_tools` without a phase fails this file, which is the
-    /// only place that decides where it belongs.
+    /// Every tool the gateway advertises. Duplicated rather than imported so a
+    /// tool added to `list_tools` without a phase fails here.
     const EVERY_TOOL: &[&str] = &[
         "a11y_snapshot",
         "checkpoint_save",
@@ -257,9 +230,7 @@ mod tests {
         }
     }
 
-    /// Every tool has to be reachable from some phase. A tool in no phase is
-    /// unreachable for any agent that narrows, which is a silent capability
-    /// loss rather than a smaller surface.
+    /// A tool in no phase is unreachable for any agent that narrows.
     #[test]
     fn every_tool_belongs_to_at_least_one_narrow_phase() {
         for tool in EVERY_TOOL {
@@ -285,8 +256,8 @@ mod tests {
         }
     }
 
-    /// Lifecycle is phase-independent: an agent that opened a session must be
-    /// able to close it without switching phase first.
+    /// Lifecycle is phase-independent: a session opened in one phase must be
+    /// closable without switching phase first.
     #[test]
     fn every_phase_advertises_session_and_page_lifecycle() {
         for phase in Toolset::ALL {
@@ -296,8 +267,7 @@ mod tests {
         }
     }
 
-    /// A mutating tool must not appear in the read-only phase — that is the
-    /// one place a phase name would actively mislead.
+    /// A mutating tool must not appear in the read-only phase.
     #[test]
     fn the_explore_phase_advertises_no_mutating_tool() {
         for tool in [
@@ -318,9 +288,7 @@ mod tests {
         }
     }
 
-    /// The two mutating phases must not overlap into one another's job: an
-    /// agent that selected `intent` and finds raw `click` there has learned
-    /// nothing about which style it is driving in.
+    /// The two mutating phases must not overlap: each names one driving style.
     #[test]
     fn the_act_and_intent_phases_stay_distinct() {
         for tool in [

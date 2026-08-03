@@ -124,18 +124,9 @@ impl EventStore {
     /// The cursor of the most recently appended event, or [`EventCursor::ZERO`]
     /// when nothing has been appended yet.
     ///
-    /// Exists for consumers that must start at the tail rather than replay
-    /// history — a push stream whose protocol gives the client no way to name a
-    /// resume cursor. Starting such a consumer at `ZERO` is not merely wasteful:
-    /// `read_decision`'s `HistoryLost` test compares against the *store-wide*
-    /// front of retention, so once the shared log has evicted a single entry,
-    /// every cursor-`ZERO` read gaps immediately, forever.
-    ///
-    /// This is store-wide, not per principal, and deliberately so: it is a
-    /// position to start reading *from*, and every read that follows still goes
-    /// through [`EventStore::read_after_for`]. It exposes nothing a caller
-    /// cannot already see — every successful batch already carries the same
-    /// store-wide `latest_available`.
+    /// Store-wide, not per principal. Consumers that cannot name a resume cursor
+    /// must start here: `HistoryLost` is tested against the store-wide retention
+    /// front, so a cursor-`ZERO` read gaps forever once any entry is evicted.
     pub async fn latest_cursor(&self) -> EventCursor {
         let state = self.inner.state.lock().await;
         EventCursor(state.next_cursor.saturating_sub(1))
