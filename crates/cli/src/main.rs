@@ -727,6 +727,34 @@ enum CliCommand {
         #[arg(long)]
         emit: Option<onboarding::EmitFormat>,
     },
+    /// Run the MCP stdio gateway with the bootstrap credential loaded for you.
+    /// This is the command agent hosts should point at: no env wiring needed.
+    McpStdio {
+        /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+        #[arg(long)]
+        bootstrap_env: Option<PathBuf>,
+    },
+    /// One-command agent setup: credential, host MCP config, agent skill
+    Install {
+        /// Host to wire (repeatable; non-interactive when given)
+        #[arg(long)]
+        host: Vec<onboarding::HostKind>,
+        /// Install the agent skill (to ~/.claude/skills/, or the project with --project-skill)
+        #[arg(long)]
+        skill: bool,
+        /// Install the skill into this project's .claude/skills/ instead of user-level
+        #[arg(long)]
+        project_skill: bool,
+        /// Regenerate the bootstrap credential even if one exists
+        #[arg(long)]
+        force: bool,
+        /// Run with defaults, no interactive checklist
+        #[arg(long)]
+        yes: bool,
+        /// Bootstrap env file path
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Run the runtime server (default)
     Serve {
         /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
@@ -862,6 +890,24 @@ pub async fn run() -> Result<()> {
             path,
             emit,
         } => run_init(force, ttl_days, path, emit)?,
+        CliCommand::McpStdio { bootstrap_env } => {
+            let path = resolve_bootstrap_path(bootstrap_env)?;
+            onboarding::exec_mcp_stdio(&path)?;
+        }
+        CliCommand::Install {
+            host,
+            skill,
+            project_skill,
+            force,
+            yes,
+            path,
+        } => {
+            let path = match path {
+                Some(path) => path,
+                None => bootstrap_local::default_bootstrap_path()?,
+            };
+            onboarding::run_install(&path, &host, skill, project_skill, force, yes)?;
+        }
         CliCommand::Serve {
             config,
             bootstrap_env,

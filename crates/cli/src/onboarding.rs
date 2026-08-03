@@ -1,9 +1,10 @@
-//! Agent onboarding: `bobby init --emit` client config fragments and the
-//! `bobby doctor` MCP handshake check.
+//! Agent onboarding: `bobby init --emit` client config fragments, the
+//! `bobby doctor` MCP handshake check, `bobby mcp-stdio` (zero-wiring MCP
+//! entrypoint), and the `bobby install` interactive installer.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
@@ -237,5 +238,331 @@ mod tests {
             assert!(text.contains("${AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN}"));
             assert!(!text.contains("=Bearer"));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `bobby mcp-stdio` and `bobby install`
+// ---------------------------------------------------------------------------
+
+/// Agent hosts the installer can wire up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HostKind {
+    /// Claude Code: project `.mcp.json` (+ optional agent skill).
+    Claude,
+    /// Zed: `~/.config/zed/settings.json` (`context_servers`).
+    Zed,
+    /// VS Code: project `.vscode/mcp.json` (`servers`).
+    Vscode,
+}
+
+const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
+const SKILL_NAME: &str = "bobby-browser";
+
+/// The MCP server entry an agent host launches: this same binary, absolute,
+/// running `mcp-stdio`, which loads the bootstrap credential itself. No env
+/// wiring in the host config, no secrets in any file the host reads.
+fn static_server_entry() -> Result<(String, Vec<String>)> {
+    let exe = std::env::current_exe().context("current executable unknown")?;
+    Ok((
+        exe.to_str()
+            .ok_or_else(|| anyhow!("executable path is not valid UTF-8"))?
+            .to_owned(),
+        vec!["mcp-stdio".to_owned()],
+    ))
+}
+
+/// The host config file `kind` reads, rooted at the current project for
+/// project-scoped hosts and at the user config dir for Zed.
+fn host_config_path(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
+    match kind {
+        HostKind::Claude => Ok(project_root.join(".mcp.json")),
+        HostKind::Vscode => Ok(project_root.join(".vscode").join("mcp.json")),
+        HostKind::Zed => Ok(dirs::config_dir()
+            .context("config directory unavailable")?
+            .join("zed")
+            .join("settings.json")),
+    }
+}
+
+/// Merge the bobby-browser server entry into one host's config file,
+/// preserving everything already there. Returns the file written.
+pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
+    let path = host_config_path(kind, project_root)?;
+    let (command, args) = static_server_entry()?;
+    let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)
+            .with_context(|| format!("{} is not valid JSON", path.display()))?,
+        _ => serde_json::json!({}),
+    };
+    let entry = match kind {
+        HostKind::Claude => serde_json::json!({"command": command, "args": args}),
+        HostKind::Vscode => serde_json::json!({"type": "stdio", "command": command, "args": args}),
+        HostKind::Zed => serde_json::json!({"command": {"path": command, "args": args, "env": {}}}),
+    };
+    let section = match kind {
+        HostKind::Claude => "mcpServers",
+        HostKind::Vscode => "servers",
+        HostKind::Zed => "context_servers",
+    };
+    let table = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{} must contain a JSON object", path.display()))?;
+    let servers = table
+        .entry(section)
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("{section} in {} must be an object", path.display()))?;
+    servers.insert("bobby-browser".to_owned(), entry);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut serialized = serde_json::to_string_pretty(&config)?;
+    serialized.push('\n');
+    std::fs::write(&path, serialized)?;
+    Ok(path)
+}
+
+/// Install the agent skill. `project` selects the project `.claude/skills/`
+/// tree; otherwise the user-level `~/.claude/skills/` tree. Returns the file
+/// written.
+pub fn install_skill(project: bool, project_root: &Path) -> Result<PathBuf> {
+    let base = if project {
+        project_root.join(".claude").join("skills")
+    } else {
+        dirs::home_dir()
+            .context("home directory unavailable")?
+            .join(".claude")
+            .join("skills")
+    };
+    let dir = base.join(SKILL_NAME);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, SKILL_SOURCE)?;
+    Ok(path)
+}
+
+/// `bobby mcp-stdio`: point an agent host at this and nothing else. Loads the
+/// bootstrap credential (process env wins, then the bootstrap.env file) and
+/// execs the stdio gateway, replacing this process.
+#[cfg(unix)]
+pub fn exec_mcp_stdio(bootstrap_path: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    if broker::StartupCredential::from_env().is_err() {
+        let env =
+            crate::bootstrap_local::load_bootstrap_env_map(bootstrap_path).with_context(|| {
+                format!(
+                    "no startup credential in the environment and bootstrap env unreadable at {}",
+                    bootstrap_path.display()
+                )
+            })?;
+        for (key, value) in env {
+            // Credentials only enter this process's environment, which the
+            // exec'd gateway inherits. They are never printed or written.
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+    let gateway = resolve_gateway()?;
+    let error = Command::new(&gateway).exec();
+    Err(anyhow!("failed to exec {}: {error}", gateway.display()))
+}
+
+/// One toggleable line of the interactive installer.
+struct InstallItem {
+    label: String,
+    enabled: bool,
+    run: Box<dyn Fn() -> Result<String>>,
+}
+
+/// `bobby install`: the one-command setup. Non-interactive when flags name
+/// the work; otherwise a checklist the operator toggles.
+pub fn run_install(
+    bootstrap_path: &Path,
+    hosts: &[HostKind],
+    skill: bool,
+    project_skill: bool,
+    force: bool,
+    yes: bool,
+) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let mut items: Vec<InstallItem> = Vec::new();
+
+    let credential_exists = bootstrap_path.exists();
+    let credential_label = if credential_exists && !force {
+        format!(
+            "Bootstrap credential: keep the existing one at {}",
+            bootstrap_path.display()
+        )
+    } else {
+        format!(
+            "Bootstrap credential: generate a 30-day credential at {}",
+            bootstrap_path.display()
+        )
+    };
+    items.push(InstallItem {
+        label: credential_label,
+        enabled: force || !credential_exists,
+        run: Box::new({
+            let path = bootstrap_path.to_path_buf();
+            move || {
+                let material = crate::bootstrap_local::generate_bootstrap(chrono::Duration::days(
+                    crate::bootstrap_local::DEFAULT_TTL_DAYS,
+                ))?;
+                crate::bootstrap_local::write_bootstrap_env(&path, &material, true)?;
+                Ok(format!("wrote {}", path.display()))
+            }
+        }),
+    });
+
+    for host in [HostKind::Claude, HostKind::Zed, HostKind::Vscode] {
+        let selected = hosts.contains(&host);
+        let default_on = matches!(host, HostKind::Claude);
+        let root = project_root.clone();
+        items.push(InstallItem {
+            label: format!("{host:?}: merge the MCP server entry into its config"),
+            enabled: selected || (hosts.is_empty() && default_on),
+            run: Box::new(move || {
+                let path = merge_host_config(host, &root)?;
+                Ok(format!("merged into {}", path.display()))
+            }),
+        });
+    }
+
+    items.push(InstallItem {
+        label: if project_skill {
+            "Agent skill: install into this project's .claude/skills/".to_owned()
+        } else {
+            "Agent skill: install into ~/.claude/skills/".to_owned()
+        },
+        enabled: skill,
+        run: Box::new({
+            let root = project_root.clone();
+            move || {
+                let path = install_skill(project_skill, &root)?;
+                Ok(format!("installed to {}", path.display()))
+            }
+        }),
+    });
+
+    let interactive = !yes && hosts.is_empty() && !skill && !force;
+    if interactive {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            anyhow::bail!(
+                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode> --skill --yes"
+            );
+        }
+        println!("bobby install — number toggles, enter runs the checked items, q quits:");
+        let stdin = std::io::stdin();
+        let mut lines = stdin.lock().lines();
+        loop {
+            for (index, item) in items.iter().enumerate() {
+                println!(
+                    "  [{}] {}. {}",
+                    if item.enabled { "x" } else { " " },
+                    index + 1,
+                    item.label
+                );
+            }
+            print!("> ");
+            std::io::stdout().flush()?;
+            let Some(line) = lines.next() else {
+                anyhow::bail!("stdin closed before a selection");
+            };
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            if trimmed == "q" {
+                println!("nothing changed");
+                return Ok(());
+            }
+            match trimmed.parse::<usize>() {
+                Ok(number) if (1..=items.len()).contains(&number) => {
+                    let item = &mut items[number - 1];
+                    item.enabled = !item.enabled;
+                }
+                _ => println!("  (enter a number, an empty line to run, or q)"),
+            }
+        }
+    }
+
+    let mut ran = 0;
+    for item in items.iter().filter(|item| item.enabled) {
+        let outcome = (item.run)()?;
+        println!("ok: {outcome}");
+        ran += 1;
+    }
+    if ran == 0 {
+        println!("nothing selected; nothing changed");
+    } else {
+        println!("done. `bobby doctor` verifies the whole setup, including the MCP handshake.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn merging_into_a_fresh_claude_config_creates_the_section() {
+        let root = tempfile::tempdir().unwrap();
+        let path = merge_host_config(HostKind::Claude, root.path()).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let server = &written["mcpServers"]["bobby-browser"];
+        assert!(
+            server["command"].as_str().unwrap().ends_with("bobby")
+                || server["command"].as_str().unwrap().contains("bobby")
+        );
+        assert_eq!(server["args"][0].as_str().unwrap(), "mcp-stdio");
+        // No credential material anywhere in the file.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN"));
+    }
+
+    #[test]
+    fn merging_preserves_existing_servers_and_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"other": {"command": "other-bin"}}, "unrelated": true}"#,
+        )
+        .unwrap();
+        merge_host_config(HostKind::Claude, root.path()).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["mcpServers"]["other"]["command"], "other-bin");
+        assert_eq!(written["unrelated"], true);
+        assert!(written["mcpServers"]["bobby-browser"].is_object());
+    }
+
+    #[test]
+    fn vscode_and_zed_use_their_own_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        let vscode_path = merge_host_config(HostKind::Vscode, root.path()).unwrap();
+        let vscode: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&vscode_path).unwrap()).unwrap();
+        assert_eq!(vscode["servers"]["bobby-browser"]["type"], "stdio");
+    }
+
+    #[test]
+    fn the_skill_installs_into_the_project_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let path = install_skill(true, root.path()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("---\nname: bobby-browser"));
+        assert!(path.ends_with(".claude/skills/bobby-browser/SKILL.md"));
+    }
+
+    #[test]
+    fn merging_rejects_a_config_that_is_not_an_object() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".mcp.json"), "[1,2,3]").unwrap();
+        assert!(merge_host_config(HostKind::Claude, root.path()).is_err());
     }
 }

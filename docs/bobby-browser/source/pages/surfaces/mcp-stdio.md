@@ -38,24 +38,33 @@ HTTP runtime / TypeScript SDK.
 
 ## Client config example
 
-`bobby init --emit <claude|zed|vscode|json>` prints the right fragment for
-your host (no credential material — `${VAR}` placeholders only):
+The easy path is the installer — it writes the bootstrap credential, merges
+the server entry into your host's config, and installs the agent skill:
+
+```bash
+bobby install                    # interactive checklist
+bobby install --host claude --skill --yes   # non-interactive
+# or: make install               # builds bobby + the gateway, then runs the installer
+```
+
+The merged entry points at `bobby mcp-stdio`, which loads the credential
+from `bootstrap.env` itself — the host config carries no secrets and no env
+wiring:
 
 ```json
 {
   "mcpServers": {
     "bobby-browser": {
-      "command": "mcp-gateway",
-      "env": {
-        "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN": "${AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN}",
-        "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL": "${AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL}",
-        "AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES": "${AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES}",
-        "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT": "${AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT}"
-      }
+      "command": "/absolute/path/to/bobby",
+      "args": ["mcp-stdio"]
     }
   }
 }
 ```
+
+`bobby init --emit <claude|zed|vscode|json>` remains for hosts that prefer
+the raw `mcp-gateway` binary with `${VAR}` placeholders; that form requires
+exporting the four bootstrap variables into the host's environment.
 
 `bobby doctor` runs a live handshake against the gateway (`initialize` +
 `tools/list`) and reports the tool count and byte size against the 128 KiB
