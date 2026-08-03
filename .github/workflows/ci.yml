@@ -126,19 +126,11 @@ jobs:
           -- --ignored --test-threads=1
 
       - name: Worker-pool live tests
-        # `chromium_collector_dogfood_passes` is skipped, not silently: its
-        # probe fails `chromeRuntime` ("chrome exists but runtime missing") on
-        # stock headless Chrome, where `window.chrome.runtime` is genuinely
-        # undefined on ordinary pages. Whether the probe or the injection is
-        # wrong is a fingerprint-semantics question, tracked separately — see
-        # the issue linked in CHANGELOG. The other five tests in this file
-        # cover the injection end to end and run here.
         run: >-
           cargo test -p worker-pool --locked
           --test fingerprint_conformance
           --test orphan_reap
           -- --ignored --test-threads=1
-          --skip chromium_collector_dogfood_passes
 
   firefox:
     name: firefox · live companion tests
