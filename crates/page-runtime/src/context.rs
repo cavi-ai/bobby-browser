@@ -28,7 +28,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use types::{
-    AccessibilityNode, AccessibilityTarget, ContextAnswer, PageId, PrimitiveCommand, RuntimeCommand,
+    AccessibilityNode, AccessibilityTarget, CommandId, ContextAnswer, PageId, PrimitiveCommand,
+    RuntimeCommand,
 };
 
 /// Below this, a context answer is not worth acting on and is discarded rather
@@ -46,6 +47,10 @@ pub const CONTEXT_CONFIDENCE_FLOOR: f32 = 0.75;
 /// process — and page text is exactly the material a local node exists to keep
 /// bounded.
 pub const MAX_RETAINED_PAGES: usize = 256;
+
+/// Command ids retained per page. Bounded for the same reason pages are: this
+/// grows with workflow length, not with anything self-limiting.
+pub const MAX_RETAINED_COMMANDS: usize = 64;
 
 /// Page structure retained for a session, keyed by page.
 ///
@@ -70,6 +75,15 @@ struct PageContext {
     observed_at: u64,
     /// When this page was last recorded, for eviction ordering.
     recorded_seq: u64,
+    /// Command ids whose evidence the runtime recorded against this page,
+    /// newest last, capped at [`MAX_RETAINED_COMMANDS`].
+    ///
+    /// The ids, deliberately, and not the evidence. An agent asking "did this
+    /// already happen" needs to reach the journal entry, which is the runtime's
+    /// own record; copying evidence in here would create a second copy that can
+    /// disagree with it, and the whole point of `evidenceRefs` is that there is
+    /// one authority on what happened.
+    commands: Vec<CommandId>,
     nodes: Vec<AccessibilityNode>,
 }
 
@@ -101,11 +115,53 @@ impl ContextGraph {
             generation: 0,
             observed_at: 0,
             recorded_seq: seq,
+            commands: Vec::new(),
             nodes: Vec::new(),
         });
         entry.observed_at = entry.generation;
         entry.recorded_seq = seq;
         entry.nodes = nodes;
+    }
+
+    /// Records that `command` produced evidence against `page`.
+    ///
+    /// Unlike [`Self::record`], this does not depend on the page having been
+    /// observed, and it survives invalidation: what happened on a page stays
+    /// true after the page changes. That is the difference between "where is
+    /// the control" — which goes stale — and "did this already happen", which
+    /// does not.
+    pub fn record_command(&self, page: &PageId, command: CommandId) {
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut pages = self.lock();
+        if !pages.contains_key(page) && pages.len() >= MAX_RETAINED_PAGES {
+            return;
+        }
+        let entry = pages.entry(page.clone()).or_insert(PageContext {
+            generation: 0,
+            observed_at: 0,
+            recorded_seq: seq,
+            commands: Vec::new(),
+            nodes: Vec::new(),
+        });
+        if entry.commands.contains(&command) {
+            return;
+        }
+        if entry.commands.len() >= MAX_RETAINED_COMMANDS {
+            entry.commands.remove(0);
+        }
+        entry.commands.push(command);
+    }
+
+    /// Command ids whose evidence the runtime recorded against `page`, oldest
+    /// first. Resolve them through `checkpoint_save`'s `evidenceRefs` or the
+    /// journal; this answers *which* commands, never *what* they produced.
+    pub fn commands_for(&self, page: &PageId) -> Vec<CommandId> {
+        self.lock()
+            .get(page)
+            .map(|entry| entry.commands.clone())
+            .unwrap_or_default()
     }
 
     /// Drops every page in `pages`, on session close.

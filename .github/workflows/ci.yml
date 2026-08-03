@@ -49,6 +49,13 @@ jobs:
         # run live in the `chromium` job below.
         run: cargo test --workspace --locked
 
+      - name: Browser-free ignored tests
+        # `default_profile_golden` is #[ignore]d because it is a golden lock,
+        # not because it needs a browser: it diffs the committed Firefox
+        # companion profile against `create_session` output. Nothing else in
+        # the workspace catches a drift between those two.
+        run: cargo test -p fingerprinting --test default_profile_golden --locked -- --ignored
+
   chromium:
     name: chromium · live browser tests
     if: ${{ !github.event.repository.private }}
@@ -112,7 +119,18 @@ jobs:
           -- --ignored --test-threads=1
 
       - name: Conformance live tests
-        run: cargo test -p interface-conformance --test javascript_evaluation --locked -- --ignored --test-threads=1
+        run: >-
+          cargo test -p interface-conformance --locked
+          --test javascript_evaluation
+          --test mcp_live
+          -- --ignored --test-threads=1
+
+      - name: Worker-pool live tests
+        run: >-
+          cargo test -p worker-pool --locked
+          --test fingerprint_conformance
+          --test orphan_reap
+          -- --ignored --test-threads=1
 
   firefox:
     name: firefox · live companion tests
