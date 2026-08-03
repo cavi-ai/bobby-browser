@@ -61,6 +61,10 @@ pub enum Capability {
     JobCancel,
     #[serde(rename = "authority:admin")]
     AuthorityAdmin,
+    #[serde(rename = "browser:fingerprint")]
+    BrowserFingerprint,
+    #[serde(rename = "browser:humanize")]
+    BrowserHumanize,
 }
 
 impl Capability {
@@ -84,6 +88,8 @@ impl Capability {
             Self::JobRead => "job:read",
             Self::JobCancel => "job:cancel",
             Self::AuthorityAdmin => "authority:admin",
+            Self::BrowserFingerprint => "browser:fingerprint",
+            Self::BrowserHumanize => "browser:humanize",
         }
     }
 }

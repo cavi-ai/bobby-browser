@@ -20,10 +20,10 @@ use session_manager::SessionManager;
 use types::{
     AttemptId, Capability, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError,
     CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, CreateSessionRequest,
-    Evidence, FillIntent, FillValue, IdempotencyKey, InspectCommand, IntentCommand, IntentHints,
-    InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrincipalId,
-    RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId, WorkflowCheckpoint,
-    WorkflowId,
+    Evidence, ExecutionPolicy, FillIntent, FillValue, IdempotencyKey, InspectCommand,
+    IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest,
+    PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId,
+    WorkflowCheckpoint, WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -293,6 +293,62 @@ async fn authenticated_runtime_implements_the_versioned_interface() {
     let info = api.runtime_info(read_context.clone()).await.unwrap();
     assert!(info.capabilities.contains(&"sdk".to_owned()));
     assert!(api.list_sessions(read_context).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fingerprint_and_humanize_policies_require_their_capabilities() {
+    let base = [
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+    ];
+    let (api, handle) = authenticated_with(RuntimeService::default(), base).await;
+    for policy in [
+        ExecutionPolicy {
+            fingerprint: true,
+            ..ExecutionPolicy::default()
+        },
+        ExecutionPolicy {
+            humanize: true,
+            ..ExecutionPolicy::default()
+        },
+    ] {
+        let error = api
+            .create_session(
+                handle.context(expiry(), None),
+                CreateSessionRequest {
+                    profile: "policy-gated".into(),
+                    proxy: None,
+                    execution_policy: policy,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    }
+    assert_eq!(api.create_session_dispatch_count(), 0);
+
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        base.into_iter()
+            .chain([Capability::BrowserFingerprint, Capability::BrowserHumanize]),
+    )
+    .await;
+    api.create_session(
+        handle.context(expiry(), None),
+        CreateSessionRequest {
+            profile: "policy-gated".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy {
+                fingerprint: true,
+                humanize: true,
+                ..ExecutionPolicy::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

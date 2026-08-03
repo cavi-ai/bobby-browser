@@ -108,6 +108,19 @@ impl AuthenticatedRuntime {
         ctx: &RequestContext,
         req: CreateSessionRequest,
     ) -> InterfaceResult<SessionState> {
+        // `executionPolicy` flags that change what the browser presents to the
+        // page are privileged: the session opt-in alone is not enough, the
+        // principal must also hold the matching capability (same double gate
+        // as `vision:assist`). Checked before the session exists so a denied
+        // principal cannot even materialize a flagged session.
+        if req.execution_policy.fingerprint {
+            self.authorization
+                .require_capability(ctx, Capability::BrowserFingerprint)?;
+        }
+        if req.execution_policy.humanize {
+            self.authorization
+                .require_capability(ctx, Capability::BrowserHumanize)?;
+        }
         let ownership_reservation = self
             .session_ownership
             .as_ref()
@@ -183,11 +196,24 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::DeleteSession)?;
         self.require_owned_session(&ctx, &session)?;
+        // Read the session's pages before deleting it: afterwards there is no
+        // record of which pages it owned, and the context graph would retain
+        // their structure for the life of the process. Retention is bounded by
+        // session lifetime, so the eviction happens here, at the one point both
+        // facts are still available.
+        let pages = self
+            .inner
+            .sessions
+            .get(&session)
+            .await
+            .map(|state| state.page_ids)
+            .unwrap_or_default();
         self.inner
             .sessions
             .delete(&session)
             .await
             .map_err(|error| map_runtime_error(&ctx, error))?;
+        self.inner.pages.context().forget_all(&pages);
         if let Some(ownership) = &self.session_ownership {
             ownership.release_authenticated_session(&ctx.principal_id, &session);
         }

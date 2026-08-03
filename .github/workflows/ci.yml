@@ -114,6 +114,64 @@ jobs:
       - name: Conformance live tests
         run: cargo test -p interface-conformance --test javascript_evaluation --locked -- --ignored --test-threads=1
 
+  firefox:
+    name: firefox · live companion tests
+    if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+
+      - name: Build the companion extension
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @bobby-browser/firefox-companion build
+
+      - name: Install Firefox
+        uses: browser-actions/setup-firefox@latest
+
+      - name: Prepare the dedicated profile and native host
+        run: |
+          cargo build -p bobby-browser -p runtime-tests --locked
+          PROFILE="$RUNNER_TEMP/bobby-firefox-profile"
+          mkdir -p "$PROFILE"
+          echo "BOBBY_FIREFOX_BIN=$(command -v firefox)" >> "$GITHUB_ENV"
+          echo "BOBBY_FIREFOX_PROFILE=$PROFILE" >> "$GITHUB_ENV"
+          echo "BOBBY_COMPANION_EXTENSION=$GITHUB_WORKSPACE/packages/firefox-companion/dist" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.mozilla/native-messaging-hosts"
+          target/debug/bobby install-firefox-native-host \
+            --wrapper "$GITHUB_WORKSPACE/target/firefox-companion-proof/firefox-native-host" \
+            --manifest "$HOME/.mozilla/native-messaging-hosts/com.bobby_browser.companion.json" \
+            --cli "$GITHUB_WORKSPACE/target/debug/bobby" \
+            --descriptor "$GITHUB_WORKSPACE/target/firefox-companion-proof/native-host-descriptor.json"
+
+      - name: Firefox live tests
+        run: >-
+          xvfb-run -a cargo test -p runtime-tests --locked
+          --test firefox_companion
+          --test behavioral_firefox
+          --test fingerprint_firefox
+          -- --ignored --test-threads=1
+
   node:
     name: node · typescript · docs
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)

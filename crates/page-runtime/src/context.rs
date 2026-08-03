@@ -37,6 +37,16 @@ use types::{
 /// for the same decision invites picking whichever is convenient.
 pub const CONTEXT_CONFIDENCE_FLOOR: f32 = 0.75;
 
+/// The most pages the graph retains at once.
+///
+/// A page is normally evicted when it closes or when its session is deleted.
+/// This bound covers what those miss: a worker that died mid-session, a client
+/// that opened pages and never closed them, a crash between open and close.
+/// Without it the map is a slow leak of page text for the lifetime of the
+/// process — and page text is exactly the material a local node exists to keep
+/// bounded.
+pub const MAX_RETAINED_PAGES: usize = 256;
+
 /// Page structure retained for a session, keyed by page.
 ///
 /// In-process by design for now: the contract is what matters, and a graph that
@@ -46,6 +56,11 @@ pub const CONTEXT_CONFIDENCE_FLOOR: f32 = 0.75;
 #[derive(Default)]
 pub struct ContextGraph {
     pages: Mutex<HashMap<PageId, PageContext>>,
+    /// Monotonic recording counter, used to pick an eviction victim. A
+    /// timestamp would be the obvious choice and is the wrong one: two
+    /// recordings inside the same clock tick would be indistinguishable, and
+    /// the clock can move backwards.
+    sequence: std::sync::atomic::AtomicU64,
 }
 
 struct PageContext {
@@ -53,6 +68,8 @@ struct PageContext {
     generation: u64,
     /// The generation `nodes` was observed under.
     observed_at: u64,
+    /// When this page was last recorded, for eviction ordering.
+    recorded_seq: u64,
     nodes: Vec<AccessibilityNode>,
 }
 
@@ -63,14 +80,49 @@ impl ContextGraph {
 
     /// Records an accessibility observation for `page`.
     pub fn record(&self, page: &PageId, nodes: Vec<AccessibilityNode>) {
+        let seq = self
+            .sequence
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut pages = self.lock();
+        if !pages.contains_key(page) && pages.len() >= MAX_RETAINED_PAGES {
+            // Full, and this page is new. Evict the least-recently-recorded
+            // entry rather than refusing the new one: a graph that stops
+            // learning at the bound answers nothing for every page opened
+            // after it, which a caller cannot tell from permanent staleness.
+            if let Some(stalest) = pages
+                .iter()
+                .min_by_key(|(_, context)| context.recorded_seq)
+                .map(|(id, _)| id.clone())
+            {
+                pages.remove(&stalest);
+            }
+        }
         let entry = pages.entry(page.clone()).or_insert(PageContext {
             generation: 0,
             observed_at: 0,
+            recorded_seq: seq,
             nodes: Vec::new(),
         });
         entry.observed_at = entry.generation;
+        entry.recorded_seq = seq;
         entry.nodes = nodes;
+    }
+
+    /// Drops every page in `pages`, on session close.
+    ///
+    /// Retention is bounded by session lifetime: once the session that owned
+    /// these pages is gone, keeping its page structure retains material nobody
+    /// can still ask about.
+    pub fn forget_all(&self, pages: &[PageId]) {
+        let mut retained = self.lock();
+        for page in pages {
+            retained.remove(page);
+        }
+    }
+
+    /// Number of pages currently retained.
+    pub fn retained_pages(&self) -> usize {
+        self.lock().len()
     }
 
     /// Invalidates everything known about `page`.
@@ -402,6 +454,67 @@ mod tests {
     fn an_empty_description_answers_nothing() {
         let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
         assert_eq!(graph.ask(&page, "   "), None);
+    }
+
+    #[test]
+    fn deleting_a_session_forgets_every_page_it_owned() {
+        let graph = ContextGraph::new();
+        let owned: Vec<PageId> = (0..3).map(|_| PageId::new()).collect();
+        let other = PageId::new();
+        for page in owned.iter().chain(std::iter::once(&other)) {
+            graph.record(page, vec![node("textbox", "Email address", Some(1))]);
+        }
+        graph.forget_all(&owned);
+        for page in &owned {
+            assert_eq!(
+                graph.ask(page, "Email address"),
+                None,
+                "a deleted session's page structure survived"
+            );
+        }
+        assert!(
+            graph.ask(&other, "Email address").is_some(),
+            "forgetting one session's pages took another session's with it"
+        );
+    }
+
+    /// Pages are normally evicted on close or on session delete. The bound
+    /// covers what those miss — a killed worker, a client that never closes —
+    /// so the map cannot grow for the life of the process.
+    #[test]
+    fn retention_is_bounded() {
+        let graph = ContextGraph::new();
+        for _ in 0..(MAX_RETAINED_PAGES + 50) {
+            graph.record(
+                &PageId::new(),
+                vec![node("textbox", "Email address", Some(1))],
+            );
+        }
+        assert_eq!(graph.retained_pages(), MAX_RETAINED_PAGES);
+    }
+
+    /// Eviction must drop the stalest entry, not refuse the new one: a graph
+    /// that stops learning at the bound answers nothing for every page opened
+    /// after it, which is indistinguishable from being permanently stale.
+    #[test]
+    fn eviction_drops_the_stalest_page_not_the_newest() {
+        let graph = ContextGraph::new();
+        let first = PageId::new();
+        graph.record(&first, vec![node("textbox", "Email address", Some(1))]);
+        for _ in 0..MAX_RETAINED_PAGES {
+            graph.record(&PageId::new(), vec![node("textbox", "Other", Some(1))]);
+        }
+        assert_eq!(
+            graph.ask(&first, "Email address"),
+            None,
+            "the stalest page survived eviction"
+        );
+        let newest = PageId::new();
+        graph.record(&newest, vec![node("textbox", "Newest", Some(1))]);
+        assert!(
+            graph.ask(&newest, "Newest").is_some(),
+            "the graph stopped learning once it hit the bound"
+        );
     }
 
     #[test]

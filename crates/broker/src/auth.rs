@@ -504,6 +504,8 @@ fn parse_capability(value: &str) -> Result<Capability, StartupCredentialError> {
         "recovery:read" => Ok(Capability::RecoveryRead),
         "recovery:write" => Ok(Capability::RecoveryWrite),
         "authority:admin" => Ok(Capability::AuthorityAdmin),
+        "browser:fingerprint" => Ok(Capability::BrowserFingerprint),
+        "browser:humanize" => Ok(Capability::BrowserHumanize),
         _ => Err(StartupCredentialError::InvalidCapability),
     }
 }

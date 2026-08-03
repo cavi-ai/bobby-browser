@@ -76,7 +76,7 @@ Named, separately addressable nodes. A session picks one by name through
 
 | Field | Default | Meaning |
 |---|---|---|
-| `kind` | required | `vision` (proposes an action from a screenshot) or `context` (answers bounded questions about a page) |
+| `kind` | required | `vision` — proposes an action from a screenshot. The only kind today; an unknown kind fails config load rather than being ignored. |
 | `endpoint_url` | required | Node URL — **https**, or **http only on loopback** |
 | `token_env` | unset | Env var name holding the node bearer (never store the token here) |
 | `timeout_ms` | `15000` | Per-call HTTP timeout |
@@ -88,9 +88,12 @@ endpoint_url = "http://127.0.0.1:8080/propose"
 ```
 
 A session that names no node escalates to no node. A session that names a node
-which is not configured, or is configured with a different `kind`, is declined:
-the runtime never substitutes a different node, and never falls back to a
-remote default.
+which is not configured is declined: the runtime never substitutes a different
+node, and never falls back to a remote default.
+
+Retained page context — what `context_ask` answers from — is held in-process,
+not in a node. There is deliberately no `kind = "context"`: an operator could
+write it and it would reach nothing.
 
 Locality comes from the address, not from a setting. A session bound to a
 loopback node cannot have its screenshots or page text leave the machine.

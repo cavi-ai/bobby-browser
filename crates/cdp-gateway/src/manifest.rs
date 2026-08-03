@@ -571,6 +571,8 @@ fn parse_capability(value: &str) -> Option<Capability> {
         "recovery:read" => Capability::RecoveryRead,
         "recovery:write" => Capability::RecoveryWrite,
         "authority:admin" => Capability::AuthorityAdmin,
+        "browser:fingerprint" => Capability::BrowserFingerprint,
+        "browser:humanize" => Capability::BrowserHumanize,
         _ => return None,
     })
 }

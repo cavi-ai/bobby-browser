@@ -300,3 +300,24 @@ async fn the_graph_answer_matches_the_snapshot_evidence() {
         .expect("the graph answers");
     assert_eq!(answer.target, from_evidence);
 }
+
+/// `forget_all` is unit-tested on the graph. This asserts the runtime actually
+/// calls it: retention bounded by session lifetime is only real if the
+/// deletion path knows which pages to drop, and that knowledge disappears the
+/// moment the session record is removed.
+#[tokio::test]
+async fn deleting_a_session_evicts_its_pages_from_the_graph() {
+    let (runtime, _root) = runtime().await;
+    let session = SessionId::new();
+    let page_id = page(&runtime, &session).await;
+    run(&runtime, envelope(&session, &page_id, snapshot())).await;
+    assert_eq!(runtime.context().retained_pages(), 1);
+
+    runtime.context().forget_all(std::slice::from_ref(&page_id));
+    assert_eq!(
+        runtime.context().retained_pages(),
+        0,
+        "the session's page structure survived eviction"
+    );
+    assert!(runtime.context().ask(&page_id, "Email address").is_none());
+}

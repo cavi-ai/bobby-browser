@@ -5,14 +5,16 @@
 - Narrow phases cut the connect payload from ~130 KB to 42–74 KB; selecting a phase emits `notifications/tools/list_changed`.
 - A phase changes what is advertised, never what is permitted: a hidden tool stays callable and capability gates remain the only authority.
 - Add MCP `context_ask` (`page:read`): asks the retained page context where a described control is, returning a bound target and confidence, or nothing.
+- **Breaking:** `executionPolicy.fingerprint` and `executionPolicy.humanize` now require the new `browser:fingerprint` and `browser:humanize` capabilities at session creation; a principal without them gets `missingCapability` and no session is created. `bobby init` bootstrap credentials include both, matching the `vision:assist` double-gate precedent.
 - Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.
 - The graph invalidates on any command not on an explicit read-only allowlist, including `navigate` and `emulate`, which are `CommandClass::Replayable` yet change the page.
 - A failed non-read-only command invalidates too, since a command that failed is not a command that did nothing.
 - Truncated accessibility snapshots are not recorded, so the graph never reports a control absent when it was cut off.
 - Ambiguous, partial, and below-floor matches answer nothing rather than guessing.
-- Add a `[nodes.<name>]` config table: named, separately addressable nodes with `kind` (`vision` or `context`), `endpoint_url`, optional `token_env`, and `timeout_ms`.
+- Retained page context is dropped when its session is deleted, and bounded at 256 pages so an unclosed page cannot leak page text for the life of the process.
+- Add a `[nodes.<name>]` config table: named, separately addressable nodes with `kind` (`vision`), `endpoint_url`, optional `token_env`, and `timeout_ms`. An unknown kind fails config load.
 - Add `executionPolicy.visionNode`, naming which registered node a session escalates to.
-- A named node that is unknown, or configured with the wrong kind, declines the escalation and never falls back to another node or to a process-wide provider.
+- A named node that is not configured declines the escalation and never falls back to another node or to a process-wide provider.
 - A `[vision]` endpoint with no `[nodes]` table is reachable as a node named `vision`; when both are set `[nodes]` wins and `[vision]` is ignored.
 - Node locality is derived from the node's address, so a session bound to a loopback node keeps page material on the machine.
 - **Breaking (HTTP):** `POST /v1/checkpoints` takes `evidenceRefs` (command ids, max 128) instead of `evidence`. The runtime resolves each id against its own journal and checks session ownership, so a caller can no longer author evidence for work it did not perform. Matches the MCP `checkpoint_save` contract. TypeScript SDK `CheckpointRequest.evidence` is replaced by `CheckpointRequest.evidenceRefs`.
