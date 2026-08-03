@@ -118,29 +118,7 @@ fn required_env(name: &'static str) -> anyhow::Result<String> {
 }
 
 fn parse_capability(value: &str) -> anyhow::Result<Capability> {
-    match value {
-        "session:read" => Ok(Capability::SessionRead),
-        "session:write" => Ok(Capability::SessionWrite),
-        "page:read" => Ok(Capability::PageRead),
-        "page:write" => Ok(Capability::PageWrite),
-        "browser:mutate" => Ok(Capability::BrowserMutate),
-        "file:upload" => Ok(Capability::FileUpload),
-        "file:download" => Ok(Capability::FileDownload),
-        "javascript:evaluate" => Ok(Capability::JavascriptEvaluate),
-        "intent:execute" => Ok(Capability::IntentExecute),
-        "vision:assist" => Ok(Capability::VisionAssist),
-        "artifact:read" => Ok(Capability::ArtifactRead),
-        "artifact:capture" => Ok(Capability::ArtifactCapture),
-        "recovery:read" => Ok(Capability::RecoveryRead),
-        "recovery:write" => Ok(Capability::RecoveryWrite),
-        "job:submit" => Ok(Capability::JobSubmit),
-        "job:read" => Ok(Capability::JobRead),
-        "job:cancel" => Ok(Capability::JobCancel),
-        "authority:admin" => Ok(Capability::AuthorityAdmin),
-        "browser:fingerprint" => Ok(Capability::BrowserFingerprint),
-        "browser:humanize" => Ok(Capability::BrowserHumanize),
-        _ => anyhow::bail!("startup capability is invalid"),
-    }
+    value.parse().map_err(Into::into)
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use acp_gateway::AcpServer;
 use chrono::{DateTime, Utc};
 use config::AppConfig;
-use interface_core::AuthorityStore;
+use interface_core::{AuthorityStore, SessionOwnershipRegistry};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use sha2::{Digest, Sha256};
 use types::{Capability, PrincipalId};
@@ -35,7 +35,10 @@ async fn run() -> anyhow::Result<()> {
     if !handle.is_valid_at(Utc::now()) {
         anyhow::bail!("startup credential expired during runtime construction");
     }
-    let authenticated = Arc::new(AuthenticatedRuntime::new(runtime, handle));
+    let (_ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
+    let authenticated = Arc::new(AuthenticatedRuntime::with_session_ownership(
+        runtime, handle, recorder,
+    ));
     AcpServer::new(authenticated, capabilities).serve().await?;
     Ok(())
 }
@@ -82,27 +85,5 @@ fn required_env(name: &'static str) -> anyhow::Result<String> {
 }
 
 fn parse_capability(value: &str) -> anyhow::Result<Capability> {
-    match value {
-        "session:read" => Ok(Capability::SessionRead),
-        "session:write" => Ok(Capability::SessionWrite),
-        "page:read" => Ok(Capability::PageRead),
-        "page:write" => Ok(Capability::PageWrite),
-        "browser:mutate" => Ok(Capability::BrowserMutate),
-        "file:upload" => Ok(Capability::FileUpload),
-        "file:download" => Ok(Capability::FileDownload),
-        "javascript:evaluate" => Ok(Capability::JavascriptEvaluate),
-        "intent:execute" => Ok(Capability::IntentExecute),
-        "vision:assist" => Ok(Capability::VisionAssist),
-        "artifact:read" => Ok(Capability::ArtifactRead),
-        "artifact:capture" => Ok(Capability::ArtifactCapture),
-        "recovery:read" => Ok(Capability::RecoveryRead),
-        "recovery:write" => Ok(Capability::RecoveryWrite),
-        "job:submit" => Ok(Capability::JobSubmit),
-        "job:read" => Ok(Capability::JobRead),
-        "job:cancel" => Ok(Capability::JobCancel),
-        "authority:admin" => Ok(Capability::AuthorityAdmin),
-        "browser:fingerprint" => Ok(Capability::BrowserFingerprint),
-        "browser:humanize" => Ok(Capability::BrowserHumanize),
-        _ => anyhow::bail!("startup capability is invalid"),
-    }
+    value.parse().map_err(Into::into)
 }

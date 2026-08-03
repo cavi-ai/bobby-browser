@@ -22,8 +22,8 @@ use types::{
     CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, CreateSessionRequest,
     Evidence, ExecutionPolicy, FillIntent, FillValue, IdempotencyKey, InspectCommand,
     IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest,
-    PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TypeTextCommand, WorkerId,
-    WorkflowCheckpoint, WorkflowId,
+    PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TargetSpec, TypeTextCommand,
+    WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -78,6 +78,14 @@ impl BrowserWorker for LifecycleWorker {
         Ok(Vec::new())
     }
 
+    async fn collect_candidates(
+        &self,
+        _: &PageId,
+        _: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        Ok(Vec::new())
+    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.closes.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -88,6 +96,83 @@ struct LifecycleFactory {
     attempts: AtomicUsize,
     fail_first: bool,
     closes: Arc<AtomicUsize>,
+}
+
+struct BlockingNavigateWorker {
+    id: WorkerId,
+    profile: PathBuf,
+    started: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl BrowserWorker for BlockingNavigateWorker {
+    fn worker_id(&self) -> WorkerId {
+        self.id.clone()
+    }
+
+    fn profile_dir(&self) -> &Path {
+        &self.profile
+    }
+
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    async fn navigate(
+        &self,
+        _: &PageId,
+        _: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.started.add_permits(1);
+        self.release.notified().await;
+        Ok(Vec::new())
+    }
+
+    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn collect_candidates(
+        &self,
+        _: &PageId,
+        _: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+struct BlockingNavigateFactory {
+    started: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl WorkerFactory for BlockingNavigateFactory {
+    async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        Ok(Arc::new(BlockingNavigateWorker {
+            id: WorkerId::new(),
+            profile: PathBuf::from(format!("/profiles/{}", session_id.0)),
+            started: Arc::clone(&self.started),
+            release: Arc::clone(&self.release),
+        }))
+    }
 }
 
 #[async_trait]
@@ -1259,6 +1344,25 @@ fn locate_intent_envelope(session_id: SessionId) -> CommandEnvelope {
     }
 }
 
+fn locate_intent_on_page(session_id: SessionId, page_id: PageId) -> CommandEnvelope {
+    CommandEnvelope {
+        session_id,
+        page_id: Some(page_id),
+        command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
+            purpose: "Continue".into(),
+            hints: IntentHints::default(),
+        })),
+        ..submit_request()
+    }
+}
+
+fn assert_failed_with(outcome: &CommandOutcome, expected: types::ErrorCode) {
+    match outcome {
+        CommandOutcome::Failed { error, .. } => assert_eq!(error.code, expected),
+        other => panic!("expected Failed({expected:?}), got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn locate_intent_without_intent_execute_capability_is_denied_before_dispatch() {
     let runtime = RuntimeService::default();
@@ -1455,6 +1559,221 @@ async fn create_session_stores_vision_assist_execution_policy() {
     assert!(session.execution_policy.vision_assist);
     let stored = runtime.sessions.get(&session.id).await.unwrap();
     assert!(stored.execution_policy.vision_assist);
+}
+
+#[tokio::test]
+async fn cancelling_a_dispatched_command_releases_the_in_flight_count() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let started = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(BlockingNavigateFactory {
+            started: Arc::clone(&started),
+            release,
+        }),
+    ));
+    let service = RuntimeService::new(
+        SessionManager::new(Arc::clone(&workers)),
+        PageRuntime::new(journal, workers),
+    );
+    let session = service
+        .create_session(CreateSessionRequest {
+            profile: "cancelled-dispatch".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy::default(),
+        })
+        .await
+        .unwrap();
+    let page = service
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let submit_service = service.clone();
+    let submit = tokio::spawn(async move {
+        submit_service
+            .submit(CommandEnvelope {
+                session_id: session.id,
+                page_id: Some(page.id),
+                command: RuntimeCommand::Primitive(types::PrimitiveCommand::Navigate(
+                    NavigateCommand {
+                        url: "https://example.test".into(),
+                        wait_until: types::WaitUntil::Interactive,
+                        timeout_ms: 30_000,
+                    },
+                )),
+                ..submit_request()
+            })
+            .await
+    });
+
+    started.acquire().await.unwrap().forget();
+    assert_eq!(service.runtime_info().await.queued_jobs, 1);
+    submit.abort();
+    assert!(submit.await.unwrap_err().is_cancelled());
+
+    assert_eq!(
+        service.runtime_info().await.queued_jobs,
+        0,
+        "dropping a dispatched command must release runtime capacity"
+    );
+}
+
+#[tokio::test]
+async fn one_shot_vision_consent_applies_to_exactly_one_command() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let closes = Arc::new(AtomicUsize::new(0));
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(LifecycleFactory {
+            attempts: AtomicUsize::new(0),
+            fail_first: false,
+            closes,
+        }),
+    ));
+    let service = RuntimeService::new(
+        SessionManager::new(workers.clone()),
+        PageRuntime::new(journal, workers),
+    );
+    let session = service
+        .create_session(CreateSessionRequest {
+            profile: "one-shot".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy::default(),
+        })
+        .await
+        .unwrap();
+    let page = service
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let (api, handle) = authenticated_with(
+        service.clone(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::IntentExecute,
+            Capability::VisionAssist,
+        ],
+    )
+    .await;
+
+    let granted = api
+        .submit_with_one_shot_vision_consent(
+            handle.context(expiry(), None),
+            locate_intent_on_page(session.id.clone(), page.id.clone()),
+        )
+        .await
+        .expect("held vision capability authorizes one-shot consent");
+    assert_failed_with(&granted, types::ErrorCode::VisionAssistFailed);
+
+    let stored = service.sessions.get(&session.id).await.unwrap();
+    assert!(!stored.execution_policy.vision_assist);
+
+    let ordinary = api
+        .submit(
+            handle.context(expiry(), None),
+            locate_intent_on_page(session.id, page.id),
+        )
+        .await
+        .unwrap();
+    assert_failed_with(&ordinary, types::ErrorCode::VisionAssistDenied);
+}
+
+#[tokio::test]
+async fn one_shot_vision_consent_requires_the_principal_capability() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "one-shot-denied".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy::default(),
+        })
+        .await
+        .unwrap();
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::IntentExecute,
+        ],
+    )
+    .await;
+
+    let error = api
+        .submit_with_one_shot_vision_consent(
+            handle.context(expiry(), None),
+            locate_intent_envelope(session.id),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::VisionAssist));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn one_shot_consent_is_part_of_the_idempotency_identity() {
+    let runtime = RuntimeService::default();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "one-shot-idempotency".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy::default(),
+        })
+        .await
+        .unwrap();
+    let (api, handle) = authenticated_with(
+        runtime,
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+            Capability::IntentExecute,
+            Capability::VisionAssist,
+        ],
+    )
+    .await;
+    let key = IdempotencyKey::try_from("one-shot-consent-mode").unwrap();
+    let request = locate_intent_envelope(session.id);
+
+    api.submit_with_one_shot_vision_consent(
+        handle.context(expiry(), Some(key.clone())),
+        request.clone(),
+    )
+    .await
+    .expect("one-shot outcome is retained");
+    api.submit_with_one_shot_vision_consent(
+        handle.context(expiry(), Some(key.clone())),
+        request.clone(),
+    )
+    .await
+    .expect("the same one-shot submission replays");
+    let conflict = api
+        .submit(handle.context(expiry(), Some(key)), request)
+        .await
+        .expect_err("an ordinary submission must not replay a one-shot grant");
+
+    assert_eq!(conflict.code, InterfaceErrorCode::IdempotencyConflict);
+    assert_eq!(api.submit_dispatch_count(), 1);
 }
 
 #[tokio::test]

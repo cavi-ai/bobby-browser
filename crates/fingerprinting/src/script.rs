@@ -1534,11 +1534,18 @@ pub fn build_collector_probe_script() -> String {
   } catch (_) {}
   check("pdfViewerEnabled", pdfOk);
 
-  try {
-    if (globalThis.chrome && !globalThis.chrome.runtime) {
-      fails.push({ check: "chromeRuntime", detail: "chrome exists but runtime missing" });
-    }
-  } catch (_) {}
+  // No `chrome.runtime` check here, deliberately. An earlier version failed
+  // when `chrome` existed without `chrome.runtime` — which is the state of
+  // stock Chrome on an ordinary page, and also the state this very script
+  // aims for: the injection above never creates a `runtime` stub, because
+  // CreepJS's `hasBadChromeRuntime` detects the `new
+  // chrome.runtime.sendMessage` TypeError shape of a faked one. The probe was
+  // asserting the opposite of the design it was probing, so it failed against
+  // real Chrome every time it ran.
+  //
+  // The invariant that does hold is locked as a unit test instead
+  // (`the_template_never_injects_a_chrome_runtime_stub`), because it is a
+  // property of the emitted script and does not need a browser to check.
 
   return {
     passed: fails.length === 0,
@@ -1878,6 +1885,44 @@ mod tests {
         // Template still carries Win persona gates; runtime uses profile platform.
         assert!(mac_script.contains("BarcodeDetector"));
         assert!(mac_script.contains("Segoe UI"));
+    }
+
+    /// The injection must never create a `chrome.runtime` stub.
+    ///
+    /// CreepJS's `hasBadChromeRuntime` fingerprints the TypeError shape of
+    /// `new chrome.runtime.sendMessage`, so a faked `runtime` is a stronger
+    /// signal than an absent one — and absent is what stock Chrome shows on an
+    /// ordinary page anyway. This is a property of the emitted script, so it is
+    /// checked here rather than through a browser.
+    #[test]
+    fn the_template_never_injects_a_chrome_runtime_stub() {
+        for inject in [true, false] {
+            let session = crate::create_session(
+                &FingerprintConfig::default()
+                    .with_session_seed(21)
+                    .with_inject_chrome(inject),
+            );
+            let script = build_init_script(&session).expect("script builds");
+            assert!(
+                !script.contains("chrome.runtime ="),
+                "injectChrome={inject} assigned a chrome.runtime stub"
+            );
+            assert!(
+                !script.contains("runtime: {"),
+                "injectChrome={inject} embedded a runtime object literal"
+            );
+        }
+    }
+
+    /// The collector probe must not assert the inverse of the injection. It did
+    /// once, and failed against real Chrome on every run.
+    #[test]
+    fn the_collector_probe_does_not_require_a_chrome_runtime() {
+        assert!(
+            !build_collector_probe_script().contains("chromeRuntime"),
+            "the probe reintroduced a chrome.runtime requirement the injection \
+             deliberately does not satisfy"
+        );
     }
 
     #[test]
