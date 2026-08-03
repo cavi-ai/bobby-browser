@@ -301,3 +301,89 @@ async fn policy_denied_never_calls_vision() {
         "never_escalates(PolicyDenied) must not call vision"
     );
 }
+
+/// C4: an open session policy does not substitute for the capability.
+///
+/// This is the row the node substrate makes load-bearing. A session names a
+/// node and sets `executionPolicy.visionAssist`, both of which it controls;
+/// the capability comes from the bearer token, which it does not. If an open
+/// session grant were enough, naming a node would be a way to reach vision
+/// with a token that never carried `vision:assist`.
+///
+/// Asserted by call count, not by error code: an assertion on the code alone
+/// would pass even if the provider had been consulted and its answer then
+/// discarded, which is a different security story from never asking.
+#[tokio::test]
+async fn an_open_session_policy_does_not_substitute_for_the_capability() {
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: click_proposal(0.99),
+    });
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &locate(),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: false,
+            assist: Some(assist),
+        },
+    )
+    .await;
+
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "an open session policy reached the vision provider without the capability"
+    );
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(
+        error.code,
+        ErrorCode::VisionAssistDenied,
+        "a missing capability was not reported as a denial"
+    );
+}
+
+/// C4, the mirror: holding the capability does not substitute for the session
+/// grant. Without this the double gate would be a single gate wearing two
+/// names.
+#[tokio::test]
+async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: click_proposal(0.99),
+    });
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &locate(),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: false,
+            capability_ok: true,
+            assist: Some(assist),
+        },
+    )
+    .await;
+
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "the capability alone reached the vision provider without the session grant"
+    );
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+}
