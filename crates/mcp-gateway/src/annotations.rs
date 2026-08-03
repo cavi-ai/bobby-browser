@@ -18,6 +18,8 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "events_read"
             | "recovery_status"
             | "cookie_get"
+            | "context_ask"
+            | "toolset_select"
     );
     let destructive = matches!(name, "session_close" | "page_close" | "cookie_delete");
     // `idempotentHint` per MCP is unconditional: "calling the tool repeatedly
@@ -85,6 +87,8 @@ pub(crate) fn tool_title(name: &str) -> &'static str {
         "page_open" => "Open page",
         "pdf" => "Print to PDF",
         "recovery_status" => "Recovery status",
+        "context_ask" => "Ask where a control is",
+        "toolset_select" => "Select a toolset phase",
         "runtime_info" => "Runtime info",
         "screenshot" => "Screenshot",
         "session_close" => "Close session",

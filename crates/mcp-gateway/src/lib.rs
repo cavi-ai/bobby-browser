@@ -7,6 +7,7 @@ pub mod protocol;
 mod resources;
 mod schema;
 mod server;
+mod toolset;
 
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
@@ -46,3 +47,4 @@ pub const PER_TOOL_BYTE_BUDGET: usize = 32 * 1024;
 pub use notify::{NotificationSink, NotificationStream};
 pub use resources::{ArtifactCatalogFull, ArtifactResources};
 pub use server::Server;
+pub use toolset::Toolset;
