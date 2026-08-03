@@ -1756,13 +1756,20 @@ async fn form_snapshot_is_a_read_only_page_tool() {
         snapshot["inputSchema"]["required"],
         json!(["sessionId", "pageId"])
     );
+    // Sorted before comparing. `serde_json::Map` iterates in sorted order by
+    // default and in insertion order under the `preserve_order` feature, which
+    // any crate in the graph can enable — so an order-sensitive assertion here
+    // passes or fails on which crates happen to be linked, not on the schema.
+    // What this test is actually about is which properties exist.
+    let mut properties = snapshot["inputSchema"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    properties.sort();
     assert_eq!(
-        snapshot["inputSchema"]["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
+        properties,
         vec!["maxControls", "pageId", "sessionId", "workflowId"]
     );
     assert_eq!(
