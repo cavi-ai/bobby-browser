@@ -432,7 +432,7 @@ checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
 name = "behavioral-engine"
 version = "0.4.0"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "rand 0.9.5",
  "serde",
 ]
@@ -504,7 +504,7 @@ dependencies = [
  "config",
  "dirs",
  "firefox-companion",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hex",
  "libc",
  "mcp-gateway",
@@ -587,7 +587,7 @@ dependencies = [
  "chrono",
  "config",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hex",
  "interface-core",
  "mcp-gateway",
@@ -2060,7 +2060,7 @@ dependencies = [
  "base64 0.23.0",
  "chrono",
  "futures",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "rustix",
  "serde",
  "serde_json",
