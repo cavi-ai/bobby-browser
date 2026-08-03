@@ -2,23 +2,21 @@
 documentedVersion: {{PRODUCT_VERSION}}
 ---
 
-# types
+# Wire types
 
-**Tier: Supported**
+**Tier: Supported** (via `bobby-browser-client`)
 
-Shared wire types for HTTP, MCP, and embed paths: capabilities, command
-envelopes (including primitives such as `activatePage` /
-`AccessibilitySnapshot` and intents such as `CompleteForm` / `Fill`),
-session/page state, recovery types, and `CURRENT_INTERFACE_VERSION`
-(`{{INTERFACE_VERSION}}`).
+`/v1` Serde wire types ship inside
+[`bobby-browser-client`](bobby-browser-client.md) on crates.io
+(`CreateSessionRequest`, command envelopes, outcomes, forms, recovery,
+`CURRENT_INTERFACE_VERSION` = `{{INTERFACE_VERSION}}`).
 
 ```bash
-cargo add types
-# workspace path today: crates/types
+cargo add bobby-browser-client
 ```
 
 ```rust,no_run
-use types::{CreateSessionRequest, CURRENT_INTERFACE_VERSION};
+use bobby_browser_client::{CreateSessionRequest, CURRENT_INTERFACE_VERSION};
 
 let _ = CURRENT_INTERFACE_VERSION;
 let _ = CreateSessionRequest {
@@ -28,21 +26,17 @@ let _ = CreateSessionRequest {
 };
 ```
 
-Prefer `types` for serde-compatible request/response bodies. Breaking changes
-remain possible while the product is alpha — pin versions deliberately.
+The workspace still has an internal `types` crate (`publish = false`) for
+runtime crates; do not publish or `cargo add` it.
 
 ## Schema feature
 
-Enable Cargo feature `schema` to derive `schemars::JsonSchema` on the wire
-types (`PrimitiveCommand`, `IntentCommand`, `Evidence`, …). The MCP gateway
-keeps hand-bounded tool JSON Schemas in `crates/mcp-gateway/src/schema.rs` and
-runs `schema_parity` tests so advertised `kind` variants cannot drift from
-these Rust enums. Prefer regenerating or updating the hand schemas whenever
-you add a command or evidence variant — the parity tests fail closed.
+```bash
+cargo add bobby-browser-client --features schema
+```
 
 ## Next
 
 - [bobby-browser-client](bobby-browser-client.md)
 - [Capabilities](../concepts/capabilities.md)
 - [HTTP API](../surfaces/http-api.md)
-- [MCP tools](../surfaces/mcp-tools.md)

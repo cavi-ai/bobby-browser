@@ -1,3 +1,5 @@
+//! Typed UUID newtypes used across the `/v1` wire contract.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

@@ -1,11 +1,12 @@
 [package]
 name = "types"
+description = "Internal Bobby Browser wire types (workspace only; not published)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = true
+publish = false
 
 [dependencies]
 chrono.workspace = true

@@ -56,7 +56,7 @@ cargo test -p bobby-browser-client
 ```
 
 ```rust,no_run
-use bobby_browser_client::BrowserRuntimeClient;
+use bobby_browser_client::{BrowserRuntimeClient, CreateSessionRequest};
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let client = BrowserRuntimeClient::new(
@@ -64,6 +64,16 @@ let client = BrowserRuntimeClient::new(
     std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
 )?;
 let _info = client.runtime_info(None).await?;
+let _session = client
+    .create_session(
+        &CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        },
+        None,
+    )
+    .await?;
 # Ok(()) }
 ```
 

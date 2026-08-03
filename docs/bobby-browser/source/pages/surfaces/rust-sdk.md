@@ -33,11 +33,10 @@ let _ = info;
 
 | Crate | Tier | Role |
 |---|---|---|
-| `bobby-browser-client` | Supported | HTTP `/v1` client |
-| `types` | Supported | Wire types |
+| `bobby-browser-client` | Supported | HTTP `/v1` client **and** wire types (crates.io SDK) |
 | `bobby-browser` | Supported (CLI) | `bobby` binary; lib name `cli` |
 | `interface-core` / `sdk-core` / `broker` | Embed | In-process runtime |
-| engines / stores | Internal | Install closure only |
+| engines / stores / `types` | Internal | Workspace only (`types` is `publish = false`) |
 
 Full tiered list: [Rust crate book](../rust/index.md).
 

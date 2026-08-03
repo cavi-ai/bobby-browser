@@ -19,19 +19,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build installable binary
         run: cargo build --release -p bobby-browser
-      - name: Dry-run publish leaves
+      - name: Dry-run publish Rust SDK
         run: |
           set -euo pipefail
-          # Full ordered live publish needs crates.io credentials and must run
-          # leaf→root after each crate exists on the registry. CI dry-runs only
-          # crates whose path deps are registry crates (no unpublished workspace
-          # path deps).
-          for crate in bobby-chromiumoxide types config test-site; do
-            echo "::group::dry-run $crate"
-            cargo publish -p "$crate" --dry-run
-            echo "::endgroup::"
-          done
-      - name: Verify path deps carry versions
+          echo "::group::dry-run bobby-browser-client"
+          cargo publish -p bobby-browser-client --dry-run
+          echo "::endgroup::"
+      - name: Verify publish path policy
         run: |
           set -euo pipefail
           python3 scripts/check-publish-path-versions.py

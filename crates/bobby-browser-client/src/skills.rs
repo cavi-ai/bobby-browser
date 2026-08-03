@@ -1,3 +1,5 @@
+//! Skill command and outcome wire types (Ghost, ZigZagZig, …).
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};

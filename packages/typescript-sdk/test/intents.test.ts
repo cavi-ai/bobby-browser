@@ -80,7 +80,7 @@ test("locateRuntimeCommand matches Rust golden nested wire shape", () => {
   });
 });
 
-test("locateEnvelope builds a full CommandEnvelope for agents", () => {
+test("locateEnvelope builds a full CommandEnvelope", () => {
   const envelope = locateEnvelope(META, "Continue");
   assert.equal(envelope.schemaVersion, 2);
   assert.equal(envelope.commandId, META.commandId);
