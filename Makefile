@@ -2,7 +2,7 @@ SHELL := /bin/bash
 REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 
-.PHONY: help build reload verify status fmt lint test fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox behavioral-benchmark behavioral-e2e behavioral-dogfood
+.PHONY: help build install reload verify status fmt lint test fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox behavioral-benchmark behavioral-e2e behavioral-dogfood
 
 help:
 	@echo "build   - cargo build --release -p bobby-browser (produces ./target/release/bobby)"
@@ -27,6 +27,14 @@ help:
 
 build:
 	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser
+
+# Build bobby + the gateways and run the interactive agent-host installer
+# (credential, MCP config merge, agent skill). Non-interactive:
+#   ./target/release/bobby install --host claude --skill --yes
+install:
+	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway
+	pnpm --filter @bobby-browser/firefox-companion build
+	$(REPO_ROOT)target/release/bobby install
 
 # The service keeps serving whatever binary existed when launchd last started
 # it, so a rebuild alone changes nothing. Always go through reload/verify.
