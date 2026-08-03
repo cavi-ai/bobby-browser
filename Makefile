@@ -33,6 +33,7 @@ build:
 #   ./target/release/bobby install --host claude --skill --yes
 install:
 	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway
+	pnpm --filter @bobby-browser/firefox-companion build
 	$(REPO_ROOT)target/release/bobby install
 
 # The service keeps serving whatever binary existed when launchd last started

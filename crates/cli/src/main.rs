@@ -745,6 +745,12 @@ enum CliCommand {
         /// Install the skill into this project's .claude/skills/ instead of user-level
         #[arg(long)]
         project_skill: bool,
+        /// Install the Firefox companion (extension, native host, descriptor)
+        #[arg(long)]
+        companion: bool,
+        /// Path to a built companion extension (else built from the repo)
+        #[arg(long)]
+        extension: Option<PathBuf>,
         /// Regenerate the bootstrap credential even if one exists
         #[arg(long)]
         force: bool,
@@ -898,6 +904,8 @@ pub async fn run() -> Result<()> {
             host,
             skill,
             project_skill,
+            companion,
+            extension,
             force,
             yes,
             path,
@@ -906,7 +914,18 @@ pub async fn run() -> Result<()> {
                 Some(path) => path,
                 None => bootstrap_local::default_bootstrap_path()?,
             };
-            onboarding::run_install(&path, &host, skill, project_skill, force, yes)?;
+            onboarding::run_install(
+                &path,
+                onboarding::InstallOptions {
+                    hosts: host,
+                    skill,
+                    project_skill,
+                    companion,
+                    extension,
+                    force,
+                    yes,
+                },
+            )?;
         }
         CliCommand::Serve {
             config,

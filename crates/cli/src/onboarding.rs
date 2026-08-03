@@ -376,16 +376,33 @@ struct InstallItem {
     run: Box<dyn Fn() -> Result<String>>,
 }
 
+/// What `bobby install` was asked to set up, flag form. The interactive
+/// checklist starts from these as its initial toggles.
+#[derive(Debug, Default)]
+pub struct InstallOptions {
+    pub hosts: Vec<HostKind>,
+    pub skill: bool,
+    pub project_skill: bool,
+    pub companion: bool,
+    pub extension: Option<PathBuf>,
+    pub force: bool,
+    pub yes: bool,
+}
+
 /// `bobby install`: the one-command setup. Non-interactive when flags name
 /// the work; otherwise a checklist the operator toggles.
-pub fn run_install(
-    bootstrap_path: &Path,
-    hosts: &[HostKind],
-    skill: bool,
-    project_skill: bool,
-    force: bool,
-    yes: bool,
-) -> Result<()> {
+pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()> {
+    let InstallOptions {
+        hosts,
+        skill,
+        project_skill,
+        companion,
+        extension,
+        force,
+        yes,
+    } = options;
+    let hosts = hosts.as_slice();
+    let extension = extension.as_deref();
     let project_root = std::env::current_dir()?;
     let mut items: Vec<InstallItem> = Vec::new();
 
@@ -430,6 +447,21 @@ pub fn run_install(
         });
     }
 
+    let companion_default = companion || (hosts.is_empty() && !skill && firefox_present());
+    let extension_path = extension.map(Path::to_path_buf);
+    items.push(InstallItem {
+        label: "Firefox companion: install extension and native host (pair at first use)".to_owned(),
+        enabled: companion || companion_default,
+        run: Box::new(move || {
+            let install = install_firefox_companion(extension_path.as_deref())?;
+            Ok(format!(
+                "extension at {}, native host manifest at {}. Next: start Firefox with --remote-debugging-port, then `bobby enroll-firefox-profile`",
+                install.extension_dir.display(),
+                install.manifest_path.display()
+            ))
+        }),
+    });
+
     items.push(InstallItem {
         label: if project_skill {
             "Agent skill: install into this project's .claude/skills/".to_owned()
@@ -446,7 +478,7 @@ pub fn run_install(
         }),
     });
 
-    let interactive = !yes && hosts.is_empty() && !skill && !force;
+    let interactive = !yes && hosts.is_empty() && !skill && !companion && !force;
     if interactive {
         if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             anyhow::bail!(
@@ -560,9 +592,163 @@ mod install_tests {
     }
 
     #[test]
+    fn companion_install_copies_the_extension_and_installs_the_native_host() {
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
+        std::fs::write(dist.path().join("background.js"), "//").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process env; restored after.
+        let previous = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let result = install_firefox_companion(Some(dist.path()));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let install = result.expect("companion installs");
+        assert!(install.extension_dir.join("manifest.json").is_file());
+        assert!(install.extension_dir.join("background.js").is_file());
+        assert!(install.wrapper_path.is_file());
+        assert!(install.manifest_path.is_file());
+        // The descriptor is written by enrollment, not the installer.
+        assert!(!install.descriptor_path.exists());
+        assert_eq!(
+            install.descriptor_path.parent().unwrap(),
+            install.extension_dir.parent().unwrap()
+        );
+    }
+
+    #[test]
+    fn companion_install_reports_a_missing_extension_build() {
+        let missing = tempfile::tempdir().unwrap();
+        let error = install_firefox_companion(Some(missing.path()))
+            .expect_err("an empty directory is not a built extension");
+        assert!(format!("{error:#}").contains("companion extension build not found"));
+    }
+
+    #[test]
     fn merging_rejects_a_config_that_is_not_an_object() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join(".mcp.json"), "[1,2,3]").unwrap();
         assert!(merge_host_config(HostKind::Claude, root.path()).is_err());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Browser companions
+// ---------------------------------------------------------------------------
+
+/// Where the Firefox companion pieces live after installation: extension
+/// copy, native-host wrapper, and pairing descriptor under the bobby config
+/// dir; the manifest goes to Mozilla's per-platform native-messaging dir.
+#[derive(Debug)]
+pub struct CompanionInstall {
+    pub extension_dir: PathBuf,
+    pub wrapper_path: PathBuf,
+    pub manifest_path: PathBuf,
+    pub descriptor_path: PathBuf,
+}
+
+fn bobby_config_dir() -> Result<PathBuf> {
+    Ok(dirs::config_dir()
+        .context("config directory unavailable")?
+        .join("bobby-browser"))
+}
+
+fn native_messaging_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("home directory unavailable")?;
+    Ok(match std::env::consts::OS {
+        "macos" => home
+            .join("Library")
+            .join("Application Support")
+            .join("Mozilla")
+            .join("NativeMessagingHosts"),
+        "linux" => home.join(".mozilla").join("native-messaging-hosts"),
+        other => anyhow::bail!("Firefox native messaging is unsupported on {other}"),
+    })
+}
+
+/// Whether any Firefox binary is discoverable — the companion item defaults
+/// off when there is nothing to pair with.
+fn firefox_present() -> bool {
+    if std::env::consts::OS == "macos" {
+        for candidate in [
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
+            "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
+        ] {
+            if Path::new(candidate).is_file() {
+                return true;
+            }
+        }
+    }
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                dir.join("firefox").is_file() || dir.join("firefox-developer-edition").is_file()
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Locate the built companion extension: an explicit flag first, then the
+/// repo layout relative to the running binary (`target/<profile>/bobby` →
+/// repo root two levels up), then the current directory.
+fn find_companion_dist(explicit: Option<&Path>) -> Result<PathBuf> {
+    let mut candidates: Vec<PathBuf> = explicit.into_iter().map(Path::to_path_buf).collect();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(root) = exe.parent().and_then(Path::parent).and_then(Path::parent) {
+            candidates.push(root.join("packages/firefox-companion/dist"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("packages/firefox-companion/dist"));
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("manifest.json").is_file())
+        .ok_or_else(|| {
+            anyhow!(
+                "companion extension build not found; run `pnpm --filter @bobby-browser/firefox-companion build` or pass --extension <dir>"
+            )
+        })
+}
+
+/// Install the Firefox companion: copy the built extension into the bobby
+/// config dir (so the source tree can move), then install the native-host
+/// wrapper and manifest; the pairing descriptor path is set aside for
+/// enrollment. Pairing itself happens against
+/// a running Firefox afterwards — see the printed next steps.
+pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionInstall> {
+    let dist = find_companion_dist(extension)?;
+    let config = bobby_config_dir()?;
+    let extension_dir = config.join("firefox-companion");
+    copy_dir(&dist, &extension_dir)?;
+    let install = CompanionInstall {
+        extension_dir,
+        wrapper_path: config.join("firefox-native-host"),
+        manifest_path: native_messaging_dir()?.join("com.bobby_browser.companion.json"),
+        descriptor_path: config.join("firefox-native-host-descriptor.json"),
+    };
+    let exe = std::env::current_exe().context("current executable unknown")?;
+    crate::install_native_host(crate::NativeHostInstallConfig {
+        wrapper_path: install.wrapper_path.clone(),
+        manifest_path: install.manifest_path.clone(),
+        cli_path: exe,
+        descriptor_path: install.descriptor_path.clone(),
+    })?;
+    Ok(install)
+}
+
+fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }

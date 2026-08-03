@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- `bobby install` gains a Browser companions item: installs the Firefox companion (extension copied into the bobby config dir, native-host wrapper + manifest into Mozilla's per-platform directory) and prints the one remaining step (start Firefox with `--remote-debugging-port`, run `bobby enroll-firefox-profile`). On by default when a Firefox binary is found; `--companion`/`--extension` for non-interactive use. `make install` builds the extension first.
 - Add `bobby mcp-stdio`: the MCP entrypoint agent hosts point at — it loads the bootstrap credential from `bootstrap.env` itself and execs the stdio gateway, so host configs carry no secrets and no env wiring.
 - Add `bobby install` (and `make install`): one-command agent setup — bootstrap credential, MCP config merge into Claude Code / Zed / VS Code (preserving existing entries), and agent-skill installation. Interactive checklist with toggles by default; `--host`/`--skill`/`--yes` for non-interactive use.
 - Add `acp-gateway`, the fourth adapter: ACP schema v1 over stdio (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/update`, `session/request_permission`). Prompts are structured (optional `url` plus one `types::IntentCommand` in the `command_execute` wire shape) — no planner, no freeform text. Permission prompts cover vision escalation only and can lift a session gate, never mint a capability.
