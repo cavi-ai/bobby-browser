@@ -551,3 +551,68 @@ fn retryable_failed_helper_remains_explicit_for_future_outcomes() {
     };
     assert!(matches!(restarted, CommandOutcome::Restarted { .. }));
 }
+
+/// The digest is the identity of an idempotent request, so it must not depend
+/// on the order a client happened to serialize object keys in — nor on which
+/// `serde_json` map backend the dependency graph selected.
+///
+/// `serde_json` uses a `BTreeMap` by default (sorted, so canonical for free)
+/// and an `IndexMap` under the `preserve_order` feature (insertion order). Any
+/// crate anywhere in the graph can enable that feature and Cargo applies it
+/// workspace-wide, so these assertions must hold under both.
+#[test]
+fn the_digest_ignores_object_key_order() {
+    let ascending: serde_json::Value =
+        serde_json::from_str(r#"{"alpha":1,"beta":2,"gamma":3}"#).expect("valid JSON");
+    let descending: serde_json::Value =
+        serde_json::from_str(r#"{"gamma":3,"beta":2,"alpha":1}"#).expect("valid JSON");
+    let shuffled: serde_json::Value =
+        serde_json::from_str(r#"{"beta":2,"gamma":3,"alpha":1}"#).expect("valid JSON");
+    let digest = canonical_sha256(&ascending).expect("canonicalizes");
+    assert_eq!(
+        digest,
+        canonical_sha256(&descending).expect("canonicalizes")
+    );
+    assert_eq!(digest, canonical_sha256(&shuffled).expect("canonicalizes"));
+}
+
+#[test]
+fn the_digest_ignores_key_order_at_every_depth() {
+    let one: serde_json::Value =
+        serde_json::from_str(r#"{"outer":{"a":1,"b":{"x":1,"y":2}},"list":[{"p":1,"q":2}]}"#)
+            .expect("valid JSON");
+    let other: serde_json::Value =
+        serde_json::from_str(r#"{"list":[{"q":2,"p":1}],"outer":{"b":{"y":2,"x":1},"a":1}}"#)
+            .expect("valid JSON");
+    assert_eq!(
+        canonical_sha256(&one).expect("canonicalizes"),
+        canonical_sha256(&other).expect("canonicalizes"),
+        "nested objects, including those inside arrays, are not canonicalized"
+    );
+}
+
+/// Array order carries meaning, so it must survive canonicalization. Without
+/// this, two genuinely different requests would share a digest and one would
+/// replay the other's result.
+#[test]
+fn the_digest_respects_array_order() {
+    let forward: serde_json::Value = serde_json::from_str(r#"{"steps":[1,2,3]}"#).expect("valid");
+    let reversed: serde_json::Value = serde_json::from_str(r#"{"steps":[3,2,1]}"#).expect("valid");
+    assert_ne!(
+        canonical_sha256(&forward).expect("canonicalizes"),
+        canonical_sha256(&reversed).expect("canonicalizes"),
+        "array order was normalized away, collapsing two different requests"
+    );
+}
+
+/// Different values still differ. A canonicalizer that returned a constant
+/// would pass every test above.
+#[test]
+fn the_digest_still_distinguishes_different_values() {
+    let one: serde_json::Value = serde_json::from_str(r#"{"a":1}"#).expect("valid");
+    let other: serde_json::Value = serde_json::from_str(r#"{"a":2}"#).expect("valid");
+    assert_ne!(
+        canonical_sha256(&one).expect("canonicalizes"),
+        canonical_sha256(&other).expect("canonicalizes")
+    );
+}

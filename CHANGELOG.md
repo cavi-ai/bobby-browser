@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- **Breaking (idempotency digests):** `canonical_sha256` now sorts JSON object keys recursively before hashing, so a digest no longer depends on the order a client serialized keys in. It previously inherited ordering from `serde_json`'s default `BTreeMap` backend; any dependency enabling `serde_json/preserve_order` switched that to insertion order workspace-wide and two equivalent requests hashed differently, so a retry executed instead of replaying. Digests change once; in-flight idempotency records will not match across the upgrade.
+- Add `crates/acp-gateway` with the ACP permission-escalation gate: a `session/request_permission` prompt is only sent for a capability the principal already holds but session policy gates, and approval never mints a capability.
+- Add `crates/interface-conformance/tests/acp_permission.rs`, joining ACP to the conformance suite as a fourth adapter.
 - **Breaking:** `executionPolicy.fingerprint` and `executionPolicy.humanize` now require the new `browser:fingerprint` and `browser:humanize` capabilities at session creation; a principal without them gets `missingCapability` and no session is created. `bobby init` bootstrap credentials include both, matching the `vision:assist` double-gate precedent.
 - Document the MCP surface depth shipped in v0.3.1: per-tool `outputSchema`, `title` + `annotations`, the four `bobby://` resources, `artifact://` capture resources, the three working-loop prompts, and `notifications/bobby/event` + `notifications/tools/list_changed` push channels. Document `job:*` capabilities and the `browser:fingerprint` / `browser:humanize` gates in the capabilities concept page.
 - Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.
