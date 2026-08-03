@@ -1,9 +1,15 @@
 import type { Capability, EventGap, InterfaceError, InterfaceErrorCode } from "./contracts.js";
 
+/** Classification of {@link RuntimeClientError}. */
 export type RuntimeClientErrorKind = "transport" | "protocol" | "http" | "aborted" | "deadline";
+
+/** Strip secrets from error strings (typically removes the bearer token). */
 export type RuntimeErrorRedactor = (value: string) => string;
 
-/** A redacted error surface: no request headers, request body, URL credentials, or bearer token are retained. */
+/**
+ * Client-side error with secrets redacted from `message`, `stack`, and inspect
+ * output. Does not retain request headers, bodies, URL credentials, or tokens.
+ */
 export class RuntimeClientError extends Error {
   readonly #redact: RuntimeErrorRedactor;
   readonly kind: RuntimeClientErrorKind;
@@ -48,6 +54,7 @@ export class RuntimeClientError extends Error {
     return this.#redact(`RuntimeClientError { kind: ${this.kind}, status: ${this.status ?? "undefined"}, code: ${this.code ?? "undefined"} }`);
   }
 
+  /** JSON-safe projection for logging (already redacted). */
   toJSON(): Record<string, unknown> {
     return {
       name: this.name,
