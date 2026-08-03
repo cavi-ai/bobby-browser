@@ -42,6 +42,24 @@ pub struct RuntimeService {
     nodes: Arc<NodeRegistry>,
 }
 
+struct InFlightGuard {
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl InFlightGuard {
+    fn acquire(counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self { counter }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 impl Default for RuntimeService {
     fn default() -> Self {
         Self::new(SessionManager::default(), PageRuntime::default())
@@ -255,6 +273,16 @@ impl RuntimeService {
         envelope: CommandEnvelope,
         vision_capability_ok: bool,
     ) -> CommandOutcome {
+        self.submit_with_vision_grant(envelope, vision_capability_ok, false)
+            .await
+    }
+
+    async fn submit_with_vision_grant(
+        &self,
+        envelope: CommandEnvelope,
+        vision_capability_ok: bool,
+        one_shot_session_ok: bool,
+    ) -> CommandOutcome {
         // SECURITY(F4): per-session execution-policy gate. This is the authoritative
         // deny-by-default check for `EvaluateJavaScript` — a session must have explicitly
         // opted in (`ExecutionPolicy.javascript_evaluation == true`) or the command is
@@ -300,7 +328,7 @@ impl RuntimeService {
             .unwrap_or_default();
         let vision = match &envelope.command {
             RuntimeCommand::Intent(_) => VisionGate {
-                session_ok: policy.vision_assist,
+                session_ok: policy.vision_assist || one_shot_session_ok,
                 capability_ok: vision_capability_ok,
             },
             RuntimeCommand::Primitive(_) => VisionGate::default(),
@@ -326,12 +354,8 @@ impl RuntimeService {
             humanize: policy.humanize,
             vision_node,
         };
-        self.in_flight
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let outcome = self.pages.execute_with_session_gate(envelope, gate).await;
-        self.in_flight
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        outcome
+        let _in_flight = InFlightGuard::acquire(Arc::clone(&self.in_flight));
+        self.pages.execute_with_session_gate(envelope, gate).await
     }
 
     /// Save a checkpoint whose evidence has already been verified by the

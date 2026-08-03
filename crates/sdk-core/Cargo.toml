@@ -27,6 +27,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 checkpoint-store = { path = "../checkpoint-store", version = "0.3.1" }
+dom-engine = { path = "../dom-engine", version = "0.3.1" }
 tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
