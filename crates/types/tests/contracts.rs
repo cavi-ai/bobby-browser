@@ -491,6 +491,19 @@ fn intent_and_vision_capabilities_round_trip() {
     assert_eq!(Capability::JobRead.as_str(), "job:read");
     assert_eq!(Capability::JobCancel.as_str(), "job:cancel");
     assert_eq!(
+        Capability::BrowserFingerprint.as_str(),
+        "browser:fingerprint"
+    );
+    assert_eq!(Capability::BrowserHumanize.as_str(), "browser:humanize");
+    assert_eq!(
+        serde_json::to_string(&Capability::BrowserFingerprint).unwrap(),
+        "\"browser:fingerprint\""
+    );
+    assert_eq!(
+        serde_json::to_string(&Capability::BrowserHumanize).unwrap(),
+        "\"browser:humanize\""
+    );
+    assert_eq!(
         serde_json::to_string(&Capability::JobSubmit).unwrap(),
         "\"job:submit\""
     );

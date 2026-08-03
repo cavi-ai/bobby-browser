@@ -108,6 +108,19 @@ impl AuthenticatedRuntime {
         ctx: &RequestContext,
         req: CreateSessionRequest,
     ) -> InterfaceResult<SessionState> {
+        // `executionPolicy` flags that change what the browser presents to the
+        // page are privileged: the session opt-in alone is not enough, the
+        // principal must also hold the matching capability (same double gate
+        // as `vision:assist`). Checked before the session exists so a denied
+        // principal cannot even materialize a flagged session.
+        if req.execution_policy.fingerprint {
+            self.authorization
+                .require_capability(ctx, Capability::BrowserFingerprint)?;
+        }
+        if req.execution_policy.humanize {
+            self.authorization
+                .require_capability(ctx, Capability::BrowserHumanize)?;
+        }
         let ownership_reservation = self
             .session_ownership
             .as_ref()
