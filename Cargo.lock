@@ -1351,12 +1351,14 @@ dependencies = [
 name = "firefox-companion"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "artifact-store",
  "async-trait",
  "base64 0.23.0",
  "behavioral-engine",
  "companion-core",
  "companion-protocol",
+ "config",
  "dom-engine",
  "fingerprinting",
  "futures-util",
@@ -1366,8 +1368,10 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tracing",
  "types",
  "url",
+ "uuid",
  "worker-pool",
 ]
 
@@ -2335,6 +2339,7 @@ dependencies = [
  "checkpoint-store",
  "chrono",
  "config",
+ "firefox-companion",
  "futures-util",
  "interface-core",
  "jsonschema",
