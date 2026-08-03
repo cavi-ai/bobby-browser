@@ -6,6 +6,10 @@
 - Add `bobby init --emit <claude|zed|vscode|json>`: prints the MCP client config fragment for the host with `${VAR}` credential placeholders, never the secret. Add `skill/SKILL.md`, the agent skill package for driving the runtime.
 - `bobby doctor` now runs a live MCP handshake (`initialize` + `tools/list`) against the stdio gateway and reports tool count and catalog bytes against the 128 KiB budget; a missing gateway is a warning, a failed handshake a failure.
 - Fix `mcp-gateway` startup rejecting bootstrap credentials that carry `job:*` capabilities (the parse table predated the jobs API, so the stdio gateway could not start with a current `bobby init` file).
+- Add MCP `toolset_select`: narrows `tools/list` to `explore`, `act`, `intent`, `verify`, or `full`. Default stays `full`, byte-for-byte the previous surface.
+- Narrow phases cut the connect payload from ~130 KB to 42–74 KB; selecting a phase emits `notifications/tools/list_changed`.
+- A phase changes what is advertised, never what is permitted: a hidden tool stays callable and capability gates remain the only authority.
+- Add MCP `context_ask` (`page:read`): asks the retained page context where a described control is, returning a bound target and confidence, or nothing.
 - **Breaking:** `executionPolicy.fingerprint` and `executionPolicy.humanize` now require the new `browser:fingerprint` and `browser:humanize` capabilities at session creation; a principal without them gets `missingCapability` and no session is created. `bobby init` bootstrap credentials include both, matching the `vision:assist` double-gate precedent.
 - Document the MCP surface depth shipped in v0.3.1: per-tool `outputSchema`, `title` + `annotations`, the four `bobby://` resources, `artifact://` capture resources, the three working-loop prompts, and `notifications/bobby/event` + `notifications/tools/list_changed` push channels. Document `job:*` capabilities and the `browser:fingerprint` / `browser:humanize` gates in the capabilities concept page.
 - Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.
@@ -16,7 +20,7 @@
 - Retained page context is dropped when its session is deleted, and bounded at 256 pages so an unclosed page cannot leak page text for the life of the process.
 - Add a `[nodes.<name>]` config table: named, separately addressable nodes with `kind` (`vision`), `endpoint_url`, optional `token_env`, and `timeout_ms`. An unknown kind fails config load.
 - Add `executionPolicy.visionNode`, naming which registered node a session escalates to.
-- A named node that is unknown, or configured with the wrong kind, declines the escalation and never falls back to another node or to a process-wide provider.
+- A named node that is not configured declines the escalation and never falls back to another node or to a process-wide provider.
 - A `[vision]` endpoint with no `[nodes]` table is reachable as a node named `vision`; when both are set `[nodes]` wins and `[vision]` is ignored.
 - Node locality is derived from the node's address, so a session bound to a loopback node keeps page material on the machine.
 - **Breaking (HTTP):** `POST /v1/checkpoints` takes `evidenceRefs` (command ids, max 128) instead of `evidence`. The runtime resolves each id against its own journal and checks session ownership, so a caller can no longer author evidence for work it did not perform. Matches the MCP `checkpoint_save` contract. TypeScript SDK `CheckpointRequest.evidence` is replaced by `CheckpointRequest.evidenceRefs`.

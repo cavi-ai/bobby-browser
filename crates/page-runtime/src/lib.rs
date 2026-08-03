@@ -19,7 +19,7 @@ use workflow_journal::CommandJournal;
 mod context;
 
 pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, NodeSelection, SessionGate, VisionGate};
-pub use context::{ContextAnswer, ContextGraph, CONTEXT_CONFIDENCE_FLOOR};
+pub use context::{ContextGraph, CONTEXT_CONFIDENCE_FLOOR};
 pub use executor::ExecutorError;
 pub use intent_engine::VisionAssist;
 pub use recovery::{

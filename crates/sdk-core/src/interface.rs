@@ -283,6 +283,19 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .map_err(|error| map_runtime_error(&ctx, error))
     }
 
+    async fn context_ask(
+        &self,
+        ctx: RequestContext,
+        session: SessionId,
+        page: types::PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextAnswer>> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::ReadPage)?;
+        self.require_owned_session(&ctx, &session)?;
+        Ok(self.inner.pages.context().ask(&page, &description))
+    }
+
     async fn form_snapshot(
         &self,
         ctx: RequestContext,

@@ -45,6 +45,20 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["profile"],
         ),
+        "context_ask" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "description": string(1, 256)
+            }),
+            vec!["sessionId", "pageId", "description"],
+        ),
+        "toolset_select" => (
+            json!({
+                "toolset": {"type":"string","enum":["full","explore","act","intent","verify"]}
+            }),
+            vec!["toolset"],
+        ),
         "page_open" => (
             json!({"sessionId": id(), "url": string(1, MAX_URL_BYTES)}),
             vec!["sessionId"],

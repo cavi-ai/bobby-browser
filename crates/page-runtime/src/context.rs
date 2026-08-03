@@ -27,14 +27,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use types::{AccessibilityNode, AccessibilityTarget, PageId, PrimitiveCommand, RuntimeCommand};
-
-/// A bounded answer from a context node.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ContextAnswer {
-    pub target: AccessibilityTarget,
-    pub confidence: f32,
-}
+use types::{
+    AccessibilityNode, AccessibilityTarget, ContextAnswer, PageId, PrimitiveCommand, RuntimeCommand,
+};
 
 /// Below this, a context answer is not worth acting on and is discarded rather
 /// than returned with a low score. Matches the vision confidence floor: both
