@@ -34,13 +34,13 @@ enum Kind {
     Extract,
 }
 
-fn classify(v: &Value) -> Result<Kind, ()> {
+fn classify(v: &Value) -> Option<Kind> {
     let has_shot = v.get("screenshotPng").is_some();
     let has_extract = v.get("schema").is_some() && v.get("content").is_some();
     match (has_shot, has_extract) {
-        (true, false) => Ok(Kind::Propose),
-        (false, true) => Ok(Kind::Extract),
-        _ => Err(()),
+        (true, false) => Some(Kind::Propose),
+        (false, true) => Some(Kind::Extract),
+        _ => None,
     }
 }
 
@@ -65,13 +65,13 @@ async fn handle_vision(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if auth::authorize(&headers, &state.bearer_token).is_err() {
+    if !auth::authorize(&headers, &state.bearer_token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
     let kind = match classify(&body) {
-        Ok(kind) => kind,
-        Err(()) => return bad_request("ambiguous or unsupported request body"),
+        Some(kind) => kind,
+        None => return bad_request("ambiguous or unsupported request body"),
     };
 
     match kind {

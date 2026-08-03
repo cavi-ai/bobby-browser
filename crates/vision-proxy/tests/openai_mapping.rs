@@ -24,7 +24,7 @@ async fn mock_chat_completions(
         .and_then(|msgs| {
             msgs.iter()
                 .find(|m| m["role"] == "user")
-                .and_then(|m| extract_user_text(m))
+                .and_then(extract_user_text)
         })
         .unwrap_or_default();
 
