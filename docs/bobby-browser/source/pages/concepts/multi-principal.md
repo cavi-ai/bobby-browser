@@ -11,6 +11,10 @@ A single bobby-browser instance serves many independent tenants. Each principal 
 - Server state (runtime binding, MCP lifecycle, idempotency, sessions) scoped to
   that principal
 
+Quota exhaustion returns HTTP **429** with a `Retry-After` header (seconds) and
+often `error.retryAfterMs` in the JSON body — see
+[HTTP API — Rate limits and retry](../surfaces/http-api.md#rate-limits-and-retry).
+
 Sessions and pages created by principal A are not visible to principal B.
 Deleting a session (`DELETE /v1/sessions/{id}` / MCP `session_close`) releases
 that principal's worker binding for the session.
