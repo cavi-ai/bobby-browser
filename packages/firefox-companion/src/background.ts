@@ -800,6 +800,14 @@ export async function startProductionBackground(
     ) {
       return syncFingerprintRegistration(browserApi);
     }
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === "popupStatus"
+    ) {
+      return background.getPopupStatus(browserApi.storage);
+    }
     void background
       .receiveRuntimeMessage(message, _sender, browserApi.runtime.id)
       .catch(() => undefined);
