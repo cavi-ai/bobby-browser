@@ -35,8 +35,20 @@ below match `AppConfig::default()` unless you override them.
 | `max_js_result_bytes` | `65536` | JS eval result bound |
 | `max_js_timeout_ms` | `30000` | Clamp for JS `timeout_ms` |
 
-Engine choice is **not** a TOML field — use
-`AUTOMATION_RUNTIME_BROWSER_SELECTION` JSON (default exact **Firefox**).
+Engine choice is **not** a TOML field. Every entry point — `bobby serve`, the
+stdio MCP gateway, and `bobby doctor` — resolves the browser selection through
+one canonical order:
+
+1. `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) — an override; wins when set.
+2. The persisted enrollment at
+   `<config-dir>/bobby-browser/browser-selection.json`, written atomically
+   (owner-only, `0600`, on Unix) by `bobby enroll-firefox-profile`.
+3. The built-in default: exact **Firefox** (fail-closed — with no enrolled
+   profile, startup fails with an actionable error rather than silently
+   downgrading engines).
+
+A source that is present but malformed is always an error, never skipped.
+`bobby doctor` reports which source resolved.
 
 ## `[storage]`
 
