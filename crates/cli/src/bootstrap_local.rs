@@ -33,6 +33,8 @@ pub(crate) const DEFAULT_CAPABILITIES: &[Capability] = &[
     Capability::JobRead,
     Capability::JobCancel,
     Capability::AuthorityAdmin,
+    Capability::BrowserFingerprint,
+    Capability::BrowserHumanize,
 ];
 
 pub struct BootstrapMaterial {
@@ -253,6 +255,8 @@ fn parse_capability(value: &str) -> Result<Capability> {
         "job:read" => Ok(Capability::JobRead),
         "job:cancel" => Ok(Capability::JobCancel),
         "authority:admin" => Ok(Capability::AuthorityAdmin),
+        "browser:fingerprint" => Ok(Capability::BrowserFingerprint),
+        "browser:humanize" => Ok(Capability::BrowserHumanize),
         _ => Err(anyhow!("unknown capability: {value}")),
     }
 }

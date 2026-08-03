@@ -494,6 +494,13 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
 - `recovery:write` -- gates `checkpoint_save`, `workflow_recover`.
 - `authority:admin` -- not required by any tool in this gateway. It guards
   principal issuance and revocation, which are not exposed as MCP tools.
+- `browser:fingerprint` -- required at `session_create` time to set
+  `executionPolicy.fingerprint`. Checked when the session is created, not by
+  `required_capabilities`; a principal without it cannot materialize a
+  fingerprint-spoofing session at all.
+- `browser:humanize` -- required at `session_create` time to set
+  `executionPolicy.humanize`. Same creation-time gate as
+  `browser:fingerprint`.
 "#;
 
 const FAILURE_TAXONOMY_BODY: &str = r#"# Failure taxonomy

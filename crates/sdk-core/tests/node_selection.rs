@@ -103,13 +103,10 @@ async fn a_session_names_the_node_it_escalates_to() {
 async fn the_runtime_reports_the_nodes_it_can_reach() {
     let runtime = runtime(registry(&[
         ("local", node(NodeKind::Vision, "http://127.0.0.1:8080/p")),
-        (
-            "context",
-            node(NodeKind::Context, "http://127.0.0.1:8081/ask"),
-        ),
+        ("remote", node(NodeKind::Vision, "https://vision.example/p")),
     ]))
     .await;
-    assert_eq!(runtime.node_names(), vec!["context", "local"]);
+    assert_eq!(runtime.node_names(), vec!["local", "remote"]);
 }
 
 #[tokio::test]
@@ -121,21 +118,15 @@ async fn a_runtime_built_without_configuration_reaches_no_node() {
     );
 }
 
-/// The three negative paths, asserted on the registry directly because that is
-/// where the decision is made. Each must be an error, never a substitution.
+/// The negative path, asserted on the registry directly because that is where
+/// the decision is made: an unknown name is an error, never a substitution.
 #[test]
 fn every_unresolvable_selection_declines_rather_than_substituting() {
     let registry = NodeRegistry::new(
-        [
-            (
-                "local".to_owned(),
-                node(NodeKind::Vision, "http://127.0.0.1:8080/p"),
-            ),
-            (
-                "notes".to_owned(),
-                node(NodeKind::Context, "http://127.0.0.1:8081/ask"),
-            ),
-        ]
+        [(
+            "local".to_owned(),
+            node(NodeKind::Vision, "http://127.0.0.1:8080/p"),
+        )]
         .into_iter()
         .collect(),
     );
@@ -146,10 +137,6 @@ fn every_unresolvable_selection_declines_rather_than_substituting() {
             Err(NodeError::Unknown(name)) if name == "typo"
         ),
         "an unknown name resolved to something"
-    );
-    assert!(
-        matches!(registry.vision("notes"), Err(NodeError::WrongKind { .. })),
-        "a context node was handed out as a vision provider"
     );
     // The positive control: with one vision node configured and named
     // correctly, resolution succeeds — so the assertions above are not passing

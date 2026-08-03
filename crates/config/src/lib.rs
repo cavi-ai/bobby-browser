@@ -379,6 +379,60 @@ impl Default for AppConfig {
 
 #[cfg(test)]
 mod tests {
+    /// A node kind that does not exist must fail to load rather than parse
+    /// into something.
+    ///
+    /// `context` is the one that matters. The runtime does retain page
+    /// context, in-process, so `kind = "context"` reads as supported to an
+    /// operator — and would then reach nothing. Config that silently does
+    /// nothing is worse than config that is rejected.
+    #[test]
+    fn an_unknown_node_kind_is_rejected() {
+        for kind in ["context", "Vision", "planner", ""] {
+            let text = format!(
+                "{}\n[nodes.helper]\nkind = \"{kind}\"\nendpoint_url = \"http://127.0.0.1:8081/x\"\n",
+                MINIMAL_CONFIG
+            );
+            assert!(
+                toml::from_str::<super::AppConfig>(&text).is_err(),
+                "kind = {kind:?} parsed instead of being rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_vision_node_kind_loads() {
+        let text = format!(
+            "{}\n[nodes.helper]\nkind = \"vision\"\nendpoint_url = \"http://127.0.0.1:8081/x\"\n",
+            MINIMAL_CONFIG
+        );
+        let config: super::AppConfig = toml::from_str(&text).expect("vision node loads");
+        assert_eq!(config.nodes.len(), 1);
+    }
+
+    const MINIMAL_CONFIG: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 7777
+shutdown_timeout_ms = 1000
+[browser]
+profiles_dir = "p"
+headless = true
+max_active = 1
+upload_roots = []
+downloads_dir = "d"
+artifacts_dir = "a"
+max_artifact_bytes = 1
+max_screenshot_dimension = 1
+max_js_result_bytes = 1
+max_js_timeout_ms = 1
+[storage]
+journal_path = "j"
+checkpoints_dir = "c"
+authority_path = "au"
+scheduler_journal_path = "s"
+"#;
+
     use super::{
         AppConfig, BrowserEngineConfig, BrowserSelectionConfig, ConfigLoadError,
         EnginePreferenceConfig, InterfaceConfig,
@@ -643,9 +697,12 @@ pub struct NodeConfig {
 pub enum NodeKind {
     /// Proposes an action from a screenshot. The `VisionAssist` contract.
     Vision,
-    /// Retains page structure for a session and answers bounded questions
-    /// about it, so the driving agent does not carry the page itself.
-    Context,
+    // There is deliberately no `Context` variant yet. Retained page structure
+    // is answered in-process by `page_runtime::ContextGraph`, so a
+    // `kind = "context"` entry would be configuration an operator can write
+    // that reaches nothing — worse than an unsupported key, because it reads
+    // as supported. `kind` stays an enum so adding one later is additive, and
+    // an unknown kind fails to load with the legal values named.
 }
 
 impl NodeConfig {

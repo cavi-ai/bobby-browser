@@ -134,6 +134,8 @@ fn parse_capability(value: &str) -> anyhow::Result<Capability> {
         "recovery:read" => Ok(Capability::RecoveryRead),
         "recovery:write" => Ok(Capability::RecoveryWrite),
         "authority:admin" => Ok(Capability::AuthorityAdmin),
+        "browser:fingerprint" => Ok(Capability::BrowserFingerprint),
+        "browser:humanize" => Ok(Capability::BrowserHumanize),
         _ => anyhow::bail!("startup capability is invalid"),
     }
 }
