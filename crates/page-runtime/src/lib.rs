@@ -16,7 +16,10 @@ use types::{
 use worker_pool::WorkerPool;
 use workflow_journal::CommandJournal;
 
-pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, SessionGate, VisionGate};
+mod context;
+
+pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, NodeSelection, SessionGate, VisionGate};
+pub use context::{ContextAnswer, ContextGraph, CONTEXT_CONFIDENCE_FLOOR};
 pub use executor::ExecutorError;
 pub use intent_engine::VisionAssist;
 pub use recovery::{
@@ -43,9 +46,19 @@ pub struct PageRuntime {
     checkpoints: Option<CheckpointStore>,
     adaptive: AdaptivePageEngine,
     phase_observer: Option<Arc<dyn ExecutionPhaseObserver>>,
+    /// Page structure retained for context-node answers. Always present: the
+    /// graph is inert until something records into it, and an `Option` here
+    /// would add a "did we bother to invalidate" branch to the one code path
+    /// where forgetting to invalidate is the bug.
+    context: Arc<ContextGraph>,
 }
 
 impl PageRuntime {
+    /// The context graph this runtime records page structure into.
+    pub fn context(&self) -> &Arc<ContextGraph> {
+        &self.context
+    }
+
     pub fn new(journal: Arc<dyn CommandJournal>, workers: Arc<WorkerPool>) -> Self {
         Self {
             inner: Arc::default(),
@@ -54,6 +67,7 @@ impl PageRuntime {
             checkpoints: None,
             adaptive: AdaptivePageEngine::browser_only(),
             phase_observer: None,
+            context: Arc::new(ContextGraph::new()),
         }
     }
 
@@ -69,6 +83,7 @@ impl PageRuntime {
             checkpoints: Some(checkpoints),
             adaptive: AdaptivePageEngine::browser_only(),
             phase_observer: None,
+            context: Arc::new(ContextGraph::new()),
         }
     }
 
@@ -85,6 +100,7 @@ impl PageRuntime {
             checkpoints,
             adaptive,
             phase_observer: None,
+            context: Arc::new(ContextGraph::new()),
         }
     }
 

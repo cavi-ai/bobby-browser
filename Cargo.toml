@@ -12,6 +12,7 @@ members = [
   "crates/behavioral-engine",
   "crates/task-scheduler",
   "crates/fingerprinting",
+  "crates/node-registry",
   "crates/interface-core",
   "crates/sdk-core",
   "crates/session-manager",
