@@ -15,9 +15,17 @@ use uuid::Uuid;
 
 use crate::{CapabilityHandle, SessionOwnershipAuthority};
 
+// The on-disk artifact boundary is Unix-only: every reader below opens through
+// handle-relative `openat` so no path is ever re-resolved. Non-Unix builds fail
+// closed instead, so the names that only describe that layout compile away with
+// it rather than sitting in the binary unread.
+#[cfg(unix)]
 const OWNERSHIP_DIRECTORY: &str = ".interface-artifact-ownership";
+#[cfg(unix)]
 const OWNERSHIP_LOCK_FILE: &str = ".quota.lock";
+#[cfg(unix)]
 const MAX_OWNERSHIP_BYTES: u64 = 64 * 1024;
+#[cfg(unix)]
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_CONCURRENT_ARTIFACT_READS: usize = 8;
 
@@ -77,6 +85,11 @@ pub trait ArtifactBoundaryTestObserver: Send + Sync {
     fn before_artifact_read(&self) {}
 }
 
+// Still constructed on non-Unix — the reader holds one — but nothing reads the
+// counters there, because the quota they bound is only enforced by the
+// handle-relative scan. Narrow to that platform so a genuinely dead counter on
+// Unix still trips the lint.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default)]
 struct OwnershipUsage {
     records: usize,
@@ -309,6 +322,7 @@ struct OwnershipMetadata {
     committed_path: String,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommittedManifest {
@@ -373,15 +387,18 @@ fn artifact_overloaded(ctx: &RequestContext) -> InterfaceError {
     }
 }
 
+#[cfg(unix)]
 fn valid_artifact_id(value: &str) -> bool {
     Uuid::parse_str(value).is_ok()
         || (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
+#[cfg(unix)]
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(unix)]
 fn valid_extension(value: &str) -> bool {
     !value.is_empty() && value.len() <= 10 && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
