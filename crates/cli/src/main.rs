@@ -27,7 +27,6 @@ pub struct NativeHostInstallConfig {
     pub descriptor_path: PathBuf,
 }
 
-
 #[derive(clap::Parser)]
 #[command(name = "bobby", version, about = "bobby-browser automation runtime")]
 struct Cli {

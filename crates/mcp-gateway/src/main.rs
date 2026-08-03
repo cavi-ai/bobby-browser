@@ -28,8 +28,12 @@ async fn run() -> anyhow::Result<()> {
     let config_path = std::env::var_os("BOBBY_BROWSER_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("./config.toml"));
-    let config = AppConfig::load(&config_path)
-        .map_err(|error| anyhow::anyhow!("failed to load config from {}: {error}", config_path.display()))?;
+    let config = AppConfig::load(&config_path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to load config from {}: {error}",
+            config_path.display()
+        )
+    })?;
     config.validate().map_err(anyhow::Error::msg)?;
     let selection_json = std::env::var("AUTOMATION_RUNTIME_BROWSER_SELECTION").ok();
     let selection = firefox_companion::selection::parse_selection(selection_json.as_deref())?;
