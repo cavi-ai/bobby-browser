@@ -1,5 +1,6 @@
 mod bootstrap_local;
 mod jobs_client;
+mod onboarding;
 
 use anyhow::{Context, Result};
 use artifact_store::ArtifactStore;
@@ -722,6 +723,9 @@ enum CliCommand {
         /// Bootstrap env file path
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Print an MCP client config fragment for an agent host (claude, zed, vscode, json)
+        #[arg(long)]
+        emit: Option<onboarding::EmitFormat>,
     },
     /// Run the runtime server (default)
     Serve {
@@ -856,7 +860,8 @@ pub async fn run() -> Result<()> {
             force,
             ttl_days,
             path,
-        } => run_init(force, ttl_days, path)?,
+            emit,
+        } => run_init(force, ttl_days, path, emit)?,
         CliCommand::Serve {
             config,
             bootstrap_env,
@@ -1217,7 +1222,7 @@ fn run_doctor(
         report("ok", "bootstrap", "credential from environment".to_string());
         report_expiry(credential.expires_at());
     } else {
-        match resolve_bootstrap_path(bootstrap_cli) {
+        match resolve_bootstrap_path(bootstrap_cli.clone()) {
             Ok(path) if path.exists() => {
                 report(
                     "ok",
@@ -1269,6 +1274,69 @@ fn run_doctor(
                 failures += 1;
                 report("fail", "bootstrap", format!("{error:#}"));
             }
+        }
+    }
+
+    // MCP handshake: the stdio gateway an agent host launches must answer
+    // `initialize` and `tools/list` within the advertised byte budget. A
+    // missing gateway binary is a warning (it may be installed separately);
+    // a gateway that starts but fails the handshake is a failure, because the
+    // host will only report it as a dead server.
+    let handshake_env: Option<std::collections::BTreeMap<String, String>> =
+        if broker::StartupCredential::from_env().is_ok() {
+            Some(std::collections::BTreeMap::new())
+        } else {
+            resolve_bootstrap_path(bootstrap_cli)
+                .ok()
+                .filter(|path| path.exists())
+                .and_then(|path| bootstrap_local::load_bootstrap_env_map(&path).ok())
+        };
+    match handshake_env {
+        Some(env) => match onboarding::mcp_handshake(&env) {
+            Ok(handshake) => {
+                if handshake.bytes > mcp_gateway::TOOLS_LIST_BYTE_BUDGET {
+                    failures += 1;
+                    report(
+                        "fail",
+                        "mcp-handshake",
+                        format!(
+                            "tools/list is {} bytes, over the {} byte budget",
+                            handshake.bytes,
+                            mcp_gateway::TOOLS_LIST_BYTE_BUDGET
+                        ),
+                    );
+                } else {
+                    report(
+                        "ok",
+                        "mcp-handshake",
+                        format!(
+                            "gateway {} answered initialize + tools/list: {} tools, {} bytes ({}% of budget)",
+                            handshake.server_version,
+                            handshake.tools,
+                            handshake.bytes,
+                            handshake.bytes * 100 / mcp_gateway::TOOLS_LIST_BYTE_BUDGET
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if message.contains("not found") {
+                    warnings += 1;
+                    report("warn", "mcp-handshake", message);
+                } else {
+                    failures += 1;
+                    report("fail", "mcp-handshake", message);
+                }
+            }
+        },
+        None => {
+            warnings += 1;
+            report(
+                "warn",
+                "mcp-handshake",
+                "skipped: no bootstrap credential to launch the gateway with".to_string(),
+            );
         }
     }
 
@@ -1416,7 +1484,12 @@ fn is_executable(_path: &Path) -> bool {
     true
 }
 
-fn run_init(force: bool, ttl_days: u32, path: Option<PathBuf>) -> Result<()> {
+fn run_init(
+    force: bool,
+    ttl_days: u32,
+    path: Option<PathBuf>,
+    emit: Option<onboarding::EmitFormat>,
+) -> Result<()> {
     let path = match path {
         Some(path) => path,
         None => bootstrap_local::default_bootstrap_path()?,
@@ -1430,6 +1503,13 @@ fn run_init(force: bool, ttl_days: u32, path: Option<PathBuf>) -> Result<()> {
     eprintln!(
         "Passing --force regenerates and invalidates the previous bearer for new enrollment."
     );
+    if let Some(format) = emit {
+        println!("{}", onboarding::emit_mcp_config(format));
+        eprintln!(
+            "Source {} into the agent host's environment so the ${{...}} placeholders resolve.",
+            path.display()
+        );
+    }
     Ok(())
 }
 
