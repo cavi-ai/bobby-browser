@@ -1,8 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
-import { renderPopup } from "../src/popup.js";
+import { applyStatusOrFallback, renderPopup } from "../src/popup.js";
 import type { PopupStatus } from "../src/popup-status.js";
+
+function memoryStorage(initial: Record<string, unknown> = {}) {
+  const store = new Map<string, unknown>(Object.entries(initial));
+  return {
+    storage: {
+      local: {
+        async get(keys: readonly string[]) {
+          const out: Record<string, unknown> = {};
+          for (const key of keys) {
+            if (store.has(key)) out[key] = store.get(key);
+          }
+          return out;
+        },
+        async set(values: Record<string, unknown>) {
+          for (const [key, value] of Object.entries(values)) store.set(key, value);
+        },
+      },
+    },
+  };
+}
 
 function mount(): Document {
   const dom = new JSDOM(`<!DOCTYPE html><html><body>
@@ -48,4 +68,36 @@ test("renderPopup shows unpaired reason when not paired", () => {
     protocolVersion: 1,
   });
   assert.match(document.getElementById("connection")!.textContent ?? "", /waiting to pair/);
+});
+
+test("renderPopup escapes HTML in unpaired reason", () => {
+  const document = mount();
+  const malicious = '<img src=x onerror="alert(1)">';
+  renderPopup(document, {
+    paired: false,
+    unpairedReason: malicious,
+    leaseCount: 0,
+    nativeConnected: false,
+    fingerprint: { enabled: true, owner: "popup" },
+    humanize: "unknown",
+    protocolVersion: 1,
+  });
+  const connection = document.querySelector("#connection .status")!;
+  assert.equal(connection.querySelector("img"), null);
+  assert.match(connection.textContent ?? "", new RegExp(malicious.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("applyStatusOrFallback binds fingerprint when status unavailable", async () => {
+  const document = mount();
+  const { storage } = memoryStorage();
+  const browserApi = {
+    storage,
+    runtime: { sendMessage: async () => undefined },
+  };
+  await applyStatusOrFallback(browserApi, document, undefined);
+  const connection = document.querySelector("#connection .status");
+  assert.equal(connection?.textContent, "Status unavailable");
+  const toggle = document.getElementById("toggle") as HTMLInputElement;
+  assert.equal(toggle.disabled, false);
+  assert.equal(toggle.checked, true);
 });

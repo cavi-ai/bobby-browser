@@ -56,19 +56,34 @@ function humanizeLabel(humanize: PopupStatus["humanize"]): string {
   }
 }
 
+function renderConnection(el: HTMLElement, status: PopupStatus): void {
+  const doc = el.ownerDocument;
+  el.replaceChildren();
+
+  const badge = doc.createElement("span");
+  if (status.paired) {
+    badge.className = "badge badge-paired";
+    badge.textContent = "Paired";
+    el.appendChild(badge);
+    const ids: string[] = [];
+    if (status.companionId) ids.push(`companion ${truncateId(status.companionId)}`);
+    if (status.profileId) ids.push(`profile ${truncateId(status.profileId)}`);
+    if (ids.length > 0) {
+      el.appendChild(doc.createTextNode(`\n${ids.join(" · ")}`));
+    }
+  } else {
+    badge.className = "badge badge-unpaired";
+    badge.textContent = "Unpaired";
+    el.appendChild(badge);
+    const reason = status.unpairedReason ?? "Not paired";
+    el.appendChild(doc.createTextNode(`\n${reason}`));
+  }
+}
+
 export function renderPopup(root: ParentNode, status: PopupStatus): void {
   const connection = sectionStatus(root, "connection");
   if (connection) {
-    if (status.paired) {
-      const ids: string[] = [];
-      if (status.companionId) ids.push(`companion ${truncateId(status.companionId)}`);
-      if (status.profileId) ids.push(`profile ${truncateId(status.profileId)}`);
-      const idLine = ids.length > 0 ? `\n${ids.join(" · ")}` : "";
-      connection.innerHTML = `<span class="badge badge-paired">Paired</span>${idLine}`;
-    } else {
-      const reason = status.unpairedReason ?? "Not paired";
-      connection.innerHTML = `<span class="badge badge-unpaired">Unpaired</span>\n${reason}`;
-    }
+    renderConnection(connection, status);
   }
 
   const session = sectionStatus(root, "session");
@@ -111,10 +126,26 @@ export function renderPopup(root: ParentNode, status: PopupStatus): void {
   }
 }
 
-function showStatusUnavailable(root: ParentNode): void {
+export function showStatusUnavailable(root: ParentNode): void {
   const connection = sectionStatus(root, "connection");
   if (connection) {
     connection.textContent = "Status unavailable";
+  }
+}
+
+export async function applyStatusOrFallback(
+  browserApi: BrowserApi,
+  root: ParentNode,
+  status: PopupStatus | undefined,
+): Promise<void> {
+  if (!status) {
+    showStatusUnavailable(root);
+    await bindFingerprintToggle(browserApi, root);
+    return;
+  }
+  renderPopup(root, status);
+  if (status.fingerprint.owner === "popup") {
+    await bindFingerprintToggle(browserApi, root);
   }
 }
 
@@ -181,15 +212,7 @@ export async function bindFingerprintToggle(
 
 async function main(): Promise<void> {
   const status = await loadStatus(browser);
-  if (!status) {
-    showStatusUnavailable(document);
-    await bindFingerprintToggle(browser, document);
-    return;
-  }
-  renderPopup(document, status);
-  if (status.fingerprint.owner === "popup") {
-    await bindFingerprintToggle(browser, document);
-  }
+  await applyStatusOrFallback(browser, document, status);
 }
 
 const inNodeTest =
