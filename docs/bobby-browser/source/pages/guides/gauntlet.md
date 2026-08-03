@@ -4,13 +4,13 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Bobby browser gauntlet
 
-`@bobby-browser/gauntlet` is a deterministic static application with ten isolated browser stations and a championship route. A version, seed, and difficulty produce an immutable manifest; every result is controller-verified and bound to that manifest. The course covers redirects, DOM replacement, semantic forms, validation, iframes, shadow roots, popups, file attachment, downloads, and a combined championship submission.
+`@cavi-ai/bobby-gauntlet` is a deterministic static application with ten isolated browser stations and a championship route. A version, seed, and difficulty produce an immutable manifest; every result is controller-verified and bound to that manifest. The course covers redirects, DOM replacement, semantic forms, validation, iframes, shadow roots, popups, file attachment, downloads, and a combined championship submission.
 
 Run the deterministic contract suite and build the static course:
 
 ```bash
-pnpm --filter @bobby-browser/gauntlet test
-pnpm --filter @bobby-browser/gauntlet build
+pnpm --filter @cavi-ai/bobby-gauntlet test
+pnpm --filter @cavi-ai/bobby-gauntlet build
 ```
 
 The production-runtime championship is intentionally ignored by the ordinary test suite because it needs an installed browser. Firefox is the default and does not fall back to Chromium. Build and install the companion native host once:

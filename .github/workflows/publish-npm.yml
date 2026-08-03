@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "sdk-v*"
+      - "v*"
 
 concurrency:
   group: publish-npm-${{ github.ref }}

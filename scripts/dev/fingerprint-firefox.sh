@@ -27,7 +27,7 @@ if command -v lsof >/dev/null 2>&1 && lsof "$BOBBY_FIREFOX_PROFILE/.parentlock" 
   lsof "$BOBBY_FIREFOX_PROFILE/.parentlock" >&2 || true
   exit 2
 fi
-pnpm --filter @bobby-browser/firefox-companion build
+pnpm --filter @cavi-ai/bobby-firefox-companion build
 if [[ ! -f "$BOBBY_COMPANION_EXTENSION/manifest.json" ]]; then
   echo "BOBBY_COMPANION_EXTENSION must name the companion extension build directory" >&2
   exit 2

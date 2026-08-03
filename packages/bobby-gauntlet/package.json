@@ -1,6 +1,6 @@
 {
-  "name": "@bobby-browser/gauntlet",
-  "version": "0.1.0",
+  "name": "@cavi-ai/bobby-gauntlet",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
