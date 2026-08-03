@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-08-03
 - Add `acp-gateway`, the fourth adapter: ACP schema v1 over stdio (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/update`, `session/request_permission`). Prompts are structured (optional `url` plus one `types::IntentCommand` in the `command_execute` wire shape) — no planner, no freeform text. Permission prompts cover vision escalation only and can lift a session gate, never mint a capability.
 - Set `[profile.dev]` and `[profile.test]` to `debug = "line-tables-only"` and `incremental = false`. A clean workspace build drops from 16 GB to 9.0 GB and from 24,138 to 2,479 files in `target/debug/deps`, the 6.2 GB per-build incremental cache goes away, and the build runs in 117s instead of 202s. Backtraces keep file, line, and column. `incremental = false` is also what lets `sccache` work at all — it does not cache incrementally-compiled crates, so it sat at a 0% hit rate before and reaches 2,158 hits of 2,808 on a rebuild after this. Use `RUSTFLAGS="-C debuginfo=2"` for a session that needs full DWARF.
 - **Breaking (idempotency digests):** `canonical_sha256` sorts JSON object keys recursively before hashing. It previously inherited ordering from `serde_json`'s default `BTreeMap` backend, so any dependency enabling `serde_json/preserve_order` switched the whole workspace to insertion order and two equivalent requests hashed differently — a retry would execute instead of replaying the retained result. Array order is preserved, since it carries meaning. Digests change once; in-flight idempotency records will not match across the upgrade.
@@ -46,7 +46,7 @@
   throughout (the `v0.3.0` release asset still referenced `@bobby-browser/sdk`).
 - Carry forward post-`0.3.0` doc coverage already on main (`recovery_status`,
   MCP agent-surface catalog fixes, truncation ordinal notes) into `v0.3.1`.
-## Unreleased
+### Browser primitives
 - Add cookie primitives (`getCookies`, `setCookies`, `deleteCookies`) on Chromium (CDP Network) and Firefox (BiDi storage), exposed as MCP `cookie_get`/`cookie_set`/`cookie_delete` with `cookieState` evidence.
 - Add `printToPdf` (MCP `pdf`) on Chromium (CDP `Page.printToPDF`) and Firefox (BiDi `browsingContext.print`), producing a verified `application/pdf` artifact.
 - Add `handleDialog` (MCP `dialog`): waits for a JavaScript dialog with a bounded timeout and accepts or dismisses it, returning dialog type/message/action evidence. Chromium via CDP dialog events, Firefox via BiDi user prompts.
