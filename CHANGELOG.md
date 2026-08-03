@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Set `[profile.dev]` and `[profile.test]` to `debug = "line-tables-only"` and `incremental = false`. A clean workspace build drops from 16 GB to 9.0 GB and from 24,138 to 2,479 files in `target/debug/deps`, the 6.2 GB per-build incremental cache goes away, and the build runs in 117s instead of 202s. Backtraces keep file, line, and column. `incremental = false` is also what lets `sccache` work at all — it does not cache incrementally-compiled crates, so it sat at a 0% hit rate before and reaches 2,158 hits of 2,808 on a rebuild after this. Use `RUSTFLAGS="-C debuginfo=2"` for a session that needs full DWARF.
 - Add the node-locality proof test: a session naming a loopback node sends its escalation traffic only to that node; a second listener standing in for a remote provider records zero hits.
 - **Breaking (Rust):** the `/v1` wire types moved from the `types` crate into `bobby-browser-client`, which is now the single published Rust crate (`cargo publish` dry-run verified; `types` remains in the workspace as a `publish = false` re-export shim over the moved modules). crates.io publishing is now the one `bobby-browser-client` crate instead of the 25-crate ordered closure.
 - TypeScript SDK source now carries JSDoc on the public surface (client, contracts, errors, events, intents, validators).
