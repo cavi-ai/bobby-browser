@@ -30,6 +30,9 @@ use types::{CommandError, ErrorCode, ErrorLayer};
 pub enum NodeError {
     #[error("no node named {0} is configured")]
     Unknown(String),
+    /// Unreachable while `NodeKind` has a single variant. Kept, with the check
+    /// in `resolve`, because the moment a second kind exists the absence of
+    /// this guard would silently hand one kind of node out as another.
     #[error("node {name} is a {configured:?} node, not {requested:?}")]
     WrongKind {
         name: String,
@@ -212,22 +215,6 @@ mod tests {
             registry.resolve("local", NodeKind::Vision),
             Err(NodeError::Unknown("local".to_owned())),
             "an unknown name must not resolve to the one configured node"
-        );
-    }
-
-    #[test]
-    fn a_node_of_the_wrong_kind_declines() {
-        let registry = registry(&[(
-            "helper",
-            node(NodeKind::Context, "http://127.0.0.1:8081/ask"),
-        )]);
-        assert_eq!(
-            registry.resolve("helper", NodeKind::Vision),
-            Err(NodeError::WrongKind {
-                name: "helper".to_owned(),
-                configured: NodeKind::Context,
-                requested: NodeKind::Vision,
-            })
         );
     }
 
