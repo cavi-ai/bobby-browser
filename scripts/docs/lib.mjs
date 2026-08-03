@@ -27,7 +27,10 @@ function readInterfaceVersion() {
     path.join(REPO_ROOT, "packages/typescript-sdk/src/contracts.ts"),
     "utf8",
   );
-  const rust = readFileSync(path.join(REPO_ROOT, "crates/types/src/interface.rs"), "utf8");
+  const rust = readFileSync(
+    path.join(REPO_ROOT, "crates/bobby-browser-client/src/interface.rs"),
+    "utf8",
+  );
   const tsMatch = ts.match(/export const INTERFACE_VERSION = "([^"]+)"\s+as const/);
   const rustMatch = rust.match(
     /pub const CURRENT_INTERFACE_VERSION:\s*&str\s*=\s*"([^"]+)"/,
