@@ -1,18 +1,11 @@
-//! `behavioral-engine`, `fingerprinting`, and `task-scheduler` landed on main
-//! without a capability reference or a `JsonSchema` derive between them, and
-//! the node-substrate spec calls that out as an integration constraint to
-//! settle before any of them reaches a surface.
+//! `behavioral-engine`, `fingerprinting`, and `task-scheduler` carry no
+//! `JsonSchema` derive, so the schema parity guard cannot see their types.
+//! The surface therefore exposes only `types::` shapes: a session opts in
+//! through two booleans on `ExecutionPolicy`, and humanizer output comes back
+//! as `Evidence::Humanization`, both already guarded.
 //!
-//! There are two ways to settle it. Either those crates get `JsonSchema`
-//! derives so the schema parity guard covers their wire types, or they never
-//! become wire types and the surface exposes only `types::` shapes the guard
-//! already covers. This repo takes the second: a session opts in through two
-//! booleans on `ExecutionPolicy`, and what the humanizer did comes back as
-//! `Evidence::Humanization` — both in `types`, both already guarded.
-//!
-//! That choice is only safe while it stays true. This file is what keeps it
-//! true: it fails the moment a schema starts naming a type from one of those
-//! three crates, which is the point at which the derives stop being optional.
+//! This file fails the moment a schema names a type from one of those three
+//! crates, which is the point at which the derives stop being optional.
 
 use serde_json::Value;
 
@@ -83,9 +76,9 @@ fn walk(value: &Value, hit: &mut dyn FnMut(&str, &str)) {
 #[test]
 fn no_tool_schema_names_a_type_from_an_unguarded_crate() {
     let mut offences = Vec::new();
-    // `command_execute` reaches the widest definition closure of any tool —
-    // the full `PrimitiveCommand` and `IntentCommand` unions — so a leak from
-    // any command shape surfaces here.
+    // `command_execute` reaches the widest definition closure of any tool (the
+    // full `PrimitiveCommand` and `IntentCommand` unions), so a leak from any
+    // command shape surfaces here.
     for tool in ["command_execute", "session_create", "checkpoint_save"] {
         let schema = mcp_gateway::schema_for_test(tool);
         walk(&schema, &mut |key, name| {
@@ -113,9 +106,8 @@ fn no_tool_schema_names_a_type_from_an_unguarded_crate() {
     );
 }
 
-/// The counterpart: the shapes that *do* carry the opt-in are `types::` ones,
-/// and the surface advertises them. Without this, the test above could pass by
-/// the feature not being exposed at all.
+/// Counterpart guard: the opt-in shapes are `types::` ones and the surface
+/// advertises them, so the test above cannot pass by the feature being absent.
 #[test]
 fn the_session_opt_in_is_advertised_as_a_types_shape() {
     let schema = mcp_gateway::schema_for_test("session_create");

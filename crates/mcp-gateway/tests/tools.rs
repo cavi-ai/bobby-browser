@@ -64,9 +64,8 @@ fn request(id: u64, method: &str, params: Value) -> Value {
 
 #[tokio::test]
 async fn reinitialize_resets_the_session_lifecycle() {
-    // MCP clients reconnect by sending `initialize` again; a re-initialize is
-    // a session reset, not a protocol error (streamable-HTTP transports like
-    // OpenClaw's bundle-mcp client call initialize on every connect).
+    // MCP clients reconnect by sending `initialize` again; a re-initialize is a
+    // session reset, not a protocol error.
     let server = fixture_server(vec![Capability::SessionRead]).await;
     let response = server
         .handle_message(request(
@@ -86,8 +85,8 @@ async fn reinitialize_resets_the_session_lifecycle() {
     );
     assert_eq!(response["result"]["protocolVersion"], json!("2025-11-25"));
 
-    // The lifecycle was genuinely reset: tool traffic before the new
-    // handshake completes is rejected as not-initialized.
+    // Tool traffic before the new handshake completes is rejected as
+    // not-initialized.
     let early = server
         .handle_message(request(91, "tools/list", json!({})))
         .await
@@ -374,10 +373,8 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         assert_closed_typed_objects(&tool["inputSchema"]);
     }
 
-    // `tool_schema` (reached here through `schema_for_test`) is what
-    // `validate_tool_arguments` enforces at dispatch, so it must keep the
-    // full command union — a malformed nested command still has to fail
-    // closed, no matter what `tools/list` advertises.
+    // `tool_schema` is what `validate_tool_arguments` enforces at dispatch, so it
+    // must keep the full command union regardless of what `tools/list` advertises.
     let validation_schema = mcp_gateway::schema_for_test("command_execute");
     assert_eq!(
         validation_schema["$defs"]["PrimitiveCommand"]["oneOf"]
@@ -404,10 +401,8 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         8
     );
 
-    // `tools/list` is what an agent actually downloads on connect. There,
-    // `command_execute` must advertise the envelope command as opaque, not
-    // the full union, or every principal pays for every primitive/intent
-    // variant on every connect.
+    // In `tools/list`, `command_execute` must advertise the envelope command as
+    // opaque, not the full union: every principal downloads it on every connect.
     let command_schema = tools
         .iter()
         .find(|tool| tool["name"] == "command_execute")
@@ -444,25 +439,15 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         0
     );
     // `checkpoint_save` resolves evidence from `evidenceRefs` (command ids) against
-    // the journal server-side; the caller never authors `Evidence` directly. The
-    // checkpoint's own `evidence` and `recoveryHistory` fields — which
-    // `RecoveryCoordinator::save_verified` overwrites and the runtime's own
-    // recovery flow appends to, respectively, never the caller of a fresh
-    // checkpoint — are forced empty here too, same as `recoveryReceipts` above.
-    // Together this drops the `Evidence` union (and `RecoveryDecision`/
-    // `RecoveryRecord`) out of this tool's reachable `$defs` entirely; see
-    // `checkpoint_save_does_not_advertise_the_evidence_union` in `budget.rs`.
+    // the journal server-side; the caller never authors `Evidence` directly. Its
+    // `evidence` and `recoveryHistory` fields are forced empty like
+    // `recoveryReceipts` above, which keeps the `Evidence` union (and
+    // `RecoveryDecision`/`RecoveryRecord`) out of this tool's reachable `$defs`.
     //
-    // The variant-for-variant guarantee that a `checkpoint_save`-side check
-    // used to carry (must match `crates/types/src/outcomes.rs`'s `Evidence`
-    // enum variant-for-variant: a hand-listed schema that silently drops a
-    // variant, as `Configuration`, `BrowserExecution`, and `JavaScriptResult`
-    // each previously were, would let `checkpoint_save` reject a real
-    // recovered evidence item with `INVALID_PARAMS` even though the type
-    // itself round-trips fine) still matters — it just lives on
-    // `workflow_recover`'s *output* schema now, the one place `Evidence` is
-    // reachable at all post-Task-3 (see the comment on `Evidence` in
-    // `definitions()`).
+    // `workflow_recover`'s output schema is the only place `Evidence` is reachable,
+    // so the variant-for-variant match against `crates/types/src/outcomes.rs` is
+    // asserted there: a schema missing a variant would reject a real recovered
+    // evidence item with `INVALID_PARAMS`.
     let recover_schema = tools
         .iter()
         .find(|tool| tool["name"] == "workflow_recover")
@@ -588,12 +573,9 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         ))
         .await
         .unwrap();
-    // Asserting only the top-level `-32602` here would not distinguish "the
-    // schema's `maxItems` bound rejected this" from "resolution failed for an
-    // unrelated reason" (this fixture's `RuntimeService::default()` has no
-    // journal, so an in-bounds `evidenceRefs` would fail too, just with a
-    // different error shape) — pin the violation payload so deleting
-    // `MAX_EVIDENCE_ITEMS` from the schema arm would actually fail this test.
+    // The violation payload is pinned, not just the top-level `-32602`: this
+    // fixture's `RuntimeService::default()` has no journal, so an in-bounds
+    // `evidenceRefs` also fails, just with a different error shape.
     assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
     assert_eq!(
         rejected["error"]["data"]["pointer"], "/evidenceRefs",
@@ -606,10 +588,9 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     assert_eq!(runtime.checkpoint_dispatch_count(), 0);
 }
 
-// F6: `session_create`'s MCP schema exposes an optional `executionPolicy` object that
-// maps into `CreateSessionRequest.execution_policy`. These two tests prove both sides of
-// deny-by-default at the MCP surface: an explicit grant is honored, and an omitted field
-// falls back to `ExecutionPolicy::default()` (deny).
+// `session_create`'s MCP schema exposes an optional `executionPolicy` object mapping
+// into `CreateSessionRequest.execution_policy`. Both sides of deny-by-default: an
+// explicit grant is honored, an omitted field falls back to `ExecutionPolicy::default()`.
 
 #[tokio::test]
 async fn session_create_with_execution_policy_grants_javascript_evaluation_on_the_stored_session() {
@@ -656,9 +637,8 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
     );
 }
 
-/// A `WorkerFactory` that is never actually leased: `checkpoint_save` only
-/// touches the journal, never the browser worker pool, so this exists purely
-/// to satisfy `PageRuntime::new`'s signature.
+/// A `WorkerFactory` that is never leased: `checkpoint_save` touches only the
+/// journal, so this exists to satisfy `PageRuntime::new`'s signature.
 struct UnusedFactory;
 
 #[async_trait]
@@ -676,17 +656,10 @@ impl WorkerFactory for UnusedFactory {
     }
 }
 
-// Regression: `evidence_variants()` previously hand-listed only 12 of `Evidence`'s 15
-// variants, so `checkpoint_save`'s `evidence` array (which schema-validated against
-// `$defs/Evidence`) rejected any workflow that ran `evaluateJavaScript` and then tried
-// to checkpoint the resulting `Evidence::JavaScriptResult` — pre-dispatch, with
-// `INVALID_PARAMS`, before `runtime.checkpoint` was ever called.
-//
-// `checkpoint_save` no longer accepts `Evidence` directly — it names a command via
-// `evidenceRefs` and the server resolves the real evidence from the journal — so the
-// regression this guards against has moved: it is now whether a real journaled
+// `checkpoint_save` names a command via `evidenceRefs` and the server resolves the
+// evidence from the journal. Guards that a real journaled
 // `javaScriptResult`/`accessibilitySnapshot` outcome resolves by id and reaches
-// dispatch, not whether a hand-maintained schema union enumerates every variant.
+// dispatch.
 #[tokio::test]
 async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_evidence_by_ref() {
     let root = tempfile::tempdir().unwrap();
@@ -754,11 +727,9 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
             truncated: false,
         },
     ];
-    // Mirrors `executor.rs`'s `execute_with_vision_gate`: the `Accepted` phase
-    // record carries the envelope (and therefore the owning session), the
-    // terminal one carries the outcome. `resolve_command_evidence` needs
-    // both — the envelope to verify ownership, the outcome for the evidence
-    // itself.
+    // The `Accepted` phase record carries the envelope (and so the owning session),
+    // the terminal one carries the outcome. `resolve_command_evidence` needs both:
+    // the envelope to verify ownership, the outcome for the evidence.
     journal
         .append(JournalRecord {
             sequence: 0,
@@ -810,11 +781,9 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
         .await
         .unwrap();
 
-    // This `RuntimeService` has no `RecoveryCoordinator`, so the call still fails
-    // downstream (an interface error, not a resolution or schema rejection) — the
-    // proof here is that `evidenceRefs` resolved the journaled JavaScript and
-    // accessibility-snapshot evidence and reached dispatch: -32602 would mean it was
-    // rejected before `runtime.checkpoint` ever ran.
+    // This `RuntimeService` has no `RecoveryCoordinator`, so the call fails
+    // downstream with an interface error. -32602 would mean the refs were rejected
+    // before `runtime.checkpoint` ran.
     assert_ne!(response["error"]["code"], -32602, "{response}");
     assert_eq!(
         runtime.checkpoint_dispatch_count(),
@@ -824,9 +793,8 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
     );
 }
 
-/// A worker that actually succeeds, unlike `UnusedFactory` — needed here because
-/// this test submits a real command (`command_execute`) for one principal and
-/// must observe its evidence land in the shared journal.
+/// A worker that succeeds, so a real `command_execute` for one principal lands
+/// evidence in the shared journal.
 struct MinimalWorker {
     profile: std::path::PathBuf,
 }
@@ -870,13 +838,9 @@ impl BrowserWorker for MinimalWorker {
     ) -> Result<Vec<Evidence>, types::CommandError> {
         Ok(Vec::new())
     }
-    // Overridden (the trait default is `Err(unsupported)`): this is the
-    // primitive the test submits, and its "evidence" here stands in for
-    // whatever a real worker would have observed — the point under test is
-    // whether a DIFFERENT principal can read it back, not what it contains.
-    // `executor.rs` requires a `ListPages` outcome to carry `Evidence::Pages`
-    // specifically to verify as completed, so the marker lives in that
-    // variant's `url`/`title` fields rather than a freer-form one.
+    // Overridden because the trait default is `Err(unsupported)`. A `ListPages`
+    // outcome must carry `Evidence::Pages` to verify as completed, so the marker
+    // string lives in that variant's `url`/`title` fields.
     async fn list_pages(
         &self,
         _: &types::ListPagesCommand,
@@ -920,15 +884,10 @@ fn session_id_from_structured_content(response: &Value) -> SessionId {
     )
 }
 
-// CRITICAL: the journal `evidenceRefs` resolves against is one `PageRuntime`
-// shared across every authenticated principal (`broker::bootstrap_listener_with`
-// clones one `RuntimeService` into every principal's `AuthenticatedRuntime`), so
-// a command id is not itself proof of ownership. Without a check, principal A
-// could name a command principal B ran — a UUIDv4 being hard to guess is the
-// only thing standing in the way — and read B's evidence back inside its own
-// checkpoint. This proves the cross-principal path is closed: A's
-// `checkpoint_save` naming B's command must be rejected, and B's evidence must
-// never appear anywhere in the response A receives.
+// SECURITY: the journal `evidenceRefs` resolves against is one `PageRuntime` shared
+// by every authenticated principal, so a command id is not proof of ownership.
+// Principal A naming principal B's command must be rejected, and B's evidence must
+// never appear anywhere in A's response.
 #[tokio::test]
 async fn checkpoint_save_rejects_evidence_refs_for_a_command_another_principal_owns() {
     let root = tempfile::tempdir().unwrap();
@@ -938,11 +897,10 @@ async fn checkpoint_save_rejects_evidence_refs_for_a_command_another_principal_o
             .unwrap(),
     );
     let workers = Arc::new(WorkerPool::new(4, Arc::new(MinimalFactory)));
-    // A REAL `RecoveryCoordinator`, unlike the other checkpoint_save tests in
-    // this file: without one, `checkpoint_with_evidence` fails regardless of
-    // what evidence resolved (`RecoveryError::WorkersUnavailable`), which
-    // would make this test pass even with the ownership check removed —
-    // exactly the false confidence a security regression test must not give.
+    // A real `RecoveryCoordinator` is required here: without one,
+    // `checkpoint_with_evidence` fails with `RecoveryError::WorkersUnavailable`
+    // regardless of what resolved, so the test would pass with the ownership
+    // check removed.
     let checkpoint_store = checkpoint_store::CheckpointStore::open(root.path().join("checkpoints"))
         .await
         .unwrap();
@@ -1756,11 +1714,9 @@ async fn form_snapshot_is_a_read_only_page_tool() {
         snapshot["inputSchema"]["required"],
         json!(["sessionId", "pageId"])
     );
-    // Sorted before comparing. `serde_json::Map` iterates in sorted order by
-    // default and in insertion order under the `preserve_order` feature, which
-    // any crate in the graph can enable — so an order-sensitive assertion here
-    // passes or fails on which crates happen to be linked, not on the schema.
-    // What this test is actually about is which properties exist.
+    // Sorted before comparing: `serde_json::Map` iterates sorted by default and in
+    // insertion order under `preserve_order`, which any crate in the graph can
+    // enable. The assertion is about which properties exist, not their order.
     let mut properties = snapshot["inputSchema"]["properties"]
         .as_object()
         .unwrap()
@@ -1925,10 +1881,8 @@ async fn session_close_deletes_an_owned_session() {
 
 #[tokio::test]
 async fn tools_list_fits_the_frame_budget_for_a_full_capability_principal() {
-    // Regression guard. Every tool schema used to carry the complete `$defs`
-    // block, so a principal holding the `bobby init` default capability set
-    // produced a `tools/list` result past MAX_FRAME_BYTES and the gateway
-    // answered `resultTooLarge` — no client could enumerate the surface.
+    // A `tools/list` result past MAX_FRAME_BYTES answers `resultTooLarge`, which
+    // leaves no way to enumerate the surface.
     let server = fixture_server(vec![
         Capability::SessionRead,
         Capability::SessionWrite,
@@ -2040,7 +1994,7 @@ async fn intent_tools_require_intent_execute_alongside_browser_mutate() {
         );
     }
 
-    // An unadvertised tool is not merely hidden — calling it fails without dispatch.
+    // An unadvertised tool is not merely hidden: calling it fails without dispatch.
     let runtime = Arc::new(authenticated_with_browser_mutate().await);
     let server = Server::new(runtime.clone());
     initialize(&server).await;
@@ -2087,8 +2041,7 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
     let session_id = SessionId::new().0.to_string();
     let page_id = types::PageId::new().0.to_string();
 
-    // No commandId/workflowId/attemptId/deadline from the caller: the whole
-    // point of these tools over hand-built `command_execute` envelopes.
+    // No commandId/workflowId/attemptId/deadline from the caller.
     let located = server
         .handle_message(request(
             73,
@@ -2192,9 +2145,8 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
 
 #[tokio::test]
 async fn rejected_arguments_name_the_offending_field_and_constraint() {
-    // Every rejection used to be a bare `"Invalid params"` with no `data`, so a
-    // caller had no way to tell which field it got wrong — the one signal that
-    // lets an agent repair a call instead of guessing against a large schema.
+    // A rejection must name the offending field in `data`; that is the only signal
+    // that lets a caller repair the call instead of guessing against the schema.
     let server = fixture_server(vec![Capability::SessionWrite]).await;
 
     let missing = server
@@ -2432,10 +2384,8 @@ async fn static_resources_are_listed_and_readable() {
 }
 
 /// The four `PrimitiveCommand` variants with no named tool are reachable only
-/// through `command_execute`, whose advertised `envelope.command` is opaque —
-/// so `bobby://primitives` is the only in-band description of their shape. If
-/// one is renamed or dropped from the union, this document silently starts
-/// telling agents to build an envelope the validator rejects.
+/// through `command_execute`, whose advertised `envelope.command` is opaque, so
+/// `bobby://primitives` is the only in-band description of their shape.
 #[tokio::test]
 async fn the_primitives_resource_documents_real_toolless_primitive_kinds() {
     const TOOLLESS_KINDS: &[&str] = &[
@@ -2488,13 +2438,10 @@ async fn the_primitives_resource_documents_real_toolless_primitive_kinds() {
     );
 }
 
-/// The push channel is only useful if an agent can find out it exists. It is
-/// advertised nowhere in `initialize` — a notification method is not a
-/// declared capability — so the only in-band pointers are `events_read`'s
-/// description (the tool an agent reaches for instead) and the failure
-/// taxonomy. The method names come from `notify`'s own constants rather than
-/// string literals, so renaming a method breaks this instead of silently
-/// stranding the documentation.
+/// A notification method is not a declared capability, so `initialize` cannot
+/// advertise the push channel; the only in-band pointers are `events_read`'s
+/// description and the failure taxonomy. Method names come from `notify`'s
+/// constants, so a rename fails here rather than stranding the documentation.
 #[tokio::test]
 async fn the_pushed_event_channel_is_discoverable_in_band() {
     let server = fixture_server(vec![Capability::SessionRead, Capability::ArtifactRead]).await;
@@ -2665,8 +2612,8 @@ async fn the_extract_prompt_binds_its_arguments_and_skips_the_checkpoint() {
         "loop does not start at a11y_snapshot"
     );
     assert!(text.contains("intent_extract"), "loop never extracts");
-    // Extraction never mutates the page (Replayable), so there is nothing
-    // for a checkpoint to protect -- the loop must not invent one.
+    // Extraction never mutates the page (Replayable), so the loop must not
+    // introduce a checkpoint.
     assert!(
         !text.contains("checkpoint_save"),
         "read-only loop should not checkpoint"
@@ -2755,10 +2702,9 @@ const NOTIFY_PRINCIPAL_A: uuid::Uuid = uuid!("10000000-0000-0000-0000-0000000000
 const NOTIFY_PRINCIPAL_B: uuid::Uuid = uuid!("10000000-0000-0000-0000-000000000091");
 
 /// A `Server` bound to an explicit principal and an `EventStore` the test also
-/// holds — the shape the broker builds, where one retained log is shared by
-/// every principal's `Server`. Appending through that store is the same call
-/// `Server::submit_envelope` and the broker's `POST /v1/commands` route make,
-/// so these tests drive the real event path rather than a test-only shim.
+/// holds, matching the broker's shape: one retained log shared by every
+/// principal's `Server`. Appending through that store is the same call
+/// `Server::submit_envelope` and `POST /v1/commands` make.
 async fn notify_fixture(principal: uuid::Uuid, events: EventStore) -> Server {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
@@ -2813,10 +2759,9 @@ async fn runtime_events_reach_the_client_as_notifications() {
     assert_eq!(frame["params"]["payload"]["commandId"], "c-1");
 }
 
-/// CRITICAL: the notification stream is principal-scoped, or it is a
+/// SECURITY: the notification stream must be principal-scoped or it is a
 /// cross-principal data leak. `EventStore` partitions by audience and the only
-/// read path a subscription can reach is `read_after_for`; this proves that end
-/// to end against the shared store the broker actually uses.
+/// read path a subscription can reach is `read_after_for`.
 #[tokio::test]
 async fn notifications_never_deliver_another_principals_events() {
     let events = EventStore::new(64);
@@ -2857,12 +2802,10 @@ async fn notifications_never_deliver_another_principals_events() {
     );
 }
 
-/// Falling behind retention must be visible, and then survivable. The frame
-/// carries the same `EventGap` body, and the same `event.gap` marker, that
-/// `GET /v1/events?stream=1` sends — but unlike that stream, this one re-arms
-/// instead of closing: `Server::serve` subscribes once for the life of a stdio
-/// process, which cannot reconnect, so latching the event half shut would
-/// silence notifications for the rest of the session over one transient gap.
+/// Falling behind retention must be visible, then survivable. The frame carries
+/// the same `EventGap` body and `event.gap` marker as `GET /v1/events?stream=1`,
+/// but this stream re-arms instead of closing: `Server::serve` subscribes once
+/// for the life of a stdio process, which cannot reconnect.
 #[tokio::test]
 async fn a_subscriber_that_falls_behind_retention_is_told_it_lost_events() {
     let events = EventStore::new(2);
@@ -2974,11 +2917,10 @@ async fn the_stdio_transport_writes_notifications_as_unsolicited_frames() {
             .await
             .expect("request writes");
 
-        // Drain the response before appending. A subscription starts at the
-        // store's tail, so an event appended before `serve` has subscribed is
-        // legitimately not this subscriber's; seeing the response proves the
-        // read loop — and therefore the subscription it opens ahead of that
-        // loop — is up.
+        // Drain the response before appending: a subscription starts at the store's
+        // tail, so an event appended before `serve` subscribes is not this
+        // subscriber's. The response proves the read loop, and its subscription,
+        // are up.
         let mut frames = Vec::new();
         while !frames.iter().any(|frame: &Value| frame["id"] == json!(41)) {
             let mut line = String::new();
@@ -3025,14 +2967,12 @@ async fn the_stdio_transport_writes_notifications_as_unsolicited_frames() {
     assert_eq!(notification["params"]["payload"]["commandId"], "c-2");
 }
 
-/// CRITICAL regression: a subscription must start at the store's tail, not at
-/// cursor 0. The retained log is shared by every principal, and
-/// `EventStore::read_after_for` reports `HistoryLost` against the STORE-WIDE
-/// front of the deque — so once a broker has served `max_event_retention`
-/// appends across all principals, a cursor-0 subscription gaps on its very
-/// first read and every client gets one gap frame and never a runtime event
-/// again. MCP gives the client no way to name a resume cursor, so reconnecting
-/// reproduces it identically.
+/// A subscription must start at the store's tail, not at cursor 0. The retained
+/// log is shared by every principal and `EventStore::read_after_for` reports
+/// `HistoryLost` against the store-wide front of the deque, so after
+/// `max_event_retention` appends a cursor-0 subscription gaps on its first read
+/// and never delivers a runtime event again. MCP has no resume cursor, so
+/// reconnecting reproduces it.
 #[tokio::test]
 async fn a_subscription_opened_after_retention_wrapped_still_receives_new_events() {
     let events = EventStore::new(2);

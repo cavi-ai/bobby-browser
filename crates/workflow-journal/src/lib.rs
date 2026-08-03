@@ -212,11 +212,9 @@ async fn scan_path(path: &Path, filter: Option<&CommandId>) -> Result<Scan, Jour
                 }
             }
             Err(_) => {
-                // A line this build cannot decode is only tolerable when it declares
-                // a schema version other than the one this build writes: an older
-                // build's records must not stop the runtime from starting. A line at
-                // the current version, or one carrying no envelope version at all, is
-                // genuine corruption and stays fatal.
+                // An undecodable line is tolerated only when it declares a schema
+                // version other than this build's. Current-version lines, and lines
+                // with no envelope version, are corruption and stay fatal.
                 let probe = serde_json::from_slice::<RecordProbe>(line)
                     .map_err(|_| JournalError::Corrupt { line: index + 1 })?;
                 let schema_version = probe.envelope.map(|envelope| envelope.schema_version);

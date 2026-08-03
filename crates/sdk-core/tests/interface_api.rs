@@ -254,9 +254,8 @@ async fn authenticated(runtime: RuntimeService) -> (AuthenticatedRuntime, Capabi
     (AuthenticatedRuntime::new(runtime, handle.clone()), handle)
 }
 
-/// Same principal/session shape as `authenticated`, but with an explicit capability set so
-/// per-primitive capability gating (file upload/download) can be exercised independent of
-/// the coarse `browser:mutate` grant.
+/// Same shape as `authenticated`, with an explicit capability set so per-primitive
+/// gating can be exercised independent of the coarse `browser:mutate` grant.
 async fn authenticated_with(
     runtime: RuntimeService,
     capabilities: impl IntoIterator<Item = Capability>,
@@ -1079,9 +1078,8 @@ async fn upload_files_with_file_upload_capability_clears_the_extra_capability_ga
     .await;
     let context = handle.context(expiry(), None);
 
-    // The extra capability gate is cleared, so this falls through to the no-idempotency-key
-    // early return (`Ok(self.inner.submit(envelope).await)`), which is infallible: any
-    // `Err` here could only have come from the capability gate itself.
+    // No idempotency key, so the early return is infallible: any `Err` here could only
+    // have come from the capability gate.
     let outcome = api.submit(context, upload_files_envelope()).await;
 
     assert!(
@@ -1164,13 +1162,11 @@ async fn non_privileged_command_needs_only_browser_mutate_to_clear_the_extra_cap
     );
 }
 
-// F4: RuntimeService's per-session ExecutionPolicy gate for EvaluateJavaScript, and its
-// composition with AuthenticatedRuntime's token capability gate. Both gates fire before any
-// browser dispatch, so these are provable with `RuntimeService::default()` / no worker pool:
-// any outcome other than `PolicyDenied` proves the session gate was cleared, and
-// `pages.execute` on an unconfigured `PageRuntime` can only ever produce `Failed`, never
-// `PolicyDenied` — so a `PolicyDenied` outcome is unambiguous proof the gate (not some
-// downstream failure) produced it.
+// RuntimeService's per-session ExecutionPolicy gate for EvaluateJavaScript, and its
+// composition with AuthenticatedRuntime's token capability gate. Both fire before browser
+// dispatch, so `RuntimeService::default()` (no worker pool) proves them: `pages.execute`
+// on an unconfigured `PageRuntime` can only produce `Failed`, never `PolicyDenied`, so a
+// `PolicyDenied` outcome can only have come from the gate.
 
 fn evaluate_javascript_envelope(session_id: SessionId) -> CommandEnvelope {
     CommandEnvelope {
@@ -1188,10 +1184,9 @@ fn evaluate_javascript_envelope(session_id: SessionId) -> CommandEnvelope {
 
 #[tokio::test]
 async fn evaluate_javascript_is_policy_denied_for_a_session_that_was_never_created() {
-    // Fail-closed proof: no `create_session` call happened, so `self.sessions.get` returns
-    // `Err(NotFound)` for this session_id. The gate must treat that as deny, not as
-    // "skip the check" — a missing/evicted session must never be treated as an implicit
-    // allow just because there's nothing to look up.
+    // No `create_session` happened, so `self.sessions.get` returns `Err(NotFound)`. The
+    // gate must deny, not skip the check: a missing or evicted session is never an
+    // implicit allow.
     let runtime = RuntimeService::default();
 
     let outcome = runtime

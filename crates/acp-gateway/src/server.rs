@@ -1,15 +1,15 @@
 //! The ACP stdio server: an editor drives the runtime as a fourth adapter.
 //!
-//! Wire scope (Spec D, v1): `initialize`, `session/new`, `session/prompt`,
+//! Wire scope: `initialize`, `session/new`, `session/prompt`,
 //! `session/cancel`, and agent→client `session/update` plus
 //! `session/request_permission`. A prompt is a structured automation request
 //! (an optional `url` plus one intent in the exact `types::IntentCommand`
-//! wire shape), never freeform natural language — there is no planner.
+//! wire shape), never freeform natural language: there is no planner.
 //!
-//! Every run goes through the same `AuthenticatedRuntime` the other three
-//! adapters use, so capability, idempotency, evidence, and outcome semantics
-//! cannot drift. The permission path is decided by [`crate::escalation`]:
-//! a click can lift a session gate, never mint authority.
+//! Every run goes through the same `AuthenticatedRuntime` the other adapters
+//! use, so capability, idempotency, evidence, and outcome semantics cannot
+//! drift. The permission path is decided by [`crate::escalation`]: a click can
+//! lift a session gate, never mint authority.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -39,7 +39,7 @@ use crate::escalation::{decide, Escalation, EscalationRequest, SessionPolicyGate
 
 /// What a `session/prompt` text block must decode to. `url` is the target
 /// page (opened and navigated first); `intent` is one intent in the exact
-/// shape `command_execute` accepts — no ACP-specific vocabulary to drift.
+/// shape `command_execute` accepts.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StructuredPrompt {
@@ -613,10 +613,10 @@ impl AcpServer {
         }
     }
 
-    /// The only path that reaches a human. Vision escalation was denied by
-    /// the session gate; whether to ask at all is the escalation module's
-    /// decision, and an approval applies only to the retry of this command on
-    /// the existing page. It never creates or publishes a reusable session.
+    /// The only path that reaches a human. Whether to ask is
+    /// [`crate::escalation`]'s decision; an approval applies only to the retry
+    /// of this command on the existing page and never creates a reusable
+    /// session.
     async fn maybe_escalate(
         &self,
         connection: &ConnectionTo<Client>,

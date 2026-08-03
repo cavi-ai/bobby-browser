@@ -36,34 +36,20 @@ use jobs::JobSubmitOutcome;
 
 type RuntimeBinder = dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static;
 
-/// Caches one [`AuthenticatedRuntime`] per principal so repeated requests from the same
-/// principal reuse the same runtime binding rather than getting a fresh one every call.
-/// This matters for more than efficiency: `AuthenticatedRuntime` owns an
-/// `IdempotencyStore` (see `sdk_core::AuthenticatedRuntime::with_session_ownership`), and
-/// idempotency-key replay/conflict detection only works if that store persists across the
-/// two-plus HTTP requests that share a key. A fresh runtime per call silently drops the
-/// idempotency memory after every request.
+/// Caches one [`AuthenticatedRuntime`] per principal.
 ///
-/// Bounded in the steady state: an `Authority` only ever hands out live handles for up to
-/// `max_principals` distinct principals at once, and this cache holds at most one entry
-/// per principal. Note it does not evict on revoke — a principal id that is revoked and
-/// never reused leaves a stale, harmless entry (its cached handle simply reports itself
-/// invalid) until the process exits, so long-running processes with heavy principal-id
-/// churn (not just token rotation for the same principal) would grow this map without
-/// bound; that tradeoff was accepted here rather than adding eviction machinery for a
-/// case fleet-multi-principal callers are not expected to hit.
+/// `AuthenticatedRuntime` owns an `IdempotencyStore`, so idempotency-key replay and
+/// conflict detection only work while that store persists across the requests sharing a
+/// key; a fresh runtime per call drops the idempotency memory.
 ///
-/// A cached entry is only reused while it still reflects what a fresh authentication
-/// would produce: same capability set, and still valid (unexpired, unrevoked) at the time
-/// of use. `CapabilityHandle::is_valid_at` and `CapabilityHandle::capabilities` back this
-/// check. Without it, a principal whose token is rotated (reissued, e.g. because the
-/// first-seen token neared expiry, possibly with a different capability set) would keep
-/// being bound to the stale first handle: `AuthorizationGuard::validate` checks
-/// `is_invalid_at` against *that* handle, so once it expires every future request for the
-/// principal would fail closed with `AuthenticationFailed` even though the caller
-/// presented a live token; and `AuthorizationGuard::authorize` intersects the stale
-/// handle's capabilities with the fresh per-request context, so newly granted
-/// capabilities would silently never be honored.
+/// An entry is reused only while it still matches what a fresh authentication would
+/// produce: same capability set, and valid (unexpired, unrevoked) at time of use.
+/// Reusing a stale handle would fail closed in `AuthorizationGuard::validate` once it
+/// expires, and would intersect away newly granted capabilities in
+/// `AuthorizationGuard::authorize`.
+///
+/// Bounded by `max_principals` in the steady state. Entries are not evicted on revoke,
+/// so heavy principal-id churn grows this map without bound.
 struct RuntimeBindingCache {
     entries: Mutex<HashMap<PrincipalId, (CapabilityHandle, Arc<AuthenticatedRuntime>)>>,
 }
@@ -226,11 +212,7 @@ pub struct AppState {
     interface: InterfaceConfig,
     in_flight_requests: Arc<Semaphore>,
     // One `Semaphore` per principal, created lazily on a principal's first request.
-    // Bounded in the steady state the same way `RuntimeBindingCache` is (see its doc
-    // comment above): an `Authority` only ever hands out live handles for up to
-    // `max_principals` distinct principals at once, and entries are not evicted on
-    // revoke, so a revoked principal id leaves a stale, harmless entry until the
-    // process exits.
+    // Bounded by `max_principals` in the steady state; entries are not evicted on revoke.
     principal_permits: Arc<RwLock<HashMap<PrincipalId, Arc<Semaphore>>>>,
     mcp_servers: mcp_http::McpServers,
     mcp_resources: mcp_gateway::ArtifactResources,
@@ -278,8 +260,8 @@ impl AppState {
 
     /// Gives `/v1/mcp` the same trusted artifact boundary `/v1/artifacts` uses. Without
     /// it the MCP surface falls back to `ArtifactResources::default()`, which carries no
-    /// `ArtifactReader` and therefore denies admission to every screenshot and download
-    /// a tool call produces — the bytes are captured but never retrievable.
+    /// `ArtifactReader` and denies admission to every screenshot and download a tool
+    /// call produces.
     pub fn with_mcp_resources(mut self, resources: mcp_gateway::ArtifactResources) -> Self {
         self.mcp_resources = resources;
         self
@@ -294,8 +276,8 @@ pub fn router(state: AppState) -> Router {
             auth::authenticate,
         ));
     // `/v1/mcp` is mounted outside `protected_router()`'s strict-header middleware and
-    // does its own thin bearer-only auth (see `mcp_http::post_mcp`) — standard MCP
-    // clients can only send a static `Authorization` header, not the fresh
+    // does its own bearer-only auth (`mcp_http::post_mcp`): standard MCP clients can only
+    // send a static `Authorization` header, not the fresh
     // `x-deadline`/`x-correlation-id`/`x-interface-version` the other routes require.
     let mcp = Router::new()
         .route(
@@ -547,7 +529,7 @@ pub async fn shutdown_signal() {
     });
 }
 
-/// Waits for the shutdown signal, then for `drain_timeout` — the deadline by
+/// Waits for the shutdown signal, then for `drain_timeout`, the deadline by
 /// which in-flight work must finish before the server gives up draining.
 async fn drain_after_signal(drain_timeout: std::time::Duration) {
     shutdown_signal().await;
@@ -632,11 +614,10 @@ where
     config.validate().map_err(anyhow::Error::msg)?;
     let authority =
         Arc::new(EnrolledAuthority::enroll(startup, config.interface.max_principals).await?);
-    // `PersistentAuthority` wraps a clone of the enrolled authority (its inner
-    // `AuthorityStore` shares the same underlying records via `Arc`, so restoring or
-    // mutating through the persistent wrapper stays visible to `authority` too) so that
-    // `AppState` authenticates and issues through the persisted path while `StartupGate`
-    // keeps its own handle on the un-wrapped `EnrolledAuthority`.
+    // `PersistentAuthority` wraps a clone of the enrolled authority; the clone shares the
+    // same `AuthorityStore` records via `Arc`, so `AppState` authenticates and issues
+    // through the persisted path while `StartupGate` keeps its own handle on the
+    // un-wrapped `EnrolledAuthority`.
     let persistent_authority = Arc::new(
         authority_persist::PersistentAuthority::open(
             (*authority).clone(),
@@ -779,12 +760,10 @@ pub mod testing {
 
     const ADMIN_BEARER: &str = "admin-bootstrap-bearer-0123456789abcdef01";
 
-    // `testing` is not `cfg(test)`-gated (it compiles into the production lib so
-    // integration test crates under `tests/` can depend on it), so it cannot pull in
-    // `tempfile`, a dev-dependency. Each call to `app_with_admin` therefore gets its own
-    // path straight under the OS temp dir, disambiguated by process id (distinct test
-    // binaries) plus a process-wide counter (distinct calls within one binary — each
-    // `#[tokio::test]` in a file runs on its own thread, so this must be atomic).
+    // `testing` compiles into the production lib so integration test crates under
+    // `tests/` can depend on it, which rules out `tempfile` (a dev-dependency). Each
+    // call gets its own path under the OS temp dir, disambiguated by process id plus an
+    // atomic counter (tests in one binary run on separate threads).
     static AUTHORITY_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn unique_authority_path() -> std::path::PathBuf {
@@ -795,13 +774,9 @@ pub mod testing {
         ))
     }
 
-    // Thread-local rather than a process-wide static: `cargo test`'s default harness
-    // runs every #[tokio::test] in this file on its own OS thread, and each such test
-    // builds and drives its own `app_with_admin` router end-to-end on that thread. A
-    // process-wide static would let concurrently-running sibling tests clobber this
-    // test's observation between its own bind calls. Scoping per-thread keeps "last
-    // bind call wins" meaningful within a single test's request sequence while still
-    // requiring no locking of, or changes to, the other tests in this file.
+    // Thread-local rather than a process-wide static: each #[tokio::test] runs on its
+    // own OS thread, so a shared static would let concurrent sibling tests clobber one
+    // test's observation between its own bind calls.
     thread_local! {
         static LAST_BOUND_PRINCIPAL: Cell<Option<Uuid>> = const { Cell::new(None) };
     }
@@ -821,7 +796,7 @@ pub mod testing {
     /// router, the enrolled authority (for direct assertions), and the admin bearer.
     ///
     /// Delegates to [`app_with_admin_and_quota`] with the default per-principal
-    /// in-flight quota, to avoid duplicating the router setup below.
+    /// in-flight quota.
     pub async fn app_with_admin(
         max_principals: usize,
     ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
@@ -847,8 +822,7 @@ pub mod testing {
     }
 
     /// Same as [`app_with_admin_and_quota`], but pins the on-disk authority persistence
-    /// path so a test can drop the router and rebuild a fresh one over the *same* file —
-    /// proving that a principal issued through the HTTP route survives a restart.
+    /// path so a test can drop the router and rebuild a fresh one over the *same* file.
     pub async fn app_with_admin_and_quota_at(
         max_principals: usize,
         max_in_flight_per_principal: usize,
@@ -879,9 +853,7 @@ pub mod testing {
                 .expect("admin authority enrolls"),
         );
         // Wraps a clone of `authority` the same way `bootstrap_listener_with` does: the
-        // clone shares the underlying `AuthorityStore` records via `Arc`, so this only
-        // adds the persistence path without changing what `authority` (returned below)
-        // observes.
+        // clone shares the underlying `AuthorityStore` records via `Arc`.
         let persistent_authority = Arc::new(
             PersistentAuthority::open((*authority).clone(), authority_path)
                 .await
@@ -897,10 +869,8 @@ pub mod testing {
 
         // Mirrors the production binder in `bootstrap_listener_with`: one
         // `AuthenticatedRuntime` (and thus one `IdempotencyStore`) per principal for the
-        // life of this router, so idempotency-key replay tests observe the real
-        // contract. The observation hook still fires on every bind *request*, cache hit
-        // or not, so `last_bound_principal` reflects the true caller of the most recent
-        // request regardless of caching.
+        // life of this router. The observation hook fires on every bind *request*, cache
+        // hit or not, so `last_bound_principal` tracks the most recent caller.
         let bindings = crate::RuntimeBindingCache::new();
         let state = AppState::new(
             persistent_authority as Arc<dyn Authority>,
@@ -938,8 +908,7 @@ pub mod testing {
     }
 
     /// Issues a bearer for `principal` with `capabilities` via `POST /v1/principals`,
-    /// using `admin_bearer` for authorization. Panics with context on failure — this is
-    /// a test helper, not production code.
+    /// using `admin_bearer` for authorization. Panics with context on failure.
     pub async fn issue_bearer(
         app: &axum::Router,
         admin_bearer: &str,

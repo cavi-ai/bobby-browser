@@ -63,12 +63,10 @@ pub struct ChromiumWorkerFactory {
 }
 
 impl ChromiumWorkerFactory {
-    /// Constructs a factory and reaps any Chrome processes orphaned by a
-    /// previous instance of this runtime (see `reap_orphaned_chrome_processes`
-    /// doc comment below for why this is necessary and safe). The reap only
-    /// runs once per process: the shared registry directory is also used by
-    /// every other same-process worker, so sweeping it again later could
-    /// mistake a live sibling worker's still-registered PID for an orphan.
+    /// Constructs a factory and reaps Chrome processes orphaned by a previous
+    /// instance of this runtime. The reap runs once per process: the registry
+    /// directory is shared with every other same-process worker, so sweeping
+    /// it again could mistake a live sibling's registered PID for an orphan.
     pub fn new(config: BrowserConfig) -> Self {
         let pid_registry_dir = default_pid_registry_dir();
         reap_orphaned_chrome_processes_once(&pid_registry_dir);
@@ -79,14 +77,10 @@ impl ChromiumWorkerFactory {
         }
     }
 
-    /// Same as `new`, but with an explicit PID registry location instead of
-    /// the shared OS temp directory, reaped unconditionally on every call
-    /// (not gated behind the process-wide once guard). Safe as long as the
-    /// directory is exclusive to this factory — which is always true for an
-    /// isolated per-test tempdir — since nothing else can register a live
-    /// sibling PID into it. Exists so tests can exercise orphan reaping
-    /// without touching, or being affected by, every other Chromium worker
-    /// on the machine.
+    /// Same as `new`, but with an explicit PID registry directory, reaped on
+    /// every call rather than behind the process-wide once guard. The
+    /// directory must be exclusive to this factory, since nothing else may
+    /// register a live sibling PID into it.
     pub fn with_pid_registry_dir(config: BrowserConfig, pid_registry_dir: PathBuf) -> Self {
         reap_orphaned_chrome_processes(&pid_registry_dir);
         Self {
@@ -144,9 +138,9 @@ impl WorkerFactory for ChromiumWorkerFactory {
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
         let worker_id = WorkerId::new();
-        // Best-effort: if we can't read the child PID or can't write the
-        // registry file, launch still proceeds — this is a self-healing
-        // backstop for *future* runs, not a launch precondition.
+        // Best-effort: launch proceeds even if the child PID cannot be read or
+        // the registry file cannot be written. This backstops future runs, it
+        // is not a launch precondition.
         let pid_registry_path = browser
             .get_mut_child()
             .and_then(|child| child.as_mut_inner().id())
@@ -194,19 +188,14 @@ impl WorkerFactory for ChromiumWorkerFactory {
 }
 
 /// Shared, machine-wide directory Chromium PID registrations live in when a
-/// caller doesn't provide an explicit one (`ChromiumWorkerFactory::new`).
-/// This directory, and everything below, is Chromium-specific plumbing on
-/// top of the engine-agnostic `process_registry` module — see that module's
-/// doc comment for why the underlying mechanism isn't Chrome-specific.
+/// caller does not provide an explicit one (`ChromiumWorkerFactory::new`).
 fn default_pid_registry_dir() -> PathBuf {
     std::env::temp_dir().join("bobby-browser-chromium-workers")
 }
 
-/// Records `pid` as the Chrome process backing `worker_id`, so a *future*
-/// process (the next test run, or the runtime restarting after a crash) can
-/// recognize and reap it if this process never gets a chance to call
-/// `close`/`terminate` on it. Returns `None` on any I/O failure — recording
-/// is best-effort and never blocks a launch.
+/// Records `pid` as the Chrome process backing `worker_id`, so a later process
+/// can recognize and reap it if this one never calls `close`/`terminate`.
+/// Returns `None` on any I/O failure: recording never blocks a launch.
 fn register_chrome_pid(registry_dir: &Path, worker_id: &WorkerId, pid: u32) -> Option<PathBuf> {
     process_registry::register_pid(registry_dir, &worker_id.0.to_string(), pid)
 }
@@ -217,19 +206,17 @@ fn unregister_chrome_pid(path: &Path) {
 
 static ORPHAN_REAP_ONCE: Once = Once::new();
 
-/// Runs `reap_orphaned_chrome_processes` at most once per process. The
-/// registry directory is shared by every worker this process ever launches;
-/// sweeping it again after this process's own workers have registered would
-/// risk mistaking a live sibling worker for an orphan left by someone else.
+/// Runs `reap_orphaned_chrome_processes` at most once per process. The registry
+/// directory is shared by every worker this process launches, so sweeping it
+/// again risks mistaking a live sibling worker for an orphan.
 fn reap_orphaned_chrome_processes_once(registry_dir: &Path) {
     let registry_dir = registry_dir.to_path_buf();
     ORPHAN_REAP_ONCE.call_once(|| reap_orphaned_chrome_processes(&registry_dir));
 }
 
-/// Chrome-specific entry point into `process_registry::reap_orphaned_processes`:
-/// every registry entry is verified to actually be a Chrome/Chromium process
-/// (`is_running_chrome_process`) before it's killed, so a PID that has since
-/// been reused by an unrelated process is never touched.
+/// Chrome-specific entry point into `process_registry::reap_orphaned_processes`.
+/// Every registry entry is verified to be a Chrome/Chromium process before it is
+/// killed, so a PID reused by an unrelated process is never touched.
 fn reap_orphaned_chrome_processes(registry_dir: &Path) {
     process_registry::reap_orphaned_processes(
         registry_dir,
@@ -305,9 +292,8 @@ impl ChromiumWorker {
         }
     }
 
-    /// Humanized click: a curved approach over the target's clickable point,
-    /// hover dwell, then the press — the same shape the Firefox worker
-    /// produces through BiDi, here over CDP mouse events.
+    /// Humanized click: curved approach to the target's clickable point, hover
+    /// dwell, then the press, over CDP mouse events.
     async fn humanized_click(
         &self,
         page: &Page,
@@ -348,9 +334,8 @@ impl ChromiumWorker {
 
     /// Humanized typing: focus the target, then replay `behavioral-engine`
     /// key actions over CDP with their synthesized delays. Returns
-    /// `(action_count, synthesized_ms)` for the `Humanization` evidence —
-    /// emitted only when this path actually ran, same honesty rule as the
-    /// Firefox worker.
+    /// `(action_count, synthesized_ms)` for `Humanization` evidence, which is
+    /// emitted only when this path ran.
     async fn humanized_type_text(
         &self,
         page: &Page,
@@ -383,9 +368,8 @@ impl ChromiumWorker {
             ));
             actions
         };
-        // Ctrl/Cmd+A loops against Chrome's command pipeline (245+ phantom
-        // keydowns for one chord, framing doesn't matter). A human who can't
-        // chord backspaces over the text instead — same effect, clean events.
+        // Ctrl/Cmd+A loops against Chrome's command pipeline: one chord yields
+        // hundreds of phantom keydowns. Backspace over the text instead.
         let actions = if clear_first {
             let existing = resolved.value(page).await?.unwrap_or_default();
             let backspaces = u32::try_from(existing.chars().count()).unwrap_or(u32::MAX);
@@ -437,11 +421,11 @@ impl ChromiumWorker {
             } else {
                 params = params.key(key);
             }
-            // Text insertion needs an explicit `text` on the keyDown, and this
-            // fork's key table leaves `text` empty for plain letters — fall
-            // back to the character itself for single printable characters.
-            // Without it Chrome sees an unidentified held key: auto-repeat
-            // storms and no inserted text.
+            // Text insertion needs an explicit `text` on the keyDown, and the
+            // key table leaves `text` empty for plain letters, so fall back to
+            // the character itself for single printable characters. Without it
+            // Chrome sees an unidentified held key: auto-repeat storms and no
+            // inserted text.
             if is_key_down {
                 let text = definition
                     .and_then(|definition| definition.text)
@@ -482,15 +466,12 @@ impl ChromiumWorker {
                 delay(*delay_ms).await;
             }
             TypingAction::SelectAll { delay_ms } => {
-                // Cmd on macOS, Ctrl elsewhere — the browser runs on this
-                // machine, so the worker's OS is the browser's OS. The
-                // modifier needs its own down/up events: releasing only `a`
-                // leaves the modifier logically held and every later key
-                // becomes a phantom chord.
-                // A coherent chord: both events carry the modifier mask, so
-                // Chrome's key state sees the chord open and close. Releasing
-                // `a` unmasked leaves the modifier logically held, and sending
-                // the physical modifier key storms unidentified events.
+                // Cmd on macOS, Ctrl elsewhere: the browser runs on this
+                // machine, so the worker's OS is the browser's OS. Both events
+                // carry the modifier mask so Chrome's key state sees the chord
+                // open and close. Releasing `a` unmasked leaves the modifier
+                // logically held, and sending the physical modifier key storms
+                // unidentified events.
                 let mask = if cfg!(target_os = "macos") { 4 } else { 2 };
                 page.execute(key_event("a", DispatchKeyEventType::KeyDown, mask))
                     .await
@@ -501,7 +482,7 @@ impl ChromiumWorker {
                 delay(*delay_ms).await;
             }
             TypingAction::Backspace { count, delay_ms } => {
-                // N backspaces at CDP speed is a sub-millisecond burst — the
+                // N backspaces at CDP speed is a sub-millisecond burst, the
                 // most synthetic cadence there is. Pace the repetitions.
                 for index in 0..*count {
                     page.execute(key_event("Backspace", DispatchKeyEventType::RawKeyDown, 0))
@@ -521,10 +502,8 @@ impl ChromiumWorker {
                 delay(*delay_ms).await;
             }
             TypingAction::CopyPaste { text, delay_ms } => {
-                // A paste produces no key events for the pasted content —
-                // replaying it as a 1ms-per-key burst is exactly what a
-                // behavioral detector flags. Insert as text, the way the
-                // clipboard path presents it.
+                // A paste produces no key events for the pasted content.
+                // Insert as text, the way the clipboard path presents it.
                 delay(*delay_ms).await;
                 page.execute(
                     chromiumoxide::cdp::browser_protocol::input::InsertTextParams::new(text),
@@ -1831,21 +1810,12 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     // SECURITY(F4): the two authoritative deny-by-default gates for JS
-    // evaluation — the token capability check (`AuthenticatedRuntime::submit`)
-    // and the per-session `ExecutionPolicy` check (`RuntimeService::submit`) —
-    // are enforced upstream of this worker; both land before `execute()` ever
-    // reaches a `BrowserWorker`. A worker-level backstop was considered here
-    // for defense-in-depth, but ChromiumWorker is launched via
-    // `WorkerFactory::launch(&SessionId)` — it has no access to the session's
-    // ExecutionPolicy, and neither does anything upstream of it in this crate
-    // (page-runtime's `WorkerPool::lease` only threads a `SessionId`, not
-    // session state; session-manager, which owns `ExecutionPolicy`, isn't
-    // even a dependency of worker-pool or page-runtime today). Threading it
-    // in would mean changing the `WorkerFactory`/`WorkerPool::lease`
-    // signatures and pulling session state into worker-pool — real
-    // architectural surface. The worker-level backstop remains deliberately
-    // absent per that design tradeoff; the two gates above are relied on as
-    // authoritative.
+    // evaluation, the token capability check (`AuthenticatedRuntime::submit`)
+    // and the per-session `ExecutionPolicy` check (`RuntimeService::submit`),
+    // are enforced upstream; both land before `execute()` reaches a
+    // `BrowserWorker`. There is deliberately no worker-level backstop:
+    // `WorkerFactory::launch(&SessionId)` gives this worker no access to the
+    // session's `ExecutionPolicy`.
     async fn evaluate_javascript(
         &self,
         page_id: &PageId,
@@ -1858,10 +1828,9 @@ impl BrowserWorker for ChromiumWorker {
         params.await_promise = Some(command.await_promise);
         params.return_by_value = Some(true);
 
-        // DoS clamp: a caller-supplied `timeout_ms` is otherwise unbounded, which would
-        // let a valid (capability- and policy-cleared) caller pin a worker lease open
-        // arbitrarily long. Clamp to the configured ceiling rather than rejecting — the
-        // command still runs, just under the same bound every other evaluation is held to.
+        // DoS clamp: a caller-supplied `timeout_ms` is otherwise unbounded and could
+        // pin a worker lease open arbitrarily long. Clamp to the configured ceiling
+        // rather than rejecting, so the command still runs under the common bound.
         let timeout_ms = clamp_js_timeout_ms(command.timeout_ms, self.max_js_timeout_ms);
 
         let value: serde_json::Value =
@@ -2414,9 +2383,9 @@ fn closed_error() -> CommandError {
     }
 }
 
-/// DoS clamp for `EvaluateJavaScript::timeout_ms`: bounds a caller-requested timeout to the
-/// configured `max_js_timeout_ms` ceiling so a valid (capability- and policy-cleared) caller
-/// cannot pin a worker lease open indefinitely by requesting an arbitrarily large timeout.
+/// DoS clamp for `EvaluateJavaScript::timeout_ms`: bounds a caller-requested
+/// timeout to the configured `max_js_timeout_ms` ceiling so no caller can pin a
+/// worker lease open indefinitely.
 fn clamp_js_timeout_ms(requested_ms: u64, max_ms: u64) -> u64 {
     requested_ms.min(max_ms)
 }
@@ -2736,10 +2705,9 @@ mod tests {
         assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
     }
 
-    // The underlying reap/register/kill mechanics are engine-agnostic and
-    // tested directly in `process_registry`. These tests cover only the
-    // Chrome-specific layer on top: the PID-registry key derivation
-    // (`WorkerId`-keyed) and the "chrom" identity check.
+    // These cover only the Chrome-specific layer: `WorkerId`-keyed PID-registry
+    // paths and the "chrom" identity check. The reap/register/kill mechanics are
+    // tested in `process_registry`.
 
     #[test]
     fn register_and_unregister_chrome_pid_round_trip_through_the_filesystem() {

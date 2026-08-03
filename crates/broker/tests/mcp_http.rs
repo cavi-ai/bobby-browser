@@ -203,17 +203,10 @@ async fn mcp_respects_per_principal_quota() {
     held.abort();
 }
 
-/// A cached `/v1/mcp` `Server` must not survive its principal's capability rotation:
-/// a stale, capability-frozen `Server` would answer a second `initialize` with a
-/// "duplicate initialize" error (see `mcp_gateway::server`'s `Lifecycle` state
-/// machine), since the first `initialize` already advanced it past
-/// `AwaitingInitialize`. Rebuilding on a rotated handle resets the lifecycle, so the
-/// rotated bearer's `initialize` must succeed exactly like a brand-new principal's.
-///
-/// Mirrors `runtime_binding_cache_rebuilds_when_capabilities_change` in
-/// `crates/broker/src/lib.rs`, but end-to-end over `/v1/mcp`: two bearers issued for
-/// the same principal with different capability sets, rather than two `CapabilityHandle`s
-/// built directly against an `AuthorityStore`.
+/// A cached `/v1/mcp` `Server` must not survive its principal's capability rotation.
+/// A stale, capability-frozen `Server` would reject the rotated bearer's `initialize`
+/// as a duplicate, since the first one advanced its `Lifecycle` past
+/// `AwaitingInitialize`.
 #[tokio::test]
 async fn mcp_server_cache_rebuilds_for_rotated_handle() {
     let (app, _authority, admin_bearer) = app_with_admin(4).await;
@@ -223,8 +216,7 @@ async fn mcp_server_cache_rebuilds_for_rotated_handle() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["result"]["protocolVersion"], "2025-11-25", "{body}");
 
-    // Same principal, a freshly issued bearer with an additional capability — the
-    // token-rotation scenario the cache must not paper over.
+    // Same principal, freshly issued bearer with an additional capability.
     let bearer_two = issue_bearer(
         &app,
         &admin_bearer,
@@ -246,21 +238,11 @@ async fn mcp_server_cache_rebuilds_for_rotated_handle() {
     );
 }
 
-/// CRITICAL regression: `checkpoint_save`'s `evidenceRefs` resolution used to run
-/// through a `mcp_gateway::Server` field only its stdio constructor populated.
-/// `POST /v1/mcp` — the only network MCP transport, what `bobby serve` mounts — builds
-/// every principal's `Server` through `Server::for_interface` (see
-/// `McpServers::get_or_create`), which left that field unset, so `checkpoint_save`
-/// rejected every HTTP call with `-32602`/`evidenceRefsUnresolvable` unconditionally,
-/// before the request ever reached the runtime — regardless of what `evidenceRefs`
-/// named. This is the coverage that gap needed: `crates/broker/tests/mcp_http.rs` had
-/// no `checkpoint_save` coverage over `POST /v1/mcp` at all before this test.
-///
-/// Naming a command id here that does not exist must reach real resolution against the
-/// runtime and come back as a `notFound` interface error, not the old hardcoded
-/// schema-style rejection — proving both that the HTTP path now runs the same
-/// `RuntimeInterface::resolve_command_evidence` the stdio transport does, and that an
-/// unresolvable reference still fails closed rather than silently contributing nothing.
+/// `checkpoint_save` over `POST /v1/mcp` must run the same
+/// `RuntimeInterface::resolve_command_evidence` the stdio transport does. A command id
+/// with no journal record must come back as a `notFound` interface error, not a
+/// schema-level `-32602` rejection before dispatch, and must fail closed rather than
+/// silently contribute nothing.
 #[tokio::test]
 async fn checkpoint_save_resolves_evidence_refs_over_the_broker_http_transport() {
     let (app, _authority, admin_bearer) = app_with_admin(4).await;
@@ -343,9 +325,8 @@ async fn checkpoint_save_resolves_evidence_refs_over_the_broker_http_transport()
 // ---------------------------------------------------------------------------
 
 /// A router whose `EventStore` the test also holds, so it can append through the
-/// same call the command route and the MCP tool surface both make. The MCP
-/// `Server` this router builds per principal shares that one store, exactly as
-/// production does.
+/// same call the command route and the MCP tool surface make. Every per-principal
+/// MCP `Server` shares that one store, as in production.
 async fn app_with_events(
     events: interface_core::EventStore,
     principals: &[(uuid::Uuid, &[types::Capability])],
@@ -462,12 +443,10 @@ async fn the_mcp_get_stream_pushes_the_principals_runtime_events() {
     assert_eq!(frame["params"]["payload"]["commandId"], "c-1", "{frame}");
 }
 
-/// CRITICAL regression: a subscription must start at the store's tail. The
-/// retained log is shared by every principal and `HistoryLost` is judged against
-/// its store-wide front, so a cursor-0 subscription gaps on its first read as
-/// soon as a broker has served `max_event_retention` appends — one gap frame per
-/// client and never a runtime event again, unrecoverable because MCP gives the
-/// client no way to name a resume cursor.
+/// A subscription must start at the store's tail. The retained log is shared by
+/// every principal and `HistoryLost` is judged against its store-wide front, so a
+/// cursor-0 subscription gaps on its first read once `max_event_retention` appends
+/// have been served, unrecoverably: MCP has no resume cursor.
 #[tokio::test]
 async fn an_mcp_stream_opened_after_retention_wrapped_still_receives_new_events() {
     let events = interface_core::EventStore::new(2);
@@ -543,10 +522,8 @@ async fn the_mcp_get_stream_never_delivers_another_principals_events() {
         "principal B's MCP stream must never carry principal A's events"
     );
 
-    // `next_mcp_frame` cannot distinguish "nothing arrived" from "the stream was
-    // already dead", so the assertion above is only worth anything once B's
-    // stream is shown to be live: its own event must still come through, at its
-    // own cursor.
+    // `next_mcp_frame` cannot distinguish "nothing arrived" from "stream already
+    // dead", so B's stream must be shown live at its own cursor.
     events
         .append_for(
             types::PrincipalId::from_uuid(PRINCIPAL_B),
@@ -591,8 +568,8 @@ async fn the_mcp_get_stream_withholds_events_from_a_principal_without_subscribe_
     );
 
     // Gated, not dead: control frames must still reach this client, or the
-    // assertion above would pass just as well against a broken channel. Rotating
-    // the principal's capabilities is what publishes one.
+    // assertion above would pass against a broken channel too. Rotating the
+    // principal's capabilities publishes one.
     let rotated = issue_for(
         &authority,
         PRINCIPAL_A,
@@ -611,10 +588,9 @@ async fn the_mcp_get_stream_withholds_events_from_a_principal_without_subscribe_
     );
 }
 
-/// The `tools.listChanged: true` the `initialize` result advertises is a
-/// promise, and this is the one thing in the process that can keep it: rotating
-/// a principal's capabilities rebuilds its cached `Server`, and the client
-/// streaming off the old one is told to re-list before that stream ends.
+/// Backs the `tools.listChanged: true` the `initialize` result advertises:
+/// rotating a principal's capabilities rebuilds its cached `Server`, and the
+/// client streaming off the old one is told to re-list before that stream ends.
 #[tokio::test]
 async fn rotating_capabilities_notifies_the_open_mcp_stream_to_relist_tools() {
     let (app, _authority, admin_bearer) = app_with_admin(4).await;

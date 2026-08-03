@@ -165,9 +165,8 @@ impl Drop for JsonRpcChild {
 }
 
 /// Spawn the stdio gateway with the bootstrap credential, run `initialize`
-/// and `tools/list`, and report the advertised surface size. This is the
-/// check `bobby doctor` runs so a host config that launches fine but answers
-/// with an oversized or empty catalog is caught before the agent sees it.
+/// and `tools/list`, and report the advertised surface size. Run by
+/// `bobby doctor` to catch an oversized or empty catalog.
 pub fn mcp_handshake(bootstrap: &BTreeMap<String, String>) -> Result<HandshakeReport> {
     let gateway = resolve_gateway()?;
     let mut command = Command::new(&gateway);
@@ -736,9 +735,7 @@ fn find_companion_dist(explicit: Option<&Path>) -> Result<PathBuf> {
 
 /// Install the Firefox companion: copy the built extension into the bobby
 /// config dir (so the source tree can move), then install the native-host
-/// wrapper and manifest; the pairing descriptor path is set aside for
-/// enrollment. Pairing itself happens against
-/// a running Firefox afterwards — see the printed next steps.
+/// wrapper and manifest. Pairing against a running Firefox is a later step.
 pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionInstall> {
     let dist = find_companion_dist(extension)?;
     let config = bobby_config_dir()?;

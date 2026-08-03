@@ -58,12 +58,10 @@ pub struct Server {
     pending_cancellations: Mutex<BTreeSet<String>>,
     shutting_down: AtomicBool,
     /// The phase this connection's `tools/list` is scoped to. Per connection,
-    /// not per principal: two agents holding the same bearer can be in
-    /// different phases, and the phase is a view over the surface rather than
-    /// anything the authority knows about.
-    /// `std::sync::Mutex`, not the async one the rest of this struct uses:
-    /// `list_tools` is a sync fn on the hot path and the critical section is a
-    /// single enum copy, so an await point here would buy nothing.
+    /// not per principal: two agents on the same bearer can be in different
+    /// phases, and the phase is a view over the surface, not authority.
+    /// `std::sync::Mutex` because `list_tools` is sync and the critical section
+    /// is a single enum copy.
     toolset: std::sync::Mutex<crate::toolset::Toolset>,
 }
 
@@ -91,9 +89,8 @@ impl Server {
         events: EventStore,
         resources: ArtifactResources,
     ) -> Self {
-        // Built here, in the one constructor both `new`/`production` and the
-        // broker's per-principal path funnel through, so neither transport can
-        // end up with a `Server` whose notification fan-out was never wired.
+        // Built in the one constructor every transport funnels through, so no
+        // `Server` can exist with its notification fan-out unwired.
         let notifications = NotificationSink::new(events.clone(), handle.principal_id().clone());
         Self {
             runtime,
@@ -116,15 +113,12 @@ impl Server {
         &self.notifications
     }
 
-    /// Tells every subscribed client that this principal's capability set — and
-    /// therefore the tool list `tools/list` returns — has changed.
+    /// Tells every subscribed client that this principal's capability set, and
+    /// therefore the tool list `tools/list` returns, has changed.
     ///
-    /// The advertised `tools.listChanged` capability is a promise, so the only
-    /// caller is whoever actually observes the change: over streamable HTTP
-    /// that is `McpServers`, which detects a rotated `CapabilityHandle` and
-    /// rebuilds the `Server`. A stdio session's capabilities are frozen by its
-    /// bootstrap credential and cannot change, so nothing calls this there —
-    /// the promise holds vacuously.
+    /// Call only from whoever observes the change: over streamable HTTP that is
+    /// `McpServers` detecting a rotated `CapabilityHandle`. A stdio session's
+    /// capabilities are frozen by its bootstrap credential.
     pub fn notify_tools_list_changed(&self) {
         self.notifications.publish(tools_list_changed_frame());
     }
@@ -185,12 +179,10 @@ impl Server {
                     )
                 });
             }
-            // A re-`initialize` from any prior lifecycle state is a session
-            // reset, not a protocol error: MCP clients over streamable HTTP
-            // call `initialize` on every reconnect, and rejecting it strands
-            // a principal behind its own once-per-process handshake. Reset
-            // clears stale cancellation state from the previous session;
-            // in-flight work from that session keeps running to completion.
+            // A re-`initialize` is a session reset, not a protocol error: MCP
+            // clients over streamable HTTP call `initialize` on every
+            // reconnect. The reset clears stale cancellation state; in-flight
+            // work from the previous session runs to completion.
             self.pending_cancellations.lock().await.clear();
             *lifecycle = Lifecycle::AwaitingInitializedNotification;
             return id.map(|id| {
@@ -335,26 +327,23 @@ impl Server {
         W: AsyncWrite + Unpin,
     {
         let mut input = BufReader::new(input);
-        // Every frame that reaches the client — responses and notifications
-        // alike — goes through `write_response`, which serializes the whole
-        // frame and its newline while holding this one lock. That is what keeps
-        // a notification from being interleaved into the middle of a response
-        // and killing the session with an unparseable line.
+        // Every frame, response or notification, goes through `write_response`,
+        // which writes the frame and its newline while holding this lock. That
+        // is what stops a notification interleaving into a response and killing
+        // the session with an unparseable line.
         let output = Arc::new(Mutex::new(output));
         let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> =
             FuturesUnordered::new();
         let mut notifications = self.notifications.subscribe().await;
         let mut notifications_open = true;
-        // Notification writes are queued rather than awaited inline, so a client
-        // that has stopped draining stdout cannot stall the read loop and
-        // deadlock the session against its own unread request pipe. Queueing is
-        // what needs the bound: responses are queued too, but the client's own
-        // request volume caps those, while notifications arrive whether or not
-        // it asks. Past the cap the branch is disabled and nothing is pulled off
-        // the subscription until a write lands, which is exactly the
-        // backpressure the queue itself cannot apply. Frames missed while
-        // stalled are not lost silently — the subscription resumes from its
-        // cursor and reports a gap if retention passed it.
+        // Notification writes are queued, not awaited inline, so a client that
+        // stops draining stdout cannot stall the read loop and deadlock the
+        // session. Notifications arrive unbidden, so they need the cap that the
+        // client's own request volume already puts on responses: past
+        // MAX_PENDING_NOTIFICATION_WRITES the branch is disabled and nothing is
+        // pulled off the subscription until a write lands. Frames missed while
+        // stalled are not lost: the subscription resumes from its cursor and
+        // reports a gap if retention passed it.
         let outstanding = Arc::new(AtomicUsize::new(0));
         let mut frame = Vec::new();
         loop {
@@ -532,12 +521,9 @@ impl Server {
                 }));
             }
         }
-        // `toolset_select` needs no capability, so on its own it would be the
-        // one tool a principal holding nothing still sees. That would break a
-        // property the conformance suite pins: a principal with no
-        // capabilities is shown no surface at all. It is also useless to such
-        // a principal — there is nothing to narrow — so drop it rather than
-        // leak the shape of the server to an unauthorized caller.
+        // `toolset_select` needs no capability, so alone it would be the one
+        // tool a principal holding nothing still sees. A principal with no
+        // capabilities must be shown no surface at all.
         if tools.len() == 1 && tools[0]["name"] == "toolset_select" {
             tools.clear();
         }
@@ -692,11 +678,10 @@ impl Server {
         if call.name.len() > 64 || !self.tool_available(&call.name) {
             return error(id, METHOD_NOT_FOUND, "Method not found", None);
         }
-        // `toolset_select` is the one tool with no `InterfaceOperation`,
-        // because it authorizes nothing: it changes which tools this
-        // connection is shown. Handled before the operation lookup rather than
-        // by loosening that lookup — a `required_operation` that tolerates
-        // `None` would silently un-gate any tool someone forgets to map.
+        // `toolset_select` is the one tool with no `InterfaceOperation`: it
+        // authorizes nothing, only changing which tools this connection sees.
+        // Handle it before the operation lookup; a `required_operation` that
+        // tolerated `None` would un-gate any tool someone forgets to map.
         if call.name == "toolset_select" {
             if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
                 return invalid_params(id, Some(violation));
@@ -731,10 +716,9 @@ impl Server {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
                     return invalid_params_reason(id, "malformedArguments");
                 }
-                // Principal-scoped, so it belongs here rather than on the
-                // runtime-wide `RuntimeInfo` the inner runtime produces. Without
-                // it a caller cannot see the credential lapse coming — the stdio
-                // gateway simply refuses to start afterwards.
+                // Principal-scoped, so it is added here rather than on the
+                // runtime-wide `RuntimeInfo`. Without it a caller cannot see
+                // the credential expiry coming.
                 let credential_expires_at = self.handle.expires_at();
                 self.runtime
                     .runtime_info(context)
@@ -754,7 +738,11 @@ impl Server {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
                     return invalid_params_reason(id, "malformedArguments");
                 }
-                self.runtime.list_sessions(context).await.and_then(to_json)
+                self.runtime
+                    .list_sessions(context)
+                    .await
+                    .and_then(to_json)
+                    .map(|sessions| json!({"sessions": sessions}))
             }
             "session_create" => {
                 let input: SessionCreateArgs = match bounded_parse(call.arguments) {
@@ -1239,9 +1227,8 @@ impl Server {
                     .context_ask(context, input.session_id, input.page_id, input.description)
                     .await
                     // `None` is an answer, not a failure: the context does not
-                    // know, and the repair is to snapshot. Returning an error
-                    // would make "ask again after a snapshot" and "this call is
-                    // broken" the same signal.
+                    // know and the repair is to snapshot. An error here would
+                    // be indistinguishable from a broken call.
                     .and_then(|answer| to_json(json!({"answer": answer})))
             }
             "form_snapshot" => {
@@ -1487,15 +1474,11 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                // The caller names commands, not evidence: resolve each id
-                // against the journal the runtime itself wrote before the
-                // checkpoint is ever persisted. A name with no journal
-                // record, one that never reached a terminal outcome, or one
-                // this principal does not own, is rejected here rather than
-                // silently contributing nothing — both transports (stdio and
-                // the broker's `POST /v1/mcp`) go through the same
-                // `RuntimeInterface` trait method, so ownership is enforced
-                // identically either way.
+                // The caller names commands, not evidence: each id is resolved
+                // against the runtime's journal before the checkpoint is
+                // persisted. An id with no journal record, no terminal outcome,
+                // or a different owner is rejected rather than silently
+                // contributing nothing.
                 match self
                     .runtime
                     .resolve_command_evidence(context.clone(), input.evidence_refs)
@@ -1641,11 +1624,10 @@ impl Server {
                 match to_json(outcome) {
                     Ok(mut value) => {
                         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
-                        // `CommandOutcome` carries only `commandId`, so without
-                        // this an agent cannot name the workflow it just ran in
-                        // and `checkpoint_save` / `workflow_recover` stay out of
-                        // reach. Pass it back into any tool's `workflowId` to
-                        // keep subsequent commands in the same workflow.
+                        // `CommandOutcome` carries only `commandId`, so the
+                        // workflow id is echoed here. Callers pass it back as a
+                        // tool's `workflowId` to stay in the same workflow, and
+                        // `checkpoint_save` / `workflow_recover` need it.
                         if let Some(object) = value.as_object_mut() {
                             object.insert(
                                 "workflowId".to_owned(),
@@ -2020,11 +2002,8 @@ macro_rules! page_scoped_args {
 }
 
 /// Intent tools take the same page scope plus the intent's own payload.
-///
-/// Intents were reachable only by hand-building a `CommandEnvelope` for
-/// `command_execute`, which meant minting three UUIDs and an RFC3339 deadline
-/// per call. These mirror the flat primitive tools instead: the server builds
-/// the envelope.
+/// They mirror the flat primitive tools: the server builds the
+/// `CommandEnvelope`, so a caller mints no UUIDs and no deadline.
 macro_rules! intent_args {
     ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
         #[derive(Deserialize)]
@@ -2374,10 +2353,8 @@ fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Val
 
 /// `-32602` with the schema keyword and JSON Pointer that rejected the call.
 ///
-/// Every rejection used to be an indistinguishable `"Invalid params"` with no
-/// `data`, so a caller could not tell a missing field from an out-of-range one,
-/// let alone find which field. `pointer` and `constraint` describe the schema,
-/// never the submitted value, so they disclose nothing `tools/list` does not.
+/// `pointer` and `constraint` must describe the schema, never the submitted
+/// value, so they disclose nothing `tools/list` does not.
 fn invalid_params(id: Value, violation: Option<crate::schema::SchemaViolation>) -> Value {
     let data = violation.map(|violation| {
         json!({
@@ -2442,11 +2419,9 @@ const MAX_COMMAND_DEADLINE_MS: i64 = 300_000;
 
 /// Builds the envelope a flat tool submits.
 ///
-/// `workflow_id` is the caller's when supplied. Every call used to mint a fresh
-/// one and the outcome never echoed it back, so an agent on the flat tools
-/// could not name the workflow it had just run in — which made
-/// `checkpoint_save` and `workflow_recover` reachable only by hand-building
-/// envelopes through `command_execute`.
+/// `workflow_id` is the caller's when supplied, otherwise freshly minted.
+/// Keeping the caller's is what makes `checkpoint_save` and `workflow_recover`
+/// reachable from the flat tools.
 fn command_envelope(
     context: types::RequestContext,
     session_id: types::SessionId,
@@ -2550,10 +2525,9 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
         "context_ask" => Some(&[types::Capability::PageRead]),
-        // Choosing which tools you can see grants nothing, so it requires
-        // nothing beyond an authenticated connection. Gating it on a
-        // capability would let a principal narrow into a phase and then lack
-        // the capability to leave it.
+        // Grants nothing, so it needs nothing beyond an authenticated
+        // connection. A capability gate here could strand a principal in a
+        // phase it lacked the capability to leave.
         "toolset_select" => Some(&[]),
         "form_snapshot" => Some(&[types::Capability::PageRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),

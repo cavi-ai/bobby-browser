@@ -20,11 +20,8 @@ fn chrome_headed() -> bool {
 
 fn chrome_config(root: &std::path::Path) -> config::BrowserConfig {
     config::BrowserConfig {
-        // `BOBBY_CHROME_EXECUTABLE` first: it is what CI sets and what every
-        // other live suite reads. This file read only `CHROME_PATH`, so it
-        // launched nothing in CI and failed with a bare
-        // `BrowserLaunchFailed: No such file or directory`. `CHROME_PATH` is
-        // kept as a fallback so existing local setups keep working.
+        // `BOBBY_CHROME_EXECUTABLE` first: it is what CI sets and what every other live
+        // suite reads. `CHROME_PATH` stays as a fallback for existing local setups.
         executable: std::env::var_os("BOBBY_CHROME_EXECUTABLE")
             .or_else(|| std::env::var_os("CHROME_PATH"))
             .map(PathBuf::from)

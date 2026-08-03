@@ -1,21 +1,9 @@
-//! ACP joins the conformance suite as a fourth adapter.
+//! ACP adapter conformance: a permission grant for a capability the principal
+//! lacks is denied, and that denial matches HTTP's and MCP's for the same token.
 //!
-//! The design is explicit that the suite is what keeps a new adapter from
-//! becoming a second-class surface, and that it must join *first* — before the
-//! adapter accumulates divergence that is expensive to unwind. So this file
-//! exists ahead of the ACP server loop, and asserts the property that would be
-//! most expensive to get wrong.
-//!
-//! That property: **a permission grant for a capability the principal lacks is
-//! denied, and the denial is indistinguishable in effect from the same denial
-//! on HTTP and MCP.**
-//!
-//! ACP inverts the usual direction — the agent asks the editor, the editor
-//! asks a human, the human clicks — so it is the one adapter where a UI
-//! affordance could be mistaken for authority. HTTP and MCP have no such
-//! affordance, which is precisely why they are the baseline here: whatever a
-//! human clicks, the outcome must match what the other two do with the same
-//! token.
+//! ACP is the one adapter where a human clicks an approval, so it is the one
+//! where a UI affordance could be mistaken for authority. HTTP and MCP have no
+//! such affordance and serve as the baseline.
 
 use std::sync::Arc;
 
@@ -34,8 +22,7 @@ use uuid::uuid;
 
 const PRINCIPAL: uuid::Uuid = uuid!("00000000-0000-0000-0000-0000000000f1");
 
-/// A principal that can open pages but cannot evaluate JavaScript. The gap is
-/// the thing every adapter has to agree about.
+/// A principal that can open pages but cannot evaluate JavaScript.
 const WITHOUT_JAVASCRIPT: [&str; 4] = ["session:read", "session:write", "page:read", "page:write"];
 
 async fn mcp_server_without_javascript() -> Server {
@@ -80,8 +67,7 @@ async fn mcp_server_without_javascript() -> Server {
 #[test]
 fn acp_denies_a_capability_the_principal_lacks() {
     // Everything `SubmitCommand` needs, so vision is the only gap. Without
-    // `browser:mutate` the decision would deny on that instead, and the test
-    // would pass while proving nothing about vision.
+    // `browser:mutate` the decision would deny on that instead.
     let held = [
         Capability::SessionRead,
         Capability::SessionWrite,
@@ -150,9 +136,8 @@ async fn mcp_denies_the_same_capability_gap() {
     );
 }
 
-/// HTTP: the same token, the same gap, refused — and specifically as
-/// `missingCapability`, so the three adapters agree on the *reason* and not
-/// merely on failing.
+/// HTTP: the same token, the same gap, refused as `missingCapability`, so the
+/// three adapters agree on the reason and not merely on failing.
 #[tokio::test]
 async fn http_denies_the_same_capability_gap_as_missing_capability() {
     let (app, _authority, admin) = app_with_admin(4).await;
@@ -193,9 +178,8 @@ async fn http_denies_the_same_capability_gap_as_missing_capability() {
     );
 }
 
-/// The parity claim itself, stated as one assertion rather than left implicit
-/// in three separate tests passing: for the same token and the same gap, every
-/// adapter refuses, and ACP refuses *without asking*.
+/// The parity claim as one assertion: for the same token and the same gap,
+/// every adapter refuses, and ACP refuses without asking.
 #[test]
 fn no_adapter_lets_a_permission_grant_widen_a_token() {
     let held = [

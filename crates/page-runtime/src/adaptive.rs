@@ -26,10 +26,8 @@ pub struct VisionGate {
 /// once per command by the layer that can see the session
 /// (`sdk_core::RuntimeService`).
 ///
-/// `Default` is all-off with no provider, which is what every caller that does
-/// not resolve a session gets. That is the deny-by-default direction: a caller
-/// that cannot prove the session opted in gets no fingerprinting, no
-/// humanization, and no node.
+/// `Default` must stay all-off with no provider: a caller that cannot prove the session
+/// opted in gets no fingerprinting, no humanization, and no node.
 #[derive(Clone, Default)]
 pub struct SessionGate {
     pub vision: VisionGate,
@@ -41,11 +39,9 @@ pub struct SessionGate {
 
 /// What resolving a session's `visionNode` produced.
 ///
-/// The three states are deliberately distinct. Collapsing `Unresolved` into
-/// `NotRequested` — the obvious `Option<Arc<dyn VisionAssist>>` shape — means a
-/// session that named a local node and mistyped it silently escalates to
-/// whatever provider the process was built with, which is the exact
-/// substitution a named registry exists to prevent.
+/// The three states must stay distinct. Collapsing `Unresolved` into `NotRequested`
+/// (an `Option<Arc<dyn VisionAssist>>`) lets a mistyped node name silently escalate to
+/// whatever provider the process was built with.
 #[derive(Clone, Default)]
 pub enum NodeSelection {
     /// The session named no node. An embedder-installed provider, if any,
@@ -60,10 +56,8 @@ pub enum NodeSelection {
 }
 
 impl NodeSelection {
-    /// Same as the private `provider`, exposed so the three states can be
-    /// asserted apart. The distinction is a security property, and a property
-    /// only checked through a live browser escalation is a property nothing
-    /// checks.
+    /// The private `provider`, exposed so the three states can be asserted apart
+    /// without a live browser escalation.
     pub fn provider_for_test(
         &self,
         installed: Option<Arc<dyn VisionAssist>>,
@@ -183,9 +177,9 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
-        // Real PNG bytes when the worker supports them; workers without byte
-        // plumbing keep the prior artifact-only behavior and vision providers
-        // receive an empty frame (their own confidence floor rejects).
+        // Real PNG bytes when the worker supports them. Workers without byte plumbing
+        // stay artifact-only, and vision providers get an empty frame, which their own
+        // confidence floor rejects.
         let bytes = self
             .lease
             .worker()
@@ -671,9 +665,8 @@ async fn browser_execute(
                 .set_emulated_media(page_id.expect("validated page id"), command)
                 .await?
         }
-        // ChromiumWorker::evaluate_javascript (F3) executes the JS; non-Chromium
-        // workers keep the default unsupported CommandError. The two policy gates
-        // (token capability, session ExecutionPolicy) land in F4.
+        // Only ChromiumWorker::evaluate_javascript executes the JS; other workers
+        // return the default unsupported CommandError.
         PrimitiveCommand::EvaluateJavaScript(command) => {
             lease
                 .worker()

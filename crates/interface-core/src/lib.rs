@@ -51,8 +51,8 @@ pub trait RuntimeInterface: Send + Sync {
     /// Where the retained page context says a described control is.
     ///
     /// `Ok(None)` is a real answer: the context does not know, and the caller
-    /// should snapshot. It is deliberately not an error — an agent that cannot
-    /// distinguish "no answer" from "call failed" will retry the wrong thing.
+    /// should snapshot. Deliberately not an error, so callers can distinguish
+    /// "no answer" from "call failed".
     async fn context_ask(
         &self,
         _ctx: RequestContext,
@@ -106,15 +106,12 @@ pub trait RuntimeInterface: Send + Sync {
     /// Evidence the runtime itself recorded for already-run commands, resolved
     /// by id rather than authored by the caller.
     ///
-    /// The journal these ids are resolved against is not principal-partitioned
-    /// (one runtime, shared across every authenticated principal), so an
-    /// implementation MUST verify each referenced command belongs to a session
-    /// this principal owns before returning its evidence — the same guard
-    /// `checkpoint` itself applies to `checkpoint.session_id` via
-    /// `require_owned_session`. A referenced command this principal does not
-    /// own must be rejected, never silently skipped or substituted with
-    /// nothing, since either would let a caller learn something about a
-    /// command it does not own from the shape of the response.
+    /// The journal these ids resolve against is shared across every principal,
+    /// so an implementation MUST verify each referenced command belongs to a
+    /// session this principal owns before returning its evidence, the same
+    /// guard `checkpoint` applies to `checkpoint.session_id` via
+    /// `require_owned_session`. Reject an unowned command; skipping or
+    /// substituting it leaks its existence through the response shape.
     async fn resolve_command_evidence(
         &self,
         ctx: RequestContext,
@@ -162,12 +159,11 @@ impl AuthorizationGuard {
         Ok(())
     }
 
-    /// Requires a single capability beyond whatever `InterfaceOperation` was already
-    /// authorized. Used at chokepoints (e.g. `AuthenticatedRuntime::submit`) where a
-    /// coarse operation-level capability (`browser:mutate`) is not sufficient on its own
-    /// to authorize a privileged primitive nested inside the request (file upload/download).
-    /// Mirrors the per-capability check in `authorize`: both the live authority and the
-    /// request context must independently carry the capability.
+    /// Requires a single capability beyond the already-authorized `InterfaceOperation`,
+    /// at chokepoints (e.g. `AuthenticatedRuntime::submit`) where a coarse operation-level
+    /// capability (`browser:mutate`) does not authorize a privileged primitive nested in
+    /// the request (file upload/download). Both the live authority and the request context
+    /// must independently carry the capability.
     pub fn require_capability(
         &self,
         ctx: &RequestContext,

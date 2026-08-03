@@ -1,27 +1,15 @@
 //! What an ACP permission prompt is allowed to change.
 //!
-//! ACP's `session/request_permission` runs agent → client: bobby asks the
-//! editor, the editor asks a human, the human clicks. That shape makes one
-//! failure mode very easy to build by accident — treating a click as authority.
-//! An editor user approving "allow this" cannot create authority the bearer
-//! token never carried, and the runtime must not act as though it can.
+//! A human click must never mint authority the bearer token does not carry, so
+//! whether to prompt at all is decided here, before any prompt is sent:
 //!
-//! So the decision of whether to *ask at all* is made here, before any prompt
-//! is sent, against the principal's capabilities:
+//! - Capability not held: [`Escalation::Denied`], no prompt sent.
+//! - Held and session policy permits it: [`Escalation::AlreadyPermitted`].
+//! - Held but session policy gates it: [`Escalation::AskUser`], the only case
+//!   that reaches a human.
 //!
-//! - The principal does not hold the capability → [`Escalation::Denied`].
-//!   No prompt is sent. Asking would put a button in front of a human whose
-//!   only honest outcome is failure, and a click that appears to work but
-//!   does not is worse than a refusal.
-//! - The principal holds it and session policy already permits it →
-//!   [`Escalation::AlreadyPermitted`]. Nothing to ask.
-//! - The principal holds it and session policy gates it →
-//!   [`Escalation::AskUser`]. This is the only case that reaches a human, and
-//!   the most a human can do is lift a gate over authority that already
-//!   existed.
-//!
-//! This is the same shape as the vision double-gate: capability *and* session
-//! policy, with the human able to move only the second one.
+//! Double-gate: capability and session policy. A human can move only the
+//! second.
 
 use types::{Capability, InterfaceOperation};
 
@@ -33,19 +21,16 @@ pub enum Escalation {
     /// The principal holds the capability; session policy gates it. A human
     /// may lift that gate.
     AskUser { capability: Capability },
-    /// The principal does not hold the capability. No prompt is sent, and no
-    /// answer to one would change the outcome.
+    /// The principal does not hold the capability. No prompt is sent.
     Denied { missing: Capability },
 }
 
 /// Session policy flags an ACP prompt could lift, mirroring
 /// `types::ExecutionPolicy`.
 ///
-/// Only the gated-but-held flags appear here. `javascriptEvaluation`,
-/// `fingerprint`, and `humanize` are deliberately absent: each is a
-/// session-creation decision with its own capability, and a mid-session prompt
-/// that flipped one would let a human widen a session past what its creator
-/// asked for.
+/// `javascriptEvaluation`, `fingerprint`, and `humanize` are deliberately
+/// absent: each is a session-creation decision, so a mid-session prompt
+/// flipping one would widen the session past what its creator asked for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionPolicyGates {
     pub vision_assist: bool,
@@ -53,12 +38,9 @@ pub struct SessionPolicyGates {
 
 /// What an ACP client is asking to do.
 ///
-/// `requires_vision` is separate from `operation` because vision escalation is
-/// not an interface operation — no `InterfaceOperation` names
-/// `vision:assist`, since the double-gate lives in `intent-engine` at the point
-/// a stuck intent would escalate. Folding it into the operation enum would
-/// misplace the gate; passing it explicitly keeps both authorities visible at
-/// the one place ACP could try to widen them.
+/// `requires_vision` stays separate from `operation`: no `InterfaceOperation`
+/// names `vision:assist`, because the double-gate lives in `intent-engine`
+/// where a stuck intent escalates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EscalationRequest {
     pub operation: InterfaceOperation,
@@ -89,9 +71,8 @@ pub fn decide(
     gates: SessionPolicyGates,
 ) -> Escalation {
     let required = request.operation.required();
-    // Missing capability wins over everything. Checked first and returned
-    // immediately so no later branch can turn a missing capability into a
-    // prompt.
+    // Checked first and returned immediately so no later branch can turn a
+    // missing capability into a prompt.
     if let Some(missing) = required
         .iter()
         .find(|capability| !capabilities.contains(capability))
@@ -120,10 +101,7 @@ impl Escalation {
     }
 
     /// Whether the operation may proceed once any prompt is answered
-    /// affirmatively.
-    ///
-    /// `Denied` answers `false` regardless of what a human said, which is the
-    /// property this whole module exists for.
+    /// affirmatively. `Denied` answers `false` regardless of the answer.
     pub fn permits_after_approval(&self) -> bool {
         match self {
             Self::AlreadyPermitted | Self::AskUser { .. } => true,
@@ -153,8 +131,7 @@ mod tests {
         Capability::RecoveryWrite,
     ];
 
-    /// Every operation, against a principal holding nothing. Not one may
-    /// produce a prompt: a prompt implies a human could make it work.
+    /// A principal holding nothing is never prompted for any operation.
     #[test]
     fn a_principal_holding_nothing_is_never_prompted_for_anything() {
         for operation in EVERY_OPERATION {
@@ -175,8 +152,7 @@ mod tests {
         }
     }
 
-    /// The claim in one assertion: approval never turns a missing capability
-    /// into a permitted operation.
+    /// Approval never turns a missing capability into a permitted operation.
     #[test]
     fn approval_cannot_mint_a_capability() {
         for operation in EVERY_OPERATION {
@@ -194,8 +170,7 @@ mod tests {
         }
     }
 
-    /// The one thing a human may do: lift a session-policy gate over authority
-    /// the token already carries.
+    /// A human may only lift a session-policy gate over a held capability.
     #[test]
     fn a_held_but_gated_capability_is_the_only_thing_a_human_can_lift() {
         let gated = decide(
@@ -236,8 +211,6 @@ mod tests {
     }
 
     /// Holding the session gate open does not substitute for the capability.
-    /// Without this, an ACP client could open the gate and reach vision with a
-    /// token that never carried `vision:assist`.
     #[test]
     fn an_open_session_gate_does_not_substitute_for_the_capability() {
         let without_vision: Vec<Capability> = EVERY_CAPABILITY
@@ -262,9 +235,8 @@ mod tests {
         assert!(!decision.permits_after_approval());
     }
 
-    /// Every operation the interface defines. Listed rather than derived so a
-    /// new operation fails to compile here until someone decides whether an
-    /// ACP prompt may escalate it.
+    /// Listed rather than derived so a new operation fails to compile here
+    /// until someone decides whether an ACP prompt may escalate it.
     const EVERY_OPERATION: &[InterfaceOperation] = &[
         InterfaceOperation::RuntimeInfo,
         InterfaceOperation::CreateSession,

@@ -105,13 +105,9 @@ pub struct CapabilitySet(BTreeSet<Capability>);
 impl std::str::FromStr for Capability {
     type Err = UnknownCapability;
 
-    /// Parses the wire string. This is the ONE parse table: bootstrap files,
-    /// broker startup credentials, and every stdio gateway all accept exactly
-    /// these strings, so a new capability is accepted everywhere the day its
-    /// variant lands. The previous shape — a hand-maintained match per binary
-    /// — drifted twice in a week (a gateway rejected `job:*`, then bootstrap
-    /// rejected `browser:*`), both times failing closed against a credential
-    /// `bobby init` itself had written.
+    /// Parses the wire string. Sole parse table: bootstrap files, broker
+    /// startup credentials, and every stdio gateway accept exactly these
+    /// strings. Do not add a per-binary match; they drift and fail closed.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Ok(match value {
             "session:read" => Self::SessionRead,

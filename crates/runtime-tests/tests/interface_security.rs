@@ -908,7 +908,7 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
     let (mcp_list, mcp_denial, mcp_submit) =
         mcp_foreign_session_checks(mcp, session.id.clone(), owner_page.id.clone()).await?;
     require!(
-        mcp_list["result"]["structuredContent"]
+        mcp_list["result"]["structuredContent"]["sessions"]
             .as_array()
             .is_some_and(Vec::is_empty),
         "MCP enumerated foreign session: {mcp_list}"

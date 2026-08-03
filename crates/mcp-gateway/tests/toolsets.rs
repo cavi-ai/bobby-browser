@@ -1,9 +1,8 @@
-//! What phase selection actually costs and saves, measured against a live
-//! `tools/list` rather than counted.
+//! Phase selection cost, measured against a live `tools/list`.
 //!
 //! Tool count is a bad proxy: `runtime_info` is a few hundred bytes and
-//! `intent_follow` is 6 KB. The number that matters is the payload an agent
-//! downloads on connect, so that is what this file asserts.
+//! `intent_follow` is 6 KB. What matters is the payload an agent downloads
+//! on connect.
 
 #![allow(dead_code)]
 
@@ -106,8 +105,8 @@ async fn the_default_is_the_full_surface() {
     );
 }
 
-/// The headline number. Each narrow phase has to buy back real bytes, or the
-/// round trip to select one is pure cost.
+/// Each narrow phase has to buy back real bytes, or the round trip to select
+/// one is pure cost.
 #[tokio::test]
 async fn every_narrow_phase_is_materially_cheaper_than_full() {
     let server = server().await;
@@ -125,11 +124,9 @@ async fn every_narrow_phase_is_materially_cheaper_than_full() {
             "{phase}: {narrowed} bytes, {saved} saved ({}% of full)",
             narrowed * 100 / full
         );
-        // Two thirds, not half. `intent` is necessarily the largest narrow
-        // phase: the eight `intent_*` schemas are the biggest objects on the
-        // surface at 5–6 KB each, and a phase for driving through intents that
-        // omitted intents would be pointless. It lands near 57%; the other two
-        // are well under half.
+        // Two thirds, not half: `intent` is the largest narrow phase because
+        // the eight `intent_*` schemas are 5-6 KB each and cannot be dropped
+        // from it. The other two phases land well under half.
         assert!(
             narrowed * 3 <= full * 2,
             "{phase} is {narrowed} bytes against {full} full — not a material reduction"
@@ -137,8 +134,7 @@ async fn every_narrow_phase_is_materially_cheaper_than_full() {
     }
 }
 
-/// The budget is nearly consumed at `full`, so the one thing phases must never
-/// do is make any view *larger*.
+/// The budget is nearly consumed at `full`, so no phase may make a view larger.
 #[tokio::test]
 async fn no_phase_exceeds_the_budget() {
     let server = server().await;
@@ -152,11 +148,8 @@ async fn no_phase_exceeds_the_budget() {
     }
 }
 
-/// Names the real constraint rather than leaving it implicit in a pass:
 /// `full` is within a couple of KB of the cap, so the next tool added to the
-/// default surface does not fit. This fails when that becomes true, with the
-/// remedy in the message, instead of the budget test failing with a byte
-/// count and no explanation.
+/// default surface may not fit. Fails with the remedy in the message.
 #[tokio::test]
 async fn the_full_surface_has_room_for_at_least_one_more_small_tool() {
     let server = server().await;
@@ -187,9 +180,8 @@ async fn selecting_a_phase_changes_what_is_advertised() {
     );
 }
 
-/// Narrowing hides a tool; it must not deny it. Enforcement is the capability
-/// gates' job, and a second weaker authority next to them is how a security
-/// property quietly becomes advisory.
+/// Narrowing hides a tool; it must not deny it. Enforcement belongs to the
+/// capability gates alone.
 #[tokio::test]
 async fn a_tool_hidden_by_the_current_phase_is_still_callable() {
     let server = server().await;
@@ -254,7 +246,6 @@ async fn every_phase_can_return_to_full() {
     }
 }
 
-/// The zero-capability case, pinned here as well as in the conformance suite:
 /// `toolset_select` requires no capability, so without the guard in
 /// `list_tools` it would be the single tool a principal holding nothing still
 /// sees.
