@@ -13,6 +13,7 @@ members = [
   "crates/task-scheduler",
   "crates/fingerprinting",
   "crates/node-registry",
+  "crates/acp-gateway",
   "crates/interface-core",
   "crates/sdk-core",
   "crates/session-manager",
@@ -46,6 +47,7 @@ repository = "https://github.com/cavi-ai/bobby-browser"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+agent-client-protocol = "2"
 axum = "0.8"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
