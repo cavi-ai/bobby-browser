@@ -8,9 +8,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use types::{
-    Capability, ErrorLayer, InterfaceError, InterfaceErrorCode, PageId, PrincipalId,
-    RequestContext, SessionId,
+    Capability, ErrorLayer, InterfaceError, InterfaceErrorCode, PrincipalId, RequestContext,
+    SessionId,
 };
+// Only the committed manifest names a page, and that manifest is Unix-only.
+#[cfg(unix)]
+use types::PageId;
 use uuid::Uuid;
 
 use crate::{CapabilityHandle, SessionOwnershipAuthority};
