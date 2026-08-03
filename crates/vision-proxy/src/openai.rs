@@ -79,6 +79,7 @@ impl OpenAiUpstream {
             .post(self.completions_url())
             .bearer_auth(&self.api_key)
             .json(&body)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| UpstreamError::Transport(e.to_string()))?;
