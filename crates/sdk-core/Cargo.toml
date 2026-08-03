@@ -12,6 +12,7 @@ artifact-store = { path = "../artifact-store", version = "0.3.1" }
 async-trait.workspace = true
 chrono.workspace = true
 checkpoint-store = { path = "../checkpoint-store", version = "0.3.1" }
+node-registry = { path = "../node-registry", version = "0.3.1" }
 config = { path = "../config", version = "0.3.1" }
 interface-core = { path = "../interface-core", version = "0.3.1" }
 serde_json.workspace = true

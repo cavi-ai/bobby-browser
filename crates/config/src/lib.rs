@@ -79,6 +79,10 @@ pub struct AppConfig {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub vision: VisionConfig,
+    /// Named nodes, selected per session. Absent means no node of any kind is
+    /// reachable — see `NodeConfig`.
+    #[serde(default)]
+    pub nodes: std::collections::BTreeMap<String, NodeConfig>,
 }
 
 /// Vision-assist provider configuration. Deny by default: no endpoint means
@@ -368,6 +372,7 @@ impl Default for AppConfig {
             interface: InterfaceConfig::default(),
             observability: ObservabilityConfig::default(),
             vision: VisionConfig::default(),
+            nodes: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -610,4 +615,51 @@ pub enum LogFormat {
 pub enum LogSink {
     #[default]
     Stdout,
+}
+
+/// One addressable node: a separate process with a bounded contract, reached
+/// over HTTP.
+///
+/// Nodes replace the single `[vision]` endpoint. The privacy property a node
+/// carries comes from its *address*, not from trusting whoever runs it: a node
+/// on loopback cannot send page pixels or page text off the machine, and
+/// [`NodeConfig::is_local`] is the check the runtime records and reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConfig {
+    /// What contract this node speaks.
+    pub kind: NodeKind,
+    #[serde(alias = "endpointUrl")]
+    pub endpoint_url: String,
+    /// Environment variable holding the node's bearer token. The token itself
+    /// is never stored in the config file.
+    #[serde(default, alias = "tokenEnv")]
+    pub token_env: Option<String>,
+    #[serde(default = "default_vision_timeout_ms", alias = "timeoutMs")]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NodeKind {
+    /// Proposes an action from a screenshot. The `VisionAssist` contract.
+    Vision,
+    /// Retains page structure for a session and answers bounded questions
+    /// about it, so the driving agent does not carry the page itself.
+    Context,
+}
+
+impl NodeConfig {
+    /// Whether this node's address is on the local machine.
+    ///
+    /// Parsing failures answer `false`. A node whose address cannot be parsed
+    /// is not a node whose locality has been established, and the caller uses
+    /// this to decide whether page material leaves the machine.
+    pub fn is_local(&self) -> bool {
+        url::Url::parse(&self.endpoint_url).is_ok_and(|url| {
+            matches!(
+                url.host_str(),
+                Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+            )
+        })
+    }
 }

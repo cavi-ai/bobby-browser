@@ -752,6 +752,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "url",
 ]
 
 [[package]]
@@ -2092,6 +2093,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "node-registry"
+version = "0.3.1"
+dependencies = [
+ "async-trait",
+ "config",
+ "intent-engine",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "types",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3011,6 +3025,7 @@ dependencies = [
  "intent-engine",
  "interface-core",
  "network-engine",
+ "node-registry",
  "page-runtime",
  "serde_json",
  "session-manager",

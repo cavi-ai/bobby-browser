@@ -1,0 +1,19 @@
+[package]
+name = "node-registry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+
+[dependencies]
+async-trait.workspace = true
+config = { path = "../config", version = "0.3.1" }
+intent-engine = { path = "../intent-engine", version = "0.3.1" }
+thiserror.workspace = true
+tracing.workspace = true
+types = { path = "../types", version = "0.3.1" }
+
+[dev-dependencies]
+tokio.workspace = true

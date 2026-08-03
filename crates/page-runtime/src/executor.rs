@@ -231,7 +231,7 @@ impl PageRuntime {
         };
         let mut execution = match self
             .adaptive
-            .execute(&envelope, &lease, page_state, gate.vision)
+            .execute(&envelope, &lease, page_state, &gate)
             .await
         {
             Ok(execution) => execution,
@@ -337,9 +337,40 @@ impl PageRuntime {
                 }
             }
             RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(command)) => {
+                self.context().forget(&command.page_id);
                 self.remove_page(&command.page_id).await
             }
             RuntimeCommand::Primitive(_) | RuntimeCommand::Intent(_) => {}
+        }
+
+        // Keep the context graph honest about this command before anything can
+        // read from it.
+        //
+        // Ordering matters: invalidate first, record second. A snapshot command
+        // is replayable, so it does not invalidate, and its result is what the
+        // graph should now hold. Any other command may have changed the page,
+        // so whatever the graph held is no longer answerable — and this runs on
+        // the success path *and* nowhere else it could be skipped, because a
+        // command that did not complete cannot be assumed not to have touched
+        // the page either. That is why `finish_failure` invalidates too.
+        if let Some(page_id) = envelope.page_id.as_ref() {
+            self.context().invalidate_for(page_id, &envelope.command);
+            for item in &evidence {
+                if let Evidence::AccessibilitySnapshot {
+                    page_id: observed,
+                    nodes,
+                    truncated,
+                } = item
+                {
+                    // A truncated snapshot is not the page. Recording it would
+                    // let the graph answer "not found" for a control that
+                    // exists past the truncation point, which reads to the
+                    // caller exactly like a control that is genuinely absent.
+                    if !*truncated {
+                        self.context().record(observed, nodes.clone());
+                    }
+                }
+            }
         }
 
         if let Err(error) = journal
@@ -769,6 +800,15 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
     ) -> CommandOutcome {
+        // A command that failed is not a command that did nothing. A click that
+        // timed out waiting for navigation may still have navigated, and
+        // `NeedsReconciliation` exists precisely because the runtime cannot
+        // tell. The context graph inherits that uncertainty: on any
+        // non-replayable failure it forgets, rather than keeping an
+        // observation that predates a change it cannot rule out.
+        if let Some(page_id) = envelope.page_id.as_ref() {
+            self.context().invalidate_for(page_id, &envelope.command);
+        }
         let Some(journal) = &self.journal else {
             return outcome;
         };

@@ -1006,6 +1006,14 @@ pub struct ExecutionPolicy {
     /// carried in `Evidence::Humanization` so the two agree.
     #[serde(default)]
     pub humanize: bool,
+    /// Name of the registered vision node this session escalates to.
+    ///
+    /// `None` means no node, which means no escalation — not "use whichever
+    /// provider the operator configured globally". Naming a node that is not
+    /// configured also declines, so a session cannot be silently redirected to
+    /// a different provider than the one it chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_node: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
