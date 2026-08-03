@@ -791,6 +791,71 @@ class FakeNativePort {
   disconnect(): void {}
 }
 
+test("production runtime listener serves popupStatus", async () => {
+  const port = new FakeNativePort();
+  const runtimeMessages = new ListenerSet<(
+    message: unknown,
+    sender: { id?: string; tab?: { id?: number }; frameId?: number },
+  ) => unknown>();
+  const browserApi = {
+    runtime: {
+      id: "trusted-extension",
+      connectNative: () => port,
+      onMessage: runtimeMessages,
+      async getBrowserInfo() {
+        return { name: "Firefox", version: "128.0" };
+      },
+      async getPlatformInfo() {
+        return { os: "mac" };
+      },
+    },
+    storage: {
+      local: {
+        async get() {
+          return {
+            companionId: CONNECT_OPTIONS.companionId,
+            profileId: CONNECT_OPTIONS.profileId,
+          };
+        },
+        async set() {},
+      },
+    },
+    tabs: {
+      onUpdated: new ListenerSet(),
+      onRemoved: new ListenerSet(),
+      async query() {
+        return [];
+      },
+      async sendMessage() {
+        return undefined;
+      },
+      async update() {},
+    },
+    webNavigation: {
+      onCommitted: new ListenerSet(),
+      async getAllFrames() {
+        return [];
+      },
+    },
+  };
+  const startProductionBackground = (
+    backgroundModule as typeof backgroundModule & {
+      startProductionBackground(api: unknown): Promise<CompanionBackground>;
+    }
+  ).startProductionBackground;
+
+  await startProductionBackground(browserApi);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const listener = runtimeMessages.listeners[0];
+  assert.ok(listener);
+  const statusPromise = listener({ type: "popupStatus" }, {});
+  assert.ok(statusPromise instanceof Promise);
+  const status = await statusPromise;
+  assert.equal(status.paired, false);
+  assert.equal(status.humanize, "unknown");
+});
+
 test("production startup pairs, discovers tabs and frames, leases, and routes", async () => {
   const port = new FakeNativePort();
   const runtimeMessages = new ListenerSet<(
