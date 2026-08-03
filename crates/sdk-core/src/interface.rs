@@ -167,6 +167,110 @@ impl AuthenticatedRuntime {
             .await
             .map_err(|_| internal_error(ctx))
     }
+
+    async fn submit_authorized(
+        &self,
+        ctx: RequestContext,
+        envelope: CommandEnvelope,
+        one_shot_vision_consent: bool,
+    ) -> InterfaceResult<CommandOutcome> {
+        self.authorize_submit(&ctx, &envelope.command, one_shot_vision_consent)?;
+        self.require_owned_session(&ctx, &envelope.session_id)?;
+        // Vision assist is gated at escalation time inside IntentEngine, not upfront.
+        // Thread whether this principal holds `vision:assist` so stuck intents can
+        // enforce the capability half of the deny-by-default double gate.
+        let vision_capability_ok = self
+            .authorization
+            .capability_handle()
+            .capabilities()
+            .contains(Capability::VisionAssist)
+            && ctx.capabilities.contains(Capability::VisionAssist);
+        let Some(key) = ctx.idempotency_key.clone() else {
+            return Ok(self
+                .inner
+                .submit_with_vision_grant(envelope, vision_capability_ok, one_shot_vision_consent)
+                .await);
+        };
+        // Consent changes what the exact same command may do. It is therefore
+        // part of the idempotency identity: an ordinary denial must not replay
+        // into an approved retry, and an approved result must not replay into
+        // a later ordinary submission.
+        let digest = if one_shot_vision_consent {
+            canonical_sha256(&(&envelope, true))?
+        } else {
+            canonical_sha256(&envelope)?
+        };
+        let reservation = self
+            .idempotency
+            .reserve(
+                ctx.principal_id.clone(),
+                key,
+                InterfaceOperation::SubmitCommand,
+                digest,
+                Utc::now(),
+                ctx.deadline,
+                ctx.correlation_id.clone(),
+            )
+            .await?;
+        match reservation {
+            IdempotencyReservation::Replay(outcome) => {
+                self.authorize_submit(&ctx, &envelope.command, one_shot_vision_consent)?;
+                self.require_owned_session(&ctx, &envelope.session_id)?;
+                Ok(outcome)
+            }
+            IdempotencyReservation::Acquired(permit) => {
+                if let Err(error) = self
+                    .authorize_submit(&ctx, &envelope.command, one_shot_vision_consent)
+                    .and_then(|()| self.require_owned_session(&ctx, &envelope.session_id))
+                {
+                    self.idempotency.abandon(permit).await;
+                    return Err(error);
+                }
+                self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
+                let outcome = self
+                    .inner
+                    .submit_with_vision_grant(
+                        envelope,
+                        vision_capability_ok,
+                        one_shot_vision_consent,
+                    )
+                    .await;
+                self.idempotency
+                    .finish(permit, outcome.clone(), Utc::now())
+                    .await?;
+                Ok(outcome)
+            }
+        }
+    }
+
+    fn authorize_submit(
+        &self,
+        ctx: &RequestContext,
+        command: &RuntimeCommand,
+        one_shot_vision_consent: bool,
+    ) -> InterfaceResult<()> {
+        self.authorization
+            .authorize(ctx, InterfaceOperation::SubmitCommand)?;
+        for capability in command_extra_capabilities(command) {
+            self.authorization.require_capability(ctx, capability)?;
+        }
+        if one_shot_vision_consent {
+            self.authorization
+                .require_capability(ctx, Capability::VisionAssist)?;
+        }
+        Ok(())
+    }
+
+    /// Submit one intent with the session-policy half of the vision double
+    /// gate open for this dispatch only. The authenticated principal must
+    /// already hold `vision:assist`; stored session policy is never mutated.
+    pub async fn submit_with_one_shot_vision_consent(
+        &self,
+        ctx: RequestContext,
+        envelope: CommandEnvelope,
+    ) -> InterfaceResult<CommandOutcome> {
+        self.submit_authorized(ctx, envelope, true).await
+    }
 }
 
 #[async_trait]
@@ -317,65 +421,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
         ctx: RequestContext,
         envelope: CommandEnvelope,
     ) -> InterfaceResult<CommandOutcome> {
-        self.authorization
-            .authorize(&ctx, InterfaceOperation::SubmitCommand)?;
-        for capability in command_extra_capabilities(&envelope.command) {
-            self.authorization.require_capability(&ctx, capability)?;
-        }
-        self.require_owned_session(&ctx, &envelope.session_id)?;
-        // Vision assist is gated at escalation time inside IntentEngine, not upfront.
-        // Thread whether this principal holds `vision:assist` so stuck intents can
-        // enforce the capability half of the deny-by-default double gate.
-        let vision_capability_ok = self
-            .authorization
-            .capability_handle()
-            .capabilities()
-            .contains(Capability::VisionAssist)
-            && ctx.capabilities.contains(Capability::VisionAssist);
-        let Some(key) = ctx.idempotency_key.clone() else {
-            return Ok(self
-                .inner
-                .submit_with_vision_capability(envelope, vision_capability_ok)
-                .await);
-        };
-        let digest = canonical_sha256(&envelope)?;
-        let reservation = self
-            .idempotency
-            .reserve(
-                ctx.principal_id.clone(),
-                key,
-                InterfaceOperation::SubmitCommand,
-                digest,
-                Utc::now(),
-                ctx.deadline,
-                ctx.correlation_id.clone(),
-            )
-            .await?;
-        match reservation {
-            IdempotencyReservation::Replay(outcome) => {
-                self.authorization
-                    .authorize(&ctx, InterfaceOperation::SubmitCommand)?;
-                Ok(outcome)
-            }
-            IdempotencyReservation::Acquired(permit) => {
-                if let Err(error) = self
-                    .authorization
-                    .authorize(&ctx, InterfaceOperation::SubmitCommand)
-                {
-                    self.idempotency.abandon(permit).await;
-                    return Err(error);
-                }
-                self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
-                let outcome = self
-                    .inner
-                    .submit_with_vision_capability(envelope, vision_capability_ok)
-                    .await;
-                self.idempotency
-                    .finish(permit, outcome.clone(), Utc::now())
-                    .await?;
-                Ok(outcome)
-            }
-        }
+        self.submit_authorized(ctx, envelope, false).await
     }
 
     async fn checkpoint(
