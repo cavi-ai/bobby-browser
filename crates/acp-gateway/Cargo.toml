@@ -1,0 +1,28 @@
+[package]
+name = "acp-gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+config = { path = "../config", version = "0.3.1" }
+sha2.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+agent-client-protocol.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+interface-core = { path = "../interface-core", version = "0.3.1" }
+sdk-core = { path = "../sdk-core", version = "0.3.1" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+types = { path = "../types", version = "0.3.1" }
+
+[dev-dependencies]
+chrono.workspace = true
+uuid.workspace = true
