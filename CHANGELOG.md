@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Add `acp-gateway`, the fourth adapter: ACP schema v1 over stdio (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/update`, `session/request_permission`). Prompts are structured (optional `url` plus one `types::IntentCommand` in the `command_execute` wire shape) — no planner, no freeform text. Permission prompts cover vision escalation only and can lift a session gate, never mint a capability.
 - Add the node-locality proof test: a session naming a loopback node sends its escalation traffic only to that node; a second listener standing in for a remote provider records zero hits.
 - **Breaking (Rust):** the `/v1` wire types moved from the `types` crate into `bobby-browser-client`, which is now the single published Rust crate (`cargo publish` dry-run verified; `types` remains in the workspace as a `publish = false` re-export shim over the moved modules). crates.io publishing is now the one `bobby-browser-client` crate instead of the 25-crate ordered closure.
 - TypeScript SDK source now carries JSDoc on the public surface (client, contracts, errors, events, intents, validators).

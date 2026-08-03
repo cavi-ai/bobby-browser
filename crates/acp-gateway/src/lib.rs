@@ -18,5 +18,7 @@
 //! conformance arm exists is what D4 warns against.
 
 pub mod escalation;
+pub mod server;
 
 pub use escalation::{decide, Escalation, EscalationRequest, SessionPolicyGates};
+pub use server::AcpServer;
