@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- **Breaking (idempotency digests):** `canonical_sha256` sorts JSON object keys recursively before hashing. It previously inherited ordering from `serde_json`'s default `BTreeMap` backend, so any dependency enabling `serde_json/preserve_order` switched the whole workspace to insertion order and two equivalent requests hashed differently — a retry would execute instead of replaying the retained result. Array order is preserved, since it carries meaning. Digests change once; in-flight idempotency records will not match across the upgrade.
 - Add the node-locality proof test: a session naming a loopback node sends its escalation traffic only to that node; a second listener standing in for a remote provider records zero hits.
 - **Breaking (Rust):** the `/v1` wire types moved from the `types` crate into `bobby-browser-client`, which is now the single published Rust crate (`cargo publish` dry-run verified; `types` remains in the workspace as a `publish = false` re-export shim over the moved modules). crates.io publishing is now the one `bobby-browser-client` crate instead of the 25-crate ordered closure.
 - TypeScript SDK source now carries JSDoc on the public surface (client, contracts, errors, events, intents, validators).
