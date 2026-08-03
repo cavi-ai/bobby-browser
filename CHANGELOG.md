@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-08-03
+- **Naming:** one scope, one prefix, one tag. Internal npm packages move off the unowned `@bobby-browser` scope to `@cavi-ai/bobby-gauntlet`, `@cavi-ai/bobby-firefox-companion`, `@cavi-ai/bobby-interface-conformance`; `@cavi-ai/bobby-browser` is unchanged, so nothing published breaks. 25 internal crates are `publish = false` — only `bobby-browser-client` and `bobby-browser` are products, and names like `types`, `config`, and `broker` are not claimed on crates.io. `sdk-v*` and `crate-v*` collapse into `v*`: one tag ships binaries, npm, and the crate.
+- `publish-crates.yml` publishes. It was named "Publish crates (dry-run)" and only ever ran `cargo publish --dry-run`, which is why crates.io is empty. The dry run stays as a pre-flight on every trigger; the real publish is gated on a `v*` tag, so `workflow_dispatch` remains a safe rehearsal.
+- Add `scripts/check-version-agreement.py`, run in CI: every crate, every `package.json`, and every path-dependency pin must carry the workspace version, npm packages must be under `@cavi-ai`, and only the two product crates may publish. npm reached 0.3.1 while the last `sdk-v*` tag was 0.3.0 because nothing checked.
 - Dogfooding the Chromium humanized stream caught three cadence bugs a detector would flag: paste bursts went out as sub-millisecond key storms (now `Input.insertText`, which is how a real paste presents), and clear-first backspaces fired at CDP speed (now paced 30–90ms apart). A biometrics dogfood test pools four typing rounds and asserts detector-relevant invariants: no sub-10ms key intervals, human variance in cadence, and a non-collinear mouse approach.
 - Remove the collector probe's `chromeRuntime` check. It failed whenever `window.chrome` existed without `chrome.runtime` — the state of stock Chrome on an ordinary page, and the state the injection deliberately produces, since CreepJS's `hasBadChromeRuntime` fingerprints the TypeError shape of a faked `chrome.runtime.sendMessage`. The probe asserted the opposite of the design it was probing. The real invariant is locked as a unit test instead, and all six `fingerprint_conformance` tests now run unskipped in CI.
 - `executionPolicy.humanize` now works on Chromium, not just Firefox: the Chromium worker synthesizes typing and pointer input through `behavioral-engine` (paced key events, curved approach paths, hover dwell) and emits `Evidence::Humanization` with action count and synthesized milliseconds, matching the Firefox contract. Two engine quirks are handled explicitly: headless pages get an activation before input so clicks can focus, and clear-first backspaces over the field instead of chording Ctrl/Cmd+A, which loops Chrome's command pipeline.
@@ -58,7 +61,7 @@
   throughout (the `v0.3.0` release asset still referenced `@bobby-browser/sdk`).
 - Carry forward post-`0.3.0` doc coverage already on main (`recovery_status`,
   MCP agent-surface catalog fixes, truncation ordinal notes) into `v0.3.1`.
-## Unreleased
+### Browser primitives
 - Add cookie primitives (`getCookies`, `setCookies`, `deleteCookies`) on Chromium (CDP Network) and Firefox (BiDi storage), exposed as MCP `cookie_get`/`cookie_set`/`cookie_delete` with `cookieState` evidence.
 - Add `printToPdf` (MCP `pdf`) on Chromium (CDP `Page.printToPDF`) and Firefox (BiDi `browsingContext.print`), producing a verified `application/pdf` artifact.
 - Add `handleDialog` (MCP `dialog`): waits for a JavaScript dialog with a bounded timeout and accepts or dismisses it, returning dialog type/message/action evidence. Chromium via CDP dialog events, Firefox via BiDi user prompts.

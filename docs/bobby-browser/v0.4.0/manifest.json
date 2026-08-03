@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "package": "bobby-browser",
+  "product": "bobby-browser",
+  "version": "0.4.0",
+  "contentSha256": "6812c786c435f5edf607469f903ccd51bbd6b62a1e6eb8e7d3165bba4859cb90",
+  "publicBasePath": "/docs/bobby-browser/v0.4.0",
+  "stableAlias": "/docs/bobby-browser",
+  "release": {
+    "tag": "v0.4.0",
+    "commit": "3f5dd20b5fef338113ffe861a20ba36b541adf5e"
+  },
+  "generatedAt": "2026-08-03T14:17:39.000Z"
+}
