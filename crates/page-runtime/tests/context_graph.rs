@@ -321,3 +321,69 @@ async fn deleting_a_session_evicts_its_pages_from_the_graph() {
     );
     assert!(runtime.context().ask(&page_id, "Email address").is_none());
 }
+
+/// C2 requires the context to retain prior evidence, not only page structure.
+/// It retains the command *ids*: an agent asking "did this already happen"
+/// resolves them through the journal, which stays the one authority on what
+/// happened. Copying evidence here would create a second copy that can
+/// disagree with it.
+#[tokio::test]
+async fn the_graph_records_which_commands_produced_evidence() {
+    let (runtime, _root) = runtime().await;
+    let session = SessionId::new();
+    let page_id = page(&runtime, &session).await;
+
+    let first = envelope(&session, &page_id, snapshot());
+    let first_id = first.command_id.clone();
+    assert!(matches!(
+        runtime.execute(first).await,
+        CommandOutcome::Completed { .. }
+    ));
+
+    let recorded = runtime.context().commands_for(&page_id);
+    assert!(
+        recorded.contains(&first_id),
+        "the command that produced evidence was not recorded: {recorded:?}"
+    );
+}
+
+/// The distinction that makes this worth having: where a control *is* goes
+/// stale when the page changes; what already *happened* does not.
+#[tokio::test]
+async fn recorded_commands_survive_invalidation() {
+    let (runtime, _root) = runtime().await;
+    let session = SessionId::new();
+    let page_id = page(&runtime, &session).await;
+
+    let first = envelope(&session, &page_id, snapshot());
+    let first_id = first.command_id.clone();
+    runtime.execute(first).await;
+    assert!(runtime.context().ask(&page_id, "Email address").is_some());
+
+    run(&runtime, envelope(&session, &page_id, click())).await;
+
+    assert!(
+        runtime.context().ask(&page_id, "Email address").is_none(),
+        "targets should be stale after a mutation"
+    );
+    assert!(
+        runtime.context().commands_for(&page_id).contains(&first_id),
+        "history was discarded along with the stale targets"
+    );
+}
+
+/// Session close drops history with everything else.
+#[tokio::test]
+async fn recorded_commands_are_dropped_on_session_close() {
+    let (runtime, _root) = runtime().await;
+    let session = SessionId::new();
+    let page_id = page(&runtime, &session).await;
+    run(&runtime, envelope(&session, &page_id, snapshot())).await;
+    assert!(!runtime.context().commands_for(&page_id).is_empty());
+
+    runtime.context().forget_all(std::slice::from_ref(&page_id));
+    assert!(
+        runtime.context().commands_for(&page_id).is_empty(),
+        "a deleted session's command history survived"
+    );
+}

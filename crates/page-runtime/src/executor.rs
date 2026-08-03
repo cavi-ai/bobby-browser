@@ -354,6 +354,14 @@ impl PageRuntime {
         // command that did not complete cannot be assumed not to have touched
         // the page either. That is why `finish_failure` invalidates too.
         if let Some(page_id) = envelope.page_id.as_ref() {
+            // Record *that* this command produced evidence against this page,
+            // before invalidation. What happened does not go stale when the
+            // page changes — only where things are does — so this outlives the
+            // generation bump below.
+            if !evidence.is_empty() {
+                self.context()
+                    .record_command(page_id, envelope.command_id.clone());
+            }
             self.context().invalidate_for(page_id, &envelope.command);
             for item in &evidence {
                 if let Evidence::AccessibilitySnapshot {
