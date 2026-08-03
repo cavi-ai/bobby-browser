@@ -81,3 +81,35 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4", "macro-diagnostics"] }
+
+# Build-artifact budget.
+#
+# `target/` reached 195 GB on this checkout: 111 GB of `debug/deps`, 71 GB of
+# `debug/incremental`, 8.5 GB of `debug/examples`. 93% of the `.rlib` files in
+# `deps` had not been touched in a day — cargo never garbage-collects stale
+# artifacts, so every dependency and every test binary accumulates a copy per
+# code change, at full DWARF debug info, forever.
+#
+# Two settings, both deliberate:
+#
+# `debug = "line-tables-only"` keeps file and line numbers in backtraces —
+# everything a failing test or a panic needs — while dropping the full type and
+# variable DWARF that only an interactive debugger uses. That information is
+# the bulk of `deps`. Anyone who needs it can build with
+# `RUSTFLAGS="-C debuginfo=2"` for a session.
+#
+# `incremental = false` removes the 71 GB cache, and is also what makes
+# `sccache` work: sccache does not cache incrementally-compiled crates, so with
+# incremental on it sits at a 0% hit rate doing nothing. Trading a
+# per-worktree, per-branch cache for a shared content-addressed one is the
+# better deal here, because work happens across many worktrees where the
+# incremental cache never carried over anyway.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+# Test binaries inherit `dev` for their own code but not for dependencies;
+# setting both keeps the whole graph consistent.
+[profile.test]
+debug = "line-tables-only"
+incremental = false
