@@ -72,9 +72,19 @@ escalation is unavailable even when the bearer and session opt in.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `endpoint_url` | unset | Provider URL — **https**, or **http only on loopback** |
-| `token_env` | unset | Env var name holding the provider bearer (never store the token here) |
+| `endpoint_url` | unset | Bobby → proxy URL — **https**, or **http only on loopback** |
+| `token_env` | unset | Env var name holding the loopback bearer (never store the token here) |
 | `timeout_ms` | `15000` | Per-proposal HTTP timeout |
+| `provider` | unset | Active profile name under `[vision.providers]` |
+| `providers.<name>` | unset | Named OpenAI-compatible upstream profiles |
+
+Each `[vision.providers.<name>]` profile:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `base_url` | yes | Upstream OpenAI-compatible API base (proxy → provider) |
+| `model` | yes | Model id passed to the upstream |
+| `api_key_env` | no | Env var for the upstream API key; omit for local servers (Ollama, LM Studio) |
 
 Request / response shapes and confidence floor: [Intent commands](intents.md#vision-provider).
 Capability + session gates: [Capabilities](../concepts/capabilities.md).
@@ -84,23 +94,76 @@ Granting `vision:assist` and creating a session with
 assist — the runtime must also reach a live provider at `[vision].endpoint_url`.
 When the URL is unset, escalation is unavailable even with capability and
 session opt-in. When the URL is set but nothing is listening,
-`bobby doctor` warns on `vision-endpoint` reachability.
+`bobby doctor` warns on `vision-endpoint` reachability (loopback endpoints
+suggest `bobby serve --vision` or manual `bobby vision-proxy`; external
+endpoints suggest verifying the remote service).
 
-### Local OpenAI (two-process setup)
+Code-review-graph answers **code structure**; bobby vision answers **page
+pixels** — do not conflate the two.
 
-Vision assist is a **two-process** setup: the broker (`bobby serve`) and a
-loopback vision provider. For local OpenAI, run `bobby vision-proxy` in a
-separate terminal (defaults: `http://127.0.0.1:9100/vision`):
+### Setup (preferred)
+
+1. Run `bobby vision connect` (interactive menu or `--yes --provider …`) to
+   write `endpoint_url`, `token_env`, `provider`, and the matching
+   `[vision.providers.*]` table.
+2. Export env vars the connect step printed (`BOBBY_VISION_TOKEN`, and
+   `api_key_env` when the profile requires one).
+3. Start `bobby serve --vision` — on loopback, bobby auto-spawns
+   `bobby vision-proxy` when the port is free.
+
+Manual `bobby vision-proxy` in a separate terminal remains valid when you want
+full control over the sidecar process.
 
 ```bash
-export BOBBY_VISION_TOKEN=…   # bearer bobby sends to the proxy
-export OPENAI_API_KEY=…       # bearer the proxy sends to OpenAI
-bobby vision-proxy            # optional: --bind, --path, --model, --openai-base-url
+export BOBBY_VISION_TOKEN=…
+export OPENAI_API_KEY=…       # openai profile only
+bobby vision connect --yes --provider openai
+bobby serve --vision
 ```
 
-Uncomment and point `[vision]` at that loopback URL, set `token_env` to
-`BOBBY_VISION_TOKEN`, then start `bobby serve`. The proxy accepts the same
-propose/extract JSON the runtime sends to any `[vision]` provider.
+### Preset providers
+
+| Provider | `base_url` (default) | `model` (default) | `api_key_env` |
+|---|---|---|---|
+| `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
+| `ollama` | `http://127.0.0.1:11434/v1` | `llava` | — |
+| `lmstudio` | `http://127.0.0.1:1234/v1` | `local-model` | — |
+
+For LM Studio (or MLX-hosted OpenAI-compatible servers), copy the **Server
+URL** the app displays — port **1234** is the common default, not a guarantee.
+Override with `bobby vision connect --base-url …` or edit
+`[vision.providers.<name>].base_url` after connect.
+
+### Custom provider
+
+Any OpenAI-compatible endpoint:
+
+```bash
+bobby vision connect --yes --provider custom \
+  --base-url https://my-host/v1 \
+  --model my-vision-model \
+  --api-key-env MY_VISION_API_KEY
+export MY_VISION_API_KEY=…
+export BOBBY_VISION_TOKEN=…
+bobby serve --vision
+```
+
+Or hand-edit:
+
+```toml
+[vision]
+endpoint_url = "http://127.0.0.1:9100/vision"
+token_env = "BOBBY_VISION_TOKEN"
+provider = "myhost"
+
+[vision.providers.myhost]
+base_url = "https://my-host/v1"
+model = "my-vision-model"
+api_key_env = "MY_VISION_API_KEY"   # omit when the upstream needs no key
+```
+
+`bobby doctor` warns on `vision-provider` when `provider` names a missing
+profile, and on `vision-upstream-key` when a profile's `api_key_env` is unset.
 
 `[vision]` is the single-provider form. `[nodes]` supersedes it — see below.
 

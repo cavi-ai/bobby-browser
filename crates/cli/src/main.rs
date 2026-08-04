@@ -6,7 +6,9 @@ mod vision_connect;
 
 use anyhow::{Context, Result};
 use companion_core::{run_native_host, NativeHostConfig};
-use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig};
+use config::{
+    ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig,
+};
 use firefox_companion::selection::NativeHostDescriptor;
 pub use firefox_companion::selection::{
     compose_worker_factory, compose_worker_factory_with_enrolled_firefox,
@@ -838,6 +840,79 @@ fn handshake_error_status(message: &str) -> DoctorStatus {
     }
 }
 
+fn vision_endpoint_is_loopback(endpoint: &str) -> bool {
+    Url::parse(endpoint).is_ok_and(|url| {
+        matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+        )
+    })
+}
+
+fn vision_endpoint_unreachable_detail(endpoint: &str) -> String {
+    if vision_endpoint_is_loopback(endpoint) {
+        format!(
+            "{endpoint} not reachable (start with `bobby serve --vision` to auto-spawn the proxy, or run `bobby vision-proxy` manually)"
+        )
+    } else {
+        format!(
+            "{endpoint} not reachable (verify the external vision endpoint is running)"
+        )
+    }
+}
+
+fn check_vision_provider(vision: &VisionConfig) -> Option<DoctorCheck> {
+    let name = vision.provider.as_deref()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if vision.providers.contains_key(name) {
+        Some(DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-provider".to_string(),
+            detail: format!("provider \"{name}\" configured"),
+        })
+    } else {
+        Some(DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "vision-provider".to_string(),
+            detail: format!(
+                "provider \"{name}\" is set but missing from [vision.providers]"
+            ),
+        })
+    }
+}
+
+fn check_vision_upstream_key(vision: &VisionConfig) -> Option<DoctorCheck> {
+    let (provider_name, profile) = vision.selected_provider()?;
+    let api_key_env = profile.api_key_env.as_deref()?.trim();
+    if api_key_env.is_empty() {
+        return None;
+    }
+    match std::env::var(api_key_env) {
+        Ok(value) if !value.is_empty() => Some(DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-upstream-key".to_string(),
+            detail: format!("{api_key_env} is set"),
+        }),
+        _ => Some(DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "vision-upstream-key".to_string(),
+            detail: format!(
+                "{api_key_env} is unset or empty (required for provider \"{provider_name}\")"
+            ),
+        }),
+    }
+}
+
+fn push_doctor_check(report: &mut DoctorReport, check: DoctorCheck) {
+    match check.status {
+        DoctorStatus::Ok => report.ok(&check.name, check.detail),
+        DoctorStatus::Warn => report.warn(&check.name, check.detail),
+        DoctorStatus::Fail => report.fail(&check.name, check.detail),
+    }
+}
+
 fn run_doctor(
     config_cli: Option<PathBuf>,
     bootstrap_cli: Option<PathBuf>,
@@ -863,6 +938,13 @@ fn run_doctor(
     };
 
     if let Some(config) = &config {
+        if let Some(check) = check_vision_provider(&config.vision) {
+            push_doctor_check(&mut report, check);
+        }
+        if let Some(check) = check_vision_upstream_key(&config.vision) {
+            push_doctor_check(&mut report, check);
+        }
+
         if let Some(endpoint) = config.vision.endpoint_url.as_deref() {
             match Url::parse(endpoint) {
                 Ok(url) => {
@@ -883,7 +965,7 @@ fn run_doctor(
                     } else {
                         report.warn(
                             "vision-endpoint",
-                            format!("{endpoint} not reachable (is `bobby vision-proxy` running?)"),
+                            vision_endpoint_unreachable_detail(endpoint),
                         );
                     }
                 }
@@ -1525,6 +1607,7 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use config::VisionProviderConfig;
 
     #[cfg(unix)]
     #[test]
@@ -1790,13 +1873,15 @@ mod tests {
     }
 
     impl DoctorEnvGuard {
-        const VARS: [&'static str; 6] = [
+        const VARS: [&'static str; 8] = [
             "AUTOMATION_RUNTIME_BROWSER_SELECTION",
             "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN",
             "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL",
             "AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES",
             "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT",
             "BOBBY_BROWSER_BOOTSTRAP_ENV",
+            "BOBBY_VISION_TOKEN",
+            "OPENAI_API_KEY",
         ];
 
         fn clear() -> Self {
@@ -1984,6 +2069,111 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
             }
             _ => panic!("unexpected vision-connect parse"),
         }
+    }
+
+    #[test]
+    fn vision_provider_check_warns_when_profile_missing() {
+        let vision = VisionConfig {
+            provider: Some("ghost".into()),
+            ..VisionConfig::default()
+        };
+        let check = check_vision_provider(&vision).unwrap();
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert_eq!(check.name, "vision-provider");
+        assert!(check.detail.contains("ghost"));
+    }
+
+    #[test]
+    fn vision_upstream_key_skipped_for_local_provider() {
+        let mut vision = VisionConfig::default();
+        vision.provider = Some("lmstudio".into());
+        vision.providers.insert(
+            "lmstudio".into(),
+            VisionProviderConfig {
+                base_url: "http://127.0.0.1:1234/v1".into(),
+                model: "local-model".into(),
+                api_key_env: None,
+            },
+        );
+        assert!(check_vision_upstream_key(&vision).is_none());
+    }
+
+    #[test]
+    fn vision_endpoint_unreachable_detail_distinguishes_loopback_from_external() {
+        let loopback = vision_endpoint_unreachable_detail("http://127.0.0.1:9100/vision");
+        assert!(loopback.contains("bobby serve --vision"));
+        assert!(loopback.contains("bobby vision-proxy"));
+
+        let external = vision_endpoint_unreachable_detail("https://vision.example.com/propose");
+        assert!(external.contains("external vision endpoint"));
+        assert!(!external.contains("auto-spawn"));
+    }
+
+    #[test]
+    fn doctor_warns_on_missing_vision_provider_profile() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"[vision]
+provider = "ghost"
+endpoint_url = "http://127.0.0.1:9100/vision"
+"#,
+        )
+        .unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.check("vision-provider").unwrap().status,
+            DoctorStatus::Warn
+        );
+        assert!(report.check("vision-upstream-key").is_none());
+    }
+
+    #[test]
+    fn doctor_warns_when_upstream_api_key_env_is_empty() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"[vision]
+provider = "openai"
+endpoint_url = "http://127.0.0.1:9100/vision"
+
+[vision.providers.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+        )
+        .unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.check("vision-upstream-key").unwrap().status,
+            DoctorStatus::Warn
+        );
+        assert!(report
+            .check("vision-upstream-key")
+            .unwrap()
+            .detail
+            .contains("OPENAI_API_KEY"));
     }
 
     #[test]
