@@ -4,8 +4,9 @@ use agent_client_protocol::{
     schema::v1::{
         AgentCapabilities, CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
         InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
-        PromptCapabilities, PromptRequest, PromptResponse, SessionNotification, SessionUpdate,
-        StopReason, TextContent,
+        PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+        RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, TextContent,
+        ToolCallUpdate, ToolCallUpdateFields,
     },
     Agent, Stdio,
 };
@@ -22,6 +23,8 @@ fn record(path: &PathBuf, event: &str) {
 #[tokio::main]
 async fn main() -> agent_client_protocol::Result<()> {
     let log = PathBuf::from(std::env::args().nth(1).expect("lifecycle log path"));
+    let mode = std::env::args().nth(2).unwrap_or_else(|| "success".into());
+    let initialize_mode = mode.clone();
     let new_log = log.clone();
     let close_log = log;
     Agent
@@ -30,8 +33,9 @@ async fn main() -> agent_client_protocol::Result<()> {
             async move |request: InitializeRequest, responder, _connection| {
                 responder.respond(
                     InitializeResponse::new(request.protocol_version).agent_capabilities(
-                        AgentCapabilities::new()
-                            .prompt_capabilities(PromptCapabilities::new().image(true)),
+                        AgentCapabilities::new().prompt_capabilities(
+                            PromptCapabilities::new().image(initialize_mode != "no-image"),
+                        ),
                     ),
                 )
             },
@@ -46,6 +50,24 @@ async fn main() -> agent_client_protocol::Result<()> {
         )
         .on_receive_request(
             async move |request: PromptRequest, responder, connection| {
+                if mode == "permission" {
+                    let permission = connection.send_request(RequestPermissionRequest::new(
+                        request.session_id.clone(),
+                        ToolCallUpdate::new(
+                            "vision-permission",
+                            ToolCallUpdateFields::new().title("Allow vision access?"),
+                        ),
+                        vec![PermissionOption::new(
+                            "allow",
+                            "Allow",
+                            PermissionOptionKind::AllowOnce,
+                        )],
+                    ));
+                    tokio::spawn(async move {
+                        let _ = permission.block_task().await;
+                    });
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
                 let digest = request
                     .prompt
                     .iter()
@@ -60,12 +82,22 @@ async fn main() -> agent_client_protocol::Result<()> {
                         _ => None,
                     })
                     .expect("packet evidence digest");
-                let body = serde_json::json!({
-                    "confidence": 0.98,
-                    "action": { "kind": "click", "x": 11.0, "y": 12.0 },
-                    "evidenceDigest": digest,
-                })
-                .to_string();
+                let body = match mode.as_str() {
+                    "malformed" => "not-json".to_owned(),
+                    "oversized" => "x".repeat(65 * 1024),
+                    "mismatched-evidence" => serde_json::json!({
+                        "confidence": 0.98,
+                        "action": { "kind": "click", "x": 11.0, "y": 12.0 },
+                        "evidenceDigest": "b".repeat(64),
+                    })
+                    .to_string(),
+                    _ => serde_json::json!({
+                        "confidence": 0.98,
+                        "action": { "kind": "click", "x": 11.0, "y": 12.0 },
+                        "evidenceDigest": digest,
+                    })
+                    .to_string(),
+                };
                 connection.send_notification(SessionNotification::new(
                     request.session_id,
                     SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
