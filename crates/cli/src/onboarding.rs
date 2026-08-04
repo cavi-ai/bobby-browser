@@ -562,36 +562,35 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }),
     });
 
-    let bin_dir = resolve_cli_bin_dir()?;
-    let bin_on_path = directory_on_path(&bin_dir);
-    let cli_label = if bin_on_path {
-        format!(
+    let cli_enabled = cli || use_defaults;
+    let cli_label = match resolve_cli_bin_dir() {
+        Ok(bin_dir) if directory_on_path(&bin_dir) => format!(
             "CLI on PATH: install bobby (+ mcp-gateway) to {}",
             bin_dir.display()
-        )
-    } else {
-        format!(
+        ),
+        Ok(bin_dir) => format!(
             "CLI on PATH: install bobby (+ mcp-gateway) to {} (add this dir to PATH)",
             bin_dir.display()
-        )
+        ),
+        Err(_) => {
+            "CLI on PATH: install bobby (+ mcp-gateway) to ~/.cargo/bin or ~/.local/bin".to_owned()
+        }
     };
     items.push(InstallItem {
         label: cli_label,
-        enabled: cli || use_defaults,
-        run: Box::new({
-            let dest = bin_dir.clone();
-            move || {
-                let (bobby, on_path) = install_cli_into(&dest)?;
-                remember_installed_cli(&bobby);
-                if on_path {
-                    Ok(format!("installed {}", bobby.display()))
-                } else {
-                    Ok(format!(
-                        "installed {} — add {} to PATH to run `bobby`",
-                        bobby.display(),
-                        dest.display()
-                    ))
-                }
+        enabled: cli_enabled,
+        run: Box::new(move || {
+            let dest = resolve_cli_bin_dir()?;
+            let (bobby, on_path) = install_cli_into(&dest)?;
+            remember_installed_cli(&bobby);
+            if on_path {
+                Ok(format!("installed {}", bobby.display()))
+            } else {
+                Ok(format!(
+                    "installed {} — add {} to PATH to run `bobby`",
+                    bobby.display(),
+                    dest.display()
+                ))
             }
         }),
     });
@@ -713,7 +712,8 @@ mod install_tests {
         let dest = tempfile::tempdir().unwrap();
         let (bobby, _) = install_cli_into(dest.path()).unwrap();
         assert!(bobby.is_file());
-        assert_eq!(bobby.file_name().unwrap(), "bobby");
+        let expected = if cfg!(windows) { "bobby.exe" } else { "bobby" };
+        assert_eq!(bobby.file_name().unwrap(), expected);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
