@@ -161,11 +161,12 @@ export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
 }
 
 function isSessionExecutionPolicy(value: unknown): value is SessionState["execution_policy"] {
-  return hasExactKeys(value, ["javascriptEvaluation", "visionAssist", "fingerprint", "humanize"])
+  return hasExactKeys(value, ["javascriptEvaluation", "visionAssist", "fingerprint", "humanize"], ["visionNode"])
     && typeof value.javascriptEvaluation === "boolean"
     && typeof value.visionAssist === "boolean"
     && typeof value.fingerprint === "boolean"
-    && typeof value.humanize === "boolean";
+    && typeof value.humanize === "boolean"
+    && optional(value, "visionNode", (node): node is string => boundedText(node, 128));
 }
 
 export function isSessionState(value: unknown): value is SessionState {

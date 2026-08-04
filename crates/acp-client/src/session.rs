@@ -1,4 +1,11 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use agent_client_protocol::{
     schema::{
@@ -207,8 +214,10 @@ async fn run_task(
 ) -> Result<AcpVisionReply, AcpClientError> {
     let output = Arc::new(Mutex::new(String::new()));
     let overflowed = Arc::new(Mutex::new(false));
+    let permission_requested = Arc::new(AtomicBool::new(false));
     let output_for_notification = Arc::clone(&output);
     let overflow_for_notification = Arc::clone(&overflowed);
+    let permission_for_request = Arc::clone(&permission_requested);
     let agent = AcpAgent::new(launch);
 
     agent_client_protocol::Client
@@ -233,6 +242,7 @@ async fn run_task(
         )
         .on_receive_request(
             async move |_request: RequestPermissionRequest, responder, _connection| {
+                permission_for_request.store(true, Ordering::Relaxed);
                 responder.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ))
@@ -278,6 +288,10 @@ async fn run_task(
                 .send_request(CloseSessionRequest::new(session_id.clone()))
                 .block_task()
                 .await;
+            if permission_requested.load(Ordering::Relaxed) {
+                close_result?;
+                return Ok(Err(AcpClientError::PermissionDenied));
+            }
             prompt_result?;
             close_result?;
 
