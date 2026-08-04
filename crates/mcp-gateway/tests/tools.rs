@@ -637,6 +637,34 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
     );
 }
 
+#[tokio::test]
+async fn session_create_accepts_and_preserves_a_named_vision_node() {
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+    let response = server
+        .handle_message(request(
+            62,
+            "tools/call",
+            json!({
+                "name":"session_create",
+                "arguments":{
+                    "profile":"fixture",
+                    "executionPolicy":{
+                        "visionAssist":true,
+                        "visionNode":"acp-codex"
+                    }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["execution_policy"]["visionNode"], "acp-codex",
+        "{response}"
+    );
+}
+
 /// A `WorkerFactory` that is never leased: `checkpoint_save` touches only the
 /// journal, so this exists to satisfy `PageRuntime::new`'s signature.
 struct UnusedFactory;

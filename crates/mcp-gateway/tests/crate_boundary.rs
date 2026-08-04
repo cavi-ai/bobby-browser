@@ -123,4 +123,9 @@ fn the_session_opt_in_is_advertised_as_a_types_shape() {
             "session_create does not advertise executionPolicy.{flag}: {schema}"
         );
     }
+    assert_eq!(
+        policy["visionNode"],
+        serde_json::json!({"type":"string","minLength":1,"maxLength":128}),
+        "session_create must advertise the named vision node selector: {schema}"
+    );
 }
