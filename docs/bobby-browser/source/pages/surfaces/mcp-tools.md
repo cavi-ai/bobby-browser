@@ -122,8 +122,11 @@ Every tool carries a human-readable `title` and MCP `annotations`
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so a
 host can gate or confirm calls without knowing the tool vocabulary. Read-only
 tools (`inspect`, `a11y_snapshot`, `cookie_get`, …) are marked
-`readOnlyHint: true`; boundary tools such as `intent_submit_and_verify` are
-marked destructive/non-idempotent accordingly.
+`readOnlyHint: true`; boundary tools `intent_submit_and_verify` and
+`intent_follow` are marked `destructiveHint: true` (hosts may confirm before
+calling; `intent_follow` is annotated conservatively even when `boundary` is
+false). Close/delete tools (`session_close`, `page_close`, `cookie_delete`)
+are also destructive.
 
 Tools that return structured content declare an `outputSchema` (always
 `type: object`), so a client can validate or render results without

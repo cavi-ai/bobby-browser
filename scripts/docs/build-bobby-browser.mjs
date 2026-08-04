@@ -21,7 +21,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 async function stampTree(root) {
   const relativePaths = await listFilesRecursive(root, root);
   for (const relativePath of relativePaths) {
-    if (!/\.(md|json)$/u.test(relativePath)) continue;
+    if (!/\.(md|json|ya?ml)$/u.test(relativePath)) continue;
     const absolute = path.join(root, relativePath);
     const original = await readFile(absolute, "utf8");
     const stamped = stampVersionTokens(original);
@@ -61,6 +61,15 @@ export async function buildBobbyBrowserDocs(root = REPO_ROOT, releaseInput) {
     path.join(sourceRoot, "navigation.json"),
     path.join(outputRoot, "navigation.json"),
   );
+  try {
+    await cp(path.join(sourceRoot, "openapi"), path.join(outputRoot, "openapi"), {
+      recursive: true,
+    });
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
   await stampTree(outputRoot);
 
   const relativePaths = await listFilesRecursive(outputRoot, outputRoot);

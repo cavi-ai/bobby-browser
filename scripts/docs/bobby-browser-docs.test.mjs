@@ -97,6 +97,23 @@ test("stamped docs substitute product and interface version tokens", async () =>
   });
 });
 
+test("build publishes navigated OpenAPI assets", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    const openapi = await readFile(
+      path.join(fixtureRoot, OUTPUT_REL, "openapi/v1.yaml"),
+      "utf8",
+    );
+    assert.match(openapi, /^openapi: 3\.1\.0$/mu);
+    assert.doesNotMatch(openapi, /\{\{(?:PRODUCT|INTERFACE)_VERSION\}\}/);
+    assert.match(
+      openapi,
+      new RegExp(`^\\s*version:\\s*"${DOCUMENTED_VERSION.replaceAll(".", "\\.")}"\\s*$`, "mu"),
+    );
+    await verifyBobbyBrowserDocs(fixtureRoot, RELEASE);
+  });
+});
+
 test("verify fails when a page is tampered", async () => {
   await withSourceFixture(async (fixtureRoot) => {
     await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
@@ -186,7 +203,7 @@ test("docs source pins versions only through tokens", async () => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) files.push(...(await collect(absolute)));
-      else if (entry.isFile() && /\.(md|json)$/u.test(entry.name)) files.push(absolute);
+      else if (entry.isFile() && /\.(md|json|ya?ml)$/u.test(entry.name)) files.push(absolute);
     }
     return files;
   }

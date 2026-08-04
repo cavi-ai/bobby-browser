@@ -267,6 +267,12 @@ Vision-assisted resolution is **deny-by-default**. All three must pass:
 
 Otherwise vision escalation is denied (`VisionAssistDenied` / failed).
 
+Capability + session grant is **not** sufficient for functional vision assist:
+the configured endpoint must be **reachable** at runtime. A granted principal
+and an opted-in session still fail closed when the provider is down or
+misconfigured — `bobby doctor` warns when `[vision].endpoint_url` does not
+accept a TCP connection.
+
 When gates pass and deterministic resolution sticks, the engine captures a real
 PNG via `screenshot_bytes` (Chromium and Firefox) and posts it to the provider.
 Empty frames are not sent.
@@ -282,6 +288,36 @@ endpoint_url = "https://vision.example.test/propose" # https, or http on loopbac
 token_env = "BOBBY_VISION_TOKEN"                  # env var holding the bearer (never in the file)
 timeout_ms = 15000
 ```
+
+### Local OpenAI via `bobby vision-proxy`
+
+For local/dev with OpenAI, run the loopback adapter in a **second process**
+before (or alongside) `bobby serve`:
+
+```bash
+export BOBBY_VISION_TOKEN=…   # bobby → proxy bearer
+export OPENAI_API_KEY=…       # proxy → OpenAI
+bobby vision-proxy            # default http://127.0.0.1:9100/vision
+```
+
+Then point config at the proxy:
+
+```toml
+[vision]
+endpoint_url = "http://127.0.0.1:9100/vision"
+token_env = "BOBBY_VISION_TOKEN"
+timeout_ms = 15000
+```
+
+The proxy maps propose/extract requests to OpenAI and returns the wire shapes
+below. Optional flags: `--bind`, `--path`, `--model`, `--openai-base-url`
+(`--upstream` is `openai` only in v1).
+
+**Manual check:** with both env vars set and `bobby vision-proxy` running,
+uncomment the loopback `[vision]` block, start the runtime, open a session with
+`visionAssist: true` under a principal with `vision:assist`, force a stuck
+locate (or call `extract_structured`), and confirm escalation or structured
+extract succeeds.
 
 The runtime `POST`s JSON:
 

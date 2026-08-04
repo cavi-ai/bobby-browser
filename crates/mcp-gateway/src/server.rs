@@ -381,15 +381,34 @@ impl Server {
                         )),
                         FrameStatus::Complete => match serde_json::from_slice::<Value>(&frame) {
                             Ok(message) => {
-                                let output = output.clone();
-                                pending.push(Box::pin(async move {
+                                // Handshake frames (and any traffic before Ready) must
+                                // finish before the next frame is dispatched. Concurrent
+                                // `pending` handlers otherwise let tools/call observe
+                                // AwaitingInitializedNotification and return -32002 when
+                                // the client wrote initialized + tools/call back-to-back.
+                                let method = message
+                                    .get("method")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("");
+                                let serialize = matches!(
+                                    method,
+                                    "initialize" | "notifications/initialized"
+                                ) || *self.lifecycle.lock().await != Lifecycle::Ready;
+                                if serialize {
                                     let response = self.handle_message(message).await;
-                                    write_response(&output, response).await
-                                }));
-                                if let Some(Some(result)) = pending.next().now_or_never() {
-                                    result?;
+                                    write_response(&output, response).await?;
+                                    None
+                                } else {
+                                    let output = output.clone();
+                                    pending.push(Box::pin(async move {
+                                        let response = self.handle_message(message).await;
+                                        write_response(&output, response).await
+                                    }));
+                                    if let Some(Some(result)) = pending.next().now_or_never() {
+                                        result?;
+                                    }
+                                    None
                                 }
-                                None
                             }
                             Err(_) => Some(error(Value::Null, PARSE_ERROR, "Parse error", None)),
                         },
