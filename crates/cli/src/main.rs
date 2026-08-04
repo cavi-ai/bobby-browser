@@ -5,21 +5,33 @@ mod vision_child;
 mod vision_connect;
 
 use anyhow::{Context, Result};
-use companion_core::{run_native_host, NativeHostConfig};
+use companion_core::{
+    run_native_host_with_enroll, EnrollFinalize, EnrollHostError, NativeConnectRequest,
+    NativeHostConfig, NativeHostEnroll,
+};
 use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig};
-use firefox_companion::selection::NativeHostDescriptor;
+use firefox_companion::read_bidi_url_from_profile_dir;
+#[cfg(test)]
+use firefox_companion::selection::write_enroll_defaults;
 pub use firefox_companion::selection::{
-    compose_worker_factory, compose_worker_factory_with_enrolled_firefox,
-    compose_worker_factory_with_pairing_observer, default_selection_path, parse_selection,
-    persist_browser_selection, resolve_browser_selection, start_firefox_profile_enrollment,
-    EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig, SelectionSource, SELECTION_ENV,
+    build_enrolled_browser_selection, compose_worker_factory,
+    compose_worker_factory_with_enrolled_firefox, compose_worker_factory_with_pairing_observer,
+    default_selection_path, parse_selection, persist_browser_selection, resolve_browser_selection,
+    start_firefox_profile_enrollment, EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig,
+    SelectionSource, SELECTION_ENV,
+};
+use firefox_companion::selection::{
+    enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults, FirefoxProfileEnrollment,
+    NativeHostDescriptor,
 };
 use std::{
+    future::Future,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
+use tokio::sync::Mutex;
 use url::Url;
 use vision_child::{
     decide_vision_child, enforce_force_on_spawn, ManagedVisionProxy, VisionChildDecision,
@@ -694,25 +706,16 @@ async fn run_firefox_profile_enroll(
         .wait()
         .await
         .map_err(|error| anyhow::anyhow!("{}", error.message))?;
-    let profile_id = enrolled.profile_id().0.to_string();
-    let selection = serde_json::json!({
-        "preference": { "mode": "exact", "engine": "firefox", "profileId": profile_id },
-        "firefox": [{
-            "profileId": profile_id,
-            "bidiUrl": bidi_url,
-            "profileDir": profile_dir,
-            "companionBind": bind.to_string(),
-            "descriptorPath": descriptor,
-            "timeoutMs": 30_000,
-            "pairingCodeTtlMs": 300_000,
-            "attachmentTtlMs": 300_000,
-        }],
-    });
-    println!("{selection}");
-    let persist = default_selection_path().and_then(|path| {
-        let parsed = serde_json::from_value(selection)?;
-        persist_browser_selection(&path, &parsed).map(|()| path)
-    });
+    let selection = build_enrolled_browser_selection(
+        enrolled.profile_id(),
+        &bidi_url,
+        &profile_dir,
+        bind,
+        &descriptor,
+    );
+    println!("{}", serde_json::to_string(&selection)?);
+    let persist = default_selection_path()
+        .and_then(|path| persist_browser_selection(&path, &selection).map(|()| path));
     match persist {
         Ok(path) => eprintln!(
             "Enrollment paired and persisted to {}. `bobby serve`, the MCP gateway, and \
@@ -1663,22 +1666,388 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
     if !descriptor_path.is_absolute() {
         anyhow::bail!("firefox native-host descriptor path must be absolute");
     }
-    let descriptor: NativeHostDescriptor =
-        serde_json::from_slice(&std::fs::read(descriptor_path)?)?;
-    run_native_host(
+    let config = match std::fs::read(&descriptor_path) {
+        Ok(bytes) => {
+            let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes)?;
+            Some(NativeHostConfig::new(
+                descriptor.endpoint,
+                descriptor.pairing_code,
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let config_dir = descriptor_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("firefox native-host descriptor path has no parent"))?
+        .to_path_buf();
+    let enroll = NativeHostFirefoxEnroll::new(config_dir, Duration::from_secs(120));
+    run_native_host_with_enroll(
         tokio::io::stdin(),
         tokio::io::stdout(),
-        NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code),
+        config,
+        Some(enroll),
     )
     .await?;
     Ok(())
 }
 
+struct NativeHostFirefoxEnroll {
+    defaults_path: PathBuf,
+    timeout: Duration,
+    state: Mutex<NativeHostFirefoxEnrollState>,
+}
+
+#[derive(Default)]
+struct NativeHostFirefoxEnrollState {
+    enrollment: Option<FirefoxProfileEnrollment>,
+    /// True when enroll reused a reachable serve descriptor (no temp bind).
+    used_live_descriptor: bool,
+    bidi_url: Option<String>,
+    defaults: Option<FirefoxEnrollDefaults>,
+}
+
+impl NativeHostFirefoxEnroll {
+    fn new(config_dir: PathBuf, timeout: Duration) -> Self {
+        Self {
+            defaults_path: enroll_defaults_path(&config_dir),
+            timeout,
+            state: Mutex::new(NativeHostFirefoxEnrollState::default()),
+        }
+    }
+}
+
+/// Prefer a serve-published descriptor when its endpoint is already accepting.
+fn load_usable_live_descriptor(path: &Path) -> Option<NativeHostConfig> {
+    let bytes = std::fs::read(path).ok()?;
+    let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes).ok()?;
+    if descriptor.pairing_code.is_empty() || descriptor.pairing_code.len() > 512 {
+        return None;
+    }
+    let url = Url::parse(&descriptor.endpoint).ok()?;
+    if url.scheme() != "ws" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false);
+    if !loopback {
+        return None;
+    }
+    let port = url.port()?;
+    let addr = if host.eq_ignore_ascii_case("localhost") {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    } else {
+        SocketAddr::new(host.parse().ok()?, port)
+    };
+    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+        return None;
+    }
+    Some(NativeHostConfig::new(
+        descriptor.endpoint,
+        descriptor.pairing_code,
+    ))
+}
+
+fn companion_bind_in_use(addr: SocketAddr) -> bool {
+    match std::net::TcpListener::bind(addr) {
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => true,
+        Ok(listener) => {
+            drop(listener);
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+impl NativeHostEnroll for NativeHostFirefoxEnroll {
+    #[allow(clippy::manual_async_fn)]
+    fn enroll_and_wait_for_pair(
+        &self,
+        _pair: NativeConnectRequest,
+    ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+        async move {
+            let defaults = read_enroll_defaults(&self.defaults_path)
+                .map_err(|_| EnrollHostError::DefaultsMissing)?;
+            let bidi_url = read_bidi_url_from_profile_dir(&defaults.profile_dir)
+                .map_err(|_| EnrollHostError::BidiMissing)?;
+
+            // Day-2 Re-pair: serve already holds the bind and published a descriptor.
+            // Reachability probe is blocking TCP — keep it off the async runtime.
+            let descriptor_path = defaults.descriptor_path.clone();
+            let live =
+                tokio::task::spawn_blocking(move || load_usable_live_descriptor(&descriptor_path))
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(config) = live {
+                let mut state = self.state.lock().await;
+                state.enrollment = None;
+                state.used_live_descriptor = true;
+                state.bidi_url = Some(bidi_url.to_string());
+                state.defaults = Some(defaults);
+                return Ok(config);
+            }
+
+            // First-time enroll: bootstrap a temporary companion on the defaults bind.
+            let enrollment = match start_firefox_profile_enrollment(
+                FirefoxProfileEnrollmentConfig {
+                    companion_bind: defaults.companion_bind,
+                    descriptor_path: defaults.descriptor_path.clone(),
+                    timeout: self.timeout,
+                    pairing_code_ttl: Duration::from_secs(300),
+                    attachment_ttl: Duration::from_secs(300),
+                },
+                Arc::new(|_| {}),
+            )
+            .await
+            {
+                Ok(enrollment) => enrollment,
+                Err(_) if companion_bind_in_use(defaults.companion_bind) => {
+                    return Err(EnrollHostError::BindInUse);
+                }
+                Err(_) => return Err(EnrollHostError::ListenerUnavailable),
+            };
+            let descriptor: NativeHostDescriptor = serde_json::from_slice(
+                &std::fs::read(&defaults.descriptor_path)
+                    .map_err(|_| EnrollHostError::ListenerUnavailable)?,
+            )
+            .map_err(|_| EnrollHostError::ListenerUnavailable)?;
+            let config = NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code);
+            let mut state = self.state.lock().await;
+            state.enrollment = Some(enrollment);
+            state.used_live_descriptor = false;
+            state.bidi_url = Some(bidi_url.to_string());
+            state.defaults = Some(defaults);
+            Ok(config)
+        }
+    }
+
+    #[allow(clippy::manual_async_fn)]
+    fn complete_enrollment(
+        &self,
+        pair: &NativeConnectRequest,
+    ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
+        let profile_id = pair.profile_id.clone();
+        async move {
+            let (enrollment, bidi_url, defaults, used_live) = {
+                let mut state = self.state.lock().await;
+                (
+                    state.enrollment.take(),
+                    state
+                        .bidi_url
+                        .take()
+                        .ok_or(EnrollHostError::ListenerUnavailable)?,
+                    state
+                        .defaults
+                        .take()
+                        .ok_or(EnrollHostError::DefaultsMissing)?,
+                    state.used_live_descriptor,
+                )
+            };
+
+            if used_live {
+                let selection = build_enrolled_browser_selection(
+                    &profile_id,
+                    &bidi_url,
+                    &defaults.profile_dir,
+                    defaults.companion_bind,
+                    &defaults.descriptor_path,
+                );
+                let path =
+                    default_selection_path().map_err(|_| EnrollHostError::ListenerUnavailable)?;
+                persist_browser_selection(&path, &selection)
+                    .map_err(|_| EnrollHostError::ListenerUnavailable)?;
+                return Ok(EnrollFinalize::KeepRelay);
+            }
+
+            let enrollment = enrollment.ok_or(EnrollHostError::ListenerUnavailable)?;
+            let enrolled = enrollment.wait().await.map_err(|error| {
+                if error.message.to_ascii_lowercase().contains("timed out") {
+                    EnrollHostError::Timeout
+                } else {
+                    EnrollHostError::ListenerUnavailable
+                }
+            })?;
+            if enrolled.profile_id() != &profile_id {
+                return Err(EnrollHostError::ListenerUnavailable);
+            }
+            let selection = build_enrolled_browser_selection(
+                enrolled.profile_id(),
+                &bidi_url,
+                &defaults.profile_dir,
+                defaults.companion_bind,
+                &defaults.descriptor_path,
+            );
+            let path =
+                default_selection_path().map_err(|_| EnrollHostError::ListenerUnavailable)?;
+            persist_browser_selection(&path, &selection)
+                .map_err(|_| EnrollHostError::ListenerUnavailable)?;
+            // Drop the temporary companion so day-2 `bobby serve` can bind.
+            drop(enrolled);
+            Ok(EnrollFinalize::ReleaseListener)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use companion_protocol::{
+        BrowserEngine, BrowserIdentity, CompanionCapabilities, PROTOCOL_VERSION,
+    };
     use config::VisionProviderConfig;
     use std::collections::BTreeMap;
+    use types::{CompanionId, ProfileId};
+
+    fn sample_native_connect_request() -> NativeConnectRequest {
+        NativeConnectRequest {
+            protocol_version: PROTOCOL_VERSION,
+            companion_id: CompanionId::new(),
+            profile_id: ProfileId::new(),
+            identity: BrowserIdentity {
+                engine: BrowserEngine::Firefox,
+                browser_name: "Firefox".into(),
+                browser_version: "stable".into(),
+                os: "macos".into(),
+                profile_label: "default-release".into(),
+            },
+            capabilities: CompanionCapabilities {
+                observe: true,
+                navigate: true,
+                native_input: false,
+                tabs: true,
+                frames: true,
+                native_dialogs: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn native_host_enroll_maps_missing_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let error = enroll
+            .enroll_and_wait_for_pair(sample_native_connect_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error, EnrollHostError::DefaultsMissing);
+        assert_eq!(error.code(), "defaultsMissing");
+    }
+
+    #[tokio::test]
+    async fn native_host_enroll_maps_missing_bidi_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_dir = root.path().join("firefox-profile");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let defaults = FirefoxEnrollDefaults {
+            profile_dir,
+            companion_bind: "127.0.0.1:9876".parse().unwrap(),
+            descriptor_path: root.path().join("firefox-native-host-descriptor.json"),
+        };
+        write_enroll_defaults(&enroll_defaults_path(root.path()), &defaults).unwrap();
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let error = enroll
+            .enroll_and_wait_for_pair(sample_native_connect_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error, EnrollHostError::BidiMissing);
+        assert_eq!(error.code(), "bidiMissing");
+    }
+
+    fn write_test_bidi_endpoint(profile_dir: &Path) {
+        std::fs::create_dir_all(profile_dir).unwrap();
+        std::fs::write(
+            profile_dir.join("WebDriverBiDiServer.json"),
+            br#"{"ws_host":"127.0.0.1","ws_port":9222}"#,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_host_enroll_uses_live_descriptor_without_temp_bind() {
+        use companion_core::{CompanionServer, CompanionServerConfig};
+
+        let root = tempfile::tempdir().unwrap();
+        let profile_dir = root.path().join("firefox-profile");
+        write_test_bidi_endpoint(&profile_dir);
+
+        let server = CompanionServer::bind_loopback(CompanionServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            pairing_code_ttl: Duration::from_secs(60),
+            attachment_ttl: Duration::from_secs(300),
+        })
+        .await
+        .unwrap();
+        let bind = server.local_addr();
+        let pairing_code = server.registry().issue_pairing_code().await;
+        let descriptor_path = root.path().join("firefox-native-host-descriptor.json");
+        let descriptor = NativeHostDescriptor {
+            endpoint: format!("ws://{bind}/v1/companion"),
+            pairing_code: pairing_code.clone(),
+            ownership_id: uuid::Uuid::new_v4().to_string(),
+        };
+        std::fs::write(&descriptor_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+
+        let defaults = FirefoxEnrollDefaults {
+            profile_dir,
+            // Same bind serve holds — bootstrap would AddrInUse if attempted.
+            companion_bind: bind,
+            descriptor_path,
+        };
+        write_enroll_defaults(&enroll_defaults_path(root.path()), &defaults).unwrap();
+
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let config = enroll
+            .enroll_and_wait_for_pair(sample_native_connect_request())
+            .await
+            .expect("live descriptor enroll must succeed without temp bind");
+        let state = enroll.state.lock().await;
+        assert!(state.used_live_descriptor);
+        assert!(state.enrollment.is_none());
+        drop(state);
+
+        // Config must authenticate against the live listener.
+        let request = config
+            .pair_request(sample_native_connect_request())
+            .expect("pair request from live descriptor");
+        let _ = request;
+        assert!(pairing_code.len() > 8);
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn native_host_enroll_maps_bind_in_use_without_live_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_dir = root.path().join("firefox-profile");
+        write_test_bidi_endpoint(&profile_dir);
+
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = holder.local_addr().unwrap();
+        let defaults = FirefoxEnrollDefaults {
+            profile_dir,
+            companion_bind: bind,
+            // No descriptor file — live path unavailable.
+            descriptor_path: root.path().join("missing-descriptor.json"),
+        };
+        write_enroll_defaults(&enroll_defaults_path(root.path()), &defaults).unwrap();
+
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let error = enroll
+            .enroll_and_wait_for_pair(sample_native_connect_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error, EnrollHostError::BindInUse);
+        assert_eq!(error.code(), "bindInUse");
+        drop(holder);
+    }
 
     #[cfg(unix)]
     #[test]

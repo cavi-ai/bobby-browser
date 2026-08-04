@@ -686,6 +686,61 @@ pub fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
 
 pub const SELECTION_ENV: &str = "AUTOMATION_RUNTIME_BROWSER_SELECTION";
 
+/// Default loopback bind address written at companion install for later
+/// enrollment (CLI or native-host `enrollProfile`).
+pub const DEFAULT_COMPANION_BIND: &str = "127.0.0.1:9876";
+
+/// Install-time defaults consumed by Task 5 native-host enroll and the CLI
+/// enroll command when profile paths are not passed explicitly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirefoxEnrollDefaults {
+    pub profile_dir: PathBuf,
+    pub companion_bind: SocketAddr,
+    pub descriptor_path: PathBuf,
+}
+
+pub fn enroll_defaults_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("firefox-enroll-defaults.json")
+}
+
+pub fn write_enroll_defaults(path: &Path, defaults: &FirefoxEnrollDefaults) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| anyhow::anyhow!("failed to create {}: {error}", parent.display()))?;
+    }
+    let pending = path.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
+    let write = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&pending)?;
+        serde_json::to_writer_pretty(&mut file, defaults)?;
+        use std::io::Write;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&pending, path)?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if write.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    write
+}
+
+pub fn read_enroll_defaults(path: &Path) -> Result<FirefoxEnrollDefaults> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!("enroll defaults {} unreadable: {error}", path.display())
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("enroll defaults {} is invalid: {error}", path.display()))
+}
+
 /// Where a resolved browser selection came from. Reported by `bobby doctor`
 /// so operators can tell env overrides apart from the persisted enrollment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -750,6 +805,35 @@ pub fn resolve_browser_selection_with(
     Ok((BrowserSelectionConfig::default(), SelectionSource::Default))
 }
 
+/// Build the browser-selection document produced after a successful Firefox
+/// profile enrollment. Shared by the CLI enroll command and (Task 5) the
+/// native-host `enrollProfile` handler so both paths emit identical wire JSON.
+pub fn build_enrolled_browser_selection(
+    profile_id: &ProfileId,
+    bidi_url: &str,
+    profile_dir: &Path,
+    companion_bind: SocketAddr,
+    descriptor_path: &Path,
+) -> BrowserSelectionConfig {
+    let profile_id = profile_id.0.to_string();
+    BrowserSelectionConfig {
+        preference: EnginePreferenceConfig::Exact {
+            engine: BrowserEngineConfig::Firefox,
+            profile_id: Some(profile_id.clone()),
+        },
+        firefox: vec![FirefoxCompanionConfig {
+            profile_id,
+            bidi_url: bidi_url.to_owned(),
+            profile_dir: profile_dir.to_path_buf(),
+            companion_bind: companion_bind.to_string(),
+            descriptor_path: descriptor_path.to_path_buf(),
+            timeout_ms: 30_000,
+            pairing_code_ttl_ms: 300_000,
+            attachment_ttl_ms: 300_000,
+        }],
+    }
+}
+
 /// Persist a selection so subsequent serve/gateway/doctor runs resolve it
 /// without any environment wiring. Written atomically with owner-only
 /// permissions on Unix: the contents locate a pairing endpoint and profile.
@@ -787,6 +871,38 @@ pub fn persist_browser_selection(path: &Path, selection: &BrowserSelectionConfig
 mod tests {
     use super::*;
     use types::SessionId;
+
+    #[test]
+    fn build_enrolled_browser_selection_matches_wire_shape() {
+        let profile_id = ProfileId(uuid::Uuid::nil());
+        let selection = build_enrolled_browser_selection(
+            &profile_id,
+            "ws://127.0.0.1:9222/session",
+            Path::new("/tmp/firefox-profile"),
+            "127.0.0.1:9876".parse().unwrap(),
+            Path::new("/tmp/descriptor.json"),
+        );
+        let value = serde_json::to_value(&selection).unwrap();
+        assert_eq!(value["preference"]["mode"], "exact");
+        assert_eq!(value["preference"]["engine"], "firefox");
+        assert_eq!(
+            value["preference"]["profileId"],
+            "00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(
+            value["firefox"][0]["bidiUrl"],
+            "ws://127.0.0.1:9222/session"
+        );
+        assert_eq!(value["firefox"][0]["profileDir"], "/tmp/firefox-profile");
+        assert_eq!(value["firefox"][0]["companionBind"], "127.0.0.1:9876");
+        assert_eq!(
+            value["firefox"][0]["descriptorPath"],
+            "/tmp/descriptor.json"
+        );
+        assert_eq!(value["firefox"][0]["timeoutMs"], 30_000);
+        assert_eq!(value["firefox"][0]["pairingCodeTtlMs"], 300_000);
+        assert_eq!(value["firefox"][0]["attachmentTtlMs"], 300_000);
+    }
 
     #[test]
     fn absent_selection_configuration_requires_firefox_without_fallback() {
@@ -1272,5 +1388,26 @@ mod tests {
         let (resolved, source) = resolve_browser_selection_with(None, Some(&path)).unwrap();
         assert_eq!(source, SelectionSource::Persisted(path));
         assert_eq!(resolved, selection);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enroll_defaults_roundtrip_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("firefox-enroll-defaults.json");
+        let defaults = FirefoxEnrollDefaults {
+            profile_dir: root.path().join("firefox-profile"),
+            companion_bind: DEFAULT_COMPANION_BIND.parse().unwrap(),
+            descriptor_path: root.path().join("firefox-native-host-descriptor.json"),
+        };
+
+        write_enroll_defaults(&path, &defaults).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(read_enroll_defaults(&path).unwrap(), defaults);
     }
 }

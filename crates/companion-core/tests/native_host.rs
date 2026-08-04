@@ -1,8 +1,8 @@
 use companion_core::{
-    encode_native_message, read_native_message, run_native_host, validate_extension_message,
-    validate_server_message, write_native_message, CompanionServer, CompanionServerConfig,
-    NativeConnectRequest, NativeHostConfig, NativeHostError, NativeReconnectBackoff,
-    MAX_NATIVE_MESSAGE_BYTES,
+    encode_native_message, read_native_message, run_native_host, run_native_host_with_enroll,
+    validate_extension_message, validate_server_message, write_native_message, CompanionServer,
+    CompanionServerConfig, EnrollFinalize, EnrollHostError, NativeConnectRequest, NativeHostConfig,
+    NativeHostEnroll, NativeHostError, NativeReconnectBackoff, MAX_NATIVE_MESSAGE_BYTES,
 };
 use companion_protocol::{
     ActionRequest, ActionResult, BrowserEngine, BrowserIdentity, BrowserTarget,
@@ -11,8 +11,13 @@ use companion_protocol::{
 };
 use serde_json::json;
 use std::{
+    future::Future,
     net::SocketAddr,
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -518,4 +523,341 @@ async fn native_eof_cancels_connection_attempts_and_backoff_promptly() {
         .expect("native EOF must cancel connection attempts and backoff")
         .unwrap();
     assert!(result.is_ok());
+}
+
+#[test]
+fn enroll_profile_request_decodes_empty_input() {
+    let value = json!({ "kind": "enrollProfile", "input": {} });
+    let request = companion_core::decode_native_request(value).expect("enrollProfile");
+    assert!(matches!(
+        request,
+        companion_core::NativeRequest::EnrollProfile(_)
+    ));
+}
+
+#[test]
+fn enroll_profile_request_rejects_secret_fields() {
+    let value = json!({
+        "kind": "enrollProfile",
+        "input": { "pairingCode": "nope" }
+    });
+    assert!(matches!(
+        companion_core::decode_native_request(value),
+        Err(NativeHostError::InvalidProtocol)
+    ));
+}
+
+struct FakeEnroll {
+    config: NativeHostConfig,
+    completed: Arc<AtomicBool>,
+}
+
+impl NativeHostEnroll for FakeEnroll {
+    fn enroll_and_wait_for_pair(
+        &self,
+        _pair: NativeConnectRequest,
+    ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+        std::future::ready(Ok(self.config.clone()))
+    }
+
+    fn complete_enrollment(
+        &self,
+        _pair: &NativeConnectRequest,
+    ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
+        self.completed.store(true, Ordering::SeqCst);
+        std::future::ready(Ok(EnrollFinalize::ReleaseListener))
+    }
+}
+
+#[tokio::test]
+async fn enroll_profile_then_pair_emits_enroll_ok_via_enroll_trait() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code.clone(),
+    );
+    let completed = Arc::new(AtomicBool::new(false));
+    let enroll = FakeEnroll {
+        config,
+        completed: Arc::clone(&completed),
+    };
+    let connect = connect_request();
+    let enroll_frame = json!({ "kind": "enrollProfile", "input": {} });
+    let pair_frame = json!({ "kind": "pair", "input": connect });
+
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host_with_enroll(
+        host_reader,
+        host_writer,
+        None,
+        Some(enroll),
+    ));
+
+    write_native_message(&mut extension_stream, &enroll_frame)
+        .await
+        .unwrap();
+    write_native_message(&mut extension_stream, &pair_frame)
+        .await
+        .unwrap();
+
+    let paired = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    // complete_enrollment runs before paired is written to the extension.
+    assert!(completed.load(Ordering::SeqCst));
+    assert_eq!(paired["kind"], "paired");
+    assert!(!serde_json::to_string(&paired)
+        .unwrap()
+        .contains(&pairing_code));
+
+    let status = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status,
+        json!({ "kind": "nativeStatus", "output": { "state": "enrollOk" } })
+    );
+
+    let result = tokio::time::timeout(Duration::from_secs(2), host)
+        .await
+        .expect("enroll path must exit after enrollOk")
+        .unwrap();
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn enroll_persist_failure_does_not_emit_paired() {
+    struct PersistFailEnroll {
+        config: NativeHostConfig,
+    }
+    impl NativeHostEnroll for PersistFailEnroll {
+        fn enroll_and_wait_for_pair(
+            &self,
+            _pair: NativeConnectRequest,
+        ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+            std::future::ready(Ok(self.config.clone()))
+        }
+
+        fn complete_enrollment(
+            &self,
+            _pair: &NativeConnectRequest,
+        ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
+            std::future::ready(Err(EnrollHostError::ListenerUnavailable))
+        }
+    }
+
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host_with_enroll(
+        host_reader,
+        host_writer,
+        None,
+        Some(PersistFailEnroll { config }),
+    ));
+
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "enrollProfile", "input": {} }),
+    )
+    .await
+    .unwrap();
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "pair", "input": connect_request() }),
+    )
+    .await
+    .unwrap();
+
+    let status = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "kind": "nativeStatus",
+            "output": { "state": "enrollFailed", "code": "listenerUnavailable" }
+        })
+    );
+    assert_ne!(status["kind"], "paired");
+    let result = host.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "enrollFailed must exit cleanly, not as InvalidProtocol: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn enroll_profile_reports_defaults_missing_from_enroll_trait() {
+    struct FailingEnroll;
+    impl NativeHostEnroll for FailingEnroll {
+        fn enroll_and_wait_for_pair(
+            &self,
+            _pair: NativeConnectRequest,
+        ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+            std::future::ready(Err(EnrollHostError::DefaultsMissing))
+        }
+
+        fn complete_enrollment(
+            &self,
+            _pair: &NativeConnectRequest,
+        ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
+            std::future::ready(Ok(EnrollFinalize::ReleaseListener))
+        }
+    }
+
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host_with_enroll(
+        host_reader,
+        host_writer,
+        None,
+        Some(FailingEnroll),
+    ));
+
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "enrollProfile", "input": {} }),
+    )
+    .await
+    .unwrap();
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "pair", "input": connect_request() }),
+    )
+    .await
+    .unwrap();
+
+    let status = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "kind": "nativeStatus",
+            "output": { "state": "enrollFailed", "code": "defaultsMissing" }
+        })
+    );
+    host.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn enroll_keep_relay_leaves_host_running_after_enroll_ok() {
+    struct KeepRelayEnroll {
+        config: NativeHostConfig,
+    }
+    impl NativeHostEnroll for KeepRelayEnroll {
+        fn enroll_and_wait_for_pair(
+            &self,
+            _pair: NativeConnectRequest,
+        ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+            std::future::ready(Ok(self.config.clone()))
+        }
+
+        fn complete_enrollment(
+            &self,
+            _pair: &NativeConnectRequest,
+        ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
+            std::future::ready(Ok(EnrollFinalize::KeepRelay))
+        }
+    }
+
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let mut host = tokio::spawn(run_native_host_with_enroll(
+        host_reader,
+        host_writer,
+        None,
+        Some(KeepRelayEnroll { config }),
+    ));
+
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "enrollProfile", "input": {} }),
+    )
+    .await
+    .unwrap();
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "pair", "input": connect_request() }),
+    )
+    .await
+    .unwrap();
+
+    let paired = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(paired["kind"], "paired");
+    let status = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status,
+        json!({ "kind": "nativeStatus", "output": { "state": "enrollOk" } })
+    );
+
+    // Must not double-write the initial paired frame after enrollOk.
+    let third = tokio::time::timeout(
+        Duration::from_millis(100),
+        read_native_message(&mut extension_stream),
+    )
+    .await;
+    assert!(
+        third.is_err()
+            || matches!(
+                third.as_ref().ok().and_then(|r| r.as_ref().ok()),
+                Some(None)
+            ),
+        "KeepRelay must not emit a second paired after enrollOk; got {third:?}"
+    );
+
+    // Live path must not exit after enrollOk — drop the extension side to finish.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut host)
+            .await
+            .is_err(),
+        "KeepRelay enroll must leave the native host running"
+    );
+    drop(extension_stream);
+    let _ = tokio::time::timeout(Duration::from_secs(2), host)
+        .await
+        .expect("host exits after native close")
+        .unwrap();
 }

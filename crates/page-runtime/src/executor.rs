@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use chrono::Utc;
 use thiserror::Error;
@@ -227,17 +228,42 @@ impl PageRuntime {
             },
             None => None,
         };
-        let mut execution = match self
-            .adaptive
-            .execute(&envelope, &lease, page_state, &gate)
-            .await
+        // The envelope deadline is a real bound, not an admission formality:
+        // race the command against it so a hung browser call fails the
+        // command (and only that command) instead of parking it forever.
+        let remaining = (envelope.deadline - Utc::now())
+            .to_std()
+            .unwrap_or(StdDuration::ZERO);
+        let mut execution = match tokio::time::timeout(
+            remaining,
+            self.adaptive.execute(&envelope, &lease, page_state, &gate),
+        )
+        .await
         {
-            Ok(execution) => execution,
-            Err(failure) => {
+            Ok(Ok(execution)) => execution,
+            Ok(Err(failure)) => {
                 return self
                     .finish_failure(
                         &envelope,
                         classify_failure(&envelope, failure.error, failure.evidence),
+                    )
+                    .await;
+            }
+            Err(_) => {
+                return self
+                    .finish_failure(
+                        &envelope,
+                        classify_failure(
+                            &envelope,
+                            CommandError {
+                                code: ErrorCode::DeadlineExceeded,
+                                message: "command did not finish before its envelope deadline"
+                                    .into(),
+                                layer: ErrorLayer::Workflow,
+                                retryable: true,
+                            },
+                            Vec::new(),
+                        ),
                     )
                     .await;
             }

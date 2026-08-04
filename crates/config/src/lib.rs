@@ -23,7 +23,7 @@ pub enum EnginePreferenceConfig {
     ManagedChromium,
     Exact {
         engine: BrowserEngineConfig,
-        #[serde(default, alias = "profileId")]
+        #[serde(default, rename = "profileId")]
         profile_id: Option<String>,
     },
     Prefer {
