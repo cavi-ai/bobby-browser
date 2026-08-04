@@ -122,14 +122,22 @@ Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
   `executionPolicy.visionAssist = true`, and `[vision].endpoint_url`.
 - Capability + session opt-in alone does **not** make vision assist work — the
   provider endpoint must be **reachable**. `bobby doctor` warns on
-  `vision-endpoint` when the configured URL does not accept a connection (for
-  example when `bobby vision-proxy` is not running).
-- For local OpenAI: set `BOBBY_VISION_TOKEN` and `OPENAI_API_KEY`, run
-  `bobby vision-proxy` (default `http://127.0.0.1:9100/vision`), then set
-  `[vision].endpoint_url` and `token_env = "BOBBY_VISION_TOKEN"` before
-  `bobby serve`.
+  `vision-endpoint` when the configured URL does not accept a connection.
+  Loopback URLs suggest `bobby serve --vision` (auto-spawn) or manual
+  `bobby vision-proxy`; external URLs suggest verifying the remote service.
+- **Preferred setup:** `bobby vision connect` → export printed env vars →
+  `bobby serve --vision`. Manual `bobby vision-proxy` in a second terminal
+  still works.
+- `bobby doctor` also warns on `vision-provider` when `provider` names a
+  missing `[vision.providers.*]` entry, and on `vision-upstream-key` when the
+  active profile's `api_key_env` is unset (local profiles like Ollama / LM
+  Studio omit `api_key_env` — that check is skipped).
 - Token lives in the env named by `token_env` — never in `config.toml`.
 - Endpoint must be https (or http on loopback). Bad proposals fail closed.
+- LM Studio / MLX: use the Server URL the app shows; **1234** is a common
+  default port — confirm in the UI before editing `base_url`.
+- Code-review-graph answers **code structure**; bobby vision answers **page
+  pixels** — do not conflate the two.
 - Guide: [Intent commands](intents.md#vision-provider) /
   [Configuration](configuration.md#vision).
 

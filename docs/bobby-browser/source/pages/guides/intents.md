@@ -263,15 +263,18 @@ Vision-assisted resolution is **deny-by-default**. All three must pass:
 
 1. Bearer holds `vision:assist`
 2. Session created with `executionPolicy.visionAssist = true`
-3. A provider is configured under `[vision]` (no `endpoint_url`, no escalation)
+3. A reachable assist endpoint is configured (`[vision].endpoint_url` or a
+   `[nodes]` vision node; no endpoint, no escalation)
 
 Otherwise vision escalation is denied (`VisionAssistDenied` / failed).
 
 Capability + session grant is **not** sufficient for functional vision assist:
 the configured endpoint must be **reachable** at runtime. A granted principal
 and an opted-in session still fail closed when the provider is down or
-misconfigured — `bobby doctor` warns when `[vision].endpoint_url` does not
-accept a TCP connection.
+misconfigured — `bobby doctor` warns on `vision-endpoint` reachability, and on
+`vision-provider` / `vision-upstream-key` when the selected upstream profile is
+missing or its required API key env is empty. Preferred local path:
+[Configuration — Setup](configuration.md#setup-preferred).
 
 When gates pass and deterministic resolution sticks, the engine captures a real
 PNG via `screenshot_bytes` (Chromium and Firefox) and posts it to the provider.
@@ -279,45 +282,41 @@ Empty frames are not sent.
 
 ## Vision provider
 
-Configure one HTTP provider in `config.toml` (also listed under
-[Configuration](configuration.md#vision)):
+Bobby posts propose/extract to the HTTP endpoint in `[vision]` (or a
+`[nodes.*.kind=vision]` node). Upstream models are configured as named
+OpenAI-compatible profiles under `[vision.providers]` — see
+[Configuration](configuration.md#vision).
 
 ```toml
 [vision]
-endpoint_url = "https://vision.example.test/propose" # https, or http on loopback only
-token_env = "BOBBY_VISION_TOKEN"                  # env var holding the bearer (never in the file)
+endpoint_url = "http://127.0.0.1:9100/vision" # https, or http on loopback only
+token_env = "BOBBY_VISION_TOKEN"              # env var holding the bearer (never in the file)
+provider = "openai"
 timeout_ms = 15000
+
+[vision.providers.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
 ```
 
-### Local OpenAI via `bobby vision-proxy`
-
-For local/dev with OpenAI, run the loopback adapter in a **second process**
-before (or alongside) `bobby serve`:
+### Local setup (preferred)
 
 ```bash
-export BOBBY_VISION_TOKEN=…   # bobby → proxy bearer
-export OPENAI_API_KEY=…       # proxy → OpenAI
-bobby vision-proxy            # default http://127.0.0.1:9100/vision
+bobby vision connect --yes --provider openai   # or ollama / lmstudio / custom
+export BOBBY_VISION_TOKEN=…
+export OPENAI_API_KEY=…                        # when the profile sets api_key_env
+bobby serve --vision                           # auto-spawns loopback vision-proxy
 ```
 
-Then point config at the proxy:
+`bobby mcp-stdio --vision` uses the same spawn policy. `--no-vision` disables
+spawn. Manual `bobby vision-proxy` in a second terminal remains valid
+(`--bind`, `--path`, `--model`, `--openai-base-url`, `--api-key-env`).
 
-```toml
-[vision]
-endpoint_url = "http://127.0.0.1:9100/vision"
-token_env = "BOBBY_VISION_TOKEN"
-timeout_ms = 15000
-```
-
-The proxy maps propose/extract requests to OpenAI and returns the wire shapes
-below. Optional flags: `--bind`, `--path`, `--model`, `--openai-base-url`
-(`--upstream` is `openai` only in v1).
-
-**Manual check:** with both env vars set and `bobby vision-proxy` running,
-uncomment the loopback `[vision]` block, start the runtime, open a session with
-`visionAssist: true` under a principal with `vision:assist`, force a stuck
-locate (or call `extract_structured`), and confirm escalation or structured
-extract succeeds.
+**Manual check:** after connect + env exports, start with `--vision`, open a
+session with `visionAssist: true` under a principal with `vision:assist`,
+force a stuck locate (or call `extract_structured`), and confirm escalation
+or structured extract succeeds.
 
 The runtime `POST`s JSON:
 
