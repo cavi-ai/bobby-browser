@@ -455,9 +455,8 @@ fn directory_on_path(dir: &Path) -> bool {
     path_var_contains(&dir)
         || std::env::var_os("PATH")
             .map(|paths| {
-                std::env::split_paths(&paths).any(|entry| {
-                    entry.canonicalize().ok().as_ref() == Some(&dir) || entry == dir
-                })
+                std::env::split_paths(&paths)
+                    .any(|entry| entry.canonicalize().ok().as_ref() == Some(&dir) || entry == dir)
             })
             .unwrap_or(false)
 }
@@ -498,8 +497,7 @@ fn copy_executable(src: &Path, dest: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755))?;
     }
-    std::fs::rename(&pending, dest)
-        .with_context(|| format!("install {}", dest.display()))?;
+    std::fs::rename(&pending, dest).with_context(|| format!("install {}", dest.display()))?;
     Ok(())
 }
 
