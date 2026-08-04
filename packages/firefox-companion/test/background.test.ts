@@ -1129,3 +1129,397 @@ test("pairing claims host fingerprint ownership and stop releases it", async () 
   background.stop();
   assert.deepEqual(ownership, [false, true, false]);
 });
+
+class EnrollFakeTransport {
+  readonly sent: unknown[] = [];
+  listener: ((message: unknown) => void | Promise<void>) | undefined;
+  connected = true;
+  started = false;
+
+  start(listener: (message: unknown) => void | Promise<void>): void {
+    this.listener = listener;
+    this.started = true;
+    this.connected = true;
+  }
+
+  send(message: unknown): void {
+    if (!this.connected) throw new Error("native companion is not connected");
+    this.sent.push(message);
+  }
+
+  stop(): void {
+    this.connected = false;
+    this.started = false;
+  }
+
+  isConnected(): boolean {
+    return this.connected;
+  }
+}
+
+test("enrollPair sends enrollProfile then pair and resolves on paired", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+  transport.sent.length = 0;
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    transport.sent.map((message) =>
+      typeof message === "object" && message !== null && "kind" in message
+        ? message.kind
+        : undefined,
+    ),
+    ["enrollProfile", "pair"],
+  );
+  assert.deepEqual(transport.sent[0], { kind: "enrollProfile", input: {} });
+  assert.equal(JSON.stringify(transport.sent[0]).includes("pairing"), false);
+
+  await transport.listener?.({
+    kind: "paired",
+    output: {
+      companionId: CONNECT_OPTIONS.companionId,
+      profileId: CONNECT_OPTIONS.profileId,
+    },
+  });
+  await transport.listener?.({
+    kind: "nativeStatus",
+    output: { state: "enrollOk" },
+  });
+  // Host exits after enrollOk — reconnect later for serve pairing.
+  transport.stop();
+  transport.start((message) => void background.receive(message));
+
+  const result = await enrollPromise;
+  assert.deepEqual(result, { ok: true });
+  const status = await background.getPopupStatus({
+    local: {
+      async get() {
+        return {};
+      },
+      async set() {},
+    },
+  });
+  assert.equal(status.paired, true);
+  assert.equal(status.enrollPhase, "idle");
+  assert.equal(status.enrollError, undefined);
+});
+
+test("enrollPair maps enrollFailed codes to operator messages", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+  await transport.listener?.({
+    kind: "nativeStatus",
+    output: { state: "enrollFailed", code: "listenerUnavailable" },
+  });
+  const result = await enrollPromise;
+  assert.deepEqual(result, {
+    ok: false,
+    code: "listenerUnavailable",
+    message: "Start bobby serve, then Pair again",
+  });
+});
+
+test("enrollPair maps bindInUse without telling operators to start serve", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+  await transport.listener?.({
+    kind: "nativeStatus",
+    output: { state: "enrollFailed", code: "bindInUse" },
+  });
+  const result = await enrollPromise;
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("expected failure");
+  assert.equal(result.code, "bindInUse");
+  assert.match(result.message, /already in use/i);
+  assert.equal(result.message.includes("Start bobby serve"), false);
+});
+
+test("enrollPair tears down native port when pair send fails after enrollProfile", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const originalSend = transport.send.bind(transport);
+  let enrollSent = false;
+  transport.send = (message: unknown) => {
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "enrollProfile"
+    ) {
+      enrollSent = true;
+      originalSend(message);
+      return;
+    }
+    throw new Error("pair send failed");
+  };
+
+  const result = await background.enrollPair();
+  assert.equal(enrollSent, true);
+  assert.deepEqual(result, {
+    ok: false,
+    code: "listenerUnavailable",
+    message: "Start bobby serve, then Pair again",
+  });
+  assert.equal(transport.started, false);
+  assert.equal(transport.connected, false);
+});
+
+test("enrollPair times out with operator copy", async () => {
+  const transport = new EnrollFakeTransport();
+  const scheduled: Array<() => void> = [];
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+    enrollTimeoutMs: 1,
+    scheduleTimeout(callback) {
+      scheduled.push(callback);
+      return 1;
+    },
+    cancelTimeout() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(scheduled.length, 1);
+  scheduled[0]?.();
+  assert.deepEqual(await enrollPromise, {
+    ok: false,
+    code: "timeout",
+    message: "Pairing timed out",
+  });
+});
+
+test("runtime enrollPair message returns the enroll result", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const enrollPromise = background.receiveRuntimeMessage(
+    { type: "enrollPair" },
+    { id: "trusted-extension" },
+    "trusted-extension",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  await transport.listener?.({
+    kind: "nativeStatus",
+    output: { state: "enrollFailed", code: "defaultsMissing" },
+  });
+  assert.deepEqual(await enrollPromise, {
+    ok: false,
+    code: "defaultsMissing",
+    message: "Profile path unknown — re-run bobby install (see docs)",
+  });
+});
+
+test("runtime enrollPair ignores messages from other extensions", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const before = transport.sent.length;
+  const result = await background.receiveRuntimeMessage(
+    { type: "enrollPair" },
+    { id: "other-extension" },
+    "trusted-extension",
+  );
+  assert.equal(result, undefined);
+  assert.equal(transport.sent.length, before);
+  assert.equal(
+    transport.sent.some(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "enrollProfile",
+    ),
+    false,
+  );
+});
+
+test("stop cancels in-flight enroll wait and clears enroll status", async () => {
+  const transport = new EnrollFakeTransport();
+  const scheduled: Array<() => void> = [];
+  let cancelled = 0;
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+    enrollTimeoutMs: 60_000,
+    scheduleTimeout(callback) {
+      scheduled.push(callback);
+      return 7;
+    },
+    cancelTimeout() {
+      cancelled += 1;
+    },
+  });
+  background.connect(CONNECT_OPTIONS);
+  const emptyStorage = {
+    local: {
+      async get() {
+        return {};
+      },
+      async set() {},
+    },
+  };
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await background.getPopupStatus(emptyStorage)).enrollPhase, "pairing");
+
+  background.stop();
+  assert.equal(cancelled, 1);
+  assert.deepEqual(await enrollPromise, {
+    ok: false,
+    code: "listenerUnavailable",
+    message: "Start bobby serve, then Pair again",
+  });
+  const status = await background.getPopupStatus(emptyStorage);
+  assert.equal(status.enrollPhase, "idle");
+  assert.equal(status.enrollError, undefined);
+});
+
+test("production runtime listener enrollPair requires matching sender id", async () => {
+  const port = new FakeNativePort();
+  const runtimeMessages = new ListenerSet<(
+    message: unknown,
+    sender: { id?: string; tab?: { id?: number }; frameId?: number },
+  ) => unknown>();
+  const browserApi = {
+    runtime: {
+      id: "trusted-extension",
+      connectNative: () => port,
+      onMessage: runtimeMessages,
+      async getBrowserInfo() {
+        return { name: "Firefox", version: "128.0" };
+      },
+      async getPlatformInfo() {
+        return { os: "mac" };
+      },
+    },
+    storage: {
+      local: {
+        async get() {
+          return {
+            companionId: CONNECT_OPTIONS.companionId,
+            profileId: CONNECT_OPTIONS.profileId,
+          };
+        },
+        async set() {},
+      },
+    },
+    tabs: {
+      onUpdated: new ListenerSet(),
+      onRemoved: new ListenerSet(),
+      async query() {
+        return [];
+      },
+      async sendMessage() {
+        return undefined;
+      },
+      async update() {},
+    },
+    webNavigation: {
+      onCommitted: new ListenerSet(),
+      async getAllFrames() {
+        return [];
+      },
+    },
+  };
+  const startProductionBackground = (
+    backgroundModule as typeof backgroundModule & {
+      startProductionBackground(api: unknown): Promise<CompanionBackground>;
+    }
+  ).startProductionBackground;
+
+  const background = await startProductionBackground(browserApi);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const listener = runtimeMessages.listeners[0];
+  assert.ok(listener);
+  const rejected = await listener({ type: "enrollPair" }, { id: "other-extension" });
+  assert.equal(rejected, undefined);
+
+  const enrollPromise = listener({ type: "enrollPair" }, { id: "trusted-extension" });
+  assert.ok(enrollPromise instanceof Promise);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(
+    port.sent.some((message) => {
+      return (
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "enrollProfile"
+      );
+    }),
+  );
+  background.stop();
+  assert.deepEqual(await enrollPromise, {
+    ok: false,
+    code: "listenerUnavailable",
+    message: "Start bobby serve, then Pair again",
+  });
+});
