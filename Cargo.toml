@@ -30,6 +30,7 @@ members = [
   "crates/cdp-gateway",
   "crates/mcp-gateway",
   "crates/test-site",
+  "crates/vision-proxy",
   "crates/runtime-tests",
   "crates/interface-conformance",
   "crates/release-gates",

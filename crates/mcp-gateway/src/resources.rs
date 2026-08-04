@@ -480,9 +480,11 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   front. It is also half of a deny-by-default double gate on the
   vision-fallback resolution path inside every `intent_*` tool: holding the
   capability is necessary but not sufficient on its own -- the session must
-  also opt in and a vision provider must be configured. That escalation-time
-  check runs per stuck resolution, not per tool call, so it is not part of
-  `required_capabilities`.
+  also opt in and a vision provider must be configured. The configured
+  endpoint must be reachable at runtime (for local OpenAI, run
+  `bobby vision-proxy` and point `[vision].endpoint_url` at it). That
+  escalation-time check runs per stuck resolution, not per tool call, so it is
+  not part of `required_capabilities`.
 - `artifact:read` -- required to call `resources/list` or `resources/read`
   at all. It is not a per-tool gate; every static and artifact resource sits
   behind it.
