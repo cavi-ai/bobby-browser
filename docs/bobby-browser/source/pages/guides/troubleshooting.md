@@ -44,9 +44,8 @@ parse SSE frames, omit `stream` and use the batch JSON response instead.
 
 Call `initialize` (protocol `2025-11-25`) before `tools/list` or `tools/call`.
 After token rotate on HTTP MCP, re-initialize for that principal.
-MCP HTTP still needs the broker context headers
-(`x-interface-version`, `x-correlation-id`, `x-deadline`) —
-[MCP over HTTP](../surfaces/mcp-http.md).
+MCP HTTP is bearer-only: no `x-interface-version`, `x-correlation-id`, or
+`x-deadline` — [MCP over HTTP](../surfaces/mcp-http.md).
 
 ## Browser / engine
 
