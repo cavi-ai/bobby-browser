@@ -20,7 +20,7 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | GET | `/v1/runtime` | Runtime info | `session:read` |
 | GET | `/v1/sessions` | List sessions | `session:read` |
 | POST | `/v1/sessions` | Create session | `session:write` |
-| DELETE | `/v1/sessions/{session}` | Delete session (204) | `session:write` |
+| DELETE | `/v1/sessions/{sessionId}` | Delete session (204) | `session:write` |
 | POST | `/v1/pages` | Open page | `page:write` |
 | POST | `/v1/commands` | Submit command envelope | `browser:mutate` (+ nested caps for upload / download / JS / intents) |
 | POST | `/v1/checkpoints` | Persist workflow checkpoint | `recovery:write` |
@@ -53,7 +53,7 @@ validators / Rust types.
   session; `humanize` synthesizes human-like input timing and reports what it
   synthesized as `humanization` evidence. Both are written to the worker on
   every lease, so one session's opt-in never carries into another's.
-- **DELETE `/v1/sessions/{session}`** — empty body; `204` on success
+- **DELETE `/v1/sessions/{sessionId}`** — empty body; `204` on success
 - **POST `/v1/pages`** — `{ session_id }` (snake_case on this request; session/page state also uses `id` / `session_id` / `page_ids`)
 - **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,
   `command` where `command` is `{ kind: "primitive"|"intent", input: … }`).
