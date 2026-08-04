@@ -383,13 +383,23 @@ impl PageRuntime {
                 if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_)) = &envelope.command
                 {
                     if let Some(Evidence::Navigation { url, .. }) = evidence.first() {
-                        let _ = self
+                        // The navigation itself succeeded, so the outcome is
+                        // still completed -- but a registry write failure
+                        // leaves page_list showing a stale URL, and that must
+                        // be visible in logs rather than swallowed.
+                        if let Err(error) = self
                             .set_url(
                                 envelope.page_id.as_ref().expect("validated page id"),
                                 url.clone(),
                                 "interactive",
                             )
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %error,
+                                "page registry URL update failed after navigate"
+                            );
+                        }
                     }
                 }
                 let outcome = CommandOutcome::Completed {
@@ -546,7 +556,11 @@ impl PageRuntime {
             PrimitiveCommand::Click(command) => {
                 if let Some(expected_url) = &command.expected_url {
                     let page_id = page_id.expect("validated page id");
-                    let _ = lease
+                    // Settle wait: its failure is tolerated because the
+                    // inspect below is the real verification, but it must be
+                    // logged -- a silently skipped wait reads as a fast,
+                    // flaky expected-URL failure.
+                    if let Err(error) = lease
                         .worker()
                         .wait_for(
                             page_id,
@@ -557,7 +571,13 @@ impl PageRuntime {
                                 timeout_ms: 5_000,
                             },
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %error.message,
+                            "expected-URL settle wait failed before click verification"
+                        );
+                    }
                     let verification = lease
                         .worker()
                         .inspect(page_id, &InspectCommand::default())

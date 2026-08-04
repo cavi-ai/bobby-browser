@@ -127,3 +127,78 @@ async fn thirty_two_warm_sessions_remain_addressable_with_eight_active_slots() {
         );
     }
 }
+
+struct FailingCloseWorker {
+    id: WorkerId,
+}
+
+#[async_trait]
+impl BrowserWorker for FailingCloseWorker {
+    fn worker_id(&self) -> WorkerId {
+        self.id.clone()
+    }
+    fn profile_dir(&self) -> &Path {
+        Path::new("/profiles/failing")
+    }
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+    async fn navigate(
+        &self,
+        _: &PageId,
+        _: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![])
+    }
+    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![])
+    }
+    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![])
+    }
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![])
+    }
+    async fn close(&self) -> Result<(), CommandError> {
+        Err(CommandError {
+            code: types::ErrorCode::BrowserCommandFailed,
+            message: "close refused".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: true,
+        })
+    }
+}
+
+struct FailingCloseFactory;
+
+#[async_trait]
+impl WorkerFactory for FailingCloseFactory {
+    async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        Ok(Arc::new(FailingCloseWorker {
+            id: WorkerId::new(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn failed_release_keeps_the_session_registered_for_retry() {
+    let pool = Arc::new(WorkerPool::new(8, Arc::new(FailingCloseFactory)));
+    let manager = SessionManager::new(pool);
+    let session = manager
+        .create(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    // The close failure must not unregister the session: deleting first
+    // would leak the browser with no handle left to close it.
+    assert!(manager.delete(&session.id).await.is_err());
+    assert!(manager.get(&session.id).await.is_ok());
+}
