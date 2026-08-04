@@ -35,8 +35,7 @@ async fn run() -> anyhow::Result<()> {
         )
     })?;
     config.validate().map_err(anyhow::Error::msg)?;
-    let selection_json = std::env::var("AUTOMATION_RUNTIME_BROWSER_SELECTION").ok();
-    let selection = firefox_companion::selection::parse_selection(selection_json.as_deref())?;
+    let (selection, _source) = firefox_companion::selection::resolve_browser_selection()?;
     let factory = firefox_companion::selection::compose_worker_factory(&config, selection)?;
     let runtime = RuntimeService::build_with_worker_factory(&config, factory)
         .await

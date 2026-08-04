@@ -16,6 +16,7 @@ behavioral-engine = { path = "../behavioral-engine", version = "0.4.0" }
 companion-core = { path = "../companion-core", version = "0.4.0" }
 companion-protocol = { path = "../companion-protocol", version = "0.4.0" }
 config = { path = "../config", version = "0.4.0" }
+dirs.workspace = true
 dom-engine = { path = "../dom-engine", version = "0.4.0" }
 fingerprinting = { path = "../fingerprinting", version = "0.4.0" }
 futures-util.workspace = true
