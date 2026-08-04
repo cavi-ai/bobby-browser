@@ -524,17 +524,21 @@ impl ChromiumWorker {
         &self,
         page_id: &PageId,
     ) -> Result<Arc<crate::HarRecorder>, CommandError> {
-        // Single-flight: the recorders-map guard stays held across the
-        // check-and-insert, so two concurrent network_log calls can never
-        // spawn duplicate collectors that split entries between them.
-        let mut recorders = self.har_recorders.lock().await;
-        if let Some(recorder) = recorders.get(page_id) {
+        if let Some(recorder) = self.har_recorders.lock().await.get(page_id) {
             return Ok(recorder.clone());
         }
         let page = {
             let pages = self.pages.lock().await;
             pages.get(page_id).cloned().ok_or_else(page_missing)?
         };
+        // Single-flight the collector spawn without holding this map's guard
+        // across other lock acquisitions: re-lock and re-check, so the loser
+        // of the race returns the winner's recorder instead of spawning a
+        // duplicate collector that splits entries between them.
+        let mut recorders = self.har_recorders.lock().await;
+        if let Some(recorder) = recorders.get(page_id) {
+            return Ok(recorder.clone());
+        }
         let recorder = Arc::new(crate::HarRecorder::default());
         let task_recorder = recorder.clone();
         let task = tokio::spawn(async move {
