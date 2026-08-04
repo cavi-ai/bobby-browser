@@ -54,4 +54,17 @@ jobs:
       # publishing but is not reliably applied without the flag.
       - name: Publish
         working-directory: packages/typescript-sdk
-        run: npm publish --access public --provenance
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$EVENT_NAME" = "push" ] && [ "$RELEASE_TAG" != "v${PKG_VERSION}" ]; then
+            echo "::error::release tag ${RELEASE_TAG} does not match package version ${PKG_VERSION}"
+            exit 1
+          fi
+          if npm view "@cavi-ai/bobby-browser@${PKG_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::@cavi-ai/bobby-browser@${PKG_VERSION} is already published; skipping."
+            exit 0
+          fi
+          npm publish --access public --provenance

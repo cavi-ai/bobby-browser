@@ -653,6 +653,7 @@ async fn dispatch_submit_job(
         config = config.with_timeout(std::time::Duration::from_millis(timeout_ms));
     }
     config = config.with_correlation_id(request.context.correlation_id.as_uuid().to_string());
+    config = config.with_owner(request.context.principal_id.clone());
     let id = state
         .scheduler
         .submit(config)
@@ -761,6 +762,19 @@ async fn get_job(
             request.context.correlation_id.clone(),
         ));
     };
+    // Ownership is indistinguishable from absence: another principal's job
+    // answers NotFound, never its payload or existence. Jobs persisted
+    // before ownership (owner: None) stay readable by any job:read holder.
+    if job
+        .owner
+        .as_ref()
+        .is_some_and(|owner| *owner != request.context.principal_id)
+    {
+        return Err(job_error(
+            JobError::NotFound(id),
+            request.context.correlation_id.clone(),
+        ));
+    }
     Ok(Json(job_status_response(job)))
 }
 
@@ -771,6 +785,22 @@ async fn cancel_job(
 ) -> Result<StatusCode, ProtocolError> {
     authorize_boundary(&request, InterfaceOperation::CancelJob)?;
     let id = JobId(job);
+    // Same ownership gate as get_job: cancel is a read of another
+    // principal's work queue otherwise.
+    match state.scheduler.get_job(&id).await {
+        Some(job)
+            if job
+                .owner
+                .as_ref()
+                .is_some_and(|owner| *owner != request.context.principal_id) =>
+        {
+            return Err(job_error(
+                JobError::NotFound(id),
+                request.context.correlation_id.clone(),
+            ));
+        }
+        _ => {}
+    }
     state
         .scheduler
         .cancel_job(&id)

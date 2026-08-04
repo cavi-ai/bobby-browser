@@ -80,6 +80,7 @@ impl JobQueue {
         if let Some(correlation_id) = config.correlation_id {
             job.correlation_id = Some(correlation_id);
         }
+        job.owner = config.owner;
 
         self.jobs.push_back(job.clone());
         Ok(job)
