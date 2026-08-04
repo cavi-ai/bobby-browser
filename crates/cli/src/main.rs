@@ -24,7 +24,8 @@ use std::{
 };
 use url::Url;
 use vision_child::{
-    decide_vision_child, ManagedVisionProxy, VisionChildDecision, VisionSpawnPolicy,
+    decide_vision_child, enforce_force_on_spawn, ManagedVisionProxy, VisionChildDecision,
+    VisionSpawnPolicy,
 };
 use vision_proxy::{serve as serve_vision_proxy, OpenAiUpstream, ProxyConfig};
 
@@ -173,27 +174,14 @@ enum CliCommand {
         #[command(subcommand)]
         command: JobsCommand,
     },
-    /// Configure a vision provider profile in config.toml
-    VisionConnect {
-        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
-        #[arg(long)]
-        config: Option<PathBuf>,
-        /// Provider preset: openai, ollama, lmstudio, or custom
-        #[arg(long)]
-        provider: Option<String>,
-        /// Upstream base URL (required for custom; overrides preset default)
-        #[arg(long)]
-        base_url: Option<String>,
-        /// Model id (required for custom; overrides preset default)
-        #[arg(long)]
-        model: Option<String>,
-        /// Env var holding upstream API key (custom only; empty omits)
-        #[arg(long)]
-        api_key_env: Option<String>,
-        /// Accept defaults without interactive prompts
-        #[arg(long)]
-        yes: bool,
+    /// Vision provider setup and loopback proxy
+    Vision {
+        #[command(subcommand)]
+        command: VisionCommands,
     },
+    /// Configure a vision provider profile in config.toml (deprecated alias)
+    #[command(name = "vision-connect", hide = true)]
+    VisionConnect(VisionConnectArgs),
     /// Run the loopback vision proxy (propose/extract → OpenAI)
     VisionProxy {
         /// Bind address (loopback default)
@@ -215,6 +203,47 @@ enum CliCommand {
         #[arg(long)]
         api_key_env: Option<String>,
     },
+}
+
+#[derive(clap::Args)]
+struct VisionConnectArgs {
+    /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Provider preset: openai, ollama, lmstudio, or custom
+    #[arg(long)]
+    provider: Option<String>,
+    /// Upstream base URL (required for custom; overrides preset default)
+    #[arg(long)]
+    base_url: Option<String>,
+    /// Model id (required for custom; overrides preset default)
+    #[arg(long)]
+    model: Option<String>,
+    /// Env var holding upstream API key (custom only; empty omits)
+    #[arg(long)]
+    api_key_env: Option<String>,
+    /// Accept defaults without interactive prompts
+    #[arg(long)]
+    yes: bool,
+}
+
+impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
+    fn from(args: VisionConnectArgs) -> Self {
+        Self {
+            config: args.config,
+            provider: args.provider,
+            base_url: args.base_url,
+            model: args.model,
+            api_key_env: args.api_key_env,
+            yes: args.yes,
+        }
+    }
+}
+
+#[derive(clap::Subcommand)]
+enum VisionCommands {
+    /// Configure a vision provider profile in config.toml
+    Connect(VisionConnectArgs),
 }
 
 #[derive(clap::Subcommand)]
@@ -428,21 +457,10 @@ pub async fn run() -> Result<()> {
             }
         }
         CliCommand::Jobs { command } => run_jobs(command)?,
-        CliCommand::VisionConnect {
-            config,
-            provider,
-            base_url,
-            model,
-            api_key_env,
-            yes,
-        } => vision_connect::connect(vision_connect::ConnectOpts {
-            config,
-            provider,
-            base_url,
-            model,
-            api_key_env,
-            yes,
-        })?,
+        CliCommand::Vision { command } => match command {
+            VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
+        },
+        CliCommand::VisionConnect(args) => vision_connect::connect(args.into())?,
         CliCommand::VisionProxy {
             bind,
             path,
@@ -505,12 +523,7 @@ fn prepare_vision_child(
     }
 
     let decision = decide_vision_child(&config, policy);
-    if matches!(policy, VisionSpawnPolicy::ForceOn)
-        && !decision.should_spawn
-        && decision.reason.contains("no vision provider")
-    {
-        anyhow::bail!("no vision provider configured; run `bobby vision connect` first");
-    }
+    enforce_force_on_spawn(policy, &decision)?;
 
     let vision_child = if decision.should_spawn {
         let (_, profile) = config
@@ -2044,11 +2057,12 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
     }
 
     #[test]
-    fn vision_connect_clap_parses_non_interactive_flags() {
+    fn vision_connect_clap_parses_nested_subcommand() {
         use clap::Parser;
         let cli = Cli::try_parse_from([
             "bobby",
-            "vision-connect",
+            "vision",
+            "connect",
             "--yes",
             "--provider",
             "lmstudio",
@@ -2057,17 +2071,43 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         ])
         .unwrap();
         match cli.command {
-            Some(CliCommand::VisionConnect {
-                yes,
-                provider,
-                config,
-                ..
+            Some(CliCommand::Vision {
+                command: VisionCommands::Connect(VisionConnectArgs {
+                    yes,
+                    provider,
+                    config,
+                    ..
+                }),
             }) => {
                 assert!(yes);
                 assert_eq!(provider.as_deref(), Some("lmstudio"));
                 assert_eq!(config.as_deref(), Some(Path::new("/tmp/config.toml")));
             }
-            _ => panic!("unexpected vision-connect parse"),
+            _ => panic!("unexpected vision connect parse"),
+        }
+    }
+
+    #[test]
+    fn vision_connect_clap_parses_legacy_alias() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "bobby",
+            "vision-connect",
+            "--yes",
+            "--provider",
+            "openai",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::VisionConnect(VisionConnectArgs {
+                yes,
+                provider,
+                ..
+            })) => {
+                assert!(yes);
+                assert_eq!(provider.as_deref(), Some("openai"));
+            }
+            _ => panic!("unexpected vision-connect alias parse"),
         }
     }
 

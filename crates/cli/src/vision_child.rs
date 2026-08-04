@@ -38,8 +38,28 @@ impl VisionChildDecision {
     }
 }
 
+pub const FORCE_ON_SKIP_REASON: &str = "vision endpoint already reachable";
+
 pub fn decide_vision_child(config: &AppConfig, policy: VisionSpawnPolicy) -> VisionChildDecision {
     decide_vision_child_with_probe(config, policy, is_port_accepting)
+}
+
+/// When `--vision` is set, refuse to start unless spawn proceeds or the loopback
+/// endpoint is already healthy (attach/skip).
+pub fn enforce_force_on_spawn(
+    policy: VisionSpawnPolicy,
+    decision: &VisionChildDecision,
+) -> Result<()> {
+    if matches!(policy, VisionSpawnPolicy::ForceOn)
+        && !decision.should_spawn
+        && decision.reason != FORCE_ON_SKIP_REASON
+    {
+        anyhow::bail!(
+            "--vision requires a managed loopback vision-proxy: {}",
+            decision.reason
+        );
+    }
+    Ok(())
 }
 
 fn decide_vision_child_with_probe(
@@ -102,7 +122,7 @@ fn decide_vision_child_with_probe(
             should_spawn: false,
             bind,
             path,
-            reason: "vision endpoint already reachable".to_string(),
+            reason: FORCE_ON_SKIP_REASON.to_string(),
         };
     }
 
@@ -189,16 +209,17 @@ impl ManagedVisionProxy {
             anyhow::bail!("vision child spawn not requested: {}", decision.reason);
         }
 
-        if std::env::var(token_env)
+        let token_value = std::env::var(token_env)
             .ok()
             .filter(|value| !value.is_empty())
-            .is_none()
-        {
-            anyhow::bail!("{token_env} must be set before spawning vision-proxy");
-        }
+            .ok_or_else(|| {
+                anyhow::anyhow!("{token_env} must be set before spawning vision-proxy")
+            })?;
 
         let exe = std::env::current_exe().context("failed to resolve current executable")?;
         let mut cmd = Command::new(exe);
+        // vision-proxy validates BOBBY_VISION_TOKEN; copy from configurable token_env.
+        cmd.env("BOBBY_VISION_TOKEN", &token_value);
         cmd.arg("vision-proxy")
             .arg("--bind")
             .arg(decision.bind.to_string())
@@ -365,6 +386,58 @@ mod tests {
             decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("multiple"));
+    }
+
+    #[test]
+    fn force_on_bails_when_non_loopback() {
+        let config = loopback_config("https://vision.example/vision", true);
+        let decision =
+            decide_vision_child_with_probe(&config, VisionSpawnPolicy::ForceOn, |_| false);
+        assert!(!decision.should_spawn);
+        assert!(enforce_force_on_spawn(VisionSpawnPolicy::ForceOn, &decision).is_err());
+    }
+
+    #[test]
+    fn force_on_allows_reachable_port_skip() {
+        let config = loopback_config("http://127.0.0.1:19876/vision", true);
+        let decision =
+            decide_vision_child_with_probe(&config, VisionSpawnPolicy::ForceOn, |_| true);
+        assert!(!decision.should_spawn);
+        assert_eq!(decision.reason, FORCE_ON_SKIP_REASON);
+        assert!(enforce_force_on_spawn(VisionSpawnPolicy::ForceOn, &decision).is_ok());
+    }
+
+    #[test]
+    fn force_on_bails_on_multiple_vision_nodes() {
+        let mut config = AppConfig::default();
+        config.nodes.insert(
+            "alpha".into(),
+            NodeConfig {
+                kind: NodeKind::Vision,
+                endpoint_url: "http://127.0.0.1:19876/vision".into(),
+                token_env: None,
+                timeout_ms: 15_000,
+            },
+        );
+        config.nodes.insert(
+            "beta".into(),
+            NodeConfig {
+                kind: NodeKind::Vision,
+                endpoint_url: "http://127.0.0.1:19877/vision".into(),
+                token_env: None,
+                timeout_ms: 15_000,
+            },
+        );
+        config.vision.provider = Some("openai".into());
+        config
+            .vision
+            .providers
+            .insert("openai".into(), sample_provider());
+
+        let decision =
+            decide_vision_child_with_probe(&config, VisionSpawnPolicy::ForceOn, |_| false);
+        assert!(!decision.should_spawn);
+        assert!(enforce_force_on_spawn(VisionSpawnPolicy::ForceOn, &decision).is_err());
     }
 
     #[test]
