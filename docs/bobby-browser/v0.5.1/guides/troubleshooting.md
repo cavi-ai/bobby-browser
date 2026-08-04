@@ -117,6 +117,14 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
 
 ## Vision assist
 
+- For ACP profiles, `bobby doctor` reports `vision-routing`,
+  `vision-acp-reachability`, and `vision-auth-path` separately and performs no
+  model call. If reachability warns, verify the configured harness executable;
+  if auth fails during use, complete the OAuth/device flow in that harness.
+- ACP harness credentials are not Bobby configuration. Do not paste provider
+  tokens into `config.toml`; use `advertised` auth or an existing harness
+  session. Direct/local providers remain available with `--backend direct`.
+
 - Needs **all three**: `vision:assist` capability, session
   `executionPolicy.visionAssist = true`, and `[vision].endpoint_url`.
 - Capability + session opt-in alone does **not** make vision assist work — the

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use config::{AppConfig, NodeConfig, NodeKind};
+use config::{AppConfig, NodeConfig, NodeKind, VisionAcpProfile, VisionAuthKind};
 use intent_engine::{HttpVisionAssist, VisionAssist};
 use types::{CommandError, ErrorCode, ErrorLayer};
 
@@ -71,11 +71,15 @@ impl ResolvedNode {
 #[derive(Default)]
 pub struct NodeRegistry {
     nodes: BTreeMap<String, NodeConfig>,
+    acp_profiles: BTreeMap<String, VisionAcpProfile>,
 }
 
 impl NodeRegistry {
     pub fn new(nodes: BTreeMap<String, NodeConfig>) -> Self {
-        Self { nodes }
+        Self {
+            nodes,
+            acp_profiles: BTreeMap::new(),
+        }
     }
 
     /// Builds the registry from configuration.
@@ -92,7 +96,10 @@ impl NodeRegistry {
                      Move it into [nodes.<name>] with kind = \"vision\"."
                 );
             }
-            return Self::new(config.nodes.clone());
+            return Self {
+                nodes: config.nodes.clone(),
+                acp_profiles: config.vision.acp_profiles.clone(),
+            };
         }
         let mut nodes = BTreeMap::new();
         if let Some(endpoint_url) = config.vision.endpoint_url.clone() {
@@ -106,19 +113,32 @@ impl NodeRegistry {
                 },
             );
         }
-        Self::new(nodes)
+        Self {
+            nodes,
+            acp_profiles: config.vision.acp_profiles.clone(),
+        }
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.nodes.keys().map(String::as_str)
+        self.nodes
+            .keys()
+            .chain(self.acp_profiles.keys())
+            .map(String::as_str)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.nodes.is_empty() && self.acp_profiles.is_empty()
     }
 
     /// Resolves `name` and checks it speaks `kind`.
     pub fn resolve(&self, name: &str, kind: NodeKind) -> Result<ResolvedNode, NodeError> {
+        if self.acp_profiles.contains_key(name) {
+            return Ok(ResolvedNode {
+                name: name.to_owned(),
+                kind,
+                is_local: false,
+            });
+        }
         let node = self
             .nodes
             .get(name)
@@ -143,6 +163,18 @@ impl NodeRegistry {
     /// no node has no vision provider, which the intent engine's
     /// deny-by-default double gate turns into a declined escalation.
     pub fn vision(&self, name: &str) -> Result<Arc<dyn VisionAssist>, NodeError> {
+        if let Some(profile) = self.acp_profiles.get(name) {
+            let assist =
+                acp_client::AcpVisionAssist::new(profile.command.clone(), profile.args.clone())
+                    .with_advertised_auth(matches!(
+                        profile.auth,
+                        VisionAuthKind::Advertised
+                            | VisionAuthKind::OAuthAuthorizationCode
+                            | VisionAuthKind::OAuthDeviceCode
+                    ));
+            tracing::debug!(node = name, "node.vision.acp_resolved");
+            return Ok(Arc::new(assist));
+        }
         let resolved = self.resolve(name, NodeKind::Vision)?;
         let node = self.nodes.get(name).expect("resolve found it");
         let bearer = node
@@ -300,5 +332,24 @@ mod tests {
             registry.resolve("anything", NodeKind::Vision),
             Err(NodeError::Unknown("anything".to_owned()))
         );
+    }
+
+    #[test]
+    fn acp_profile_is_a_named_vision_node() {
+        let config = AppConfig::from_toml_str(
+            r#"
+[vision]
+backend = "acp"
+profile = "codex"
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "advertised"
+"#,
+        )
+        .unwrap();
+        let registry = NodeRegistry::from_config(&config);
+        assert_eq!(registry.names().collect::<Vec<_>>(), ["codex"]);
+        assert!(registry.vision("codex").is_ok());
     }
 }

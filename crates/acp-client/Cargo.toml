@@ -1,5 +1,5 @@
 [package]
-name = "node-registry"
+name = "acp-client"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,13 +8,16 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-acp-client = { path = "../acp-client", version = "0.5.1" }
+agent-client-protocol.workspace = true
 async-trait.workspace = true
-config = { path = "../config", version = "0.5.1" }
+base64.workspace = true
 intent-engine = { path = "../intent-engine", version = "0.5.1" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
+tokio.workspace = true
 types = { path = "../types", version = "0.5.1" }
 
 [dev-dependencies]
-tokio.workspace = true
+tempfile.workspace = true

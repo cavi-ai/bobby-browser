@@ -14,6 +14,8 @@ members = [
   "crates/fingerprinting",
   "crates/node-registry",
   "crates/acp-gateway",
+  "crates/acp-client",
+  "crates/auth-broker",
   "crates/interface-core",
   "crates/sdk-core",
   "crates/session-manager",

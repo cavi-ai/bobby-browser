@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub use vision_write::{ensure_loopback_vision_defaults, upsert_vision_platform, ConfigWriteError};
+pub use vision_write::{
+    ensure_loopback_vision_defaults, upsert_vision_acp_profile, upsert_vision_platform,
+    ConfigWriteError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +111,56 @@ pub struct VisionConfig {
     pub provider: Option<String>,
     #[serde(default)]
     pub providers: BTreeMap<String, VisionProviderConfig>,
+    #[serde(default)]
+    pub backend: Option<VisionBackendKind>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub fallback_profile: Option<String>,
+    #[serde(default)]
+    pub acp_profiles: BTreeMap<String, VisionAcpProfile>,
+    #[serde(default)]
+    pub provider_profiles: BTreeMap<String, VisionDirectProfile>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VisionBackendKind {
+    Acp,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VisionAuthKind {
+    Advertised,
+    #[serde(rename = "oauth-authorization-code")]
+    OAuthAuthorizationCode,
+    #[serde(rename = "oauth-device-code")]
+    OAuthDeviceCode,
+    Environment,
+    ExistingSession,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VisionAcpProfile {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub auth: VisionAuthKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VisionDirectProfile {
+    pub kind: String,
+    pub base_url: String,
+    pub model: String,
+    pub auth: VisionAuthKind,
+    #[serde(default)]
+    pub credential_handle: Option<String>,
+    #[serde(default)]
+    pub credential_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,11 +172,47 @@ pub struct VisionProviderConfig {
     pub api_key_env: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum VisionBackendSelection<'a> {
+    Acp {
+        name: &'a str,
+        profile: &'a VisionAcpProfile,
+    },
+    Direct {
+        name: &'a str,
+        profile: &'a VisionDirectProfile,
+    },
+    LegacyDirect {
+        name: &'a str,
+        profile: &'a VisionProviderConfig,
+    },
+}
+
 impl VisionConfig {
     pub fn selected_provider(&self) -> Option<(&str, &VisionProviderConfig)> {
         let name = self.provider.as_deref()?;
         let profile = self.providers.get(name)?;
         Some((name, profile))
+    }
+
+    pub fn selected_backend(&self) -> Option<VisionBackendSelection<'_>> {
+        match self.backend {
+            Some(VisionBackendKind::Acp) => {
+                let name = self.profile.as_deref()?;
+                self.acp_profiles
+                    .get(name)
+                    .map(|profile| VisionBackendSelection::Acp { name, profile })
+            }
+            Some(VisionBackendKind::Direct) => {
+                let name = self.profile.as_deref()?;
+                self.provider_profiles
+                    .get(name)
+                    .map(|profile| VisionBackendSelection::Direct { name, profile })
+            }
+            None => self
+                .selected_provider()
+                .map(|(name, profile)| VisionBackendSelection::LegacyDirect { name, profile }),
+        }
     }
 }
 
@@ -455,6 +544,53 @@ model = "local-model"
         assert_eq!(profile.base_url, "http://127.0.0.1:1234/v1");
         assert_eq!(profile.model, "local-model");
         assert!(profile.api_key_env.is_none());
+    }
+
+    #[test]
+    fn acp_backend_profile_loads_without_credentials() {
+        let text = r#"
+[vision]
+backend = "acp"
+profile = "codex"
+
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "advertised"
+"#;
+        let config: super::AppConfig = toml::from_str(text).expect("parse ACP profile");
+        let selected = config
+            .vision
+            .selected_backend()
+            .expect("selected ACP backend");
+        assert!(matches!(
+            selected,
+            super::VisionBackendSelection::Acp { name: "codex", .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_provider_maps_to_direct_backend() {
+        let text = r#"
+[vision]
+provider = "lmstudio"
+
+[vision.providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+model = "local-model"
+"#;
+        let config: super::AppConfig = toml::from_str(text).expect("parse legacy profile");
+        let selected = config
+            .vision
+            .selected_backend()
+            .expect("selected legacy backend");
+        assert!(matches!(
+            selected,
+            super::VisionBackendSelection::LegacyDirect {
+                name: "lmstudio",
+                ..
+            }
+        ));
     }
 
     #[test]
