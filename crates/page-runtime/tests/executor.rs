@@ -21,6 +21,7 @@ use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan,
 enum DriverMode {
     Succeed,
     FailInspect,
+    SlowInspect,
     FailClick,
     StateConflict,
     CommitFail,
@@ -119,6 +120,9 @@ impl BrowserWorker for FakeWorker {
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:inspect".into());
+        if matches!(self.mode, DriverMode::SlowInspect) {
+            tokio::time::sleep(StdDuration::from_secs(30)).await;
+        }
         if matches!(self.mode, DriverMode::FailInspect) {
             return Err(driver_failure());
         }
@@ -1511,4 +1515,28 @@ async fn terminal_policy_denial_never_calls_chromium() {
     let events = events.lock().await;
     assert!(!events.iter().any(|event| event.starts_with("browser:")));
     assert!(!events.contains(&"http:state".to_string()));
+}
+
+#[tokio::test]
+async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
+    let (runtime, session, page, _) = runtime(DriverMode::SlowInspect, None).await;
+    let mut request = envelope(
+        session,
+        page,
+        PrimitiveCommand::Inspect(InspectCommand {
+            selector: Some("#slow".into()),
+            target: None,
+            include_html: false,
+        }),
+    );
+    request.deadline = Utc::now() + Duration::milliseconds(50);
+
+    let outcome = runtime.execute(request).await;
+    let error = match outcome {
+        CommandOutcome::Failed { error, .. } | CommandOutcome::RetryableFailure { error, .. } => {
+            error
+        }
+        other => panic!("hung command must fail at its deadline: {other:?}"),
+    };
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded, "{error:?}");
 }
