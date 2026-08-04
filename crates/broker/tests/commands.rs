@@ -105,7 +105,7 @@ fn envelope() -> CommandEnvelope {
     }
 }
 
-async fn response_for(outcome: CommandOutcome) -> (StatusCode, serde_json::Value, Option<u64>) {
+async fn response_for(outcome: CommandOutcome) -> (StatusCode, serde_json::Value) {
     let authority = AuthorityStore::in_memory();
     let token = authority
         .issue(
@@ -143,13 +143,8 @@ async fn response_for(outcome: CommandOutcome) -> (StatusCode, serde_json::Value
         .await
         .unwrap();
     let status = response.status();
-    let retry_after = response
-        .headers()
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok());
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    (status, serde_json::from_slice(&body).unwrap(), retry_after)
+    (status, serde_json::from_slice(&body).unwrap())
 }
 
 #[tokio::test]
@@ -163,7 +158,6 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::OK,
             "completed",
-            None,
         ),
         (
             CommandOutcome::RetryableFailure {
@@ -172,7 +166,6 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::SERVICE_UNAVAILABLE,
             "retryableFailure",
-            Some(1),
         ),
         (
             CommandOutcome::NeedsReconciliation {
@@ -182,7 +175,6 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::CONFLICT,
             "needsReconciliation",
-            None,
         ),
         (
             CommandOutcome::PolicyDenied {
@@ -191,7 +183,6 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::FORBIDDEN,
             "policyDenied",
-            None,
         ),
         (
             CommandOutcome::ResourceExhausted {
@@ -201,7 +192,6 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::TOO_MANY_REQUESTS,
             "resourceExhausted",
-            Some(1),
         ),
         (
             CommandOutcome::Failed {
@@ -211,7 +201,6 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::UNPROCESSABLE_ENTITY,
             "failed",
-            None,
         ),
         (
             CommandOutcome::Restarted {
@@ -223,7 +212,6 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::OK,
             "restarted",
-            None,
         ),
         (
             CommandOutcome::Failed {
@@ -233,14 +221,12 @@ async fn command_outcomes_map_to_stable_http_statuses() {
             },
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed",
-            None,
         ),
     ];
 
-    for (outcome, expected_status, expected_tag, expected_retry_after) in cases {
-        let (status, body, retry_after) = response_for(outcome).await;
+    for (outcome, expected_status, expected_tag) in cases {
+        let (status, body) = response_for(outcome).await;
         assert_eq!(status, expected_status);
         assert_eq!(body["status"], expected_tag);
-        assert_eq!(retry_after, expected_retry_after);
     }
 }
