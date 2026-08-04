@@ -5,7 +5,7 @@ mod vision_child;
 
 use anyhow::{Context, Result};
 use companion_core::{run_native_host, NativeHostConfig};
-use config::AppConfig;
+use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig};
 use firefox_companion::selection::NativeHostDescriptor;
 pub use firefox_companion::selection::{
     compose_worker_factory, compose_worker_factory_with_enrolled_firefox,
@@ -20,6 +20,9 @@ use std::{
     time::Duration,
 };
 use url::Url;
+use vision_child::{
+    decide_vision_child, ManagedVisionProxy, VisionChildDecision, VisionSpawnPolicy,
+};
 use vision_proxy::{serve as serve_vision_proxy, OpenAiUpstream, ProxyConfig};
 
 #[derive(Clone)]
@@ -66,6 +69,13 @@ enum CliCommand {
         /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
         #[arg(long)]
         bootstrap_env: Option<PathBuf>,
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, conflicts_with = "no_vision")]
+        vision: bool,
+        #[arg(long, conflicts_with = "vision")]
+        no_vision: bool,
     },
     /// One-command agent setup: credential, host MCP config, agent skill
     Install {
@@ -102,6 +112,10 @@ enum CliCommand {
         /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
         #[arg(long)]
         bootstrap_env: Option<PathBuf>,
+        #[arg(long, conflicts_with = "no_vision")]
+        vision: bool,
+        #[arg(long, conflicts_with = "vision")]
+        no_vision: bool,
     },
     /// Run the Firefox native-messaging host
     FirefoxNativeHost {
@@ -243,6 +257,8 @@ pub async fn run() -> Result<()> {
     match Cli::parse_args().command.unwrap_or(CliCommand::Serve {
         config: None,
         bootstrap_env: None,
+        vision: false,
+        no_vision: false,
     }) {
         CliCommand::Init {
             force,
@@ -250,9 +266,26 @@ pub async fn run() -> Result<()> {
             path,
             emit,
         } => run_init(force, ttl_days, path, emit)?,
-        CliCommand::McpStdio { bootstrap_env } => {
-            let path = resolve_bootstrap_path(bootstrap_env)?;
-            onboarding::exec_mcp_stdio(&path)?;
+        CliCommand::McpStdio {
+            bootstrap_env,
+            config,
+            vision,
+            no_vision,
+        } => {
+            let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+            let config_path = resolve_config_path(config);
+            let policy = policy_from_flags(vision, no_vision);
+            let config = AppConfig::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let (config, decision, vision_child) =
+                prepare_vision_child(&config_path, config, policy)?;
+            if decision.should_spawn {
+                let child = vision_child
+                    .ok_or_else(|| anyhow::anyhow!("vision sidecar missing after spawn decision"))?;
+                onboarding::run_mcp_stdio_with_sidecar(&bootstrap_path, child)?;
+            } else {
+                onboarding::exec_mcp_stdio(&bootstrap_path)?;
+            }
         }
         CliCommand::Install {
             host,
@@ -284,11 +317,26 @@ pub async fn run() -> Result<()> {
         CliCommand::Serve {
             config,
             bootstrap_env,
+            vision,
+            no_vision,
         } => {
             let config_path = resolve_config_path(config);
             let config_existed = config_path.exists();
+            let policy = policy_from_flags(vision, no_vision);
             let config = AppConfig::load(&config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let (config, decision, _vision_child) =
+                prepare_vision_child(&config_path, config, policy)?;
+            if decision.should_spawn {
+                tracing::info!(
+                    bind = %decision.bind,
+                    path = %decision.path,
+                    reason = %decision.reason,
+                    "spawned loopback vision-proxy sidecar"
+                );
+            } else if matches!(policy, VisionSpawnPolicy::ForceOn) {
+                tracing::info!(reason = %decision.reason, "vision sidecar not spawned");
+            }
             let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
             let resolved = bootstrap_local::resolve_startup_credential_with(
                 &config.server.host,
@@ -369,6 +417,82 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn policy_from_flags(vision: bool, no_vision: bool) -> VisionSpawnPolicy {
+    if no_vision {
+        VisionSpawnPolicy::Off
+    } else if vision {
+        VisionSpawnPolicy::ForceOn
+    } else {
+        VisionSpawnPolicy::Auto
+    }
+}
+
+fn prepare_vision_child(
+    config_path: &Path,
+    mut config: AppConfig,
+    policy: VisionSpawnPolicy,
+) -> Result<(AppConfig, VisionChildDecision, Option<ManagedVisionProxy>)> {
+    if matches!(policy, VisionSpawnPolicy::ForceOn) {
+        ensure_loopback_vision_defaults(&mut config.vision);
+        let Some((provider_name, profile)) = config.vision.selected_provider() else {
+            anyhow::bail!("no vision provider configured; run `bobby vision connect` first");
+        };
+        let endpoint_url = config
+            .vision
+            .endpoint_url
+            .as_deref()
+            .context("vision endpoint_url missing after defaults")?;
+        let token_env = config
+            .vision
+            .token_env
+            .as_deref()
+            .context("vision token_env missing after defaults")?;
+        upsert_vision_platform(
+            config_path,
+            endpoint_url,
+            token_env,
+            provider_name,
+            profile,
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        config = AppConfig::load(config_path).with_context(|| {
+            format!(
+                "failed to reload config from {}",
+                config_path.display()
+            )
+        })?;
+    }
+
+    let decision = decide_vision_child(&config, policy);
+    if matches!(policy, VisionSpawnPolicy::ForceOn)
+        && !decision.should_spawn
+        && decision.reason.contains("no vision provider")
+    {
+        anyhow::bail!("no vision provider configured; run `bobby vision connect` first");
+    }
+
+    let vision_child = if decision.should_spawn {
+        let (_, profile) = config
+            .vision
+            .selected_provider()
+            .context("no vision provider configured; run `bobby vision connect` first")?;
+        let token_env = config
+            .vision
+            .token_env
+            .as_deref()
+            .context("vision token_env not configured")?;
+        Some(ManagedVisionProxy::spawn_from_current_exe(
+            &decision,
+            profile,
+            token_env,
+        )?)
+    } else {
+        None
+    };
+
+    Ok((config, decision, vision_child))
 }
 
 fn require_vision_proxy_bearer() -> Result<String> {
@@ -1785,5 +1909,22 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
             DoctorStatus::Fail
         );
         assert!(report.check("engine-satisfiability").is_none());
+    }
+
+    #[test]
+    fn policy_from_flags_maps_cli_vision_switches() {
+        assert_eq!(
+            policy_from_flags(false, false),
+            VisionSpawnPolicy::Auto
+        );
+        assert_eq!(policy_from_flags(true, false), VisionSpawnPolicy::ForceOn);
+        assert_eq!(policy_from_flags(false, true), VisionSpawnPolicy::Off);
+    }
+
+    #[test]
+    fn serve_and_mcp_stdio_reject_conflicting_vision_flags() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["bobby", "serve", "--vision", "--no-vision"]).is_err());
+        assert!(Cli::try_parse_from(["bobby", "mcp-stdio", "--vision", "--no-vision"]).is_err());
     }
 }
