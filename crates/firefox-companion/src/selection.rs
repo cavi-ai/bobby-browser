@@ -734,14 +734,11 @@ pub fn write_enroll_defaults(path: &Path, defaults: &FirefoxEnrollDefaults) -> R
 }
 
 pub fn read_enroll_defaults(path: &Path) -> Result<FirefoxEnrollDefaults> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| anyhow::anyhow!("enroll defaults {} unreadable: {error}", path.display()))?;
-    serde_json::from_str(&text).map_err(|error| {
-        anyhow::anyhow!(
-            "enroll defaults {} is invalid: {error}",
-            path.display()
-        )
-    })
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        anyhow::anyhow!("enroll defaults {} unreadable: {error}", path.display())
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("enroll defaults {} is invalid: {error}", path.display()))
 }
 
 /// Where a resolved browser selection came from. Reported by `bobby doctor`
@@ -892,10 +889,16 @@ mod tests {
             value["preference"]["profileId"],
             "00000000-0000-0000-0000-000000000000"
         );
-        assert_eq!(value["firefox"][0]["bidiUrl"], "ws://127.0.0.1:9222/session");
+        assert_eq!(
+            value["firefox"][0]["bidiUrl"],
+            "ws://127.0.0.1:9222/session"
+        );
         assert_eq!(value["firefox"][0]["profileDir"], "/tmp/firefox-profile");
         assert_eq!(value["firefox"][0]["companionBind"], "127.0.0.1:9876");
-        assert_eq!(value["firefox"][0]["descriptorPath"], "/tmp/descriptor.json");
+        assert_eq!(
+            value["firefox"][0]["descriptorPath"],
+            "/tmp/descriptor.json"
+        );
         assert_eq!(value["firefox"][0]["timeoutMs"], 30_000);
         assert_eq!(value["firefox"][0]["pairingCodeTtlMs"], 300_000);
         assert_eq!(value["firefox"][0]["attachmentTtlMs"], 300_000);

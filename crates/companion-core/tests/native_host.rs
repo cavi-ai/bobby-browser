@@ -525,7 +525,6 @@ async fn native_eof_cancels_connection_attempts_and_backoff_promptly() {
     assert!(result.is_ok());
 }
 
-
 #[test]
 fn enroll_profile_request_decodes_empty_input() {
     let value = json!({ "kind": "enrollProfile", "input": {} });
