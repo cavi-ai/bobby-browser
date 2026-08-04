@@ -1343,6 +1343,7 @@ dependencies = [
  "companion-core",
  "companion-protocol",
  "config",
+ "dirs",
  "dom-engine",
  "fingerprinting",
  "futures-util",

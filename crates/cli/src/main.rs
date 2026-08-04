@@ -8,8 +8,9 @@ use config::AppConfig;
 use firefox_companion::selection::NativeHostDescriptor;
 pub use firefox_companion::selection::{
     compose_worker_factory, compose_worker_factory_with_enrolled_firefox,
-    compose_worker_factory_with_pairing_observer, parse_selection,
-    start_firefox_profile_enrollment, EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig,
+    compose_worker_factory_with_pairing_observer, default_selection_path, parse_selection,
+    persist_browser_selection, resolve_browser_selection, start_firefox_profile_enrollment,
+    EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig, SelectionSource, SELECTION_ENV,
 };
 use std::{
     net::SocketAddr,
@@ -315,9 +316,8 @@ pub async fn run() -> Result<()> {
                     "config file not found, using built-in defaults"
                 );
             }
-            let selection_json = std::env::var("AUTOMATION_RUNTIME_BROWSER_SELECTION").ok();
-            let factory =
-                compose_worker_factory(&config, parse_selection(selection_json.as_deref())?)?;
+            let (selection, _source) = resolve_browser_selection()?;
+            let factory = compose_worker_factory(&config, selection)?;
             broker::serve_with_worker_factory(config, startup, factory).await?
         }
         CliCommand::FirefoxNativeHost { descriptor } => {
@@ -344,7 +344,13 @@ pub async fn run() -> Result<()> {
             config,
             bootstrap_env,
             skip_health,
-        } => run_doctor(config, bootstrap_env, !skip_health)?,
+        } => {
+            let report = run_doctor(config, bootstrap_env, !skip_health)?;
+            report.render();
+            if report.failures() > 0 {
+                std::process::exit(1);
+            }
+        }
         CliCommand::Jobs { command } => run_jobs(command)?,
         CliCommand::VisionProxy {
             bind,
@@ -507,7 +513,22 @@ async fn run_firefox_profile_enroll(
         }],
     });
     println!("{selection}");
-    eprintln!("Enrollment paired. Export the line above as AUTOMATION_RUNTIME_BROWSER_SELECTION.");
+    let persist = default_selection_path().and_then(|path| {
+        let parsed = serde_json::from_value(selection)?;
+        persist_browser_selection(&path, &parsed).map(|()| path)
+    });
+    match persist {
+        Ok(path) => eprintln!(
+            "Enrollment paired and persisted to {}. `bobby serve`, the MCP gateway, and \
+             `bobby doctor` now resolve this selection with no environment wiring; \
+             {SELECTION_ENV} remains an override.",
+            path.display()
+        ),
+        Err(error) => eprintln!(
+            "Enrollment paired but could not persist the selection ({error:#}). \
+             Export the line above as {SELECTION_ENV}."
+        ),
+    }
     Ok(())
 }
 
@@ -515,16 +536,141 @@ async fn run_firefox_profile_enroll(
 /// renew before the gateway starts failing closed.
 const BOOTSTRAP_EXPIRY_WARN_DAYS: i64 = 7;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl DoctorStatus {
+    fn label(self) -> &'static str {
+        match self {
+            DoctorStatus::Ok => "ok",
+            DoctorStatus::Warn => "warn",
+            DoctorStatus::Fail => "fail",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DoctorCheck {
+    status: DoctorStatus,
+    name: String,
+    detail: String,
+}
+
+/// Structured outcome of a `bobby doctor` run: every check in order, so the
+/// CLI can render it and tests can assert on it without capturing stderr.
+#[derive(Debug, Default)]
+struct DoctorReport {
+    checks: Vec<DoctorCheck>,
+}
+
+impl DoctorReport {
+    fn record(&mut self, status: DoctorStatus, name: &str, detail: String) {
+        self.checks.push(DoctorCheck {
+            status,
+            name: name.to_string(),
+            detail,
+        });
+    }
+
+    fn ok(&mut self, name: &str, detail: String) {
+        self.record(DoctorStatus::Ok, name, detail);
+    }
+
+    fn warn(&mut self, name: &str, detail: String) {
+        self.record(DoctorStatus::Warn, name, detail);
+    }
+
+    fn fail(&mut self, name: &str, detail: String) {
+        self.record(DoctorStatus::Fail, name, detail);
+    }
+
+    fn failures(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|check| check.status == DoctorStatus::Fail)
+            .count()
+    }
+
+    fn warnings(&self) -> usize {
+        self.checks
+            .iter()
+            .filter(|check| check.status == DoctorStatus::Warn)
+            .count()
+    }
+
+    #[cfg(test)]
+    fn check(&self, name: &str) -> Option<&DoctorCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    fn render(&self) {
+        for check in &self.checks {
+            eprintln!(
+                "[{}] {}: {}",
+                check.status.label(),
+                check.name,
+                check.detail
+            );
+        }
+        eprintln!(
+            "doctor: {} failure(s), {} warning(s)",
+            self.failures(),
+            self.warnings()
+        );
+    }
+}
+
+fn check_bootstrap_expiry(expires_at: chrono::DateTime<chrono::Utc>) -> DoctorCheck {
+    let remaining = expires_at - chrono::Utc::now();
+    if remaining <= chrono::Duration::zero() {
+        DoctorCheck {
+            status: DoctorStatus::Fail,
+            name: "bootstrap-expiry".to_string(),
+            detail: format!(
+                "credential expired at {}; run `bobby init --force`",
+                expires_at.to_rfc3339()
+            ),
+        }
+    } else if remaining < chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS) {
+        DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "bootstrap-expiry".to_string(),
+            detail: format!(
+                "credential expires in {} day(s) at {}; run `bobby init --force` before then",
+                remaining.num_days(),
+                expires_at.to_rfc3339()
+            ),
+        }
+    } else {
+        DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "bootstrap-expiry".to_string(),
+            detail: format!("credential valid for {} more day(s)", remaining.num_days()),
+        }
+    }
+}
+
+/// A gateway binary that cannot be spawned at all is a warning (it may be
+/// installed separately); a gateway that starts but fails the handshake is a
+/// failure, because the host will only report it as a dead server.
+fn handshake_error_status(message: &str) -> DoctorStatus {
+    if message.contains("not found") {
+        DoctorStatus::Warn
+    } else {
+        DoctorStatus::Fail
+    }
+}
+
 fn run_doctor(
     config_cli: Option<PathBuf>,
     bootstrap_cli: Option<PathBuf>,
     check_health: bool,
-) -> Result<()> {
-    let mut failures = 0usize;
-    let mut warnings = 0usize;
-    let report = |status: &str, check: &str, detail: String| {
-        eprintln!("[{status}] {check}: {detail}");
-    };
+) -> Result<DoctorReport> {
+    let mut report = DoctorReport::default();
 
     let config_path = resolve_config_path(config_cli);
     let config = match AppConfig::load(&config_path) {
@@ -534,12 +680,11 @@ fn run_doctor(
             } else {
                 "built-in defaults (no config file)".to_string()
             };
-            report("ok", "config", source);
+            report.ok("config", source);
             Some(config)
         }
         Err(error) => {
-            failures += 1;
-            report("fail", "config", format!("{error:#}"));
+            report.fail("config", format!("{error:#}"));
             None
         }
     };
@@ -561,40 +706,30 @@ fn run_doctor(
                         })
                         .unwrap_or(false);
                     if reachable {
-                        report("ok", "vision-endpoint", endpoint.to_string());
+                        report.ok("vision-endpoint", endpoint.to_string());
                     } else {
-                        warnings += 1;
-                        report(
-                            "warn",
+                        report.warn(
                             "vision-endpoint",
                             format!("{endpoint} not reachable (is `bobby vision-proxy` running?)"),
                         );
                     }
                 }
                 Err(error) => {
-                    warnings += 1;
-                    report("warn", "vision-endpoint", format!("invalid URL: {error}"));
+                    report.warn("vision-endpoint", format!("invalid URL: {error}"));
                 }
             }
 
             match config.vision.token_env.as_deref() {
                 Some(name) if !name.is_empty() => match std::env::var(name) {
                     Ok(value) if !value.is_empty() => {
-                        report("ok", "vision-token-env", format!("{name} is set"));
+                        report.ok("vision-token-env", format!("{name} is set"));
                     }
                     _ => {
-                        warnings += 1;
-                        report(
-                            "warn",
-                            "vision-token-env",
-                            format!("{name} is unset or empty"),
-                        );
+                        report.warn("vision-token-env", format!("{name} is unset or empty"));
                     }
                 },
                 _ => {
-                    warnings += 1;
-                    report(
-                        "warn",
+                    report.warn(
                         "vision-token-env",
                         "token_env unset; bobby will call the provider without a bearer"
                             .to_string(),
@@ -604,37 +739,36 @@ fn run_doctor(
         }
     }
 
-    let selection_raw = std::env::var("AUTOMATION_RUNTIME_BROWSER_SELECTION").ok();
-    let selection = match parse_selection(selection_raw.as_deref()) {
-        Ok(selection) => {
-            report(
-                "ok",
+    let selection = match resolve_browser_selection() {
+        Ok((selection, source)) => {
+            report.ok(
                 "browser-selection",
-                if selection_raw.is_some() {
-                    "AUTOMATION_RUNTIME_BROWSER_SELECTION parses".to_string()
-                } else {
-                    "default (Firefox, exact)".to_string()
+                match source {
+                    SelectionSource::Environment => {
+                        "AUTOMATION_RUNTIME_BROWSER_SELECTION parses".to_string()
+                    }
+                    SelectionSource::Persisted(path) => {
+                        format!("persisted selection at {}", path.display())
+                    }
+                    SelectionSource::Default => "default (Firefox, exact)".to_string(),
                 },
             );
             Some(selection)
         }
         Err(error) => {
-            failures += 1;
-            report("fail", "browser-selection", format!("{error:#}"));
+            report.fail("browser-selection", format!("{error:#}"));
             None
         }
     };
 
     if let (Some(config), Some(selection)) = (&config, &selection) {
         match compose_worker_factory(config, selection.clone()) {
-            Ok(_) => report(
-                "ok",
+            Ok(_) => report.ok(
                 "engine-satisfiability",
                 "engine preference can be satisfied by configured registrations".to_string(),
             ),
             Err(error) => {
-                failures += 1;
-                report("fail", "engine-satisfiability", format!("{error:#}"));
+                report.fail("engine-satisfiability", format!("{error:#}"));
             }
         }
         for profile in &selection.firefox {
@@ -653,15 +787,9 @@ fn run_doctor(
                         })
                         .unwrap_or(false);
                     if reachable {
-                        report(
-                            "ok",
-                            "firefox-bidi",
-                            format!("{} reachable", profile.bidi_url),
-                        );
+                        report.ok("firefox-bidi", format!("{} reachable", profile.bidi_url));
                     } else {
-                        warnings += 1;
-                        report(
-                            "warn",
+                        report.warn(
                             "firefox-bidi",
                             format!(
                                 "{} not reachable (is Firefox running with --remote-debugging-port?)",
@@ -671,9 +799,7 @@ fn run_doctor(
                     }
                 }
                 _ => {
-                    failures += 1;
-                    report(
-                        "fail",
+                    report.fail(
                         "firefox-bidi",
                         format!(
                             "profile {} has an invalid bidiUrl (expected ws:// or wss://)",
@@ -683,23 +809,18 @@ fn run_doctor(
                 }
             }
             if profile.profile_dir.exists() {
-                report(
-                    "ok",
+                report.ok(
                     "firefox-profile-dir",
                     profile.profile_dir.display().to_string(),
                 );
             } else {
-                warnings += 1;
-                report(
-                    "warn",
+                report.warn(
                     "firefox-profile-dir",
                     format!("{} does not exist yet", profile.profile_dir.display()),
                 );
             }
             if profile.companion_bind.parse::<SocketAddr>().is_err() {
-                failures += 1;
-                report(
-                    "fail",
+                report.fail(
                     "firefox-companion-bind",
                     format!(
                         "profile {} has an invalid companionBind",
@@ -713,57 +834,24 @@ fn run_doctor(
     // The bootstrap expiry is pinned into MCP client config and the stdio
     // gateway refuses to start once it passes, which a host reports only as a
     // dead server. Warn while there is still time to run `bobby init`.
-    let mut report_expiry = |expires_at: chrono::DateTime<chrono::Utc>| {
-        let remaining = expires_at - chrono::Utc::now();
-        if remaining <= chrono::Duration::zero() {
-            failures += 1;
-            report(
-                "fail",
-                "bootstrap-expiry",
-                format!(
-                    "credential expired at {}; run `bobby init --force`",
-                    expires_at.to_rfc3339()
-                ),
-            );
-        } else if remaining < chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS) {
-            warnings += 1;
-            report(
-                "warn",
-                "bootstrap-expiry",
-                format!(
-                    "credential expires in {} day(s) at {}; run `bobby init --force` before then",
-                    remaining.num_days(),
-                    expires_at.to_rfc3339()
-                ),
-            );
-        } else {
-            report(
-                "ok",
-                "bootstrap-expiry",
-                format!("credential valid for {} more day(s)", remaining.num_days()),
-            );
-        }
-    };
-
     if let Ok(credential) = broker::StartupCredential::from_env() {
-        report("ok", "bootstrap", "credential from environment".to_string());
-        report_expiry(credential.expires_at());
+        report.ok("bootstrap", "credential from environment".to_string());
+        let expiry = check_bootstrap_expiry(credential.expires_at());
+        report.record(expiry.status, &expiry.name, expiry.detail);
     } else {
         match resolve_bootstrap_path(bootstrap_cli.clone()) {
             Ok(path) if path.exists() => {
-                report(
-                    "ok",
+                report.ok(
                     "bootstrap",
                     format!("credential file at {}", path.display()),
                 );
                 match bootstrap_local::load_startup_from_env_file(&path) {
                     Ok(credential) => {
-                        report_expiry(credential.expires_at());
+                        let expiry = check_bootstrap_expiry(credential.expires_at());
+                        report.record(expiry.status, &expiry.name, expiry.detail);
                         match bootstrap_local::load_bootstrap_capabilities_csv(&path) {
                             Ok(caps) if !caps.split(',').any(|c| c.trim() == "job:submit") => {
-                                warnings += 1;
-                                report(
-                                    "warn",
+                                report.warn(
                                     "bootstrap-job-caps",
                                     "bootstrap lacks job:submit; run `bobby init --force` for job:* capabilities"
                                         .to_string(),
@@ -771,9 +859,7 @@ fn run_doctor(
                             }
                             Ok(_) => {}
                             Err(error) => {
-                                warnings += 1;
-                                report(
-                                    "warn",
+                                report.warn(
                                     "bootstrap-job-caps",
                                     format!("could not read capabilities ({error:#})"),
                                 );
@@ -781,15 +867,12 @@ fn run_doctor(
                         }
                     }
                     Err(error) => {
-                        failures += 1;
-                        report("fail", "bootstrap-expiry", format!("{error:#}"));
+                        report.fail("bootstrap-expiry", format!("{error:#}"));
                     }
                 }
             }
             Ok(path) => {
-                warnings += 1;
-                report(
-                    "warn",
+                report.warn(
                     "bootstrap",
                     format!(
                         "no credential yet; `bobby serve` will generate one at {}",
@@ -798,8 +881,7 @@ fn run_doctor(
                 );
             }
             Err(error) => {
-                failures += 1;
-                report("fail", "bootstrap", format!("{error:#}"));
+                report.fail("bootstrap", format!("{error:#}"));
             }
         }
     }
@@ -822,9 +904,7 @@ fn run_doctor(
         Some(env) => match onboarding::mcp_handshake(&env) {
             Ok(handshake) => {
                 if handshake.bytes > mcp_gateway::TOOLS_LIST_BYTE_BUDGET {
-                    failures += 1;
-                    report(
-                        "fail",
+                    report.fail(
                         "mcp-handshake",
                         format!(
                             "tools/list is {} bytes, over the {} byte budget",
@@ -833,8 +913,7 @@ fn run_doctor(
                         ),
                     );
                 } else {
-                    report(
-                        "ok",
+                    report.ok(
                         "mcp-handshake",
                         format!(
                             "gateway {} answered initialize + tools/list: {} tools, {} bytes ({}% of budget)",
@@ -848,19 +927,11 @@ fn run_doctor(
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                if message.contains("not found") {
-                    warnings += 1;
-                    report("warn", "mcp-handshake", message);
-                } else {
-                    failures += 1;
-                    report("fail", "mcp-handshake", message);
-                }
+                report.record(handshake_error_status(&message), "mcp-handshake", message);
             }
         },
         None => {
-            warnings += 1;
-            report(
-                "warn",
+            report.warn(
                 "mcp-handshake",
                 "skipped: no bootstrap credential to launch the gateway with".to_string(),
             );
@@ -894,10 +965,9 @@ fn run_doctor(
             ("artifacts-dir", config.browser.artifacts_dir.clone()),
         ] {
             match std::fs::create_dir_all(&dir) {
-                Ok(()) => report("ok", name, dir.display().to_string()),
+                Ok(()) => report.ok(name, dir.display().to_string()),
                 Err(error) => {
-                    failures += 1;
-                    report("fail", name, format!("{}: {error}", dir.display()));
+                    report.fail(name, format!("{}: {error}", dir.display()));
                 }
             }
         }
@@ -912,11 +982,9 @@ fn run_doctor(
         .iter()
         .any(|bundle| Path::new(bundle).exists());
     if firefox {
-        report("ok", "firefox", "found".to_string());
+        report.ok("firefox", "found".to_string());
     } else {
-        warnings += 1;
-        report(
-            "warn",
+        report.warn(
             "firefox",
             "not found on PATH or /Applications (default engine)".to_string(),
         );
@@ -925,11 +993,9 @@ fn run_doctor(
         || Path::new("/Applications/Google Chrome.app").exists()
         || Path::new("/Applications/Chromium.app").exists();
     if chromium {
-        report("ok", "chromium", "found".to_string());
+        report.ok("chromium", "found".to_string());
     } else {
-        warnings += 1;
-        report(
-            "warn",
+        report.warn(
             "chromium",
             "not found (required for Chromium engine selection)".to_string(),
         );
@@ -942,11 +1008,9 @@ fn run_doctor(
                 config.server.host, config.server.port
             );
             match probe_healthz(&url) {
-                Ok(()) => report("ok", "healthz", format!("{url} responded")),
+                Ok(()) => report.ok("healthz", format!("{url} responded")),
                 Err(error) => {
-                    warnings += 1;
-                    report(
-                        "warn",
+                    report.warn(
                         "healthz",
                         format!("{url} not reachable ({error}); is `bobby serve` running?"),
                     );
@@ -955,11 +1019,7 @@ fn run_doctor(
         }
     }
 
-    eprintln!("doctor: {failures} failure(s), {warnings} warning(s)");
-    if failures > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
+    Ok(report)
 }
 
 fn probe_healthz(url: &str) -> Result<()> {
@@ -1440,6 +1500,7 @@ mod tests {
         std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
+
     #[test]
     fn jobs_submit_clap_parses_required_name() {
         use clap::Parser;
@@ -1502,5 +1563,215 @@ mod tests {
             }) => assert_eq!(job_id, "job-456"),
             _ => panic!("unexpected cancel parse"),
         }
+    }
+
+    #[test]
+    fn doctor_report_counts_and_indexes_checks() {
+        let mut report = DoctorReport::default();
+        report.ok("a", "fine".to_string());
+        report.warn("b", "meh".to_string());
+        report.fail("c", "broken".to_string());
+        report.fail("d", "also broken".to_string());
+
+        assert_eq!(report.failures(), 2);
+        assert_eq!(report.warnings(), 1);
+        assert_eq!(report.check("c").unwrap().status, DoctorStatus::Fail);
+        assert!(report.check("missing").is_none());
+    }
+
+    #[test]
+    fn bootstrap_expiry_check_fails_when_expired_warns_when_near_and_passes_beyond() {
+        let expired = check_bootstrap_expiry(chrono::Utc::now() - chrono::Duration::hours(1));
+        assert_eq!(expired.status, DoctorStatus::Fail);
+        assert!(expired.detail.contains("expired"));
+
+        let soon = check_bootstrap_expiry(
+            chrono::Utc::now() + chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS - 1),
+        );
+        assert_eq!(soon.status, DoctorStatus::Warn);
+        assert!(soon.detail.contains("expires in"));
+
+        let later = check_bootstrap_expiry(
+            chrono::Utc::now() + chrono::Duration::days(BOOTSTRAP_EXPIRY_WARN_DAYS + 10),
+        );
+        assert_eq!(later.status, DoctorStatus::Ok);
+        assert!(later.detail.contains("valid"));
+    }
+
+    #[test]
+    fn handshake_error_classification_distinguishes_missing_binary_from_failed_handshake() {
+        assert_eq!(
+            handshake_error_status("failed to spawn /usr/local/bin/mcp-gateway: not found"),
+            DoctorStatus::Warn
+        );
+        assert_eq!(
+            handshake_error_status("initialize: gateway did not answer within 15s"),
+            DoctorStatus::Fail
+        );
+    }
+
+    /// `run_doctor` reads process env; serialize these tests and restore every
+    /// variable they touch so they cannot leak into each other or the host.
+    struct DoctorEnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl DoctorEnvGuard {
+        const VARS: [&'static str; 6] = [
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN",
+            "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL",
+            "AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES",
+            "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT",
+            "BOBBY_BROWSER_BOOTSTRAP_ENV",
+        ];
+
+        fn clear() -> Self {
+            let saved = Self::VARS
+                .iter()
+                .map(|name| {
+                    let value = std::env::var_os(name);
+                    unsafe { std::env::remove_var(name) };
+                    (*name, value)
+                })
+                .collect();
+            Self { saved }
+        }
+
+        fn set(&self, name: &str, value: &str) {
+            assert!(Self::VARS.contains(&name));
+            unsafe { std::env::set_var(name, value) };
+        }
+    }
+
+    impl Drop for DoctorEnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    static DOCTOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn doctor_config_fixture(root: &Path) -> PathBuf {
+        let path = root.join("config.toml");
+        let text = format!(
+            r#"[server]
+host = "127.0.0.1"
+port = 17987
+
+[browser]
+profiles_dir = "{0}/profiles"
+headless = true
+max_active = 1
+upload_roots = []
+downloads_dir = "{0}/downloads"
+artifacts_dir = "{0}/artifacts"
+max_artifact_bytes = 1048576
+max_screenshot_dimension = 1024
+max_js_result_bytes = 65536
+max_js_timeout_ms = 5000
+
+[storage]
+journal_path = "{0}/storage/journal.jsonl"
+checkpoints_dir = "{0}/storage/checkpoints"
+authority_path = "{0}/storage/authority.json"
+scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
+"#,
+            root.display()
+        );
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn doctor_flags_a_malformed_config_and_skips_dependent_checks() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "not = [valid").unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report.failures(), 1, "{:?}", report.checks);
+        assert_eq!(report.check("config").unwrap().status, DoctorStatus::Fail);
+        assert!(report.check("engine-satisfiability").is_none());
+        assert!(report.check("storage-journal-dir").is_none());
+        assert_eq!(
+            report.check("browser-selection").unwrap().status,
+            DoctorStatus::Ok
+        );
+    }
+
+    #[test]
+    fn doctor_accepts_a_valid_config_and_a_satisfiable_selection() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report.failures(), 0, "{:?}", report.checks);
+        assert_eq!(report.check("config").unwrap().status, DoctorStatus::Ok);
+        assert_eq!(
+            report.check("browser-selection").unwrap().status,
+            DoctorStatus::Ok
+        );
+        assert_eq!(
+            report.check("engine-satisfiability").unwrap().status,
+            DoctorStatus::Ok
+        );
+        assert_eq!(
+            report.check("artifacts-dir").unwrap().status,
+            DoctorStatus::Ok
+        );
+        assert!(root.path().join("artifacts").is_dir());
+    }
+
+    #[test]
+    fn doctor_fails_on_an_unparseable_browser_selection() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set("AUTOMATION_RUNTIME_BROWSER_SELECTION", "{not json");
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(report.failures(), 1, "{:?}", report.checks);
+        assert_eq!(
+            report.check("browser-selection").unwrap().status,
+            DoctorStatus::Fail
+        );
+        assert!(report.check("engine-satisfiability").is_none());
     }
 }
