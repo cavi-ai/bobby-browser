@@ -1604,6 +1604,7 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
 mod tests {
     use super::*;
     use config::VisionProviderConfig;
+    use std::collections::BTreeMap;
 
     #[cfg(unix)]
     #[test]
@@ -2096,16 +2097,18 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
 
     #[test]
     fn vision_upstream_key_skipped_for_local_provider() {
-        let mut vision = VisionConfig::default();
-        vision.provider = Some("lmstudio".into());
-        vision.providers.insert(
-            "lmstudio".into(),
-            VisionProviderConfig {
-                base_url: "http://127.0.0.1:1234/v1".into(),
-                model: "local-model".into(),
-                api_key_env: None,
-            },
-        );
+        let vision = VisionConfig {
+            provider: Some("lmstudio".into()),
+            providers: BTreeMap::from([(
+                "lmstudio".into(),
+                VisionProviderConfig {
+                    base_url: "http://127.0.0.1:1234/v1".into(),
+                    model: "local-model".into(),
+                    api_key_env: None,
+                },
+            )]),
+            ..VisionConfig::default()
+        };
         assert!(check_vision_upstream_key(&vision).is_none());
     }
 

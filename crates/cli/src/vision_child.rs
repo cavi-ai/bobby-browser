@@ -298,7 +298,7 @@ mod tests {
     }
 
     fn loopback_config(endpoint: &str, with_provider: bool) -> AppConfig {
-        let config = AppConfig {
+        AppConfig {
             vision: VisionConfig {
                 endpoint_url: Some(endpoint.into()),
                 token_env: Some("BOBBY_VISION_TOKEN".into()),
@@ -315,8 +315,7 @@ mod tests {
                 },
             },
             ..AppConfig::default()
-        };
-        config
+        }
     }
 
     #[test]
