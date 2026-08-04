@@ -19,3 +19,16 @@ test("runs Node workflows on the pinned Node 24 LTS release", async () => {
     assert.doesNotMatch(workflow, /npm install -g npm@latest/);
   }
 });
+
+test("npm publish is tag-guarded and idempotent under OIDC trusted publishing", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/publish.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(workflow, /RELEASE_TAG" != "v\$\{PKG_VERSION\}/);
+  assert.match(workflow, /npm view "@cavi-ai\/bobby-browser@\$\{PKG_VERSION\}" version/);
+  assert.match(workflow, /npm publish --access public --provenance/);
+  assert.doesNotMatch(workflow, /NODE_AUTH_TOKEN:\s*\$\{/);
+  assert.doesNotMatch(workflow, /secrets\.NPM_TOKEN/);
+});
