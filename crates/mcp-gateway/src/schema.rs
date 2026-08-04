@@ -211,6 +211,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "click" => (
             json!({
                 "workflowId": id(),
+                "commandId": id_pin(),
+                "attemptId": id_pin(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
@@ -562,12 +564,17 @@ fn intent_required(extra: &[&'static str]) -> Vec<&'static str> {
 /// Page scope shared by every intent tool.
 ///
 /// `workflowId` is optional on the way in so an agent can keep a multi-step
-/// intent sequence inside one workflow and then checkpoint it.
+/// intent sequence inside one workflow and then checkpoint it. `commandId`
+/// and `attemptId` are optional too: a Boundary intent's pre-action
+/// checkpoint must name the exact ids the submit will carry, so the caller
+/// pins them up front instead of letting the server mint them.
 fn intent_scope(extra: Value) -> Value {
     let mut properties = json!({
         "sessionId": id(),
         "pageId": id(),
         "workflowId": id(),
+        "commandId": id_pin(),
+        "attemptId": id_pin(),
         "idempotencyKey": string(1, 128)
     });
     merge_properties(&mut properties, extra);
@@ -654,6 +661,7 @@ pub(crate) fn definitions_for_test() -> Value {
 
 fn definitions() -> Value {
     json!({
+        "Id": {"type":"string","format":"uuid","minLength":36,"maxLength":36},
         "CommandEnvelope": object(json!({
             "schemaVersion":{"type":"integer","const":2},
             "commandId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(),
@@ -1526,6 +1534,10 @@ fn evidence_variants() -> Vec<Value> {
 }
 
 /// Must match `types::ErrorCode`'s camelCase serde output variant-for-variant.
+pub(crate) fn error_code_for_test() -> Value {
+    error_code()
+}
+
 fn error_code() -> Value {
     json!({"type":"string","enum":[
         "invalidRequest","notFound","deadlineExceeded","browserLaunchFailed",
@@ -1535,7 +1547,7 @@ fn error_code() -> Value {
         "screenshotCaptureFailed","networkPolicyDenied","httpResponseTooLarge",
         "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
         "intentCompileFailed","intentActionMismatch","obstructionSuspected",
-        "visionAssistDenied","visionAssistFailed"
+        "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds"
     ]})
 }
 
@@ -1979,7 +1991,14 @@ fn timeout_ms() -> Value {
     json!({"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS})
 }
 fn id() -> Value {
-    json!({"type":"string","format":"uuid","minLength":36,"maxLength":36})
+    json!({"$ref":"#/$defs/Id"})
+}
+
+/// Caller-pinned ids (commandId/attemptId on Boundary-capable tools). The
+/// length bounds `id()` carries are dropped here to keep `tools/list` inside
+/// the connect byte budget; the types themselves reject a non-UUID on parse.
+fn id_pin() -> Value {
+    json!({"type":"string","format":"uuid"})
 }
 fn sha256() -> Value {
     json!({"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"})

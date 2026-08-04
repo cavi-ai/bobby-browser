@@ -31,7 +31,11 @@ the MCP `checkpoint_save` tool enforces. Maximum 128 refs.
 Typical moments to checkpoint:
 
 - Before boundary work (`SubmitAndVerify`, boundary clicks /
-  `Follow` with `boundary: true`)
+  `Follow` with `boundary: true`) — required, not optional: the runtime
+  refuses a Boundary command whose checkpoint does not already name the
+  exact `commandId`/`attemptId` the command will carry. Over MCP, pin those
+  ids yourself and pass them to both `checkpoint_save` and the Boundary
+  call (`intent_*` tools and `click` accept `commandId`/`attemptId`).
 - After durable evidence is available and before irreversible navigation
 
 TypeScript:

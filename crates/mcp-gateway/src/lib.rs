@@ -26,6 +26,11 @@ pub fn definitions_for_test() -> serde_json::Value {
     schema::definitions_for_test()
 }
 
+#[doc(hidden)]
+pub fn error_code_for_test() -> serde_json::Value {
+    schema::error_code_for_test()
+}
+
 /// The ceiling on a `tools/list` response for a principal holding every
 /// capability — an eighth of the 1 MiB frame cap.
 ///
