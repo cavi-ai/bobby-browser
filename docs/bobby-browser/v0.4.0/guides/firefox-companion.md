@@ -136,6 +136,24 @@ backoff, so restarts of either side self-heal).
 - Re-sideload a new extension xpi after rebuilding `dist/`; Firefox picks it
   up on restart.
 
+### Operator popup
+
+The toolbar popup is the day-to-day operator panel for the companion:
+
+- **Connection** — paired/unpaired badge, companion and profile ids when
+  paired, or an unpaired reason.
+- **Session** — active lease count; when the host owns fingerprint spoofing,
+  session id and seed hex appear here too.
+- **Fingerprint** — toggle for popup-owned spoofing; disabled and read-only
+  when a Bobby worker session claims host ownership (BiDi owns spoofing).
+- **Humanize** — status only; shows `Unknown — set by session policy` when not
+  reported by the active session.
+- **Debug** — native port connected/disconnected, protocol version, and last
+  error when present.
+
+Host-managed fingerprint cannot be flipped from the popup. After changing
+popup code, rebuild and re-sideload `dist/` (see re-sideload note above).
+
 ## Limitations
 
 - The companion declares `nativeInput: false` and `nativeDialogs: false`;
