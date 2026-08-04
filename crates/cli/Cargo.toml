@@ -33,6 +33,7 @@ tokio.workspace = true
 tracing.workspace = true
 broker = { path = "../broker", version = "0.4.0" }
 config = { path = "../config", version = "0.4.0" }
+node-registry = { path = "../node-registry", version = "0.4.0" }
 companion-protocol = { path = "../companion-protocol", version = "0.4.0" }
 companion-core = { path = "../companion-core", version = "0.4.0" }
 firefox-companion = { path = "../firefox-companion", version = "0.4.0" }

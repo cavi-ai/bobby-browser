@@ -508,6 +508,7 @@ dependencies = [
  "hex",
  "libc",
  "mcp-gateway",
+ "node-registry",
  "observability",
  "reqwest 0.12.28",
  "serde",

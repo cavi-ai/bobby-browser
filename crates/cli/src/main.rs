@@ -1,6 +1,7 @@
 mod bootstrap_local;
 mod jobs_client;
 mod onboarding;
+mod vision_child;
 
 use anyhow::{Context, Result};
 use companion_core::{run_native_host, NativeHostConfig};
