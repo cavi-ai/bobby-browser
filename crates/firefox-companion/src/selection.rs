@@ -750,6 +750,35 @@ pub fn resolve_browser_selection_with(
     Ok((BrowserSelectionConfig::default(), SelectionSource::Default))
 }
 
+/// Build the browser-selection document produced after a successful Firefox
+/// profile enrollment. Shared by the CLI enroll command and (Task 5) the
+/// native-host `enrollProfile` handler so both paths emit identical wire JSON.
+pub fn build_enrolled_browser_selection(
+    profile_id: &ProfileId,
+    bidi_url: &str,
+    profile_dir: &Path,
+    companion_bind: SocketAddr,
+    descriptor_path: &Path,
+) -> BrowserSelectionConfig {
+    let profile_id = profile_id.0.to_string();
+    BrowserSelectionConfig {
+        preference: EnginePreferenceConfig::Exact {
+            engine: BrowserEngineConfig::Firefox,
+            profile_id: Some(profile_id.clone()),
+        },
+        firefox: vec![FirefoxCompanionConfig {
+            profile_id,
+            bidi_url: bidi_url.to_owned(),
+            profile_dir: profile_dir.to_path_buf(),
+            companion_bind: companion_bind.to_string(),
+            descriptor_path: descriptor_path.to_path_buf(),
+            timeout_ms: 30_000,
+            pairing_code_ttl_ms: 300_000,
+            attachment_ttl_ms: 300_000,
+        }],
+    }
+}
+
 /// Persist a selection so subsequent serve/gateway/doctor runs resolve it
 /// without any environment wiring. Written atomically with owner-only
 /// permissions on Unix: the contents locate a pairing endpoint and profile.
@@ -787,6 +816,32 @@ pub fn persist_browser_selection(path: &Path, selection: &BrowserSelectionConfig
 mod tests {
     use super::*;
     use types::SessionId;
+
+    #[test]
+    fn build_enrolled_browser_selection_matches_wire_shape() {
+        let profile_id = ProfileId(uuid::Uuid::nil());
+        let selection = build_enrolled_browser_selection(
+            &profile_id,
+            "ws://127.0.0.1:9222/session",
+            Path::new("/tmp/firefox-profile"),
+            "127.0.0.1:9876".parse().unwrap(),
+            Path::new("/tmp/descriptor.json"),
+        );
+        let value = serde_json::to_value(&selection).unwrap();
+        assert_eq!(value["preference"]["mode"], "exact");
+        assert_eq!(value["preference"]["engine"], "firefox");
+        assert_eq!(
+            value["preference"]["profileId"],
+            "00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(value["firefox"][0]["bidiUrl"], "ws://127.0.0.1:9222/session");
+        assert_eq!(value["firefox"][0]["profileDir"], "/tmp/firefox-profile");
+        assert_eq!(value["firefox"][0]["companionBind"], "127.0.0.1:9876");
+        assert_eq!(value["firefox"][0]["descriptorPath"], "/tmp/descriptor.json");
+        assert_eq!(value["firefox"][0]["timeoutMs"], 30_000);
+        assert_eq!(value["firefox"][0]["pairingCodeTtlMs"], 300_000);
+        assert_eq!(value["firefox"][0]["attachmentTtlMs"], 300_000);
+    }
 
     #[test]
     fn absent_selection_configuration_requires_firefox_without_fallback() {
