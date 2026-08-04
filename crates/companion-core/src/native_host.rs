@@ -256,6 +256,8 @@ pub enum NativeRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrollHostError {
     ListenerUnavailable,
+    /// Defaults bind is occupied but no usable live descriptor was found.
+    BindInUse,
     BidiMissing,
     DefaultsMissing,
     Timeout,
@@ -265,11 +267,21 @@ impl EnrollHostError {
     pub fn code(self) -> &'static str {
         match self {
             Self::ListenerUnavailable => "listenerUnavailable",
+            Self::BindInUse => "bindInUse",
             Self::BidiMissing => "bidiMissing",
             Self::DefaultsMissing => "defaultsMissing",
             Self::Timeout => "timeout",
         }
     }
+}
+
+/// Whether the native host should drop the enroll-time companion listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollFinalize {
+    /// Temp companion was released; exit so day-2 serve can bind the same address.
+    ReleaseListener,
+    /// Paired against an already-running serve descriptor; keep the WS relay.
+    KeepRelay,
 }
 
 /// CLI-supplied enroll bridge so `companion-core` does not depend on `firefox-companion`.
@@ -282,7 +294,7 @@ pub trait NativeHostEnroll: Send + Sync {
     fn complete_enrollment(
         &self,
         pair: &NativeConnectRequest,
-    ) -> impl Future<Output = Result<(), EnrollHostError>> + Send;
+    ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send;
 }
 
 /// Placeholder enroll impl for pair-only `run_native_host` callers.
@@ -299,8 +311,8 @@ impl NativeHostEnroll for NullNativeHostEnroll {
     fn complete_enrollment(
         &self,
         _pair: &NativeConnectRequest,
-    ) -> impl Future<Output = Result<(), EnrollHostError>> + Send {
-        async { Ok(()) }
+    ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
+        async { Ok(EnrollFinalize::ReleaseListener) }
     }
 }
 
@@ -827,17 +839,27 @@ where
                             if !enroll_finalized && is_initial_pair {
                                 // Persist before the extension observes durable success.
                                 if let Some(enroll) = enroll.as_ref() {
-                                    if let Err(error) = enroll.complete_enrollment(&connect).await {
-                                        write_enroll_failed(&mut native_writer, error).await?;
-                                        break Err(NativeHostError::InvalidProtocol);
-                                    }
+                                    let finalize = match enroll.complete_enrollment(&connect).await
+                                    {
+                                        Ok(finalize) => finalize,
+                                        Err(error) => {
+                                            write_enroll_failed(&mut native_writer, error).await?;
+                                            break Err(NativeHostError::InvalidProtocol);
+                                        }
+                                    };
                                     write_native_message(&mut native_writer, &value).await?;
                                     write_enroll_status(&mut native_writer, "enrollOk", None)
                                         .await?;
                                     enroll_finalized = true;
-                                    // Enrollment listener is torn down in complete_enrollment;
-                                    // stop relay so day-2 serve can bind the same address.
-                                    break Ok(ConnectionResult::NativeClosed);
+                                    match finalize {
+                                        // Temp enrollment listener was dropped; exit so day-2
+                                        // serve can bind the same address.
+                                        EnrollFinalize::ReleaseListener => {
+                                            break Ok(ConnectionResult::NativeClosed);
+                                        }
+                                        // Live serve already owns the bind; keep relaying.
+                                        EnrollFinalize::KeepRelay => {}
+                                    }
                                 }
                             }
                             write_native_message(&mut native_writer, &value).await?;
