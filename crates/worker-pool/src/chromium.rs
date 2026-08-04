@@ -531,6 +531,14 @@ impl ChromiumWorker {
             let pages = self.pages.lock().await;
             pages.get(page_id).cloned().ok_or_else(page_missing)?
         };
+        // Single-flight the collector spawn without holding this map's guard
+        // across other lock acquisitions: re-lock and re-check, so the loser
+        // of the race returns the winner's recorder instead of spawning a
+        // duplicate collector that splits entries between them.
+        let mut recorders = self.har_recorders.lock().await;
+        if let Some(recorder) = recorders.get(page_id) {
+            return Ok(recorder.clone());
+        }
         let recorder = Arc::new(crate::HarRecorder::default());
         let task_recorder = recorder.clone();
         let task = tokio::spawn(async move {
@@ -597,10 +605,8 @@ impl ChromiumWorker {
                 }
             }
         });
-        self.har_recorders
-            .lock()
-            .await
-            .insert(page_id.clone(), recorder.clone());
+        recorders.insert(page_id.clone(), recorder.clone());
+        drop(recorders);
         self.har_tasks.lock().await.insert(page_id.clone(), task);
         Ok(recorder)
     }
@@ -1300,8 +1306,13 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::SetCookiesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        // Clone the page handle and drop the pages guard before any browser
+        // I/O: the read-back below locks the same (non-reentrant) mutex, so
+        // holding it here deadlocks every cookie_set.
+        let page = {
+            let pages = self.pages.lock().await;
+            pages.get(page_id).cloned().ok_or_else(page_missing)?
+        };
         if command.cookies.len() > 128 {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
@@ -1330,8 +1341,12 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::DeleteCookiesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        // Same deadlock avoidance as set_cookies: take the handle, drop the
+        // guard, then do I/O (both get_cookies calls lock pages again).
+        let page = {
+            let pages = self.pages.lock().await;
+            pages.get(page_id).cloned().ok_or_else(page_missing)?
+        };
         let current = self
             .get_cookies(
                 page_id,

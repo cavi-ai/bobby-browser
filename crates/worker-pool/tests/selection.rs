@@ -455,3 +455,51 @@ async fn failed_launch_does_not_leave_a_stale_selected_choice() {
     assert_eq!(recovered.profile_dir(), Path::new("recovered-firefox"));
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
+
+struct SlowFactory(Arc<AtomicUsize>);
+
+#[async_trait]
+impl WorkerFactory for SlowFactory {
+    async fn launch(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        // Widen the race window so a check-then-act regression reliably
+        // shows up as a second launch.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(Arc::new(NamedWorker {
+            id: WorkerId::new(),
+            name: "slow-chromium",
+        }))
+    }
+}
+
+#[tokio::test]
+async fn concurrent_leases_on_one_session_launch_a_single_worker() {
+    let launches = Arc::new(AtomicUsize::new(0));
+    let selector = Arc::new(BrowserWorkerSelector::new(
+        vec![FactoryRegistration::new(
+            BrowserEngine::Chromium,
+            None,
+            capabilities(true),
+            Arc::new(SlowFactory(launches.clone())),
+        )],
+        RequiredCapabilities::default(),
+    ));
+    let pool = WorkerPool::new(
+        2,
+        Arc::new(SelectedWorkerFactory::new(
+            selector,
+            EnginePreference::ManagedChromium,
+        )),
+    );
+
+    let session = session();
+    let (first, second) = tokio::join!(pool.lease(session.clone()), pool.lease(session));
+    first.expect("first lease succeeds");
+    second.expect("second lease succeeds");
+    // Without single-flighting, both leases miss the launched cache and each
+    // spawns a browser against the same profile directory.
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
+}
