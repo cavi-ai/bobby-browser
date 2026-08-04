@@ -30,14 +30,8 @@ jobs:
           node-version: 24.18.1
           cache: pnpm
           registry-url: https://registry.npmjs.org
-      # Trusted publishing needs npm >= 11.5.1. An older npm does not attempt the
-      # OIDC exchange at all — it falls back to token auth and fails on the
-      # account's publish-time 2FA with `EOTP`, which is how v0.5.0 failed.
-      - name: Upgrade npm for trusted publishing
-        run: |
-          set -euo pipefail
-          npm install -g npm@latest
-          npm --version
+      # Trusted publishing needs npm >= 11.5.1; the pinned Node 24.18.1 bundles
+      # 11.16.0, so npm stays pinned with Node rather than floating on @latest.
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @cavi-ai/bobby-browser test
       - name: Dry-run pack
@@ -45,7 +39,10 @@ jobs:
         run: pnpm build && npm pack --dry-run
       # No NODE_AUTH_TOKEN: a user token cannot publish here because the account
       # requires 2FA on publish, and a one-time password cannot be held by CI.
-      # OIDC is the way this package publishes from Actions.
+      # OIDC is the way this package publishes from Actions. v0.5.0 failed with
+      # `EOTP` because the trusted publisher named a workflow filename and
+      # environment this repository did not have, so no OIDC exchange matched
+      # and npm fell back to the token.
       #
       # The trusted publisher on npmjs.com for @cavi-ai/bobby-browser is
       # cavi-ai / bobby-browser, workflow filename `publish.yml`, environment

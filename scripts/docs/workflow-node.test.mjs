@@ -8,7 +8,9 @@ test("runs Node workflows on the pinned Node 24 LTS release", async () => {
   const workflows = await Promise.all([
     "ci.yml",
     "publish-docs.yml",
-    "publish-npm.yml",
+    // Named `publish.yml` because the npm trusted publisher matches the
+    // workflow filename exactly.
+    "publish.yml",
   ].map((name) => readFile(new URL(`.github/workflows/${name}`, root), "utf8")));
 
   for (const workflow of workflows) {
