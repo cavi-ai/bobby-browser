@@ -72,13 +72,33 @@ max_concurrent_requests = 8
 
 [vision]
 # Vision-assist provider (disabled when endpoint_url is unset).
-# For local/dev with OpenAI, run a loopback adapter:
-#   export BOBBY_VISION_TOKEN=…   # bobby → proxy bearer
-#   export OPENAI_API_KEY=…      # proxy → OpenAI
-#   bobby vision-proxy           # default http://127.0.0.1:9100/vision
+#
+# Preferred setup:
+#   bobby vision connect          # writes provider profile + loopback endpoint
+#   export BOBBY_VISION_TOKEN=…   # loopback bearer (never stored in this file)
+#   export OPENAI_API_KEY=…       # only when the profile sets api_key_env
+#   bobby serve --vision          # auto-spawns loopback vision-proxy when needed
+#
+# Manual two-process setup still works:
+#   bobby vision-proxy            # default http://127.0.0.1:9100/vision
+#
 # endpoint_url = "http://127.0.0.1:9100/vision"
 # token_env = "BOBBY_VISION_TOKEN"
+# provider = "lmstudio"
 # timeout_ms = 15000
+#
+# [vision.providers.openai]
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-4o-mini"
+# api_key_env = "OPENAI_API_KEY"
+#
+# [vision.providers.lmstudio]
+# base_url = "http://127.0.0.1:1234/v1"   # use the URL LM Studio shows (port often 1234)
+# model = "local-model"
+#
+# [vision.providers.ollama]
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "llava"
 
 [interface]
 # Maximum size, in bytes, of a single interface request.

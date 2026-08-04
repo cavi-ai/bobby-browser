@@ -69,8 +69,8 @@ Submitting a command still requires `browser:mutate`. Nested commands add:
 | Evaluate JavaScript | `javascript:evaluate` (+ session `executionPolicy.javascriptEvaluation`) |
 | Any intent | `intent:execute` |
 | Intent + file fill (`fill` / `completeForm` with `files`) | `intent:execute` and `file:upload` |
-| Vision escalation | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
-| Structured extraction (`extractStructured` / MCP `extract_structured`) | `vision:assist` (+ session `executionPolicy.visionAssist` + `[vision]` provider) |
+| Vision escalation | `vision:assist` (+ session `executionPolicy.visionAssist` + reachable `[vision]` / vision node endpoint) |
+| Structured extraction (`extractStructured` / MCP `extract_structured`) | `vision:assist` (+ session `executionPolicy.visionAssist` + reachable `[vision]` / vision node endpoint) |
 | Fingerprint spoofing | `browser:fingerprint` at session creation (+ session `executionPolicy.fingerprint`) |
 | Humanized input timing | `browser:humanize` at session creation (+ session `executionPolicy.humanize`) |
 

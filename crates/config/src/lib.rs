@@ -1,5 +1,10 @@
+mod vision_write;
+
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+pub use vision_write::{ensure_loopback_vision_defaults, upsert_vision_platform, ConfigWriteError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,10 +71,13 @@ const fn default_attachment_ttl_ms() -> u64 {
     300_000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
     pub browser: BrowserConfig,
+    #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
     pub http: HttpConfig,
@@ -96,6 +104,27 @@ pub struct VisionConfig {
     pub token_env: Option<String>,
     #[serde(default = "default_vision_timeout_ms", alias = "timeoutMs")]
     pub timeout_ms: u64,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub providers: BTreeMap<String, VisionProviderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VisionProviderConfig {
+    #[serde(alias = "baseUrl")]
+    pub base_url: String,
+    pub model: String,
+    #[serde(default, alias = "apiKeyEnv")]
+    pub api_key_env: Option<String>,
+}
+
+impl VisionConfig {
+    pub fn selected_provider(&self) -> Option<(&str, &VisionProviderConfig)> {
+        let name = self.provider.as_deref()?;
+        let profile = self.providers.get(name)?;
+        Some((name, profile))
+    }
 }
 
 fn default_vision_timeout_ms() -> u64 {
@@ -306,7 +335,18 @@ const fn default_shutdown_timeout_ms() -> u64 {
     10_000
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 7777,
+            shutdown_timeout_ms: default_shutdown_timeout_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BrowserConfig {
     pub executable: Option<PathBuf>,
     pub profiles_dir: PathBuf,
@@ -324,6 +364,26 @@ pub struct BrowserConfig {
     pub max_js_timeout_ms: u64,
 }
 
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            executable: std::env::var_os("BOBBY_CHROME_EXECUTABLE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            profiles_dir: PathBuf::from("./data/profiles"),
+            headless: true,
+            max_active: 8,
+            upload_roots: vec![PathBuf::from("./data/uploads")],
+            downloads_dir: PathBuf::from("./data/downloads"),
+            artifacts_dir: PathBuf::from("./data/artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub journal_path: PathBuf,
@@ -338,40 +398,13 @@ fn default_scheduler_journal_path() -> PathBuf {
     PathBuf::from("./data/storage/scheduler-jobs.jsonl")
 }
 
-impl Default for AppConfig {
+impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            server: ServerConfig {
-                host: "127.0.0.1".to_string(),
-                port: 7777,
-                shutdown_timeout_ms: 10_000,
-            },
-            browser: BrowserConfig {
-                executable: std::env::var_os("BOBBY_CHROME_EXECUTABLE")
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from),
-                profiles_dir: PathBuf::from("./data/profiles"),
-                headless: true,
-                max_active: 8,
-                upload_roots: vec![PathBuf::from("./data/uploads")],
-                downloads_dir: PathBuf::from("./data/downloads"),
-                artifacts_dir: PathBuf::from("./data/artifacts"),
-                max_artifact_bytes: 8 * 1024 * 1024,
-                max_screenshot_dimension: 16_384,
-                max_js_result_bytes: 64 * 1024,
-                max_js_timeout_ms: 30_000,
-            },
-            storage: StorageConfig {
-                journal_path: PathBuf::from("./data/storage/commands.jsonl"),
-                checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
-                authority_path: PathBuf::from("./data/storage/authority.json"),
-                scheduler_journal_path: default_scheduler_journal_path(),
-            },
-            http: HttpConfig::default(),
-            interface: InterfaceConfig::default(),
-            observability: ObservabilityConfig::default(),
-            vision: VisionConfig::default(),
-            nodes: std::collections::BTreeMap::new(),
+            journal_path: PathBuf::from("./data/storage/commands.jsonl"),
+            checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
+            authority_path: PathBuf::from("./data/storage/authority.json"),
+            scheduler_journal_path: default_scheduler_journal_path(),
         }
     }
 }
@@ -402,6 +435,55 @@ mod tests {
         );
         let config: super::AppConfig = toml::from_str(&text).expect("vision node loads");
         assert_eq!(config.nodes.len(), 1);
+    }
+
+    #[test]
+    fn vision_providers_table_loads_and_selects() {
+        let text = r#"
+[vision]
+endpoint_url = "http://127.0.0.1:9100/vision"
+token_env = "BOBBY_VISION_TOKEN"
+provider = "lmstudio"
+
+[vision.providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+model = "local-model"
+"#;
+        let config: super::AppConfig = toml::from_str(text).expect("parse");
+        let (name, profile) = config.vision.selected_provider().expect("selected");
+        assert_eq!(name, "lmstudio");
+        assert_eq!(profile.base_url, "http://127.0.0.1:1234/v1");
+        assert_eq!(profile.model, "local-model");
+        assert!(profile.api_key_env.is_none());
+    }
+
+    #[test]
+    fn vision_provider_missing_from_table_returns_none() {
+        let text = r#"
+[vision]
+provider = "missing"
+"#;
+        let config: super::AppConfig = toml::from_str(text).unwrap();
+        assert!(config.vision.selected_provider().is_none());
+    }
+
+    #[test]
+    fn nodes_still_load_alongside_vision_providers() {
+        let text = r#"
+[vision]
+provider = "openai"
+[vision.providers.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[nodes.helper]
+kind = "vision"
+endpoint_url = "http://127.0.0.1:8081/x"
+"#;
+        let config: super::AppConfig = toml::from_str(text).unwrap();
+        assert!(config.nodes.contains_key("helper"));
+        assert!(config.vision.selected_provider().is_some());
     }
 
     const MINIMAL_CONFIG: &str = r#"

@@ -356,10 +356,19 @@ pub fn install_skill(project: bool, project_root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// `bobby mcp-stdio`: point an agent host at this and nothing else. Loads the
-/// bootstrap credential (process env wins, then the bootstrap.env file) and
-/// execs the stdio gateway, replacing this process.
-pub fn exec_mcp_stdio(bootstrap_path: &Path) -> Result<()> {
+/// Point the gateway at the same config file used for vision prepare/upsert.
+fn apply_config_env(config_path: &Path) {
+    let absolute = config_path.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(config_path))
+            .unwrap_or_else(|_| config_path.to_path_buf())
+    });
+    unsafe { std::env::set_var("BOBBY_BROWSER_CONFIG", absolute) };
+}
+
+/// Load bootstrap credential env vars into this process when they are not
+/// already present in the environment.
+fn load_bootstrap_into_env(bootstrap_path: &Path) -> Result<()> {
     if broker::StartupCredential::from_env().is_err() {
         let env =
             crate::bootstrap_local::load_bootstrap_env_map(bootstrap_path).with_context(|| {
@@ -370,12 +379,49 @@ pub fn exec_mcp_stdio(bootstrap_path: &Path) -> Result<()> {
             })?;
         for (key, value) in env {
             // Credentials only enter this process's environment, which the
-            // exec'd gateway inherits. They are never printed or written.
+            // spawned gateway inherits. They are never printed or written.
             unsafe { std::env::set_var(key, value) };
         }
     }
+    Ok(())
+}
+
+/// Spawn the stdio gateway with inherited stdio and wait for it to exit.
+fn spawn_gateway_inherited_stdio(gateway: &Path) -> Result<()> {
+    let status = Command::new(gateway)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("failed to run {}", gateway.display()))?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// `bobby mcp-stdio`: point an agent host at this and nothing else. Loads the
+/// bootstrap credential (process env wins, then the bootstrap.env file) and
+/// execs the stdio gateway, replacing this process.
+pub fn exec_mcp_stdio(bootstrap_path: &Path, config_path: &Path) -> Result<()> {
+    apply_config_env(config_path);
+    load_bootstrap_into_env(bootstrap_path)?;
     let gateway = resolve_gateway()?;
     exec_gateway(&gateway)
+}
+
+/// Like [`exec_mcp_stdio`], but stays resident as parent so a vision sidecar
+/// child can be torn down when the gateway exits. Used on Unix when a loopback
+/// vision-proxy must outlive the gateway process.
+pub fn run_mcp_stdio_with_sidecar(
+    bootstrap_path: &Path,
+    config_path: &Path,
+    _vision_child: crate::vision_child::ManagedVisionProxy,
+) -> Result<()> {
+    apply_config_env(config_path);
+    load_bootstrap_into_env(bootstrap_path)?;
+    let gateway = resolve_gateway()?;
+    spawn_gateway_inherited_stdio(&gateway)
 }
 
 /// Unix replaces this process outright, so the agent host keeps talking to a
@@ -393,10 +439,7 @@ fn exec_gateway(gateway: &Path) -> Result<()> {
 /// the gateway's exit status becomes ours.
 #[cfg(windows)]
 fn exec_gateway(gateway: &Path) -> Result<()> {
-    let status = Command::new(gateway)
-        .status()
-        .with_context(|| format!("failed to run {}", gateway.display()))?;
-    std::process::exit(status.code().unwrap_or(1));
+    spawn_gateway_inherited_stdio(gateway)
 }
 
 /// One toggleable line of the interactive installer.
