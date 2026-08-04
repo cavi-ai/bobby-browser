@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.5.0 - 2026-08-04
 - `bobby install` can put `bobby` (+ sibling `mcp-gateway`) on PATH (`~/.cargo/bin` when already on PATH, else `~/.local/bin`). On by default in the interactive checklist and via `--cli` / `make cli`.
 - `make` help lists every target in sections (Setup / Service / Quality / dogfood); `install` was missing from the menu. `make firefox` builds and installs the Firefox companion only. `bobby install --companion` no longer also wires Claude or regenerates the bootstrap credential.
 - `bobby install` interactive checklist uses ↑/↓ + space (esc quits) instead of number-key toggles, so arrow keys actually select options.
@@ -11,6 +13,18 @@
 - `bobby serve` and `bobby mcp-stdio` gain `--vision` / `--no-vision`: when the resolved vision endpoint is loopback and a provider is selected, the parent auto-spawns `vision-proxy` and tears it down on exit; non-loopback never spawns. `mcp-stdio` sets `BOBBY_BROWSER_CONFIG` and stays resident when holding the sidecar.
 - `bobby doctor` warns on missing `vision.provider` profile and missing upstream `api_key_env` (skipped for local profiles without a key), and distinguishes loopback vs external `vision-endpoint` hints.
 - Docs: configuration / troubleshooting / intents cover connect → `--vision`, LM Studio (MLX), and custom OpenAI-compatible providers.
+- Browser selection resolves through one function for `bobby serve`, the stdio gateway, and `bobby doctor`: `AUTOMATION_RUNTIME_BROWSER_SELECTION`, then the persisted enrollment at `<config-dir>/bobby-browser/browser-selection.json`, then the built-in default; a present-but-malformed source fails closed. The gateway composed its factory eagerly, so an install with no env var hit the fail-closed Firefox default and exited at startup, which every MCP host reported as a dead server. `bobby enroll-firefox-profile` persists the selection atomically (0600 on Unix) instead of instructing an env export, and `doctor` reports which source resolved.
+- `run_doctor` is a structured `DoctorReport` with bootstrap-expiry and handshake-error classification extracted as pure functions, covered by tests for malformed config, malformed selection, and the satisfiable path.
+- The stdio gateway loads `AppConfig` (`BOBBY_BROWSER_CONFIG` or `./config.toml`) and composes its worker factory the way `bobby serve` does. It ran on `AppConfig::default()` with a hardcoded Chromium factory, so MCP sessions ignored `headless = false` and enrolled Firefox profiles while `serve` and `doctor` validated a different path. Factory composition moved from `cli` into `firefox-companion::selection`; `cli` re-exports it unchanged.
+- `POST /v1/commands` emits `Retry-After` on a 503 `retryableFailure` (1s when the outcome carries no explicit backoff), matching `resourceExhausted`.
+- Publish the `/v1` OpenAPI description in the docs artifact, stamped with the product and interface versions. Nullable schemas use OpenAPI 3.1 type arrays instead of the 3.0 `nullable` keyword, and `OpenPageRequest` drops `additionalProperties: false`.
+- The MCP stdio server serializes handshake frames and all traffic before `Ready`. Back-to-back `notifications/initialized` + `tools/call` could observe `AwaitingInitializedNotification` and return `-32002`, which surfaced as a missing `structuredContent.id` on `session_create`.
+- Add the Firefox companion operator popup: connection state, session policy (fingerprint owner, humanize), and a fingerprint toggle rendered checked and disabled when the host owns the setting.
+- `skill/SKILL.md` documents the runtime wiring an agent needs: that the gateway loads `config.toml`, the engine resolution order, `doctor`'s source reporting, and that Chromium profiles are disposable while the Firefox companion attaches to a real profile where logins persist.
+- `bobby` builds on Windows. `exec_mcp_stdio` was `#[cfg(unix)]` but called unconditionally, `GATEWAY_COMMAND` never matched `mcp-gateway.exe`, and the Unix-only artifact boundary in `interface-core` failed `-D warnings` as dead code. CI gains a windows-latest job building the crate the release ships; the break first appeared in `release-binaries` on the `v0.4.0` tag.
+- The npm publish step sets `NODE_AUTH_TOKEN` from `NPM_TOKEN`. Without it the token was empty and npm answered 404 on PUT, so publish had never succeeded.
+- Land the pending Dependabot bumps across Rust, JS, and Actions, with the `rand` 0.10 fixes (`RngExt`, and `SessionRandom` cloned from its seed after `StdRng` lost `Clone`).
+- Comments across 54 files are compressed to facts — invariants, units, bounds, safety constraints — dropping build-history narration and references to internal planning documents. `docs/superpowers/` is removed from the published tree.
 
 ## 0.4.0 - 2026-08-03
 - **Naming:** one scope, one prefix, one tag. Internal npm packages move off the unowned `@bobby-browser` scope to `@cavi-ai/bobby-gauntlet`, `@cavi-ai/bobby-firefox-companion`, `@cavi-ai/bobby-interface-conformance`; `@cavi-ai/bobby-browser` is unchanged, so nothing published breaks. 25 internal crates are `publish = false` — only `bobby-browser-client` and `bobby-browser` are products, and names like `types`, `config`, and `broker` are not claimed on crates.io. `sdk-v*` and `crate-v*` collapse into `v*`: one tag ships binaries, npm, and the crate.
