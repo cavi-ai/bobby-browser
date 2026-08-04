@@ -1,0 +1,57 @@
+name: Publish npm
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-sdk:
+    runs-on: ubuntu-latest
+    # Named in the npm trusted publisher, so it is part of the OIDC subject
+    # claim npm matches against — not decoration. Removing it changes the claim
+    # to a repo-level subject and npm rejects the exchange.
+    environment: production
+    permissions:
+      contents: read
+      # The whole of the publish credential: npm exchanges this OIDC token for a
+      # short-lived publish grant. No npm token is stored in this repository.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6.0.9
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; the pinned Node 24.18.1 bundles
+      # 11.16.0, so npm stays pinned with Node rather than floating on @latest.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @cavi-ai/bobby-browser test
+      - name: Dry-run pack
+        working-directory: packages/typescript-sdk
+        run: pnpm build && npm pack --dry-run
+      # No NODE_AUTH_TOKEN: a user token cannot publish here because the account
+      # requires 2FA on publish, and a one-time password cannot be held by CI.
+      # OIDC is the way this package publishes from Actions. v0.5.0 failed with
+      # `EOTP` because the trusted publisher named a workflow filename and
+      # environment this repository did not have, so no OIDC exchange matched
+      # and npm fell back to the token.
+      #
+      # The trusted publisher on npmjs.com for @cavi-ai/bobby-browser is
+      # cavi-ai / bobby-browser, workflow filename `publish.yml`, environment
+      # `production`. Every one of those is matched exactly against the OIDC
+      # claim: renaming this file, or dropping the `environment:` above, stops
+      # publishing until the trusted publisher is edited to match.
+      #
+      # `--provenance` is explicit: it is documented as automatic under trusted
+      # publishing but is not reliably applied without the flag.
+      - name: Publish
+        working-directory: packages/typescript-sdk
+        run: npm publish --access public --provenance
