@@ -710,11 +710,11 @@ pub fn default_selection_path() -> Result<PathBuf> {
 /// wins, then the persisted enrollment, then the built-in default. A present
 /// but malformed source is always an error — never silently ignored.
 pub fn resolve_browser_selection() -> Result<(BrowserSelectionConfig, SelectionSource)> {
-    let persisted = default_selection_path().ok();
-    resolve_browser_selection_with(
-        std::env::var(SELECTION_ENV).ok().as_deref(),
-        persisted.as_deref(),
-    )
+    if std::env::var_os(SELECTION_ENV).is_some() {
+        return resolve_browser_selection_with(std::env::var(SELECTION_ENV).ok().as_deref(), None);
+    }
+    let persisted = default_selection_path()?;
+    resolve_browser_selection_with(None, Some(&persisted))
 }
 
 pub fn resolve_browser_selection_with(
@@ -752,7 +752,7 @@ pub fn resolve_browser_selection_with(
 
 /// Persist a selection so subsequent serve/gateway/doctor runs resolve it
 /// without any environment wiring. Written atomically with owner-only
-/// permissions: the contents locate a pairing endpoint and profile.
+/// permissions on Unix: the contents locate a pairing endpoint and profile.
 pub fn persist_browser_selection(path: &Path, selection: &BrowserSelectionConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -772,6 +772,8 @@ pub fn persist_browser_selection(path: &Path, selection: &BrowserSelectionConfig
         use std::io::Write;
         file.flush()?;
         file.sync_all()?;
+        // Close before renaming: Windows refuses to rename an open file.
+        drop(file);
         std::fs::rename(&pending, path)?;
         Ok::<_, anyhow::Error>(())
     })();

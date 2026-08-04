@@ -42,7 +42,7 @@ one canonical order:
 1. `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) — an override; wins when set.
 2. The persisted enrollment at
    `<config-dir>/bobby-browser/browser-selection.json`, written atomically
-   (owner-only permissions) by `bobby enroll-firefox-profile`.
+   (owner-only, `0600`, on Unix) by `bobby enroll-firefox-profile`.
 3. The built-in default: exact **Firefox** (fail-closed — with no enrolled
    profile, startup fails with an actionable error rather than silently
    downgrading engines).
