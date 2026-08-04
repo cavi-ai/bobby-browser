@@ -70,6 +70,19 @@
         border-top: 1px solid #e0e0e0;
         padding-top: 8px;
       }
+      #pair-button {
+        margin-top: 8px;
+        font: inherit;
+        padding: 4px 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+      }
+      #pair-button:disabled {
+        cursor: default;
+        opacity: 0.6;
+      }
     </style>
   </head>
   <body>
@@ -78,6 +91,7 @@
     <section id="connection">
       <div class="section-title">Connection</div>
       <div class="status">Loading…</div>
+      <button id="pair-button" type="button">Pair</button>
     </section>
 
     <section id="session">
