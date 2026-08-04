@@ -438,14 +438,18 @@ async fn mcp_stdio_process_termination_after_durable_executing_rebuilds_exactly(
     )
     .await;
     mcp_send(&mut stdin,serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_create","arguments":{"profile":"mcp-loss","proxy":null}}})).await;
-    let session = mcp_response(&mut lines, 2).await["result"]["structuredContent"]["id"]
+    let session_response = mcp_response(&mut lines, 2).await;
+    let session = session_response["result"]["structuredContent"]["id"]
         .as_str()
-        .unwrap()
+        .unwrap_or_else(|| {
+            panic!("session_create missing structuredContent.id: {session_response}")
+        })
         .to_owned();
     mcp_send(&mut stdin,serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"page_open","arguments":{"sessionId":session}}})).await;
-    let page = mcp_response(&mut lines, 3).await["result"]["structuredContent"]["id"]
+    let page_response = mcp_response(&mut lines, 3).await;
+    let page = page_response["result"]["structuredContent"]["id"]
         .as_str()
-        .unwrap()
+        .unwrap_or_else(|| panic!("page_open missing structuredContent.id: {page_response}"))
         .to_owned();
     let command_id = CommandId::new();
     let workflow = WorkflowId::new();
