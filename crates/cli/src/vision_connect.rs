@@ -61,9 +61,7 @@ fn resolve_non_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            anyhow!("--yes requires --provider (openai|ollama|lmstudio|custom)")
-        })?;
+        .ok_or_else(|| anyhow!("--yes requires --provider (openai|ollama|lmstudio|custom)"))?;
 
     if provider.eq_ignore_ascii_case("custom") {
         let base_url = opts
@@ -163,8 +161,7 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
                 normalize_api_key_env(opts.api_key_env.as_deref())
             } else {
                 normalize_api_key_env(
-                    prompt_optional("API key env var (empty for none)")?
-                        .as_deref(),
+                    prompt_optional("API key env var (empty for none)")?.as_deref(),
                 )
             };
             return Ok(ResolvedProfile {
@@ -215,8 +212,7 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
                 base_url: prompt_line("Base URL", None)?,
                 model: prompt_line("Model", None)?,
                 api_key_env: normalize_api_key_env(
-                    prompt_optional("API key env var (empty for none)")?
-                        .as_deref(),
+                    prompt_optional("API key env var (empty for none)")?.as_deref(),
                 ),
             },
         },
@@ -285,9 +281,9 @@ fn smoke_probe_upstream(base_url: &str) {
             return;
         }
     };
-    let reachable = addrs.iter().any(|addr| {
-        std::net::TcpStream::connect_timeout(addr, Duration::from_millis(500)).is_ok()
-    });
+    let reachable = addrs
+        .iter()
+        .any(|addr| std::net::TcpStream::connect_timeout(addr, Duration::from_millis(500)).is_ok());
     if reachable {
         eprintln!("ok: upstream reachable at {base_url}");
     } else {

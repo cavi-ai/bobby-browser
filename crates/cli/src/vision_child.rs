@@ -22,10 +22,8 @@ pub struct VisionChildDecision {
     pub reason: String,
 }
 
-const DEFAULT_BIND: SocketAddr = SocketAddr::new(
-    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-    9100,
-);
+const DEFAULT_BIND: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9100);
 
 impl VisionChildDecision {
     fn skipped(reason: impl Into<String>) -> Self {
@@ -80,9 +78,7 @@ fn decide_vision_child_with_probe(
     }
 
     let Some(node_name) = select_vision_node_name(&registry, policy) else {
-        return VisionChildDecision::skipped(
-            "multiple vision nodes configured; refusing to spawn",
-        );
+        return VisionChildDecision::skipped("multiple vision nodes configured; refusing to spawn");
     };
 
     let Some(node) = node_config(config, &node_name) else {
@@ -134,11 +130,11 @@ fn decide_vision_child_with_probe(
     }
 }
 
-fn select_vision_node_name(
-    registry: &NodeRegistry,
-    policy: VisionSpawnPolicy,
-) -> Option<String> {
-    if registry.resolve(LEGACY_VISION_NODE, NodeKind::Vision).is_ok() {
+fn select_vision_node_name(registry: &NodeRegistry, policy: VisionSpawnPolicy) -> Option<String> {
+    if registry
+        .resolve(LEGACY_VISION_NODE, NodeKind::Vision)
+        .is_ok()
+    {
         return Some(LEGACY_VISION_NODE.to_string());
     }
 
@@ -182,7 +178,17 @@ fn parse_loopback_endpoint(endpoint_url: &str) -> Option<(SocketAddr, String)> {
     let url = Url::parse(endpoint_url).ok()?;
     let host = url.host_str()?;
     let port = url.port_or_known_default()?;
-    let bind: SocketAddr = format!("{host}:{port}").parse().ok()?;
+    // `SocketAddr` parsing needs an IP literal. Map hostname loopback and
+    // bracket IPv6 the way `NodeConfig::is_local` already treats as local.
+    let bind: SocketAddr = match host {
+        "localhost" => format!("127.0.0.1:{port}").parse().ok()?,
+        "::1" | "[::1]" => format!("[::1]:{port}").parse().ok()?,
+        host if host.starts_with('[') && host.ends_with(']') => {
+            format!("{host}:{port}").parse().ok()?
+        }
+        host if host.contains(':') => format!("[{host}]:{port}").parse().ok()?,
+        host => format!("{host}:{port}").parse().ok()?,
+    };
     let path = if url.path().is_empty() {
         "/".to_string()
     } else {
@@ -216,6 +222,22 @@ impl ManagedVisionProxy {
                 anyhow::anyhow!("{token_env} must be set before spawning vision-proxy")
             })?;
 
+        if let Some(name) = profile
+            .api_key_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            let key_set = std::env::var(name)
+                .ok()
+                .is_some_and(|value| !value.is_empty());
+            if !key_set {
+                anyhow::bail!(
+                    "{name} is missing or empty (required by the selected vision provider)"
+                );
+            }
+        }
+
         let exe = std::env::current_exe().context("failed to resolve current executable")?;
         let mut cmd = Command::new(exe);
         // vision-proxy validates BOBBY_VISION_TOKEN; copy from configurable token_env.
@@ -237,9 +259,11 @@ impl ManagedVisionProxy {
                 cmd.arg("--api-key-env").arg("");
             }
         }
+        // Inherit stderr so the child cannot fill a pipe and deadlock; discard
+        // stdin/stdout (proxy is HTTP-only).
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::inherit());
 
         let mut child = cmd.spawn().context("failed to spawn vision-proxy child")?;
 
@@ -247,10 +271,7 @@ impl ManagedVisionProxy {
         if !is_port_accepting(decision.bind) {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!(
-                "vision-proxy did not become reachable on {}",
-                decision.bind
-            );
+            anyhow::bail!("vision-proxy did not become reachable on {}", decision.bind);
         }
 
         Ok(Self { child })
@@ -303,8 +324,7 @@ mod tests {
     #[test]
     fn no_vision_policy_never_spawns() {
         let config = loopback_config("http://127.0.0.1:19876/vision", true);
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Off, |_| false);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Off, |_| false);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("off"));
     }
@@ -312,8 +332,7 @@ mod tests {
     #[test]
     fn non_loopback_never_spawns() {
         let config = loopback_config("https://vision.example/vision", true);
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("loopback"));
     }
@@ -321,18 +340,36 @@ mod tests {
     #[test]
     fn loopback_with_provider_auto_spawns() {
         let config = loopback_config("http://127.0.0.1:19876/vision", true);
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
         assert!(decision.should_spawn);
         assert_eq!(decision.bind, "127.0.0.1:19876".parse().unwrap());
         assert_eq!(decision.path, "/vision");
     }
 
     #[test]
+    fn localhost_endpoint_maps_to_ipv4_loopback_bind() {
+        let config = loopback_config("http://localhost:19876/vision", true);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        assert!(decision.should_spawn);
+        assert_eq!(decision.bind, "127.0.0.1:19876".parse().unwrap());
+    }
+
+    #[test]
+    fn ipv6_loopback_endpoint_parses_bind() {
+        let config = loopback_config("http://[::1]:19876/vision", true);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        assert!(
+            decision.should_spawn,
+            "unexpected skip: {}",
+            decision.reason
+        );
+        assert_eq!(decision.bind, "[::1]:19876".parse().unwrap());
+    }
+
+    #[test]
     fn loopback_without_provider_auto_skips() {
         let config = loopback_config("http://127.0.0.1:19876/vision", false);
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("provider"));
     }
@@ -340,8 +377,7 @@ mod tests {
     #[test]
     fn loopback_reachable_port_skips_spawn() {
         let config = loopback_config("http://127.0.0.1:19876/vision", true);
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| true);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| true);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("reachable"));
     }
@@ -349,8 +385,7 @@ mod tests {
     #[test]
     fn empty_registry_auto_skips() {
         let config = AppConfig::default();
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("no vision node"));
     }
@@ -382,8 +417,7 @@ mod tests {
             .providers
             .insert("openai".into(), sample_provider());
 
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("multiple"));
     }
@@ -467,8 +501,7 @@ mod tests {
             .providers
             .insert("openai".into(), sample_provider());
 
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
         assert!(decision.should_spawn);
         assert_eq!(decision.bind, "127.0.0.1:19878".parse().unwrap());
     }

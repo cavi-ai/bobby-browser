@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::{VisionConfig, VisionProviderConfig};
 
@@ -9,6 +9,7 @@ use crate::{VisionConfig, VisionProviderConfig};
 pub enum ConfigWriteError {
     Io(std::io::Error),
     Parse(toml_edit::TomlError),
+    Invalid(String),
 }
 
 impl std::fmt::Display for ConfigWriteError {
@@ -16,6 +17,7 @@ impl std::fmt::Display for ConfigWriteError {
         match self {
             ConfigWriteError::Io(err) => write!(f, "failed to write config file: {err}"),
             ConfigWriteError::Parse(err) => write!(f, "failed to parse config file: {err}"),
+            ConfigWriteError::Invalid(reason) => write!(f, "invalid config: {reason}"),
         }
     }
 }
@@ -25,6 +27,7 @@ impl std::error::Error for ConfigWriteError {
         match self {
             ConfigWriteError::Io(err) => Some(err),
             ConfigWriteError::Parse(err) => Some(err),
+            ConfigWriteError::Invalid(_) => None,
         }
     }
 }
@@ -62,27 +65,14 @@ pub fn upsert_vision_platform(
         DocumentMut::new()
     };
 
-    let vision = doc
-        .entry("vision")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("vision entry is a table");
+    let vision = ensure_table(doc.as_table_mut(), "vision")?;
 
     vision["endpoint_url"] = value(endpoint_url);
     vision["token_env"] = value(token_env);
     vision["provider"] = value(provider);
 
-    let providers = vision
-        .entry("providers")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("providers entry is a table");
-
-    let provider_table = providers
-        .entry(provider)
-        .or_insert(Item::Table(Table::new()))
-        .as_table_mut()
-        .expect("provider entry is a table");
+    let providers = ensure_table(vision, "providers")?;
+    let provider_table = ensure_table(providers, provider)?;
 
     provider_table["base_url"] = value(&profile.base_url);
     provider_table["model"] = value(&profile.model);
@@ -94,6 +84,19 @@ pub fn upsert_vision_platform(
 
     std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)?;
     Ok(())
+}
+
+fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, ConfigWriteError> {
+    if parent.contains_key(key) && !parent[key].is_table() {
+        return Err(ConfigWriteError::Invalid(format!(
+            "{key} must be a TOML table"
+        )));
+    }
+    parent
+        .entry(key)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| ConfigWriteError::Invalid(format!("{key} must be a TOML table")))
 }
 
 #[cfg(test)]
@@ -131,6 +134,27 @@ mod tests {
     }
 
     #[test]
+    fn upsert_rejects_non_table_vision_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "vision = \"not-a-table\"\n").unwrap();
+        let profile = VisionProviderConfig {
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            model: "local-model".into(),
+            api_key_env: None,
+        };
+        let err = upsert_vision_platform(
+            &path,
+            "http://127.0.0.1:9100/vision",
+            "BOBBY_VISION_TOKEN",
+            "lmstudio",
+            &profile,
+        )
+        .expect_err("non-table vision must fail");
+        assert!(err.to_string().contains("table"));
+    }
+
+    #[test]
     fn ensure_loopback_vision_defaults_fills_missing_fields_only() {
         let mut config = VisionConfig {
             endpoint_url: Some("http://custom/vision".into()),
@@ -138,10 +162,7 @@ mod tests {
             ..VisionConfig::default()
         };
         ensure_loopback_vision_defaults(&mut config);
-        assert_eq!(
-            config.endpoint_url.as_deref(),
-            Some("http://custom/vision")
-        );
+        assert_eq!(config.endpoint_url.as_deref(), Some("http://custom/vision"));
         assert_eq!(config.token_env.as_deref(), Some("BOBBY_VISION_TOKEN"));
 
         let mut empty = VisionConfig::default();

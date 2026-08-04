@@ -348,13 +348,11 @@ pub fn install_skill(project: bool, project_root: &Path) -> Result<PathBuf> {
 
 /// Point the gateway at the same config file used for vision prepare/upsert.
 fn apply_config_env(config_path: &Path) {
-    let absolute = config_path
-        .canonicalize()
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(config_path))
-                .unwrap_or_else(|_| config_path.to_path_buf())
-        });
+    let absolute = config_path.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(config_path))
+            .unwrap_or_else(|_| config_path.to_path_buf())
+    });
     unsafe { std::env::set_var("BOBBY_BROWSER_CONFIG", absolute) };
 }
 

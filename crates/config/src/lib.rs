@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub use vision_write::{ConfigWriteError, ensure_loopback_vision_defaults, upsert_vision_platform};
+pub use vision_write::{ensure_loopback_vision_defaults, upsert_vision_platform, ConfigWriteError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

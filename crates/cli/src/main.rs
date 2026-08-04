@@ -6,9 +6,7 @@ mod vision_connect;
 
 use anyhow::{Context, Result};
 use companion_core::{run_native_host, NativeHostConfig};
-use config::{
-    ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig,
-};
+use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig};
 use firefox_companion::selection::NativeHostDescriptor;
 pub use firefox_companion::selection::{
     compose_worker_factory, compose_worker_factory_with_enrolled_firefox,
@@ -333,8 +331,9 @@ pub async fn run() -> Result<()> {
             let (_config, decision, vision_child) =
                 prepare_vision_child(&config_path, config, policy)?;
             if decision.should_spawn {
-                let child = vision_child
-                    .ok_or_else(|| anyhow::anyhow!("vision sidecar missing after spawn decision"))?;
+                let child = vision_child.ok_or_else(|| {
+                    anyhow::anyhow!("vision sidecar missing after spawn decision")
+                })?;
                 onboarding::run_mcp_stdio_with_sidecar(&bootstrap_path, &config_path, child)?;
             } else {
                 onboarding::exec_mcp_stdio(&bootstrap_path, &config_path)?;
@@ -506,20 +505,10 @@ fn prepare_vision_child(
             .token_env
             .as_deref()
             .context("vision token_env missing after defaults")?;
-        upsert_vision_platform(
-            config_path,
-            endpoint_url,
-            token_env,
-            provider_name,
-            profile,
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-        config = AppConfig::load(config_path).with_context(|| {
-            format!(
-                "failed to reload config from {}",
-                config_path.display()
-            )
-        })?;
+        upsert_vision_platform(config_path, endpoint_url, token_env, provider_name, profile)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        config = AppConfig::load(config_path)
+            .with_context(|| format!("failed to reload config from {}", config_path.display()))?;
     }
 
     let decision = decide_vision_child(&config, policy);
@@ -536,9 +525,7 @@ fn prepare_vision_child(
             .as_deref()
             .context("vision token_env not configured")?;
         Some(ManagedVisionProxy::spawn_from_current_exe(
-            &decision,
-            profile,
-            token_env,
+            &decision, profile, token_env,
         )?)
     } else {
         None
@@ -868,9 +855,7 @@ fn vision_endpoint_unreachable_detail(endpoint: &str) -> String {
             "{endpoint} not reachable (start with `bobby serve --vision` to auto-spawn the proxy, or run `bobby vision-proxy` manually)"
         )
     } else {
-        format!(
-            "{endpoint} not reachable (verify the external vision endpoint is running)"
-        )
+        format!("{endpoint} not reachable (verify the external vision endpoint is running)")
     }
 }
 
@@ -889,9 +874,7 @@ fn check_vision_provider(vision: &VisionConfig) -> Option<DoctorCheck> {
         Some(DoctorCheck {
             status: DoctorStatus::Warn,
             name: "vision-provider".to_string(),
-            detail: format!(
-                "provider \"{name}\" is set but missing from [vision.providers]"
-            ),
+            detail: format!("provider \"{name}\" is set but missing from [vision.providers]"),
         })
     }
 }
@@ -2048,10 +2031,7 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
 
     #[test]
     fn policy_from_flags_maps_cli_vision_switches() {
-        assert_eq!(
-            policy_from_flags(false, false),
-            VisionSpawnPolicy::Auto
-        );
+        assert_eq!(policy_from_flags(false, false), VisionSpawnPolicy::Auto);
         assert_eq!(policy_from_flags(true, false), VisionSpawnPolicy::ForceOn);
         assert_eq!(policy_from_flags(false, true), VisionSpawnPolicy::Off);
     }
@@ -2072,12 +2052,13 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         .unwrap();
         match cli.command {
             Some(CliCommand::Vision {
-                command: VisionCommands::Connect(VisionConnectArgs {
-                    yes,
-                    provider,
-                    config,
-                    ..
-                }),
+                command:
+                    VisionCommands::Connect(VisionConnectArgs {
+                        yes,
+                        provider,
+                        config,
+                        ..
+                    }),
             }) => {
                 assert!(yes);
                 assert_eq!(provider.as_deref(), Some("lmstudio"));
@@ -2090,20 +2071,10 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
     #[test]
     fn vision_connect_clap_parses_legacy_alias() {
         use clap::Parser;
-        let cli = Cli::try_parse_from([
-            "bobby",
-            "vision-connect",
-            "--yes",
-            "--provider",
-            "openai",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["bobby", "vision-connect", "--yes", "--provider", "openai"])
+            .unwrap();
         match cli.command {
-            Some(CliCommand::VisionConnect(VisionConnectArgs {
-                yes,
-                provider,
-                ..
-            })) => {
+            Some(CliCommand::VisionConnect(VisionConnectArgs { yes, provider, .. })) => {
                 assert!(yes);
                 assert_eq!(provider.as_deref(), Some("openai"));
             }
