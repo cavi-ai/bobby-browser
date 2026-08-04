@@ -1,12 +1,17 @@
 # Changelog
 
 ## Unreleased
+
+## 0.5.1 - 2026-08-04
 - **Breaking (MCP):** a command whose outcome status is not `completed` now returns `isError: true`. Failed commands previously reported `isError: false`, so hosts checking `isError` treated every failure as success. `restarted`/`resumed` recovery decisions remain success.
 - Boundary commands are usable over the flat MCP tools: `intent_*` tools and `click` accept optional `commandId`/`attemptId` (threaded through unchanged), and every outcome echoes `attemptId` alongside `workflowId`/`commandId`. The Boundary gate requires a pre-saved checkpoint naming those exact ids, but the server minted them internally and never surfaced them, so `intent_submit_and_verify` and boundary `click` could never pass it over MCP. The `fill_and_submit_form` prompt is rewritten to the only working order (snapshot, fill, pin ids, checkpoint, submit) and states the exact `CompleteFormField`/`ExtractField` shapes it previously omitted.
 - The static `bobby://` resources (capabilities, failure-taxonomy, intents, primitives) are readable by any authenticated principal; only live `artifact://` entries require `artifact:read`. An agent that hit `missingCapability` could not read the repair documentation for it. Revoked/expired principals are still denied.
 - `bobby://failure-taxonomy` documents the RPC-layer `InterfaceErrorCode` vocabulary (14 codes, each with a repair action), and the advertised `errorCode` enum adds `targetObscured`/`targetOutOfBounds` (29/29 variants, pinned by a schemars parity test).
 - Tool annotations corrected: `readOnlyHint` on `wait_for`, `intent_locate`, `intent_wait_for_state`, `intent_extract`; `openWorldHint` on `page_open`, `click`, `intent_follow`, `intent_submit_and_verify`. `network_log`'s description names both real failure codes.
 - `tools/list` advertises shared `Id` schemas by `$ref`, keeping the full surface at ~125 KB with ~5.8 KB of headroom inside the 128 KiB connect budget after the new `commandId`/`attemptId` fields.
+- A tag publishes every artifact. `release-binaries` creates the GitHub Release before uploading assets — nothing created it, so `gh release upload` answered "release not found" and v0.5.0 built five binaries and shipped none. The body is the CHANGELOG section for the version via `scripts/changelog-section.py`, so a version with no section fails the tag instead of publishing empty notes.
+- `release-binaries` calls `publish-docs` directly, and `publish-docs` gains a `workflow_call` trigger. A release created with `GITHUB_TOKEN` does not fire `on: release`, so the documentation artifact never built.
+- npm publishes through the OIDC trusted publisher instead of a stored token: the account requires 2FA on publish, so a token fails with `EOTP` and CI cannot hold a one-time password. `publish-npm.yml` is renamed `publish.yml` and the job runs in the `production` environment, matching the org, repository, workflow filename, and environment the trusted publisher matches against.
 
 ## 0.5.0 - 2026-08-04
 - `bobby install` can put `bobby` (+ sibling `mcp-gateway`) on PATH (`~/.cargo/bin` when already on PATH, else `~/.local/bin`). On by default in the interactive checklist and via `--cli` / `make cli`.

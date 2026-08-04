@@ -28,26 +28,26 @@ dialoguer.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 hex.workspace = true
-artifact-store = { path = "../artifact-store", version = "0.5.0" }
+artifact-store = { path = "../artifact-store", version = "0.5.1" }
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-broker = { path = "../broker", version = "0.5.0" }
-config = { path = "../config", version = "0.5.0" }
-node-registry = { path = "../node-registry", version = "0.5.0" }
-companion-protocol = { path = "../companion-protocol", version = "0.5.0" }
-companion-core = { path = "../companion-core", version = "0.5.0" }
-firefox-companion = { path = "../firefox-companion", version = "0.5.0" }
-observability = { path = "../observability", version = "0.5.0" }
-mcp-gateway = { path = "../mcp-gateway", version = "0.5.0" }
+broker = { path = "../broker", version = "0.5.1" }
+config = { path = "../config", version = "0.5.1" }
+node-registry = { path = "../node-registry", version = "0.5.1" }
+companion-protocol = { path = "../companion-protocol", version = "0.5.1" }
+companion-core = { path = "../companion-core", version = "0.5.1" }
+firefox-companion = { path = "../firefox-companion", version = "0.5.1" }
+observability = { path = "../observability", version = "0.5.1" }
+mcp-gateway = { path = "../mcp-gateway", version = "0.5.1" }
 libc = "0.2"
 serde_json.workspace = true
 serde.workspace = true
-types = { path = "../types", version = "0.5.0" }
+types = { path = "../types", version = "0.5.1" }
 uuid.workspace = true
 url.workspace = true
-worker-pool = { path = "../worker-pool", version = "0.5.0" }
-vision-proxy = { path = "../vision-proxy", version = "0.5.0" }
+worker-pool = { path = "../worker-pool", version = "0.5.1" }
+vision-proxy = { path = "../vision-proxy", version = "0.5.1" }
 reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
