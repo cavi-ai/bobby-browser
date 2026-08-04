@@ -16,6 +16,19 @@ and installs the agent skill:
 make install
 ```
 
+Firefox companion only (extension + native host):
+
+```bash
+make firefox
+```
+
+Put `bobby` on your PATH (`~/.cargo/bin` when that is already on PATH, else
+`~/.local/bin`):
+
+```bash
+make cli
+```
+
 It runs an interactive checklist. For CI or scripted setup:
 
 ```bash

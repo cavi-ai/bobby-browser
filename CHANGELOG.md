@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- `bobby install` can put `bobby` (+ sibling `mcp-gateway`) on PATH (`~/.cargo/bin` when already on PATH, else `~/.local/bin`). On by default in the interactive checklist and via `--cli` / `make cli`.
+- `make` help lists every target in sections (Setup / Service / Quality / dogfood); `install` was missing from the menu. `make firefox` builds and installs the Firefox companion only. `bobby install --companion` no longer also wires Claude or regenerates the bootstrap credential.
+- `bobby install` interactive checklist uses ↑/↓ + space (esc quits) instead of number-key toggles, so arrow keys actually select options.
 - **Breaking (MCP):** `session_list` `structuredContent` is `{"sessions": [...]}`, was a bare array. MCP types `structuredContent` as an object; a conforming client rejects the entire `tools/list` on a non-object `outputSchema`, so all 43 tools failed to load. `outputSchema` is object-shaped to match and the `ARRAY_SHAPED_OUTPUT` exception is removed. `GET /v1/sessions` is unchanged.
 
 ## 0.4.0 - 2026-08-03
