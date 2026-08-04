@@ -3,6 +3,20 @@ name: Publish product documentation
 on:
   release:
     types: [published]
+  # Called by `release-binaries` once the release exists: a release created with
+  # GITHUB_TOKEN does not fire `on: release`, so the tag path invokes this
+  # directly instead of waiting for an event that never arrives.
+  workflow_call:
+    inputs:
+      version:
+        description: Exact stable version to publish
+        required: true
+        type: string
+      dry_run:
+        description: Build and verify without upload or dispatch
+        required: false
+        default: "false"
+        type: string
   workflow_dispatch:
     inputs:
       version:
