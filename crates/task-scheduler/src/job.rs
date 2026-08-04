@@ -84,6 +84,10 @@ pub struct Job {
     /// Optional correlation id propagated from the calling request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// Principal that submitted the job. `None` only for jobs persisted
+    /// before ownership existed; reads/cancels enforce it when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<types::PrincipalId>,
 }
 
 impl Job {
@@ -103,6 +107,7 @@ impl Job {
             error: None,
             timeout_ms: None,
             correlation_id: None,
+            owner: None,
         }
     }
 
@@ -123,6 +128,11 @@ impl Job {
 
     pub fn with_correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
         self.correlation_id = Some(correlation_id.into());
+        self
+    }
+
+    pub fn with_owner(mut self, owner: types::PrincipalId) -> Self {
+        self.owner = Some(owner);
         self
     }
 
@@ -186,6 +196,8 @@ pub struct JobConfig {
     pub timeout: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<types::PrincipalId>,
 }
 
 impl JobConfig {
@@ -197,6 +209,7 @@ impl JobConfig {
             max_retries: 3,
             timeout: None,
             correlation_id: None,
+            owner: None,
         }
     }
 
@@ -217,6 +230,11 @@ impl JobConfig {
 
     pub fn with_correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
         self.correlation_id = Some(correlation_id.into());
+        self
+    }
+
+    pub fn with_owner(mut self, owner: types::PrincipalId) -> Self {
+        self.owner = Some(owner);
         self
     }
 }

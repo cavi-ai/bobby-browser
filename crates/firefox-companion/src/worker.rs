@@ -4269,11 +4269,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let path = cookie.get("path").and_then(Value::as_str).unwrap_or("/");
-            if !urls.is_empty()
-                && !urls
-                    .iter()
-                    .any(|url| url.contains(domain.trim_start_matches('.')) && url.contains(path))
-            {
+            if !urls.is_empty() && !urls.iter().any(|url| cookie_matches_url(domain, path, url)) {
                 continue;
             }
             records.push(types::CookieRecord {
@@ -4964,6 +4960,22 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
+/// Cookie-domain matching is suffix-with-dot-boundary, not substring:
+/// `example.com` must match `https://app.example.com/` but never
+/// `https://notexample.com/`. The path must be a real path prefix, and a URL
+/// that does not parse never matches.
+fn cookie_matches_url(domain: &str, path: &str, url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let bare = domain.trim_start_matches('.');
+    let host_matches = host == bare || host.ends_with(&format!(".{bare}"));
+    host_matches && parsed.path().starts_with(path)
+}
+
 fn page_missing() -> CommandError {
     driver_error(
         ErrorCode::NotFound,
@@ -5340,5 +5352,45 @@ mod truncate_tests {
 
         let short = "héllo";
         assert_eq!(truncate_utf8(short, 100), short);
+    }
+}
+
+#[cfg(test)]
+mod cookie_match_tests {
+    use super::cookie_matches_url;
+
+    #[test]
+    fn cookie_domain_matching_is_dot_bounded_not_substring() {
+        assert!(cookie_matches_url(
+            "example.com",
+            "/",
+            "https://example.com/"
+        ));
+        assert!(cookie_matches_url(
+            ".example.com",
+            "/",
+            "https://app.example.com/"
+        ));
+        assert!(!cookie_matches_url(
+            "example.com",
+            "/",
+            "https://notexample.com/"
+        ));
+        assert!(!cookie_matches_url(
+            "example.com",
+            "/",
+            "https://example.com.evil.test/"
+        ));
+        assert!(cookie_matches_url(
+            "example.com",
+            "/app",
+            "https://example.com/app/x"
+        ));
+        assert!(!cookie_matches_url(
+            "example.com",
+            "/app",
+            "https://example.com/other"
+        ));
+        assert!(!cookie_matches_url("example.com", "/", "not a url"));
     }
 }

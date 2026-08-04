@@ -123,3 +123,53 @@ async fn missing_job_capability_is_forbidden() {
     let response = app.clone().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn jobs_are_invisible_and_immovable_across_principals() {
+    let (app, _, admin) = app_with_admin(8).await;
+    let body = json!({ "name": "echo", "payload": {"secret": "owner-only"}, "maxRetries": 0 });
+    let req = context_headers(Request::post("/v1/jobs"), &admin)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = created["jobId"].as_str().unwrap();
+
+    // A different principal holding job:read + job:cancel still cannot see
+    // or cancel the admin's job: ownership answers as absence.
+    let intruder = issue_bearer(&app, &admin, Uuid::new_v4(), &["job:read", "job:cancel"]).await;
+
+    let get = context_headers(Request::get(format!("/v1/jobs/{job_id}")), &intruder)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(get).await.unwrap();
+    // Ownership answers as absence; this API maps job not-found to 422.
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "cross-principal read"
+    );
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("owner-only"),
+        "payload must not leak cross-principal"
+    );
+
+    let cancel = context_headers(Request::delete(format!("/v1/jobs/{job_id}")), &intruder)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(cancel).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "cross-principal cancel"
+    );
+
+    // The owner is unaffected.
+    let job = wait_completed(&app, &admin, job_id).await;
+    assert_eq!(job["status"], "completed");
+    assert_eq!(job["result"]["output"]["secret"], "owner-only");
+}
