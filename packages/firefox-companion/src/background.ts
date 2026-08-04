@@ -257,6 +257,7 @@ export class CompanionBackground {
     this.#targetIdsByRoute.clear();
     this.#tabLifecycles.clear();
     void this.#setFingerprintManagedByHost(false);
+    this.#clearEnrollStateOnStop();
     this.#dependencies.transport.stop();
   }
 
@@ -673,6 +674,25 @@ export class CompanionBackground {
     return this.#failEnroll(code);
   }
 
+  /** Cancel an in-flight enroll timeout and drop stale enroll UI state. */
+  #clearEnrollStateOnStop(): void {
+    const waiter = this.#enrollWaiter;
+    this.#enrollWaiter = undefined;
+    if (waiter?.timeoutHandle !== undefined) {
+      (this.#dependencies.cancelTimeout ?? clearTimeout)(waiter.timeoutHandle as never);
+    }
+    this.#enrollPhase = "idle";
+    this.#enrollError = undefined;
+    if (waiter) {
+      waiter.resolve({
+        ok: false,
+        code: "listenerUnavailable",
+        message:
+          enrollOperatorMessage("listenerUnavailable") ?? ENROLL_OPERATOR_FALLBACK,
+      });
+    }
+  }
+
   #resolveEnroll(result: EnrollPairResult): void {
     const waiter = this.#enrollWaiter;
     if (!waiter) {
@@ -983,7 +1003,11 @@ export async function startProductionBackground(
       "type" in message &&
       message.type === "enrollPair"
     ) {
-      return background.enrollPair();
+      return background.receiveRuntimeMessage(
+        message,
+        _sender,
+        browserApi.runtime.id,
+      );
     }
     void background
       .receiveRuntimeMessage(message, _sender, browserApi.runtime.id)

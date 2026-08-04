@@ -1363,3 +1363,163 @@ test("runtime enrollPair message returns the enroll result", async () => {
     message: "Profile path unknown — re-run bobby install (see docs)",
   });
 });
+
+test("runtime enrollPair ignores messages from other extensions", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const before = transport.sent.length;
+  const result = await background.receiveRuntimeMessage(
+    { type: "enrollPair" },
+    { id: "other-extension" },
+    "trusted-extension",
+  );
+  assert.equal(result, undefined);
+  assert.equal(transport.sent.length, before);
+  assert.equal(
+    transport.sent.some(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "enrollProfile",
+    ),
+    false,
+  );
+});
+
+test("stop cancels in-flight enroll wait and clears enroll status", async () => {
+  const transport = new EnrollFakeTransport();
+  const scheduled: Array<() => void> = [];
+  let cancelled = 0;
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+    enrollTimeoutMs: 60_000,
+    scheduleTimeout(callback) {
+      scheduled.push(callback);
+      return 7;
+    },
+    cancelTimeout() {
+      cancelled += 1;
+    },
+  });
+  background.connect(CONNECT_OPTIONS);
+  const emptyStorage = {
+    local: {
+      async get() {
+        return {};
+      },
+      async set() {},
+    },
+  };
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await background.getPopupStatus(emptyStorage)).enrollPhase, "pairing");
+
+  background.stop();
+  assert.equal(cancelled, 1);
+  assert.deepEqual(await enrollPromise, {
+    ok: false,
+    code: "listenerUnavailable",
+    message: "Start bobby serve, then Pair again",
+  });
+  const status = await background.getPopupStatus(emptyStorage);
+  assert.equal(status.enrollPhase, "idle");
+  assert.equal(status.enrollError, undefined);
+});
+
+test("production runtime listener enrollPair requires matching sender id", async () => {
+  const port = new FakeNativePort();
+  const runtimeMessages = new ListenerSet<(
+    message: unknown,
+    sender: { id?: string; tab?: { id?: number }; frameId?: number },
+  ) => unknown>();
+  const browserApi = {
+    runtime: {
+      id: "trusted-extension",
+      connectNative: () => port,
+      onMessage: runtimeMessages,
+      async getBrowserInfo() {
+        return { name: "Firefox", version: "128.0" };
+      },
+      async getPlatformInfo() {
+        return { os: "mac" };
+      },
+    },
+    storage: {
+      local: {
+        async get() {
+          return {
+            companionId: CONNECT_OPTIONS.companionId,
+            profileId: CONNECT_OPTIONS.profileId,
+          };
+        },
+        async set() {},
+      },
+    },
+    tabs: {
+      onUpdated: new ListenerSet(),
+      onRemoved: new ListenerSet(),
+      async query() {
+        return [];
+      },
+      async sendMessage() {
+        return undefined;
+      },
+      async update() {},
+    },
+    webNavigation: {
+      onCommitted: new ListenerSet(),
+      async getAllFrames() {
+        return [];
+      },
+    },
+  };
+  const startProductionBackground = (
+    backgroundModule as typeof backgroundModule & {
+      startProductionBackground(api: unknown): Promise<CompanionBackground>;
+    }
+  ).startProductionBackground;
+
+  const background = await startProductionBackground(browserApi);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const listener = runtimeMessages.listeners[0];
+  assert.ok(listener);
+  const rejected = await listener({ type: "enrollPair" }, { id: "other-extension" });
+  assert.equal(rejected, undefined);
+
+  const enrollPromise = listener({ type: "enrollPair" }, { id: "trusted-extension" });
+  assert.ok(enrollPromise instanceof Promise);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(
+    port.sent.some((message) => {
+      return (
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "enrollProfile"
+      );
+    }),
+  );
+  background.stop();
+  assert.deepEqual(await enrollPromise, {
+    ok: false,
+    code: "listenerUnavailable",
+    message: "Start bobby serve, then Pair again",
+  });
+});

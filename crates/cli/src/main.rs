@@ -1776,7 +1776,15 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
                 .map_err(|_| EnrollHostError::BidiMissing)?;
 
             // Day-2 Re-pair: serve already holds the bind and published a descriptor.
-            if let Some(config) = load_usable_live_descriptor(&defaults.descriptor_path) {
+            // Reachability probe is blocking TCP — keep it off the async runtime.
+            let descriptor_path = defaults.descriptor_path.clone();
+            let live = tokio::task::spawn_blocking(move || {
+                load_usable_live_descriptor(&descriptor_path)
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(config) = live {
                 let mut state = self.state.lock().await;
                 state.enrollment = None;
                 state.used_live_descriptor = true;

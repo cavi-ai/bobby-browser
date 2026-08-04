@@ -207,6 +207,28 @@ test("bindPairButton sends enrollPair and reloads status", async () => {
   assert.match(document.querySelector("#connection .status")?.textContent ?? "", /Paired/);
 });
 
+test("bindPairButton re-enables when status is unavailable after click", async () => {
+  const document = mount();
+  renderPopup(document, baseStatus());
+  const browserApi = {
+    storage: memoryStorage().storage,
+    runtime: {
+      async sendMessage() {
+        throw new Error("background restarting");
+      },
+    },
+  };
+  await bindPairButton(browserApi, document);
+  const button = document.querySelector("#pair-button") as HTMLButtonElement;
+  button.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(button.disabled, false);
+  assert.equal(
+    document.querySelector("#connection .status")?.textContent,
+    "Status unavailable",
+  );
+});
+
 test("applyStatusOrFallback binds fingerprint when status unavailable", async () => {
   const document = mount();
   const { storage } = memoryStorage();

@@ -703,7 +703,11 @@ async fn enroll_persist_failure_does_not_emit_paired() {
         })
     );
     assert_ne!(status["kind"], "paired");
-    let _ = host.await;
+    let result = host.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "enrollFailed must exit cleanly, not as InvalidProtocol: {result:?}"
+    );
 }
 
 #[tokio::test]
