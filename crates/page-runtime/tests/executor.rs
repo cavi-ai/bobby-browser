@@ -1519,7 +1519,7 @@ async fn terminal_policy_denial_never_calls_chromium() {
 
 #[tokio::test]
 async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
-    let (runtime, session, page, _) = runtime(DriverMode::SlowInspect, None).await;
+    let (runtime, session, page, events) = runtime(DriverMode::SlowInspect, None).await;
     let mut request = envelope(
         session,
         page,
@@ -1529,9 +1529,14 @@ async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
             include_html: false,
         }),
     );
-    request.deadline = Utc::now() + Duration::milliseconds(50);
+    request.deadline = Utc::now() + Duration::milliseconds(200);
 
-    let outcome = runtime.execute(request).await;
+    let outcome = tokio::time::timeout(StdDuration::from_secs(2), runtime.execute(request))
+        .await
+        .expect("execute() did not return promptly; envelope deadline may not be enforced");
+
+    assert!(events.lock().await.contains(&"browser:inspect".to_string()));
+
     let error = match outcome {
         CommandOutcome::Failed { error, .. } | CommandOutcome::RetryableFailure { error, .. } => {
             error
@@ -1539,4 +1544,3 @@ async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
         other => panic!("hung command must fail at its deadline: {other:?}"),
     };
     assert_eq!(error.code, ErrorCode::DeadlineExceeded, "{error:?}");
-}
