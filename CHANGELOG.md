@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- **Breaking (MCP):** a command whose outcome status is not `completed` now returns `isError: true`. Failed commands previously reported `isError: false`, so hosts checking `isError` treated every failure as success. `restarted`/`resumed` recovery decisions remain success.
+- Boundary commands are usable over the flat MCP tools: `intent_*` tools and `click` accept optional `commandId`/`attemptId` (threaded through unchanged), and every outcome echoes `attemptId` alongside `workflowId`/`commandId`. The Boundary gate requires a pre-saved checkpoint naming those exact ids, but the server minted them internally and never surfaced them, so `intent_submit_and_verify` and boundary `click` could never pass it over MCP. The `fill_and_submit_form` prompt is rewritten to the only working order (snapshot, fill, pin ids, checkpoint, submit) and states the exact `CompleteFormField`/`ExtractField` shapes it previously omitted.
+- The static `bobby://` resources (capabilities, failure-taxonomy, intents, primitives) are readable by any authenticated principal; only live `artifact://` entries require `artifact:read`. An agent that hit `missingCapability` could not read the repair documentation for it. Revoked/expired principals are still denied.
+- `bobby://failure-taxonomy` documents the RPC-layer `InterfaceErrorCode` vocabulary (14 codes, each with a repair action), and the advertised `errorCode` enum adds `targetObscured`/`targetOutOfBounds` (29/29 variants, pinned by a schemars parity test).
+- Tool annotations corrected: `readOnlyHint` on `wait_for`, `intent_locate`, `intent_wait_for_state`, `intent_extract`; `openWorldHint` on `page_open`, `click`, `intent_follow`, `intent_submit_and_verify`. `network_log`'s description names both real failure codes.
+- `tools/list` advertises shared `Id` schemas by `$ref`, keeping the full surface at ~125 KB with ~5.8 KB of headroom inside the 128 KiB connect budget after the new `commandId`/`attemptId` fields.
 
 ## 0.5.0 - 2026-08-04
 - `bobby install` can put `bobby` (+ sibling `mcp-gateway`) on PATH (`~/.cargo/bin` when already on PATH, else `~/.local/bin`). On by default in the interactive checklist and via `--cli` / `make cli`.
