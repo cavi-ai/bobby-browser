@@ -223,6 +223,17 @@ impl BidiTransport for FakeBidi {
                 .unwrap_or_else(|| "Original tab title".into());
             return Ok(json!({"result": {"type": "string", "value": title}}));
         }
+        if method == "script.evaluate" && params["expression"] == "globalThis.location.href" {
+            // Queued responses win (wait_for tests script exact URLs); the
+            // canned URL covers close_page's pre-teardown capture, which
+            // older test queues never accounted for.
+            if let Some(response) = self.scripted.lock().await.pop_front() {
+                return response;
+            }
+            return Ok(
+                json!({"result": {"type": "string", "value": "https://example.test/closed"}}),
+            );
+        }
         if method == "script.evaluate"
             && params["expression"]
                 .as_str()
@@ -2556,6 +2567,7 @@ async fn closed_and_destroyed_contexts_are_removed_from_the_page_map() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
         Ok(json!({})),
+        Ok(json!({})),
         Ok(json!({"context": "context-2"})),
     ]);
     let observer = FakeObserver::new(observation());
@@ -3149,4 +3161,38 @@ async fn fingerprint_toggle_adds_and_removes_preload_script() {
         }),
         "open_page must re-apply viewport with the new browsing context"
     );
+}
+
+#[tokio::test]
+async fn close_page_returns_page_evidence_captured_before_teardown() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "https://example.test/closed"}})),
+        Ok(json!({})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .close_page_command(&ClosePageCommand {
+            page_id: page.clone(),
+        })
+        .await
+        .unwrap();
+
+    // The executor rejects a close with no Page evidence, which recorded
+    // every successful close as a verification failure.
+    let page_evidence = evidence.iter().find_map(|item| match item {
+        Evidence::Page {
+            page_id,
+            url,
+            title,
+        } => Some((page_id.clone(), url.clone(), title.clone())),
+        _ => None,
+    });
+    let (page_id, url, title) = page_evidence.expect("close_page must produce Page evidence");
+    assert_eq!(page_id, page);
+    assert_eq!(url, "https://example.test/closed");
+    assert!(!title.is_empty());
 }

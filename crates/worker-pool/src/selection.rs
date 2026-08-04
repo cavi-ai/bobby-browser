@@ -264,6 +264,7 @@ impl BrowserWorkerSelector {
                 .map(|registration| Arc::clone(&registration.factory))
                 .collect(),
             launched: Mutex::new(HashMap::new()),
+            launching: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -287,11 +288,27 @@ impl BrowserWorkerSelector {
 struct PreferenceWorkerFactory {
     factories: Vec<Arc<dyn WorkerFactory>>,
     launched: Mutex<HashMap<SessionId, Arc<dyn WorkerFactory>>>,
+    /// Per-session launch gates: two commands leasing the same session must
+    /// not both miss the cache and launch two browsers against one profile
+    /// directory (SingletonLock), so the first launch is single-flighted and
+    /// the loser re-reads the winner's registration.
+    launching: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
 }
 
 #[async_trait]
 impl WorkerFactory for PreferenceWorkerFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        if let Some(factory) = self.launched.lock().await.get(session_id).cloned() {
+            return factory.launch(session_id).await;
+        }
+
+        let gate = {
+            let mut launching = self.launching.lock().await;
+            Arc::clone(launching.entry(session_id.clone()).or_default())
+        };
+        let _permit = gate.lock().await;
+        // Re-check after winning the gate: the launch we raced has already
+        // registered its factory.
         if let Some(factory) = self.launched.lock().await.get(session_id).cloned() {
             return factory.launch(session_id).await;
         }
@@ -318,6 +335,7 @@ impl WorkerFactory for PreferenceWorkerFactory {
             factory.release_session(session_id).await;
             launched.remove(session_id);
         }
+        self.launching.lock().await.remove(session_id);
     }
 }
 
