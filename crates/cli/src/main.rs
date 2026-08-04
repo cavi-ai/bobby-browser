@@ -83,6 +83,9 @@ enum CliCommand {
         /// Path to a built companion extension (else built from the repo)
         #[arg(long)]
         extension: Option<PathBuf>,
+        /// Install `bobby` (+ `mcp-gateway`) onto PATH (~/.cargo/bin or ~/.local/bin)
+        #[arg(long)]
+        cli: bool,
         /// Regenerate the bootstrap credential even if one exists
         #[arg(long)]
         force: bool,
@@ -256,6 +259,7 @@ pub async fn run() -> Result<()> {
             project_skill,
             companion,
             extension,
+            cli,
             force,
             yes,
             path,
@@ -272,6 +276,7 @@ pub async fn run() -> Result<()> {
                     project_skill,
                     companion,
                     extension,
+                    cli,
                     force,
                     yes,
                 },

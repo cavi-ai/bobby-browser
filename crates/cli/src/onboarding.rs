@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
+use dialoguer::{theme::ColorfulTheme, MultiSelect};
 
 /// Agent host config dialect for `bobby init --emit`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -262,11 +263,20 @@ pub enum HostKind {
 const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
 const SKILL_NAME: &str = "bobby-browser";
 
+thread_local! {
+    /// Set when this process installs `bobby` onto PATH, so host MCP merges
+    /// point at the durable bin path instead of a transient `target/` binary.
+    static INSTALLED_CLI: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The MCP server entry an agent host launches: this same binary, absolute,
 /// running `mcp-stdio`, which loads the bootstrap credential itself. No env
 /// wiring in the host config, no secrets in any file the host reads.
 fn static_server_entry() -> Result<(String, Vec<String>)> {
-    let exe = std::env::current_exe().context("current executable unknown")?;
+    let exe = match INSTALLED_CLI.with(|slot| slot.borrow().clone()) {
+        Some(path) => path,
+        None => std::env::current_exe().context("current executable unknown")?,
+    };
     Ok((
         exe.to_str()
             .ok_or_else(|| anyhow!("executable path is not valid UTF-8"))?
@@ -405,8 +415,96 @@ pub struct InstallOptions {
     pub project_skill: bool,
     pub companion: bool,
     pub extension: Option<PathBuf>,
+    /// Copy `bobby` (+ sibling `mcp-gateway`) onto a writable bin dir on PATH.
+    pub cli: bool,
     pub force: bool,
     pub yes: bool,
+}
+
+/// Named flags select only that work; no named flags (interactive or `--yes`
+/// alone) uses the built-in defaults (Claude host, companion if Firefox is
+/// present, credential if missing, CLI on PATH).
+fn use_install_defaults(options: &InstallOptions) -> bool {
+    options.hosts.is_empty()
+        && !options.skill
+        && !options.companion
+        && !options.cli
+        && !options.force
+}
+
+/// Prefer `~/.cargo/bin` when it is already on PATH (rustup users), else
+/// `~/.local/bin` (created if needed; operator may still need to add it).
+fn resolve_cli_bin_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("home directory unavailable")?;
+    let cargo_bin = home.join(".cargo").join("bin");
+    let local_bin = home.join(".local").join("bin");
+    if directory_on_path(&cargo_bin) {
+        return Ok(cargo_bin);
+    }
+    if directory_on_path(&local_bin) {
+        return Ok(local_bin);
+    }
+    Ok(local_bin)
+}
+
+fn directory_on_path(dir: &Path) -> bool {
+    let Ok(dir) = dir.canonicalize() else {
+        // Not created yet — still count a PATH entry that matches by string.
+        return path_var_contains(dir);
+    };
+    path_var_contains(&dir)
+        || std::env::var_os("PATH")
+            .map(|paths| {
+                std::env::split_paths(&paths)
+                    .any(|entry| entry.canonicalize().ok().as_ref() == Some(&dir) || entry == dir)
+            })
+            .unwrap_or(false)
+}
+
+fn path_var_contains(dir: &Path) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|entry| entry == dir))
+        .unwrap_or(false)
+}
+
+/// Copy this `bobby` binary (and sibling `mcp-gateway` when present) into
+/// `dest_dir`. Returns the installed `bobby` path and whether `dest_dir` is
+/// on PATH.
+pub fn install_cli_into(dest_dir: &Path) -> Result<(PathBuf, bool)> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("could not create {}", dest_dir.display()))?;
+    let exe = std::env::current_exe().context("current executable unknown")?;
+    let bobby_dest = dest_dir.join(if cfg!(windows) { "bobby.exe" } else { "bobby" });
+    copy_executable(&exe, &bobby_dest)?;
+
+    if let Some(dir) = exe.parent() {
+        let gateway_src = dir.join(GATEWAY_COMMAND);
+        if gateway_src.is_file() {
+            let gateway_dest = dest_dir.join(GATEWAY_COMMAND);
+            copy_executable(&gateway_src, &gateway_dest)?;
+        }
+    }
+
+    Ok((bobby_dest, directory_on_path(dest_dir)))
+}
+
+fn copy_executable(src: &Path, dest: &Path) -> Result<()> {
+    let pending = dest.with_extension(format!("pending-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::copy(src, &pending)
+        .with_context(|| format!("copy {} → {}", src.display(), pending.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&pending, dest).with_context(|| format!("install {}", dest.display()))?;
+    Ok(())
+}
+
+fn remember_installed_cli(bobby: &Path) {
+    INSTALLED_CLI.with(|slot| {
+        *slot.borrow_mut() = Some(bobby.to_path_buf());
+    });
 }
 
 /// `bobby install`: the one-command setup. Non-interactive when flags name
@@ -418,11 +516,18 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         project_skill,
         companion,
         extension,
+        cli,
         force,
         yes,
-    } = options;
+    } = &options;
     let hosts = hosts.as_slice();
     let extension = extension.as_deref();
+    let skill = *skill;
+    let project_skill = *project_skill;
+    let companion = *companion;
+    let cli = *cli;
+    let force = *force;
+    let yes = *yes;
     let project_root = std::env::current_dir()?;
     let mut items: Vec<InstallItem> = Vec::new();
 
@@ -438,9 +543,13 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             bootstrap_path.display()
         )
     };
+    // Named flags (--host/--skill/--companion/--cli/--force) select only that
+    // work. No named flags (interactive checklist, or --yes alone) uses defaults.
+    let use_defaults = use_install_defaults(&options);
+
     items.push(InstallItem {
         label: credential_label,
-        enabled: force || !credential_exists,
+        enabled: force || (!credential_exists && use_defaults),
         run: Box::new({
             let path = bootstrap_path.to_path_buf();
             move || {
@@ -453,13 +562,46 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }),
     });
 
+    let cli_enabled = cli || use_defaults;
+    let cli_label = match resolve_cli_bin_dir() {
+        Ok(bin_dir) if directory_on_path(&bin_dir) => format!(
+            "CLI on PATH: install bobby (+ mcp-gateway) to {}",
+            bin_dir.display()
+        ),
+        Ok(bin_dir) => format!(
+            "CLI on PATH: install bobby (+ mcp-gateway) to {} (add this dir to PATH)",
+            bin_dir.display()
+        ),
+        Err(_) => {
+            "CLI on PATH: install bobby (+ mcp-gateway) to ~/.cargo/bin or ~/.local/bin".to_owned()
+        }
+    };
+    items.push(InstallItem {
+        label: cli_label,
+        enabled: cli_enabled,
+        run: Box::new(move || {
+            let dest = resolve_cli_bin_dir()?;
+            let (bobby, on_path) = install_cli_into(&dest)?;
+            remember_installed_cli(&bobby);
+            if on_path {
+                Ok(format!("installed {}", bobby.display()))
+            } else {
+                Ok(format!(
+                    "installed {} — add {} to PATH to run `bobby`",
+                    bobby.display(),
+                    dest.display()
+                ))
+            }
+        }),
+    });
+
     for host in [HostKind::Claude, HostKind::Zed, HostKind::Vscode] {
         let selected = hosts.contains(&host);
         let default_on = matches!(host, HostKind::Claude);
         let root = project_root.clone();
         items.push(InstallItem {
             label: format!("{host:?}: merge the MCP server entry into its config"),
-            enabled: selected || (hosts.is_empty() && default_on),
+            enabled: selected || (use_defaults && default_on),
             run: Box::new(move || {
                 let path = merge_host_config(host, &root)?;
                 Ok(format!("merged into {}", path.display()))
@@ -467,11 +609,10 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         });
     }
 
-    let companion_default = companion || (hosts.is_empty() && !skill && firefox_present());
     let extension_path = extension.map(Path::to_path_buf);
     items.push(InstallItem {
         label: "Firefox companion: install extension and native host (pair at first use)".to_owned(),
-        enabled: companion || companion_default,
+        enabled: companion || (use_defaults && firefox_present()),
         run: Box::new(move || {
             let install = install_firefox_companion(extension_path.as_deref())?;
             Ok(format!(
@@ -498,46 +639,28 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }),
     });
 
-    let interactive = !yes && hosts.is_empty() && !skill && !companion && !force;
+    let interactive = !yes && hosts.is_empty() && !skill && !companion && !cli && !force;
     if interactive {
-        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || !std::io::IsTerminal::is_terminal(&std::io::stdout())
+        {
             anyhow::bail!(
-                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode> --skill --yes"
+                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode> --skill --cli --yes"
             );
         }
-        println!("bobby install — number toggles, enter runs the checked items, q quits:");
-        let stdin = std::io::stdin();
-        let mut lines = stdin.lock().lines();
-        loop {
-            for (index, item) in items.iter().enumerate() {
-                println!(
-                    "  [{}] {}. {}",
-                    if item.enabled { "x" } else { " " },
-                    index + 1,
-                    item.label
-                );
-            }
-            print!("> ");
-            std::io::stdout().flush()?;
-            let Some(line) = lines.next() else {
-                anyhow::bail!("stdin closed before a selection");
-            };
-            let line = line?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                break;
-            }
-            if trimmed == "q" {
-                println!("nothing changed");
-                return Ok(());
-            }
-            match trimmed.parse::<usize>() {
-                Ok(number) if (1..=items.len()).contains(&number) => {
-                    let item = &mut items[number - 1];
-                    item.enabled = !item.enabled;
-                }
-                _ => println!("  (enter a number, an empty line to run, or q)"),
-            }
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        let defaults: Vec<bool> = items.iter().map(|item| item.enabled).collect();
+        let Some(selected) = MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("bobby install — ↑/↓ move, space toggles, enter runs (esc quits)")
+            .items(&labels)
+            .defaults(&defaults)
+            .interact_opt()?
+        else {
+            println!("nothing changed");
+            return Ok(());
+        };
+        for (index, item) in items.iter_mut().enumerate() {
+            item.enabled = selected.contains(&index);
         }
     }
 
@@ -558,6 +681,46 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
 #[cfg(test)]
 mod install_tests {
     use super::*;
+
+    #[test]
+    fn companion_only_flag_does_not_use_full_install_defaults() {
+        assert!(use_install_defaults(&InstallOptions::default()));
+        assert!(use_install_defaults(&InstallOptions {
+            yes: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            companion: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            cli: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            skill: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            hosts: vec![HostKind::Claude],
+            ..InstallOptions::default()
+        }));
+    }
+
+    #[test]
+    fn cli_install_copies_bobby_into_the_bin_dir() {
+        let dest = tempfile::tempdir().unwrap();
+        let (bobby, _) = install_cli_into(dest.path()).unwrap();
+        assert!(bobby.is_file());
+        let expected = if cfg!(windows) { "bobby.exe" } else { "bobby" };
+        assert_eq!(bobby.file_name().unwrap(), expected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&bobby).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "installed bobby must be executable");
+        }
+    }
 
     #[test]
     fn merging_into_a_fresh_claude_config_creates_the_section() {

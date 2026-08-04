@@ -24,6 +24,7 @@ path = "src/bin/cli.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+dialoguer.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 hex.workspace = true
