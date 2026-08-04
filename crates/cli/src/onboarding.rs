@@ -725,6 +725,10 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
 mod install_tests {
     use super::*;
 
+    /// Companion install tests mutate process-global `HOME` (and sometimes
+    /// `XDG_CONFIG_HOME`); serialize so parallel `cargo test` stays deterministic.
+    static INSTALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn companion_only_flag_does_not_use_full_install_defaults() {
         assert!(use_install_defaults(&InstallOptions::default()));
@@ -819,6 +823,7 @@ mod install_tests {
 
     #[test]
     fn companion_install_copies_the_extension_and_installs_the_native_host() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let dist = tempfile::tempdir().unwrap();
         std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
         std::fs::write(dist.path().join("background.js"), "//").unwrap();
@@ -846,10 +851,9 @@ mod install_tests {
 
     #[test]
     fn install_writes_enroll_defaults_next_to_descriptor() {
-        use firefox_companion::selection::{
-            enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults,
-        };
+        use firefox_companion::selection::{enroll_defaults_path, read_enroll_defaults};
 
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let dist = tempfile::tempdir().unwrap();
         std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
         std::fs::write(dist.path().join("background.js"), "//").unwrap();
@@ -884,12 +888,10 @@ mod install_tests {
         );
 
         let defaults = read_enroll_defaults(&defaults_path).unwrap();
-        assert!(defaults.profile_dir.ends_with("firefox-profile"));
+        assert_eq!(defaults.profile_dir, config_dir.join("firefox-profile"));
         assert!(defaults.profile_dir.is_dir());
         assert_eq!(defaults.companion_bind.to_string(), "127.0.0.1:9876");
         assert_eq!(defaults.descriptor_path, install.descriptor_path);
-
-        let _unused: FirefoxEnrollDefaults = defaults;
     }
 
     #[test]
