@@ -124,13 +124,18 @@ command `resourceExhausted` outcomes return **HTTP 429** with:
 - Response header `Retry-After: <seconds>` (integer seconds)
 - Body field `error.retryAfterMs` when the runtime supplies a millisecond hint
 
+`Retry-After` is always whole seconds: the broker rounds millisecond hints
+**up** (`ceil(ms / 1000)`, minimum **1**). A 50 ms hint therefore yields
+`Retry-After: 1`. Prefer `retryAfterMs` in the body when you need sub-second
+intent; never treat a missing or zero header as “retry immediately.”
+
 Treat 429 as retryable after the indicated delay. Do not spin. Connection /
 accept limits on the listener can also emit 429 with `Retry-After`.
 
 HTTP **503** appears for retryable command failures (`retryableFailure`). Those
-responses now include `Retry-After: 1` (one second) as a default backoff when
-the outcome does not carry an explicit millisecond hint. Prefer that header
-over spinning.
+responses always include `Retry-After: 1` — a fixed default, because
+`retryableFailure` has no per-outcome millisecond field yet. Prefer that
+header over spinning.
 
 ## Clients
 
