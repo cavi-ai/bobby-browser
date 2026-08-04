@@ -172,6 +172,9 @@ enum CliCommand {
         /// OpenAI API base URL (tests / proxies)
         #[arg(long, default_value = "https://api.openai.com/v1")]
         openai_base_url: String,
+        /// Upstream API key env var (default OPENAI_API_KEY; empty value skips key)
+        #[arg(long)]
+        api_key_env: Option<String>,
     },
 }
 
@@ -358,27 +361,29 @@ pub async fn run() -> Result<()> {
             upstream,
             model,
             openai_base_url,
+            api_key_env,
         } => {
-            run_vision_proxy(bind, path, upstream, model, openai_base_url).await?;
+            run_vision_proxy(bind, path, upstream, model, openai_base_url, api_key_env).await?;
         }
     }
 
     Ok(())
 }
 
-fn require_vision_proxy_env() -> Result<(String, String)> {
-    let bearer = std::env::var("BOBBY_VISION_TOKEN")
+fn require_vision_proxy_bearer() -> Result<String> {
+    std::env::var("BOBBY_VISION_TOKEN")
         .ok()
-        .filter(|value| !value.is_empty());
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("BOBBY_VISION_TOKEN is missing or empty"))
+}
 
-    match (bearer, api_key) {
-        (Some(bearer), Some(api_key)) => Ok((bearer, api_key)),
-        (None, None) => anyhow::bail!("BOBBY_VISION_TOKEN and OPENAI_API_KEY are missing or empty"),
-        (None, Some(_)) => anyhow::bail!("BOBBY_VISION_TOKEN is missing or empty"),
-        (Some(_), None) => anyhow::bail!("OPENAI_API_KEY is missing or empty"),
+fn require_upstream_api_key(api_key_env: Option<&str>) -> Result<String> {
+    match api_key_env.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(String::new()),
+        Some(name) => std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("{name} is missing or empty")),
     }
 }
 
@@ -388,12 +393,18 @@ async fn run_vision_proxy(
     upstream: String,
     model: String,
     openai_base_url: String,
+    api_key_env: Option<String>,
 ) -> Result<()> {
     if upstream != "openai" {
         anyhow::bail!("unsupported upstream {upstream:?}; v1 supports only \"openai\"");
     }
 
-    let (bearer_token, api_key) = require_vision_proxy_env()?;
+    let bearer_token = require_vision_proxy_bearer()?;
+    let api_key = match api_key_env {
+        None => require_upstream_api_key(Some("OPENAI_API_KEY"))?,
+        Some(name) if name.trim().is_empty() => require_upstream_api_key(None)?,
+        Some(name) => require_upstream_api_key(Some(name.trim()))?,
+    };
     let bind: SocketAddr = bind.parse().context("invalid --bind address")?;
 
     let upstream = Arc::new(OpenAiUpstream::new(api_key, model, openai_base_url));

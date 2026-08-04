@@ -11,13 +11,16 @@ use vision_proxy::{
 #[derive(Clone, Default)]
 struct MockOpenAiState {
     last_body: Arc<Mutex<Option<Value>>>,
+    had_authorization: Arc<Mutex<bool>>,
 }
 
 async fn mock_chat_completions(
     State(state): State<MockOpenAiState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Json<Value> {
     *state.last_body.lock().unwrap() = Some(body.clone());
+    *state.had_authorization.lock().unwrap() = headers.contains_key("authorization");
 
     let user_text = body["messages"]
         .as_array()
@@ -138,6 +141,27 @@ async fn malformed_model_json_returns_invalid() {
         .unwrap_err();
 
     assert!(matches!(err, UpstreamError::Invalid(_)));
+}
+
+#[tokio::test]
+async fn empty_api_key_omits_authorization_header() {
+    let (base_url, state) = start_mock_openai().await;
+    let upstream = OpenAiUpstream::new(String::new(), "gpt-4o".into(), base_url);
+
+    upstream
+        .propose(ProposeInput {
+            purpose: "find submit".into(),
+            intent_kind: "click".into(),
+            stuck: "targetMissing".into(),
+            screenshot_png_b64: "aGVsbG8=".into(),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        !*state.had_authorization.lock().unwrap(),
+        "empty api key must omit Authorization header"
+    );
 }
 
 #[tokio::test]

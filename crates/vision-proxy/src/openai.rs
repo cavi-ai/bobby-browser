@@ -74,12 +74,16 @@ impl OpenAiUpstream {
             ],
         };
 
-        let response = self
+        let mut req = self
             .client
             .post(self.completions_url())
-            .bearer_auth(&self.api_key)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(30));
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+
+        let response = req
             .send()
             .await
             .map_err(|e| UpstreamError::Transport(e.to_string()))?;
