@@ -624,32 +624,34 @@ impl Server {
             Ok(input) => input,
             Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
         };
-        let context = self.request_context();
-        let artifact_readable = match self
-            .authorization
-            .authorize(&context, types::InterfaceOperation::ReadArtifact)
-        {
-            Ok(()) => true,
-            Err(error) if error.code == types::InterfaceErrorCode::MissingCapability => false,
-            Err(error) => return interface_error_response(id, error),
-        };
         if let Some(text) = static_resource_body(&input.uri) {
+            let context = self.request_context();
+            // Repair docs are readable by any authenticated principal, even
+            // one missing artifact:read; a revoked/expired principal (any
+            // other authorization failure) is denied like anywhere else.
+            match self
+                .authorization
+                .authorize(&context, types::InterfaceOperation::ReadArtifact)
+            {
+                Ok(()) => {}
+                Err(error) if error.code == types::InterfaceErrorCode::MissingCapability => {}
+                Err(error) => return interface_error_response(id, error),
+            }
             return success(
                 id,
                 json!({"contents":[{"uri":input.uri,"mimeType":"text/markdown","text":text}]}),
             );
         }
-        if !artifact_readable {
-            return interface_error_response(
-                id,
-                self.authorization
-                    .authorize(&context, types::InterfaceOperation::ReadArtifact)
-                    .expect_err("artifact readability checked above"),
-            );
-        }
         let Some(artifact_id) = parse_artifact_uri(&input.uri) else {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         };
+        let context = self.request_context();
+        if let Err(error) = self
+            .authorization
+            .authorize(&context, types::InterfaceOperation::ReadArtifact)
+        {
+            return interface_error_response(id, error);
+        }
         let content = match self
             .resources
             .read(&self.handle, &context, artifact_id)
