@@ -558,19 +558,15 @@ impl NativeHostEnroll for FakeEnroll {
         &self,
         _pair: NativeConnectRequest,
     ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
-        let config = self.config.clone();
-        async move { Ok(config) }
+        std::future::ready(Ok(self.config.clone()))
     }
 
     fn complete_enrollment(
         &self,
         _pair: &NativeConnectRequest,
     ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
-        let completed = Arc::clone(&self.completed);
-        async move {
-            completed.store(true, Ordering::SeqCst);
-            Ok(EnrollFinalize::ReleaseListener)
-        }
+        self.completed.store(true, Ordering::SeqCst);
+        std::future::ready(Ok(EnrollFinalize::ReleaseListener))
     }
 }
 
@@ -650,15 +646,14 @@ async fn enroll_persist_failure_does_not_emit_paired() {
             &self,
             _pair: NativeConnectRequest,
         ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
-            let config = self.config.clone();
-            async move { Ok(config) }
+            std::future::ready(Ok(self.config.clone()))
         }
 
         fn complete_enrollment(
             &self,
             _pair: &NativeConnectRequest,
         ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
-            async { Err(EnrollHostError::ListenerUnavailable) }
+            std::future::ready(Err(EnrollHostError::ListenerUnavailable))
         }
     }
 
@@ -719,14 +714,14 @@ async fn enroll_profile_reports_defaults_missing_from_enroll_trait() {
             &self,
             _pair: NativeConnectRequest,
         ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
-            async { Err(EnrollHostError::DefaultsMissing) }
+            std::future::ready(Err(EnrollHostError::DefaultsMissing))
         }
 
         fn complete_enrollment(
             &self,
             _pair: &NativeConnectRequest,
         ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
-            async { Ok(EnrollFinalize::ReleaseListener) }
+            std::future::ready(Ok(EnrollFinalize::ReleaseListener))
         }
     }
 
@@ -776,15 +771,14 @@ async fn enroll_keep_relay_leaves_host_running_after_enroll_ok() {
             &self,
             _pair: NativeConnectRequest,
         ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
-            let config = self.config.clone();
-            async move { Ok(config) }
+            std::future::ready(Ok(self.config.clone()))
         }
 
         fn complete_enrollment(
             &self,
             _pair: &NativeConnectRequest,
         ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
-            async { Ok(EnrollFinalize::KeepRelay) }
+            std::future::ready(Ok(EnrollFinalize::KeepRelay))
         }
     }
 
