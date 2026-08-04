@@ -1764,6 +1764,7 @@ fn companion_bind_in_use(addr: SocketAddr) -> bool {
 }
 
 impl NativeHostEnroll for NativeHostFirefoxEnroll {
+    #[allow(clippy::manual_async_fn)]
     fn enroll_and_wait_for_pair(
         &self,
         _pair: NativeConnectRequest,
@@ -1808,8 +1809,7 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
                     .map_err(|_| EnrollHostError::ListenerUnavailable)?,
             )
             .map_err(|_| EnrollHostError::ListenerUnavailable)?;
-            let config =
-                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code);
+            let config = NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code);
             let mut state = self.state.lock().await;
             state.enrollment = Some(enrollment);
             state.used_live_descriptor = false;
@@ -1819,6 +1819,7 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn complete_enrollment(
         &self,
         pair: &NativeConnectRequest,

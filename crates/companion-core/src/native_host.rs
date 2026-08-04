@@ -305,14 +305,14 @@ impl NativeHostEnroll for NullNativeHostEnroll {
         &self,
         _pair: NativeConnectRequest,
     ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
-        async { Err(EnrollHostError::ListenerUnavailable) }
+        std::future::ready(Err(EnrollHostError::ListenerUnavailable))
     }
 
     fn complete_enrollment(
         &self,
         _pair: &NativeConnectRequest,
     ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
-        async { Ok(EnrollFinalize::ReleaseListener) }
+        std::future::ready(Ok(EnrollFinalize::ReleaseListener))
     }
 }
 
