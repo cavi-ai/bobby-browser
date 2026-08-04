@@ -3100,3 +3100,51 @@ async fn static_resources_are_readable_without_artifact_read() {
         "{denied}"
     );
 }
+
+#[tokio::test]
+async fn download_url_requires_and_threads_a_page_id() {
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::FileDownload]).await;
+
+    // The advertised schema names pageId: the executor requires one, and the
+    // gateway used to send None unconditionally, failing every call.
+    let listed = server
+        .handle_message(request(2, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "download_url")
+        .expect("download_url is advertised");
+    assert!(
+        tool["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("pageId")),
+        "download_url must advertise pageId as required: {tool}"
+    );
+
+    let outcome = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"download_url",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "url":"https://example.test/file",
+                    "maxBytes":1024
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    // Downstream failure (unknown session) is fine; the old defect failed
+    // every call with "pageId is required" before anything ran.
+    assert!(
+        !outcome.to_string().contains("pageId is required"),
+        "{outcome}"
+    );
+}

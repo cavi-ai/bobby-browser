@@ -2620,11 +2620,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 )
             })?;
         let truncated = raw.len() > MAX_JS_RESULT_BYTES;
-        let slice = if truncated {
-            &raw[..MAX_JS_RESULT_BYTES]
-        } else {
-            raw
-        };
+        let slice = truncate_utf8(raw, MAX_JS_RESULT_BYTES);
         let value: Value = serde_json::from_str(slice).map_err(|error| {
             driver_error(
                 ErrorCode::BrowserCommandFailed,
@@ -3928,7 +3924,28 @@ impl BrowserWorker for FirefoxCompanionWorker {
         &self,
         command: &ClosePageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        self.context(&command.page_id).await?;
+        let context = self.context(&command.page_id).await?;
+        // The executor requires Page evidence for close commands: capture the
+        // page's identity BEFORE teardown, or a successful close records as a
+        // verification failure and agents retry a destructive op.
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": "globalThis.location.href",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        let url = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let title = self.page_title(&command.page_id).await.unwrap_or_default();
         let cleanup = self
             .page_cleanups
             .read()
@@ -3940,7 +3957,14 @@ impl BrowserWorker for FirefoxCompanionWorker {
         if !failures.is_empty() {
             return Err(cleanup_failures_error(&failures));
         }
-        Ok(vec![self.evidence(InteractionPath::EngineNative)])
+        Ok(vec![
+            Evidence::Page {
+                page_id: command.page_id.clone(),
+                url,
+                title,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ])
     }
 
     async fn a11y_snapshot(
@@ -4927,6 +4951,19 @@ fn session_error(error: CompanionSessionError) -> CommandError {
     }
 }
 
+/// Byte-index slicing a `String` panics mid-codepoint; back off to a char
+/// boundary so non-ASCII content cannot kill the worker task.
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn page_missing() -> CommandError {
     driver_error(
         ErrorCode::NotFound,
@@ -5285,5 +5322,23 @@ mod cleanup_state_tests {
                 & (CLEANUP_RESTORE_DONE | CLEANUP_CLOSE_DONE | CLEANUP_BINDING_DONE),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_utf8;
+
+    #[test]
+    fn truncation_never_splits_a_codepoint() {
+        let text = "é".repeat(100);
+        let cut = truncate_utf8(&text, 51);
+        assert_eq!(cut.len(), 50);
+
+        let ascii = "a".repeat(100);
+        assert_eq!(truncate_utf8(&ascii, 51).len(), 51);
+
+        let short = "héllo";
+        assert_eq!(truncate_utf8(short, 100), short);
     }
 }

@@ -273,11 +273,12 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             json!({
                 "workflowId": id(),
                 "sessionId": id(),
+                "pageId": id(),
                 "url": string(1, MAX_URL_BYTES),
                 "expectedContentType": nullable(string(1, 256)),
                 "maxBytes": {"type":"integer","minimum":1,"maximum":1099511627776_u64}
             }),
-            vec!["sessionId", "url", "maxBytes"],
+            vec!["sessionId", "pageId", "url", "maxBytes"],
         ),
         "upload_files" => (
             json!({
