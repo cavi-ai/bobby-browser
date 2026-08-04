@@ -82,7 +82,7 @@ jobs:
           else
             "./${STAGE_DIR}/bobby" --help
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bobby-browser-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
           path: ${{ env.ASSET }}
@@ -96,7 +96,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

@@ -1,6 +1,6 @@
 //! Priority-based job queue with retry logic.
 
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::Duration;
