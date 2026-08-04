@@ -684,6 +684,103 @@ pub fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
         .map_err(Into::into)
 }
 
+pub const SELECTION_ENV: &str = "AUTOMATION_RUNTIME_BROWSER_SELECTION";
+
+/// Where a resolved browser selection came from. Reported by `bobby doctor`
+/// so operators can tell env overrides apart from the persisted enrollment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionSource {
+    Environment,
+    Persisted(PathBuf),
+    Default,
+}
+
+/// Machine-local selection written by `bobby enroll-firefox-profile`, next to
+/// the bootstrap credential. Every entry point (serve, gateway, doctor)
+/// resolves through the same precedence, so configuration cannot diverge
+/// between the process an operator validates and the process a host launches.
+pub fn default_selection_path() -> Result<PathBuf> {
+    Ok(dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
+        .join("bobby-browser")
+        .join("browser-selection.json"))
+}
+
+/// Resolve the browser selection: `AUTOMATION_RUNTIME_BROWSER_SELECTION`
+/// wins, then the persisted enrollment, then the built-in default. A present
+/// but malformed source is always an error — never silently ignored.
+pub fn resolve_browser_selection() -> Result<(BrowserSelectionConfig, SelectionSource)> {
+    let persisted = default_selection_path().ok();
+    resolve_browser_selection_with(
+        std::env::var(SELECTION_ENV).ok().as_deref(),
+        persisted.as_deref(),
+    )
+}
+
+pub fn resolve_browser_selection_with(
+    env: Option<&str>,
+    persisted_path: Option<&Path>,
+) -> Result<(BrowserSelectionConfig, SelectionSource)> {
+    if let Some(value) = env {
+        let selection = parse_selection(Some(value))
+            .map_err(|error| anyhow::anyhow!("{SELECTION_ENV} is invalid: {error:#}"))?;
+        return Ok((selection, SelectionSource::Environment));
+    }
+    if let Some(path) = persisted_path {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let selection: BrowserSelectionConfig =
+                    serde_json::from_str(&text).map_err(|error| {
+                        anyhow::anyhow!(
+                            "persisted browser selection {} is invalid: {error}",
+                            path.display()
+                        )
+                    })?;
+                return Ok((selection, SelectionSource::Persisted(path.to_path_buf())));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "persisted browser selection {} is unreadable: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok((BrowserSelectionConfig::default(), SelectionSource::Default))
+}
+
+/// Persist a selection so subsequent serve/gateway/doctor runs resolve it
+/// without any environment wiring. Written atomically with owner-only
+/// permissions: the contents locate a pairing endpoint and profile.
+pub fn persist_browser_selection(path: &Path, selection: &BrowserSelectionConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| anyhow::anyhow!("failed to create {}: {error}", parent.display()))?;
+    }
+    let pending = path.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
+    let write = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&pending)?;
+        serde_json::to_writer_pretty(&mut file, selection)?;
+        use std::io::Write;
+        file.flush()?;
+        file.sync_all()?;
+        std::fs::rename(&pending, path)?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if write.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    write
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1093,5 +1190,85 @@ mod tests {
         drop(publication);
         assert!(!path.exists());
         assert!(!pending.exists());
+    }
+
+    #[test]
+    fn selection_resolution_prefers_env_then_persisted_then_default() {
+        let root = tempfile::tempdir().unwrap();
+        let persisted = root.path().join("browser-selection.json");
+        std::fs::write(
+            &persisted,
+            r#"{"preference":{"mode":"prefer","engines":["chromium","firefox"]}}"#,
+        )
+        .unwrap();
+
+        let (selection, source) = resolve_browser_selection_with(
+            Some(r#"{"preference":{"mode":"managedChromium"}}"#),
+            Some(&persisted),
+        )
+        .unwrap();
+        assert_eq!(source, SelectionSource::Environment);
+        assert_eq!(
+            selection.preference,
+            EnginePreferenceConfig::ManagedChromium
+        );
+
+        let (selection, source) = resolve_browser_selection_with(None, Some(&persisted)).unwrap();
+        assert_eq!(source, SelectionSource::Persisted(persisted.clone()));
+        assert_eq!(
+            selection.preference,
+            EnginePreferenceConfig::Prefer {
+                engines: vec![BrowserEngineConfig::Chromium, BrowserEngineConfig::Firefox]
+            }
+        );
+
+        let missing = root.path().join("absent.json");
+        let (selection, source) = resolve_browser_selection_with(None, Some(&missing)).unwrap();
+        assert_eq!(source, SelectionSource::Default);
+        assert_eq!(
+            selection.preference,
+            EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn selection_resolution_fails_closed_on_malformed_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let persisted = root.path().join("browser-selection.json");
+        std::fs::write(&persisted, r#"{"preference":{"mode":"managedChromium"}}"#).unwrap();
+
+        let error = resolve_browser_selection_with(Some("{not json"), Some(&persisted))
+            .expect_err("malformed env must fail even with a valid persisted selection");
+        assert!(error.to_string().contains(SELECTION_ENV));
+
+        std::fs::write(&persisted, "{not json").unwrap();
+        let error = resolve_browser_selection_with(None, Some(&persisted))
+            .expect_err("malformed persisted selection must fail");
+        assert!(error.to_string().contains("persisted browser selection"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_selection_roundtrips_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("nested").join("browser-selection.json");
+        let selection = BrowserSelectionConfig {
+            preference: EnginePreferenceConfig::ManagedChromium,
+            firefox: Vec::new(),
+        };
+
+        persist_browser_selection(&path, &selection).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let (resolved, source) = resolve_browser_selection_with(None, Some(&path)).unwrap();
+        assert_eq!(source, SelectionSource::Persisted(path));
+        assert_eq!(resolved, selection);
     }
 }

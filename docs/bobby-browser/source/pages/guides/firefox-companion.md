@@ -105,12 +105,18 @@ bobby enroll-firefox-profile \
   --timeout-secs 120
 ```
 
-On success it prints a single-line JSON value. Export it as
-`AUTOMATION_RUNTIME_BROWSER_SELECTION` for `bobby serve`:
+On success it prints a single-line JSON value and persists it to
+`<config-dir>/bobby-browser/browser-selection.json` (atomic write,
+owner-only). From that point `bobby serve`, the MCP gateway, and
+`bobby doctor` resolve the selection with no environment wiring:
 
 ```json
 {"firefox":[{"attachmentTtlMs":300000,"bidiUrl":"ws://127.0.0.1:9222/session","companionBind":"127.0.0.1:9876","descriptorPath":"…/firefox-native-host-descriptor.json","pairingCodeTtlMs":300000,"profileDir":"…/firefox-profile","profileId":"…","timeoutMs":30000}],"preference":{"engine":"firefox","mode":"exact","profileId":"…"}}
 ```
+
+Setting `AUTOMATION_RUNTIME_BROWSER_SELECTION` to that JSON remains
+supported as an override (it wins over the persisted file), e.g. for a
+one-off run against a different profile.
 
 ### 6. Serve
 
