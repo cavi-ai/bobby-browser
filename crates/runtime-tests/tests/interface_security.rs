@@ -24,7 +24,7 @@ use mcp_gateway::{
     protocol::{MAX_FRAME_BYTES as MAX_MCP_FRAME_BYTES, MCP_PROTOCOL_VERSION},
     ArtifactResources, Server as McpServer,
 };
-use sdk_core::AuthenticatedRuntime;
+use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -125,19 +125,23 @@ impl SecurityCase {
     async fn run(self, harness: &ChromeRuntimeHarness) -> SecurityResult {
         match self {
             Self::CanaryLeakage => canary_leakage(harness).await,
-            Self::HttpLifetime => http_lifetime(harness).await,
-            Self::McpLifetime => mcp_lifetime(harness).await,
-            Self::CdpLifetime => cdp_lifetime(harness).await,
+            Self::HttpLifetime => http_lifetime(&BoundaryFixture::from_chrome(harness)).await,
+            Self::McpLifetime => mcp_lifetime(&BoundaryFixture::from_chrome(harness)).await,
+            Self::CdpLifetime => cdp_lifetime(&BoundaryFixture::from_chrome(harness)).await,
             Self::PrincipalIsolation => principal_isolation(harness).await,
             Self::FilesystemConfinement => filesystem_confinement().await,
-            Self::DuplicateHeaders => duplicate_headers(harness).await,
-            Self::OversizedHttp => oversized_http(harness).await,
-            Self::OversizedMcp => oversized_mcp(harness).await,
+            Self::DuplicateHeaders => {
+                duplicate_headers(&BoundaryFixture::from_chrome(harness)).await
+            }
+            Self::OversizedHttp => oversized_http(&BoundaryFixture::from_chrome(harness)).await,
+            Self::OversizedMcp => oversized_mcp(&BoundaryFixture::from_chrome(harness)).await,
             Self::OversizedCdp => oversized_cdp(),
-            Self::UnsupportedProtocols => unsupported_protocols(harness).await,
+            Self::UnsupportedProtocols => {
+                unsupported_protocols(&BoundaryFixture::from_chrome(harness)).await
+            }
             Self::IdempotencyMismatch => idempotency_mismatch().await,
-            Self::QueueOverflow => queue_overflow(harness).await,
-            Self::EventGap => event_gap(harness).await,
+            Self::QueueOverflow => queue_overflow(&BoundaryFixture::from_chrome(harness)).await,
+            Self::EventGap => event_gap(&BoundaryFixture::from_chrome(harness)).await,
         }
     }
 }
@@ -167,10 +171,69 @@ async fn real_security_release_matrix_executes_every_production_boundary() {
     println!("AUTOMATION_RUNTIME_SECURITY_PROOF:v1:interface-boundaries");
 }
 
-fn runtime_app(harness: &ChromeRuntimeHarness, interface: InterfaceConfig) -> axum::Router {
-    let service = harness.service.clone();
+/// The fields the protocol-boundary cases actually use, sourced either from
+/// the full Chrome harness (the release matrix) or from a browser-free
+/// fixture (the always-on test) -- the cases never lease a worker.
+struct BoundaryFixture {
+    service: RuntimeService,
+    authority: Arc<AuthorityStore>,
+    runtime: Arc<AuthenticatedRuntime>,
+    handle: interface_core::CapabilityHandle,
+    token: String,
+    _root: tempfile::TempDir,
+}
+
+impl BoundaryFixture {
+    fn from_chrome(harness: &ChromeRuntimeHarness) -> Self {
+        Self {
+            service: harness.service.clone(),
+            authority: harness.authority.clone(),
+            runtime: harness.runtime.clone(),
+            handle: harness.handle.clone(),
+            token: harness.token.clone(),
+            _root: tempfile::tempdir().expect("fixture scratch dir"),
+        }
+    }
+
+    /// A real RuntimeService over tempdir state with no browser behind it.
+    /// Every protocol-boundary case runs here: they exercise auth, framing,
+    /// quotas, and stores, none of which lease a worker.
+    async fn start() -> Self {
+        let root = tempfile::tempdir().expect("create protocol fixture root");
+        let mut config = config::AppConfig::default();
+        config.browser.profiles_dir = root.path().join("profiles");
+        config.browser.artifacts_dir = root.path().join("artifacts");
+        config.storage.journal_path = root.path().join("commands.jsonl");
+        config.storage.checkpoints_dir = root.path().join("checkpoints");
+        std::fs::create_dir_all(&config.browser.artifacts_dir).expect("artifacts dir");
+        std::fs::create_dir_all(&config.storage.checkpoints_dir).expect("checkpoints dir");
+        let service = RuntimeService::build(&config)
+            .await
+            .expect("build protocol runtime");
+        let authority = Arc::new(AuthorityStore::in_memory());
+        let (_, token, handle) = identity(
+            &authority,
+            all_capabilities(),
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .expect("protocol fixture identity");
+        let runtime = Arc::new(AuthenticatedRuntime::new(service.clone(), handle.clone()));
+        Self {
+            service,
+            authority,
+            runtime,
+            handle,
+            token,
+            _root: root,
+        }
+    }
+}
+
+fn runtime_app(fixture: &BoundaryFixture, interface: InterfaceConfig) -> axum::Router {
+    let service = fixture.service.clone();
     router(AppState::new(
-        harness.authority.clone(),
+        fixture.authority.clone(),
         move |handle| {
             Arc::new(AuthenticatedRuntime::new(service.clone(), handle))
                 as Arc<dyn RuntimeInterface>
@@ -639,10 +702,10 @@ async fn canary_leakage(harness: &ChromeRuntimeHarness) -> SecurityResult {
     require_canary_absent(surfaces)
 }
 
-async fn http_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
+async fn http_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
     for revoke in [false, true] {
         let (principal, token, _) = identity(
-            &harness.authority,
+            &fixture.authority,
             [Capability::SessionWrite],
             if revoke {
                 Utc::now() + Duration::minutes(5)
@@ -655,12 +718,12 @@ async fn http_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
             tokio::time::sleep(std::time::Duration::from_millis(175)).await;
             Ok::<_, Infallible>(Bytes::from_static(br#"{"profile":"late","proxy":null}"#))
         });
-        let task = tokio::spawn(runtime_app(harness, InterfaceConfig::default()).oneshot(
+        let task = tokio::spawn(runtime_app(fixture, InterfaceConfig::default()).oneshot(
             authorized("POST", "/v1/sessions", &token, Body::from_stream(delayed)),
         ));
         if revoke {
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            harness
+            fixture
                 .authority
                 .revoke(&principal)
                 .await
@@ -679,10 +742,10 @@ async fn http_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
     Ok(())
 }
 
-async fn mcp_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
+async fn mcp_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
     for revoke in [false, true] {
         let (principal, _, handle) = identity(
-            &harness.authority,
+            &fixture.authority,
             [Capability::SessionRead],
             if revoke {
                 Utc::now() + Duration::minutes(5)
@@ -692,12 +755,12 @@ async fn mcp_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
         )
         .await?;
         let server = McpServer::new(Arc::new(AuthenticatedRuntime::new(
-            harness.service.clone(),
+            fixture.service.clone(),
             handle,
         )));
         initialize_mcp(&server).await;
         if revoke {
-            harness
+            fixture
                 .authority
                 .revoke(&principal)
                 .await
@@ -717,10 +780,10 @@ async fn mcp_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
     Ok(())
 }
 
-async fn cdp_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
+async fn cdp_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
     for revoke in [false, true] {
         let (principal, token, handle) = identity(
-            &harness.authority,
+            &fixture.authority,
             [Capability::SessionRead],
             if revoke {
                 Utc::now() + Duration::minutes(5)
@@ -730,8 +793,8 @@ async fn cdp_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
         )
         .await?;
         let gateway = CdpGateway::new(
-            harness.authority.clone(),
-            Arc::new(AuthenticatedRuntime::new(harness.service.clone(), handle)),
+            fixture.authority.clone(),
+            Arc::new(AuthenticatedRuntime::new(fixture.service.clone(), handle)),
             MethodRegistry::compiled(),
             "ws://localhost",
         );
@@ -748,7 +811,7 @@ async fn cdp_lifetime(harness: &ChromeRuntimeHarness) -> SecurityResult {
             .await
             .map_err(|error| format!("{error:?}"))?;
         if revoke {
-            harness
+            fixture
                 .authority
                 .revoke(&principal)
                 .await
@@ -1234,8 +1297,8 @@ async fn filesystem_confinement() -> SecurityResult {
     Ok(())
 }
 
-async fn duplicate_headers(harness: &ChromeRuntimeHarness) -> SecurityResult {
-    let app = runtime_app(harness, InterfaceConfig::default());
+async fn duplicate_headers(fixture: &BoundaryFixture) -> SecurityResult {
+    let app = runtime_app(fixture, InterfaceConfig::default());
     for (header, expected) in [
         ("authorization", StatusCode::UNAUTHORIZED),
         ("x-interface-version", StatusCode::UNPROCESSABLE_ENTITY),
@@ -1243,7 +1306,7 @@ async fn duplicate_headers(harness: &ChromeRuntimeHarness) -> SecurityResult {
         ("x-deadline", StatusCode::UNPROCESSABLE_ENTITY),
         ("idempotency-key", StatusCode::UNPROCESSABLE_ENTITY),
     ] {
-        let mut request = authorized("GET", "/v1/runtime", &harness.token, Body::empty());
+        let mut request = authorized("GET", "/v1/runtime", &fixture.token, Body::empty());
         if header == "idempotency-key" {
             request
                 .headers_mut()
@@ -1266,9 +1329,9 @@ async fn duplicate_headers(harness: &ChromeRuntimeHarness) -> SecurityResult {
     Ok(())
 }
 
-async fn oversized_http(harness: &ChromeRuntimeHarness) -> SecurityResult {
+async fn oversized_http(fixture: &BoundaryFixture) -> SecurityResult {
     let app = runtime_app(
-        harness,
+        fixture,
         InterfaceConfig {
             max_request_bytes: 64,
             ..InterfaceConfig::default()
@@ -1279,7 +1342,7 @@ async fn oversized_http(harness: &ChromeRuntimeHarness) -> SecurityResult {
         .oneshot(authorized(
             "POST",
             "/v1/sessions",
-            &harness.token,
+            &fixture.token,
             Body::from(body),
         ))
         .await
@@ -1292,8 +1355,8 @@ async fn oversized_http(harness: &ChromeRuntimeHarness) -> SecurityResult {
     Ok(())
 }
 
-async fn oversized_mcp(harness: &ChromeRuntimeHarness) -> SecurityResult {
-    let server = McpServer::new(harness.runtime.clone());
+async fn oversized_mcp(fixture: &BoundaryFixture) -> SecurityResult {
+    let server = McpServer::new(fixture.runtime.clone());
     initialize_mcp(&server).await;
     let input = format!("{{\"padding\":\"{}\"}}\n", "x".repeat(MAX_MCP_FRAME_BYTES));
     let mut stdout = Vec::new();
@@ -1323,15 +1386,15 @@ fn oversized_cdp() -> SecurityResult {
     Ok(())
 }
 
-async fn unsupported_protocols(harness: &ChromeRuntimeHarness) -> SecurityResult {
+async fn unsupported_protocols(fixture: &BoundaryFixture) -> SecurityResult {
     require!(
         serde_json::from_str::<InterfaceVersion>("\"unsupported\"").is_err(),
         "unsupported interface version parsed"
     );
-    let mut http = authorized("GET", "/v1/runtime", &harness.token, Body::empty());
+    let mut http = authorized("GET", "/v1/runtime", &fixture.token, Body::empty());
     http.headers_mut()
         .insert("x-interface-version", "unsupported".parse().unwrap());
-    let response = runtime_app(harness, InterfaceConfig::default())
+    let response = runtime_app(fixture, InterfaceConfig::default())
         .oneshot(http)
         .await
         .map_err(|error| error.to_string())?;
@@ -1340,15 +1403,15 @@ async fn unsupported_protocols(harness: &ChromeRuntimeHarness) -> SecurityResult
         "unsupported HTTP version returned {}",
         response.status()
     );
-    let mcp = McpServer::new(harness.runtime.clone());
+    let mcp = McpServer::new(fixture.runtime.clone());
     let response = mcp.handle_message(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1900-01-01","capabilities":{},"clientInfo":{"name":"old","version":"1"}}})).await.unwrap();
     require!(
         response["error"]["code"] == -32602,
         "unsupported MCP version returned {response}"
     );
     let cdp = CdpConnection::new(
-        harness.handle.clone(),
-        harness.runtime.clone(),
+        fixture.handle.clone(),
+        fixture.runtime.clone(),
         MethodRegistry::compiled(),
     );
     let response = cdp
@@ -1360,11 +1423,11 @@ async fn unsupported_protocols(harness: &ChromeRuntimeHarness) -> SecurityResult
             .is_some_and(|error| error.code == CdpErrorCode::MethodNotFound as i32),
         "unsupported CDP method forwarded"
     );
-    let mut malicious = authorized("GET", "/v1/runtime", &harness.token, Body::empty());
+    let mut malicious = authorized("GET", "/v1/runtime", &fixture.token, Body::empty());
     malicious
         .headers_mut()
         .insert("x-correlation-id", SECRET.parse().unwrap());
-    let response = runtime_app(harness, InterfaceConfig::default())
+    let response = runtime_app(fixture, InterfaceConfig::default())
         .oneshot(malicious)
         .await
         .map_err(|error| error.to_string())?;
@@ -1422,10 +1485,10 @@ async fn idempotency_mismatch() -> SecurityResult {
     Ok(())
 }
 
-async fn queue_overflow(harness: &ChromeRuntimeHarness) -> SecurityResult {
+async fn queue_overflow(fixture: &BoundaryFixture) -> SecurityResult {
     let connection = CdpConnection::new(
-        harness.handle.clone(),
-        harness.runtime.clone(),
+        fixture.handle.clone(),
+        fixture.runtime.clone(),
         MethodRegistry::compiled(),
     );
     for index in 0..MAX_QUEUED_EVENTS {
@@ -1452,7 +1515,7 @@ async fn queue_overflow(harness: &ChromeRuntimeHarness) -> SecurityResult {
     Ok(())
 }
 
-async fn event_gap(harness: &ChromeRuntimeHarness) -> SecurityResult {
+async fn event_gap(fixture: &BoundaryFixture) -> SecurityResult {
     let events = EventStore::new(2);
     for index in 1..=3 {
         events
@@ -1465,7 +1528,7 @@ async fn event_gap(harness: &ChromeRuntimeHarness) -> SecurityResult {
         "non-deterministic event gap {gap:?}"
     );
     let server = McpServer::production(
-        harness.runtime.clone(),
+        fixture.runtime.clone(),
         events,
         ArtifactResources::default(),
     );
@@ -1502,4 +1565,48 @@ async fn credentials_expire_revoke_and_never_reach_observable_payloads() {
     assert!(!encoded.contains(SECRET));
     assert!(encoded.contains("[REDACTED]"));
     assert!(!format!("{authority:?} {handle:?}").contains(&token));
+}
+
+/// Twelve of the fourteen release cases never lease a worker -- they prove
+/// auth, framing, quota, store, and lifecycle boundaries, all of which run
+/// over a real RuntimeService with no browser installed. Only the canary and
+/// principal-isolation cases open pages, so only those stay behind the
+/// Chrome-gated release matrix.
+#[tokio::test]
+async fn transport_boundary_security_cases_run_without_a_browser() {
+    let fixture = BoundaryFixture::start().await;
+    let cases: [(&str, SecurityResult); 12] = [
+        (
+            "mid-connection HTTP expiry and revocation",
+            http_lifetime(&fixture).await,
+        ),
+        (
+            "mid-connection MCP expiry and revocation",
+            mcp_lifetime(&fixture).await,
+        ),
+        (
+            "mid-connection CDP expiry and revocation",
+            cdp_lifetime(&fixture).await,
+        ),
+        (
+            "path traversal and symlink swap",
+            filesystem_confinement().await,
+        ),
+        ("duplicate HTTP headers", duplicate_headers(&fixture).await),
+        ("oversized HTTP input", oversized_http(&fixture).await),
+        ("oversized MCP input", oversized_mcp(&fixture).await),
+        ("oversized CDP input", oversized_cdp()),
+        (
+            "unsupported versions and methods",
+            unsupported_protocols(&fixture).await,
+        ),
+        ("idempotency mismatch", idempotency_mismatch().await),
+        ("queue overflow", queue_overflow(&fixture).await),
+        ("event gaps", event_gap(&fixture).await),
+    ];
+    let failures = cases
+        .into_iter()
+        .filter_map(|(name, result)| result.err().map(|error| format!("{name}: {error}")))
+        .collect::<Vec<_>>();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
