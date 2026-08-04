@@ -346,6 +346,18 @@ pub fn install_skill(project: bool, project_root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Point the gateway at the same config file used for vision prepare/upsert.
+fn apply_config_env(config_path: &Path) {
+    let absolute = config_path
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(config_path))
+                .unwrap_or_else(|_| config_path.to_path_buf())
+        });
+    unsafe { std::env::set_var("BOBBY_BROWSER_CONFIG", absolute) };
+}
+
 /// Load bootstrap credential env vars into this process when they are not
 /// already present in the environment.
 fn load_bootstrap_into_env(bootstrap_path: &Path) -> Result<()> {
@@ -383,7 +395,8 @@ fn spawn_gateway_inherited_stdio(gateway: &Path) -> Result<()> {
 /// `bobby mcp-stdio`: point an agent host at this and nothing else. Loads the
 /// bootstrap credential (process env wins, then the bootstrap.env file) and
 /// execs the stdio gateway, replacing this process.
-pub fn exec_mcp_stdio(bootstrap_path: &Path) -> Result<()> {
+pub fn exec_mcp_stdio(bootstrap_path: &Path, config_path: &Path) -> Result<()> {
+    apply_config_env(config_path);
     load_bootstrap_into_env(bootstrap_path)?;
     let gateway = resolve_gateway()?;
     exec_gateway(&gateway)
@@ -394,8 +407,10 @@ pub fn exec_mcp_stdio(bootstrap_path: &Path) -> Result<()> {
 /// vision-proxy must outlive the gateway process.
 pub fn run_mcp_stdio_with_sidecar(
     bootstrap_path: &Path,
+    config_path: &Path,
     _vision_child: crate::vision_child::ManagedVisionProxy,
 ) -> Result<()> {
+    apply_config_env(config_path);
     load_bootstrap_into_env(bootstrap_path)?;
     let gateway = resolve_gateway()?;
     spawn_gateway_inherited_stdio(&gateway)

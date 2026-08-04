@@ -277,14 +277,14 @@ pub async fn run() -> Result<()> {
             let policy = policy_from_flags(vision, no_vision);
             let config = AppConfig::load(&config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let (config, decision, vision_child) =
+            let (_config, decision, vision_child) =
                 prepare_vision_child(&config_path, config, policy)?;
             if decision.should_spawn {
                 let child = vision_child
                     .ok_or_else(|| anyhow::anyhow!("vision sidecar missing after spawn decision"))?;
-                onboarding::run_mcp_stdio_with_sidecar(&bootstrap_path, child)?;
+                onboarding::run_mcp_stdio_with_sidecar(&bootstrap_path, &config_path, child)?;
             } else {
-                onboarding::exec_mcp_stdio(&bootstrap_path)?;
+                onboarding::exec_mcp_stdio(&bootstrap_path, &config_path)?;
             }
         }
         CliCommand::Install {
