@@ -2,6 +2,12 @@
 
 ## Unreleased
 - **Breaking (MCP):** `session_list` `structuredContent` is `{"sessions": [...]}`, was a bare array. MCP types `structuredContent` as an object; a conforming client rejects the entire `tools/list` on a non-object `outputSchema`, so all 43 tools failed to load. `outputSchema` is object-shaped to match and the `ARRAY_SHAPED_OUTPUT` exception is removed. `GET /v1/sessions` is unchanged.
+- Add `bobby vision-proxy`: loopback adapter that speaks bobby’s propose/extract HTTP contract and forwards to an OpenAI-compatible chat/completions upstream (no model SDK in the runtime).
+- Add named `[vision.providers.<name>]` profiles plus `[vision].provider` selection (OpenAI / Ollama / LM Studio presets; any OpenAI-compatible custom `base_url`). Secrets stay in env via `token_env` / `api_key_env` — never in TOML.
+- Add `bobby vision connect` to write loopback `[vision]` + a provider profile (interactive or `--yes`).
+- `bobby serve` and `bobby mcp-stdio` gain `--vision` / `--no-vision`: when the resolved vision endpoint is loopback and a provider is selected, the parent auto-spawns `vision-proxy` and tears it down on exit; non-loopback never spawns. `mcp-stdio` sets `BOBBY_BROWSER_CONFIG` and stays resident when holding the sidecar.
+- `bobby doctor` warns on missing `vision.provider` profile and missing upstream `api_key_env` (skipped for local profiles without a key), and distinguishes loopback vs external `vision-endpoint` hints.
+- Docs: configuration / troubleshooting / intents cover connect → `--vision`, LM Studio (MLX), and custom OpenAI-compatible providers.
 
 ## 0.4.0 - 2026-08-03
 - **Naming:** one scope, one prefix, one tag. Internal npm packages move off the unowned `@bobby-browser` scope to `@cavi-ai/bobby-gauntlet`, `@cavi-ai/bobby-firefox-companion`, `@cavi-ai/bobby-interface-conformance`; `@cavi-ai/bobby-browser` is unchanged, so nothing published breaks. 25 internal crates are `publish = false` — only `bobby-browser-client` and `bobby-browser` are products, and names like `types`, `config`, and `broker` are not claimed on crates.io. `sdk-v*` and `crate-v*` collapse into `v*`: one tag ships binaries, npm, and the crate.
