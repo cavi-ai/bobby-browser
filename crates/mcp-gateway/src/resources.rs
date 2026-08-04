@@ -485,9 +485,10 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   `bobby vision-proxy` and point `[vision].endpoint_url` at it). That
   escalation-time check runs per stuck resolution, not per tool call, so it is
   not part of `required_capabilities`.
-- `artifact:read` -- required to call `resources/list` or `resources/read`
-  at all. It is not a per-tool gate; every static and artifact resource sits
-  behind it.
+- `artifact:read` -- required to list or read live `artifact://` resources.
+  The static `bobby://` documents (this taxonomy, capabilities, intents,
+  primitives) are deliberately NOT gated: an agent that just hit
+  `missingCapability` is exactly the one that needs the repair docs.
 - `artifact:capture` -- required to register a command's captured evidence
   (screenshots, downloads) as a readable `artifact://` resource. Checked when
   evidence is admitted after a command completes, not by
@@ -518,7 +519,50 @@ vocabulary:
 - `InterfaceErrorCode` (`crates/types/src/interface.rs`) is a separate,
   RPC-layer enum whose names overlap this one. Where the same name means two
   different things, the entry below says so -- see `notFound` and
-  `resourceExhausted`.
+  `resourceExhausted`. Every RPC-layer code and its repair is in
+  "RPC-layer rejections".
+
+Repair actions below are the general pattern for each code; where a specific
+tool's own description gives a more precise repair, that tool description
+wins for that tool.
+
+## RPC-layer rejections
+
+A call that fails before a command runs (auth, capability, routing) returns a
+JSON-RPC error whose `data.interfaceError` carries one of these codes
+(`crates/types/src/interface.rs`). The `message` is deliberately generic;
+the code, `retryable`, `retryAfterMs`, and `requiredCapability` fields are
+the signal:
+
+- `authenticationFailed` -- the bearer did not verify. Re-source the
+  credential (`bootstrap.env` or `AUTOMATION_RUNTIME_BOOTSTRAP_*`); do not
+  retry with the same token.
+- `tokenExpired` -- the credential's `expiresAt` passed. Run `bobby init
+  --force` and update the host's environment, then reconnect.
+- `missingCapability` -- the principal lacks the named capability; the error
+  carries `requiredCapability`. Re-issue the credential with that capability
+  (see bobby://capabilities) or pick a tool the current grant covers.
+- `idempotencyConflict` -- the idempotency key was already used with a
+  different request body. Mint a fresh key; never reuse a key across
+  different calls.
+- `invalidIdempotencyKey` -- the key is malformed (wrong length/characters).
+  Fix the key and retry; the call had no effect.
+- `malformedScope` -- the request's scope (session/page ids) is
+  structurally invalid. Re-read the ids from `session_list` / `page_list`.
+- `artifactDenied` -- the artifact is not readable by this principal (wrong
+  owner or past retention). Re-capture it with a command this principal owns.
+- `unsupportedInterfaceVersion` -- the client's interface version header is
+  not one this runtime serves. Downgrade/upgrade the client to match
+  `runtime_info`'s advertised version.
+- `unsupportedOperation` -- the operation does not exist on this surface.
+  Check the tool name against `tools/list`.
+- `invalidRequest` -- the request shape itself is invalid. Fix and retry;
+  nothing ran.
+- `deadlineExceeded` -- the request's deadline passed before dispatch.
+  Re-issue with a longer deadline; retryable if the command is Replayable.
+- `notFound` / `resourceExhausted` / `internal` -- see their entries below;
+  the RPC-layer and command-layer meanings are called out there.
+
 
 Repair actions below are the general pattern for each code; where a specific
 tool's own description gives a more precise repair, that tool description
