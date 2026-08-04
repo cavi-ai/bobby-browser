@@ -1544,3 +1544,4 @@ async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
         other => panic!("hung command must fail at its deadline: {other:?}"),
     };
     assert_eq!(error.code, ErrorCode::DeadlineExceeded, "{error:?}");
+}
