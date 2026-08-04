@@ -1790,7 +1790,9 @@ async fn flat_browser_tools_validate_arguments_and_submit_envelopes() {
         .await
         .unwrap();
     assert!(navigated["error"].is_null(), "{navigated}");
-    assert_eq!(navigated["result"]["isError"], json!(false));
+    // A failed command is a failed tool call: isError mirrors the outcome
+    // status rather than reporting transport-level success.
+    assert_eq!(navigated["result"]["isError"], json!(true));
     assert_eq!(
         navigated["result"]["structuredContent"]["status"],
         json!("failed"),
@@ -3004,4 +3006,97 @@ async fn a_subscription_opened_after_retention_wrapped_still_receives_new_events
          not gap against history it never asked for: {frame}"
     );
     assert_eq!(frame["params"]["payload"]["commandId"], "c-1", "{frame}");
+}
+
+#[tokio::test]
+async fn caller_pinned_command_and_attempt_ids_are_threaded_and_echoed() {
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+
+    let command_id = CommandId::new().0.to_string();
+    let attempt_id = AttemptId::new().0.to_string();
+    let outcome = server
+        .handle_message(request(
+            76,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "commandId":command_id,
+                    "attemptId":attempt_id,
+                    "purpose":"the search box"
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    // A Boundary command's pre-action checkpoint must name the exact ids the
+    // submit will carry, so the server threads caller-pinned ids through
+    // unchanged and echoes the attempt id for the checkpoint's attemptId.
+    assert!(outcome["error"].is_null(), "{outcome}");
+    assert_eq!(
+        outcome["result"]["structuredContent"]["commandId"],
+        json!(command_id),
+        "{outcome}"
+    );
+    assert_eq!(
+        outcome["result"]["structuredContent"]["attemptId"],
+        json!(attempt_id),
+        "{outcome}"
+    );
+}
+
+#[tokio::test]
+async fn static_resources_are_readable_without_artifact_read() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+
+    let listed = server
+        .handle_message(request(2, "resources/list", json!({})))
+        .await
+        .unwrap();
+    assert!(listed["error"].is_null(), "{listed}");
+    let uris: Vec<String> = listed["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["uri"].as_str().unwrap().to_owned())
+        .collect();
+    for expected in [
+        "bobby://capabilities",
+        "bobby://failure-taxonomy",
+        "bobby://intents",
+        "bobby://primitives",
+    ] {
+        assert!(uris.contains(&expected.to_owned()), "{expected} not listed");
+        let read = server
+            .handle_message(request(3, "resources/read", json!({"uri":expected})))
+            .await
+            .unwrap();
+        assert!(
+            read["result"]["contents"][0]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
+            "{expected} read returned no text: {read}"
+        );
+    }
+    // A principal without artifact:read sees no live artifact entries, and
+    // reading one is still denied -- only the repair docs are ungated.
+    assert!(
+        !uris.iter().any(|uri| uri.starts_with("artifact://")),
+        "artifact entries leaked to a principal without artifact:read"
+    );
+    let denied = server
+        .handle_message(request(
+            4,
+            "resources/read",
+            json!({"uri":"artifact://deadbeef"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        denied["error"]["data"]["interfaceError"]["code"], "missingCapability",
+        "{denied}"
+    );
 }

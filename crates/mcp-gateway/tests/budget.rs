@@ -265,6 +265,11 @@ const READ_ONLY: &[&str] = &[
     "context_ask",
     // Changes only what `tools/list` advertises to this connection.
     "toolset_select",
+    // Pure observers: they never mutate the page.
+    "wait_for",
+    "intent_locate",
+    "intent_wait_for_state",
+    "intent_extract",
 ];
 
 const DESTRUCTIVE: &[&str] = &[
@@ -282,6 +287,12 @@ const OPEN_WORLD: &[&str] = &[
     "download_url",
     "extract_structured",
     "command_execute",
+    // Navigates when given a URL.
+    "page_open",
+    // Can carry the page to a new destination (verified by expected* guards).
+    "click",
+    "intent_follow",
+    "intent_submit_and_verify",
 ];
 
 // `idempotentHint` is unconditional under MCP: repeating the call with the same arguments
@@ -941,4 +952,35 @@ async fn the_only_declared_pattern_is_the_one_the_validator_implements() {
     for (name, definition) in defs.as_object().expect("definitions() is an object") {
         assert_patterns(definition, &format!("definitions()[\"{name}\"]"), "");
     }
+}
+
+/// The advertised `errorCode` enum must cover the runtime's full `ErrorCode`
+/// vocabulary variant-for-variant; a missing variant means `tools/list`
+/// describes a failure the agent cannot parse.
+#[test]
+fn advertised_error_codes_match_the_wire_vocabulary() {
+    let generated = serde_json::to_value(schemars::schema_for!(types::ErrorCode)).unwrap();
+    let wire: BTreeSet<String> = generated["enum"]
+        .as_array()
+        .expect("ErrorCode schema is an enum")
+        .iter()
+        .map(|variant| {
+            variant
+                .as_str()
+                .expect("ErrorCode variant is a string")
+                .to_owned()
+        })
+        .collect();
+    let advertised: BTreeSet<String> = mcp_gateway::error_code_for_test()["enum"]
+        .as_array()
+        .expect("advertised error_code is an enum")
+        .iter()
+        .map(|variant| {
+            variant
+                .as_str()
+                .expect("advertised ErrorCode variant is a string")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(wire, advertised);
 }
