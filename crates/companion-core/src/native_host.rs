@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fmt,
+    future::Future,
     net::IpAddr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -234,15 +235,85 @@ pub struct NativeConnectRequest {
     pub capabilities: CompanionCapabilities,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+/// Secret-free enroll control message from the extension (`input` must be `{}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnrollProfileRequest {}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(
     tag = "kind",
     content = "input",
     rename_all = "camelCase",
     deny_unknown_fields
 )]
-enum NativeRequest {
+pub enum NativeRequest {
     Pair(NativeConnectRequest),
+    EnrollProfile(EnrollProfileRequest),
+}
+
+/// Operator-safe enroll failure codes surfaced to the extension (Task 6 maps these).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollHostError {
+    ListenerUnavailable,
+    /// Defaults bind is occupied but no usable live descriptor was found.
+    BindInUse,
+    BidiMissing,
+    DefaultsMissing,
+    Timeout,
+}
+
+impl EnrollHostError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ListenerUnavailable => "listenerUnavailable",
+            Self::BindInUse => "bindInUse",
+            Self::BidiMissing => "bidiMissing",
+            Self::DefaultsMissing => "defaultsMissing",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+/// Whether the native host should drop the enroll-time companion listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollFinalize {
+    /// Temp companion was released; exit so day-2 serve can bind the same address.
+    ReleaseListener,
+    /// Paired against an already-running serve descriptor; keep the WS relay.
+    KeepRelay,
+}
+
+/// CLI-supplied enroll bridge so `companion-core` does not depend on `firefox-companion`.
+pub trait NativeHostEnroll: Send + Sync {
+    fn enroll_and_wait_for_pair(
+        &self,
+        pair: NativeConnectRequest,
+    ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send;
+
+    fn complete_enrollment(
+        &self,
+        pair: &NativeConnectRequest,
+    ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send;
+}
+
+/// Placeholder enroll impl for pair-only `run_native_host` callers.
+pub struct NullNativeHostEnroll;
+
+impl NativeHostEnroll for NullNativeHostEnroll {
+    fn enroll_and_wait_for_pair(
+        &self,
+        _pair: NativeConnectRequest,
+    ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+        std::future::ready(Err(EnrollHostError::ListenerUnavailable))
+    }
+
+    fn complete_enrollment(
+        &self,
+        _pair: &NativeConnectRequest,
+    ) -> impl Future<Output = Result<EnrollFinalize, EnrollHostError>> + Send {
+        std::future::ready(Ok(EnrollFinalize::ReleaseListener))
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -268,6 +339,8 @@ enum InitialServerEvent {
 #[serde(rename_all = "camelCase")]
 struct NativeStatusOutput {
     state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -480,16 +553,15 @@ fn contains_explicit_credential(text: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
-fn decode_native_connect(value: Value) -> Result<NativeConnectRequest, NativeHostError> {
+pub fn decode_native_request(value: Value) -> Result<NativeRequest, NativeHostError> {
+    reject_extension_secrets(&value, 0)?;
     let request: NativeRequest =
         serde_json::from_value(value.clone()).map_err(|_| NativeHostError::InvalidProtocol)?;
     let canonical = serde_json::to_value(&request).map_err(|_| NativeHostError::InvalidProtocol)?;
     if canonical != value {
         return Err(NativeHostError::InvalidProtocol);
     }
-    match request {
-        NativeRequest::Pair(input) => Ok(input),
-    }
+    Ok(request)
 }
 
 fn decode_initial_paired(value: &Value) -> Result<Option<InitialPairedOutput>, NativeHostError> {
@@ -548,11 +620,41 @@ where
             kind: "nativeStatus",
             output: NativeStatusOutput {
                 state: "invalidAuth",
+                code: None,
             },
         })
         .unwrap_or(Value::Null),
     )
     .await;
+}
+
+async fn write_enroll_status<W>(
+    writer: &mut W,
+    state: &'static str,
+    code: Option<&'static str>,
+) -> Result<(), NativeHostError>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_native_message(
+        writer,
+        &serde_json::to_value(NativeStatus {
+            kind: "nativeStatus",
+            output: NativeStatusOutput { state, code },
+        })
+        .map_err(|_| NativeHostError::InvalidProtocol)?,
+    )
+    .await
+}
+
+async fn write_enroll_failed<W>(
+    writer: &mut W,
+    error: EnrollHostError,
+) -> Result<(), NativeHostError>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_enroll_status(writer, "enrollFailed", Some(error.code())).await
 }
 
 async fn read_native_input<R>(
@@ -575,21 +677,70 @@ async fn read_native_input<R>(
 }
 
 pub async fn run_native_host<R, W>(
-    mut native_reader: R,
-    mut native_writer: W,
+    native_reader: R,
+    native_writer: W,
     config: NativeHostConfig,
 ) -> Result<(), NativeHostError>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
-    let connect = read_native_message(&mut native_reader)
+    run_native_host_with_enroll(
+        native_reader,
+        native_writer,
+        Some(config),
+        None::<NullNativeHostEnroll>,
+    )
+    .await
+}
+
+pub async fn run_native_host_with_enroll<R, W, E>(
+    mut native_reader: R,
+    mut native_writer: W,
+    config: Option<NativeHostConfig>,
+    enroll: Option<E>,
+) -> Result<(), NativeHostError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+    E: NativeHostEnroll,
+{
+    let first = read_native_message(&mut native_reader)
         .await?
         .ok_or(NativeHostError::MissingConnectRequest)?;
-    let connect = decode_native_connect(connect)?;
+    let first = decode_native_request(first)?;
+
+    let (connect, config, finalize_enroll) = match first {
+        NativeRequest::Pair(input) => {
+            let config = config.ok_or(NativeHostError::InvalidPairingMaterial)?;
+            (input, config, false)
+        }
+        NativeRequest::EnrollProfile(_) => {
+            let Some(enroll) = enroll.as_ref() else {
+                return Err(NativeHostError::InvalidProtocol);
+            };
+            let pair_message = read_native_message(&mut native_reader)
+                .await?
+                .ok_or(NativeHostError::MissingConnectRequest)?;
+            let pair_request = decode_native_request(pair_message)?;
+            let NativeRequest::Pair(input) = pair_request else {
+                write_enroll_failed(&mut native_writer, EnrollHostError::ListenerUnavailable)
+                    .await?;
+                return Ok(());
+            };
+            match enroll.enroll_and_wait_for_pair(input.clone()).await {
+                Ok(config) => (input, config, true),
+                Err(error) => {
+                    write_enroll_failed(&mut native_writer, error).await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
+
     let expected_companion_id = connect.companion_id.clone();
     let expected_profile_id = connect.profile_id.clone();
-    let pair = config.pair_request(connect)?;
+    let pair = config.pair_request(connect.clone())?;
     let pair = serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?;
 
     let (native_messages, mut receiver) = mpsc::channel(32);
@@ -601,6 +752,7 @@ where
     ));
 
     let result = async {
+        let mut enroll_finalized = !finalize_enroll;
         let mut backoff = NativeReconnectBackoff::default();
         loop {
         if *native_closed_receiver.borrow() {
@@ -689,6 +841,41 @@ where
                                 }
                                 value
                             };
+                            let is_initial_pair = value
+                                .get("kind")
+                                .and_then(|kind| kind.as_str())
+                                == Some("paired");
+                            if !enroll_finalized && is_initial_pair {
+                                // Persist before the extension observes durable success.
+                                if let Some(enroll) = enroll.as_ref() {
+                                    let finalize = match enroll.complete_enrollment(&connect).await
+                                    {
+                                        Ok(finalize) => finalize,
+                                        Err(error) => {
+                                            // Extension already has a well-formed enrollFailed;
+                                            // exit the relay cleanly (not a protocol error).
+                                            write_enroll_failed(&mut native_writer, error).await?;
+                                            break Ok(ConnectionResult::NativeClosed);
+                                        }
+                                    };
+                                    write_native_message(&mut native_writer, &value).await?;
+                                    write_enroll_status(&mut native_writer, "enrollOk", None)
+                                        .await?;
+                                    enroll_finalized = true;
+                                    match finalize {
+                                        // Temp enrollment listener was dropped; exit so day-2
+                                        // serve can bind the same address.
+                                        EnrollFinalize::ReleaseListener => {
+                                            break Ok(ConnectionResult::NativeClosed);
+                                        }
+                                        // Live serve already owns the bind; keep relaying.
+                                        // Skip the fallthrough write — paired was already sent.
+                                        EnrollFinalize::KeepRelay => {
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
                             write_native_message(&mut native_writer, &value).await?;
                         }
                         Some(Ok(Message::Ping(payload))) => {

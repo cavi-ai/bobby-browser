@@ -183,6 +183,33 @@ test("deep validators accept every exact public response variant", () => {
   assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 0 }), true);
 });
 
+test("session state accepts the selected vision node returned by the runtime", () => {
+  const session = {
+    id: ID,
+    profile: "default",
+    proxy: null,
+    page_ids: [],
+    created_at: TIME,
+    last_used_at: TIME,
+    execution_policy: {
+      javascriptEvaluation: false,
+      visionAssist: true,
+      fingerprint: false,
+      humanize: false,
+      visionNode: "acp-codex",
+    },
+  };
+  assert.equal(isSessionState(session), true);
+  assert.equal(isSessionState({
+    ...session,
+    execution_policy: { ...session.execution_policy, visionNode: "" },
+  }), false);
+  assert.equal(isSessionState({
+    ...session,
+    execution_policy: { ...session.execution_policy, visionNode: "x".repeat(129) },
+  }), false);
+});
+
 test("malformed nested fixtures are rejected for every public response family", () => {
   const invalidCheckpoint = checkpoint();
   invalidCheckpoint.recoveryHistory = [{ recordedAt: "not-a-time", decision: recoveryDecision() }];

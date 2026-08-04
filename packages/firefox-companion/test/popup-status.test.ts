@@ -137,3 +137,78 @@ test("getPopupStatus host fingerprint is reflected", async () => {
   assert.equal(status.fingerprint.seedHex, "2a");
   assert.equal(status.nativeConnected, false);
 });
+
+test("getPopupStatus surfaces enroll failed operator copy", async () => {
+  const { storage } = memoryStorage();
+  class EnrollTransport {
+    listener: ((message: unknown) => void | Promise<void>) | undefined;
+    readonly sent: unknown[] = [];
+    connected = true;
+
+    start(listener: (message: unknown) => void | Promise<void>): void {
+      this.listener = listener;
+      this.connected = true;
+    }
+
+    send(message: unknown): void {
+      this.sent.push(message);
+    }
+
+    stop(): void {
+      this.connected = false;
+    }
+
+    isConnected(): boolean {
+      return this.connected;
+    }
+  }
+
+  const transport = new EnrollTransport();
+  const background = new CompanionBackground({
+    transport,
+    sendTabMessage: async () => undefined,
+    navigateTab: async () => undefined,
+  });
+  background.connect(CONNECT);
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await background.getPopupStatus(storage)).enrollPhase, "pairing");
+
+  await transport.listener?.({
+    kind: "nativeStatus",
+    output: { state: "enrollFailed", code: "bidiMissing" },
+  });
+  const result = await enrollPromise;
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.code, "bidiMissing");
+    assert.match(result.message, /remote debugging/i);
+  }
+
+  const status = await background.getPopupStatus(storage);
+  assert.equal(status.enrollPhase, "failed");
+  assert.match(status.enrollError?.message ?? "", /remote debugging/i);
+});
+
+test("buildPopupStatus includes enroll phase fields", () => {
+  const status = buildPopupStatus({
+    paired: false,
+    unpairedReason: "waiting to pair",
+    leaseCount: 0,
+    nativeConnected: false,
+    fingerprintEnabled: true,
+    fingerprintOwner: "popup",
+    protocolVersion: 1,
+    enrollPhase: "failed",
+    enrollError: {
+      code: "defaultsMissing",
+      message: "Profile path unknown — re-run bobby install (see docs)",
+    },
+  });
+  assert.equal(status.enrollPhase, "failed");
+  assert.deepEqual(status.enrollError, {
+    code: "defaultsMissing",
+    message: "Profile path unknown — re-run bobby install (see docs)",
+  });
+});
