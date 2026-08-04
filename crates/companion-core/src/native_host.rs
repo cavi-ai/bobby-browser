@@ -647,7 +647,10 @@ where
     .await
 }
 
-async fn write_enroll_failed<W>(writer: &mut W, error: EnrollHostError) -> Result<(), NativeHostError>
+async fn write_enroll_failed<W>(
+    writer: &mut W,
+    error: EnrollHostError,
+) -> Result<(), NativeHostError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -682,8 +685,13 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
-    run_native_host_with_enroll(native_reader, native_writer, Some(config), None::<NullNativeHostEnroll>)
-        .await
+    run_native_host_with_enroll(
+        native_reader,
+        native_writer,
+        Some(config),
+        None::<NullNativeHostEnroll>,
+    )
+    .await
 }
 
 pub async fn run_native_host_with_enroll<R, W, E>(
@@ -716,7 +724,8 @@ where
                 .ok_or(NativeHostError::MissingConnectRequest)?;
             let pair_request = decode_native_request(pair_message)?;
             let NativeRequest::Pair(input) = pair_request else {
-                write_enroll_failed(&mut native_writer, EnrollHostError::ListenerUnavailable).await?;
+                write_enroll_failed(&mut native_writer, EnrollHostError::ListenerUnavailable)
+                    .await?;
                 return Ok(());
             };
             match enroll.enroll_and_wait_for_pair(input.clone()).await {

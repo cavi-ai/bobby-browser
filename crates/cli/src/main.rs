@@ -11,10 +11,6 @@ use companion_core::{
 };
 use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig};
 use firefox_companion::read_bidi_url_from_profile_dir;
-use firefox_companion::selection::{
-    enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults, FirefoxProfileEnrollment,
-    NativeHostDescriptor,
-};
 #[cfg(test)]
 use firefox_companion::selection::write_enroll_defaults;
 pub use firefox_companion::selection::{
@@ -23,6 +19,10 @@ pub use firefox_companion::selection::{
     default_selection_path, parse_selection, persist_browser_selection, resolve_browser_selection,
     start_firefox_profile_enrollment, EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig,
     SelectionSource, SELECTION_ENV,
+};
+use firefox_companion::selection::{
+    enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults, FirefoxProfileEnrollment,
+    NativeHostDescriptor,
 };
 use std::{
     future::Future,
@@ -1778,12 +1778,11 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
             // Day-2 Re-pair: serve already holds the bind and published a descriptor.
             // Reachability probe is blocking TCP — keep it off the async runtime.
             let descriptor_path = defaults.descriptor_path.clone();
-            let live = tokio::task::spawn_blocking(move || {
-                load_usable_live_descriptor(&descriptor_path)
-            })
-            .await
-            .ok()
-            .flatten();
+            let live =
+                tokio::task::spawn_blocking(move || load_usable_live_descriptor(&descriptor_path))
+                    .await
+                    .ok()
+                    .flatten();
             if let Some(config) = live {
                 let mut state = self.state.lock().await;
                 state.enrollment = None;
@@ -1883,7 +1882,8 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
                 defaults.companion_bind,
                 &defaults.descriptor_path,
             );
-            let path = default_selection_path().map_err(|_| EnrollHostError::ListenerUnavailable)?;
+            let path =
+                default_selection_path().map_err(|_| EnrollHostError::ListenerUnavailable)?;
             persist_browser_selection(&path, &selection)
                 .map_err(|_| EnrollHostError::ListenerUnavailable)?;
             // Drop the temporary companion so day-2 `bobby serve` can bind.
@@ -1896,7 +1896,9 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use companion_protocol::{BrowserEngine, BrowserIdentity, CompanionCapabilities, PROTOCOL_VERSION};
+    use companion_protocol::{
+        BrowserEngine, BrowserIdentity, CompanionCapabilities, PROTOCOL_VERSION,
+    };
     use config::VisionProviderConfig;
     use std::collections::BTreeMap;
     use types::{CompanionId, ProfileId};
@@ -1927,7 +1929,8 @@ mod tests {
     #[tokio::test]
     async fn native_host_enroll_maps_missing_defaults() {
         let root = tempfile::tempdir().unwrap();
-        let enroll = NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
         let error = enroll
             .enroll_and_wait_for_pair(sample_native_connect_request())
             .await
@@ -1947,7 +1950,8 @@ mod tests {
             descriptor_path: root.path().join("firefox-native-host-descriptor.json"),
         };
         write_enroll_defaults(&enroll_defaults_path(root.path()), &defaults).unwrap();
-        let enroll = NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
         let error = enroll
             .enroll_and_wait_for_pair(sample_native_connect_request())
             .await
@@ -1998,7 +2002,8 @@ mod tests {
         };
         write_enroll_defaults(&enroll_defaults_path(root.path()), &defaults).unwrap();
 
-        let enroll = NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
         let config = enroll
             .enroll_and_wait_for_pair(sample_native_connect_request())
             .await
@@ -2033,7 +2038,8 @@ mod tests {
         };
         write_enroll_defaults(&enroll_defaults_path(root.path()), &defaults).unwrap();
 
-        let enroll = NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let enroll =
+            NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
         let error = enroll
             .enroll_and_wait_for_pair(sample_native_connect_request())
             .await

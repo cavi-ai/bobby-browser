@@ -1,10 +1,6 @@
 //! Parse Firefox's `WebDriverBiDiServer.json` into a loopback BiDi session URL.
 
-use std::{
-    fs::OpenOptions,
-    io::Read,
-    path::Path,
-};
+use std::{fs::OpenOptions, io::Read, path::Path};
 
 use types::{CommandError, ErrorCode, ErrorLayer};
 use url::Url;
@@ -126,11 +122,7 @@ mod tests {
     fn read_bidi_url_from_profile_dir_reads_endpoint_file() {
         let root = tempfile::tempdir().unwrap();
         let endpoint = root.path().join(ENDPOINT_FILENAME);
-        std::fs::write(
-            &endpoint,
-            br#"{"ws_host":"127.0.0.1","ws_port":9222}"#,
-        )
-        .unwrap();
+        std::fs::write(&endpoint, br#"{"ws_host":"127.0.0.1","ws_port":9222}"#).unwrap();
         let url = read_bidi_url_from_profile_dir(root.path()).expect("read");
         assert_eq!(url.as_str(), "ws://127.0.0.1:9222/session");
     }
