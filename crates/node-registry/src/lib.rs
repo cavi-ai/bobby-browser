@@ -257,6 +257,7 @@ mod tests {
                 endpoint_url: Some("http://127.0.0.1:8080/propose".to_owned()),
                 token_env: None,
                 timeout_ms: 9_000,
+                ..VisionConfig::default()
             },
             ..AppConfig::default()
         };
@@ -274,6 +275,7 @@ mod tests {
                 endpoint_url: Some("https://legacy.example/propose".to_owned()),
                 token_env: None,
                 timeout_ms: 9_000,
+                ..VisionConfig::default()
             },
             ..AppConfig::default()
         };
