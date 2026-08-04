@@ -34,12 +34,14 @@ export type NativeEnrollProfileRequest = {
 
 export type EnrollFailureCode =
   | "listenerUnavailable"
+  | "bindInUse"
   | "bidiMissing"
   | "defaultsMissing"
   | "timeout";
 
 export const ENROLL_FAILURE_CODES = [
   "listenerUnavailable",
+  "bindInUse",
   "bidiMissing",
   "defaultsMissing",
   "timeout",
@@ -47,6 +49,8 @@ export const ENROLL_FAILURE_CODES = [
 
 export const ENROLL_OPERATOR_MESSAGES: Record<EnrollFailureCode, string> = {
   listenerUnavailable: "Start bobby serve, then Pair again",
+  bindInUse:
+    "Companion port already in use — if bobby serve is up, wait for its descriptor; otherwise free the bind",
   bidiMissing: "Start Firefox with remote debugging, then Pair again",
   defaultsMissing: "Profile path unknown — re-run bobby install (see docs)",
   timeout: "Pairing timed out",

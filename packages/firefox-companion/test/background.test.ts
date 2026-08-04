@@ -1240,6 +1240,71 @@ test("enrollPair maps enrollFailed codes to operator messages", async () => {
   });
 });
 
+test("enrollPair maps bindInUse without telling operators to start serve", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const enrollPromise = background.enrollPair();
+  await new Promise((resolve) => setImmediate(resolve));
+  await transport.listener?.({
+    kind: "nativeStatus",
+    output: { state: "enrollFailed", code: "bindInUse" },
+  });
+  const result = await enrollPromise;
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error("expected failure");
+  assert.equal(result.code, "bindInUse");
+  assert.match(result.message, /already in use/i);
+  assert.equal(result.message.includes("Start bobby serve"), false);
+});
+
+test("enrollPair tears down native port when pair send fails after enrollProfile", async () => {
+  const transport = new EnrollFakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  const originalSend = transport.send.bind(transport);
+  let enrollSent = false;
+  transport.send = (message: unknown) => {
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "enrollProfile"
+    ) {
+      enrollSent = true;
+      originalSend(message);
+      return;
+    }
+    throw new Error("pair send failed");
+  };
+
+  const result = await background.enrollPair();
+  assert.equal(enrollSent, true);
+  assert.deepEqual(result, {
+    ok: false,
+    code: "listenerUnavailable",
+    message: "Start bobby serve, then Pair again",
+  });
+  assert.equal(transport.started, false);
+  assert.equal(transport.connected, false);
+});
+
 test("enrollPair times out with operator copy", async () => {
   const transport = new EnrollFakeTransport();
   const scheduled: Array<() => void> = [];

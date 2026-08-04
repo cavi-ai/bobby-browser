@@ -297,19 +297,20 @@ export class CompanionBackground {
     this.#started = true;
 
     if (this.#dependencies.transport.isConnected && !this.#dependencies.transport.isConnected()) {
-      return this.#failEnroll("listenerUnavailable");
+      return this.#abortEnrollAfterHostStart("listenerUnavailable");
     }
 
     try {
       this.#dependencies.transport.send(createEnrollProfileRequest());
     } catch {
-      return this.#failEnroll("listenerUnavailable");
+      return this.#abortEnrollAfterHostStart("listenerUnavailable");
     }
 
     try {
       this.connect(options);
     } catch {
-      return this.#failEnroll("listenerUnavailable");
+      // enrollProfile already reached the host — tear down so it is not left waiting.
+      return this.#abortEnrollAfterHostStart("listenerUnavailable");
     }
 
     return await this.#waitForEnrollResult();
@@ -661,6 +662,15 @@ export class CompanionBackground {
     this.#enrollPhase = "failed";
     this.#enrollError = { code: result.code, message: result.message };
     return result;
+  }
+
+  /** Stop the native port after enrollProfile may have reached the host. */
+  #abortEnrollAfterHostStart(code: EnrollFailureCode): EnrollPairResult {
+    this.#dependencies.transport.stop();
+    this.#started = false;
+    this.#paired = false;
+    this.#unpairedReason = "waiting to pair";
+    return this.#failEnroll(code);
   }
 
   #resolveEnroll(result: EnrollPairResult): void {
