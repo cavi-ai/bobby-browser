@@ -824,17 +824,23 @@ where
                                 .get("kind")
                                 .and_then(|kind| kind.as_str())
                                 == Some("paired");
-                            write_native_message(&mut native_writer, &value).await?;
                             if !enroll_finalized && is_initial_pair {
+                                // Persist before the extension observes durable success.
                                 if let Some(enroll) = enroll.as_ref() {
                                     if let Err(error) = enroll.complete_enrollment(&connect).await {
                                         write_enroll_failed(&mut native_writer, error).await?;
                                         break Err(NativeHostError::InvalidProtocol);
                                     }
-                                    write_enroll_status(&mut native_writer, "enrollOk", None).await?;
+                                    write_native_message(&mut native_writer, &value).await?;
+                                    write_enroll_status(&mut native_writer, "enrollOk", None)
+                                        .await?;
+                                    enroll_finalized = true;
+                                    // Enrollment listener is torn down in complete_enrollment;
+                                    // stop relay so day-2 serve can bind the same address.
+                                    break Ok(ConnectionResult::NativeClosed);
                                 }
-                                enroll_finalized = true;
                             }
+                            write_native_message(&mut native_writer, &value).await?;
                         }
                         Some(Ok(Message::Ping(payload))) => {
                             if socket_writer.send(Message::Pong(payload)).await.is_err() {

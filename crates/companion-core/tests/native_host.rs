@@ -617,6 +617,8 @@ async fn enroll_profile_then_pair_emits_enroll_ok_via_enroll_trait() {
         .await
         .unwrap()
         .unwrap();
+    // complete_enrollment runs before paired is written to the extension.
+    assert!(completed.load(Ordering::SeqCst));
     assert_eq!(paired["kind"], "paired");
     assert!(!serde_json::to_string(&paired)
         .unwrap()
@@ -630,10 +632,83 @@ async fn enroll_profile_then_pair_emits_enroll_ok_via_enroll_trait() {
         status,
         json!({ "kind": "nativeStatus", "output": { "state": "enrollOk" } })
     );
-    assert!(completed.load(Ordering::SeqCst));
 
-    drop(extension_stream);
-    host.await.unwrap().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), host)
+        .await
+        .expect("enroll path must exit after enrollOk")
+        .unwrap();
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn enroll_persist_failure_does_not_emit_paired() {
+    struct PersistFailEnroll {
+        config: NativeHostConfig,
+    }
+    impl NativeHostEnroll for PersistFailEnroll {
+        fn enroll_and_wait_for_pair(
+            &self,
+            _pair: NativeConnectRequest,
+        ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+            let config = self.config.clone();
+            async move { Ok(config) }
+        }
+
+        fn complete_enrollment(
+            &self,
+            _pair: &NativeConnectRequest,
+        ) -> impl Future<Output = Result<(), EnrollHostError>> + Send {
+            async { Err(EnrollHostError::ListenerUnavailable) }
+        }
+    }
+
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host_with_enroll(
+        host_reader,
+        host_writer,
+        None,
+        Some(PersistFailEnroll { config }),
+    ));
+
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "enrollProfile", "input": {} }),
+    )
+    .await
+    .unwrap();
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "pair", "input": connect_request() }),
+    )
+    .await
+    .unwrap();
+
+    let status = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "kind": "nativeStatus",
+            "output": { "state": "enrollFailed", "code": "listenerUnavailable" }
+        })
+    );
+    assert_ne!(status["kind"], "paired");
+    let _ = host.await;
 }
 
 #[tokio::test]

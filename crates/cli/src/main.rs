@@ -15,6 +15,8 @@ use firefox_companion::selection::{
     enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults, FirefoxProfileEnrollment,
     NativeHostDescriptor,
 };
+#[cfg(test)]
+use firefox_companion::selection::write_enroll_defaults;
 pub use firefox_companion::selection::{
     build_enrolled_browser_selection, compose_worker_factory,
     compose_worker_factory_with_enrolled_firefox, compose_worker_factory_with_pairing_observer,
@@ -1699,7 +1701,6 @@ struct NativeHostFirefoxEnroll {
 #[derive(Default)]
 struct NativeHostFirefoxEnrollState {
     enrollment: Option<FirefoxProfileEnrollment>,
-    enrolled: Option<EnrolledFirefoxProfile>,
     bidi_url: Option<String>,
     defaults: Option<FirefoxEnrollDefaults>,
 }
@@ -1757,19 +1758,23 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
     ) -> impl Future<Output = Result<(), EnrollHostError>> + Send {
         let profile_id = pair.profile_id.clone();
         async move {
-            let mut state = self.state.lock().await;
-            let enrollment = state
-                .enrollment
-                .take()
-                .ok_or(EnrollHostError::ListenerUnavailable)?;
-            let bidi_url = state
-                .bidi_url
-                .clone()
-                .ok_or(EnrollHostError::ListenerUnavailable)?;
-            let defaults = state
-                .defaults
-                .clone()
-                .ok_or(EnrollHostError::DefaultsMissing)?;
+            let (enrollment, bidi_url, defaults) = {
+                let mut state = self.state.lock().await;
+                (
+                    state
+                        .enrollment
+                        .take()
+                        .ok_or(EnrollHostError::ListenerUnavailable)?,
+                    state
+                        .bidi_url
+                        .take()
+                        .ok_or(EnrollHostError::ListenerUnavailable)?,
+                    state
+                        .defaults
+                        .take()
+                        .ok_or(EnrollHostError::DefaultsMissing)?,
+                )
+            };
             let enrolled = enrollment.wait().await.map_err(|error| {
                 if error.message.to_ascii_lowercase().contains("timed out") {
                     EnrollHostError::Timeout
@@ -1790,7 +1795,8 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
             let path = default_selection_path().map_err(|_| EnrollHostError::ListenerUnavailable)?;
             persist_browser_selection(&path, &selection)
                 .map_err(|_| EnrollHostError::ListenerUnavailable)?;
-            state.enrolled = Some(enrolled);
+            // Drop the temporary companion so day-2 `bobby serve` can bind.
+            drop(enrolled);
             Ok(())
         }
     }
@@ -1799,8 +1805,65 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use companion_protocol::{BrowserEngine, BrowserIdentity, CompanionCapabilities, PROTOCOL_VERSION};
     use config::VisionProviderConfig;
     use std::collections::BTreeMap;
+    use types::{CompanionId, ProfileId};
+
+    fn sample_native_connect_request() -> NativeConnectRequest {
+        NativeConnectRequest {
+            protocol_version: PROTOCOL_VERSION,
+            companion_id: CompanionId::new(),
+            profile_id: ProfileId::new(),
+            identity: BrowserIdentity {
+                engine: BrowserEngine::Firefox,
+                browser_name: "Firefox".into(),
+                browser_version: "stable".into(),
+                os: "macos".into(),
+                profile_label: "default-release".into(),
+            },
+            capabilities: CompanionCapabilities {
+                observe: true,
+                navigate: true,
+                native_input: false,
+                tabs: true,
+                frames: true,
+                native_dialogs: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn native_host_enroll_maps_missing_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let enroll = NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let error = enroll
+            .enroll_and_wait_for_pair(sample_native_connect_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error, EnrollHostError::DefaultsMissing);
+        assert_eq!(error.code(), "defaultsMissing");
+    }
+
+    #[tokio::test]
+    async fn native_host_enroll_maps_missing_bidi_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let profile_dir = root.path().join("firefox-profile");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let defaults = FirefoxEnrollDefaults {
+            profile_dir,
+            companion_bind: "127.0.0.1:9876".parse().unwrap(),
+            descriptor_path: root.path().join("firefox-native-host-descriptor.json"),
+        };
+        write_enroll_defaults(&enroll_defaults_path(root.path()), &defaults).unwrap();
+        let enroll = NativeHostFirefoxEnroll::new(root.path().to_path_buf(), Duration::from_secs(5));
+        let error = enroll
+            .enroll_and_wait_for_pair(sample_native_connect_request())
+            .await
+            .unwrap_err();
+        assert_eq!(error, EnrollHostError::BidiMissing);
+        assert_eq!(error.code(), "bidiMissing");
+    }
 
     #[cfg(unix)]
     #[test]
