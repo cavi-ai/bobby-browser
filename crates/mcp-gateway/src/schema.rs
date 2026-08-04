@@ -38,7 +38,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                         "javascriptEvaluation":{"type":"boolean"},
                         "visionAssist":{"type":"boolean"},
                         "fingerprint":{"type":"boolean"},
-                        "humanize":{"type":"boolean"}
+                        "humanize":{"type":"boolean"},
+                        "visionNode":string(1, 128)
                     }),
                     &[]
                 )
@@ -1665,7 +1666,8 @@ fn session_state() -> Value {
                     "javascriptEvaluation":{"type":"boolean"},
                     "visionAssist":{"type":"boolean"},
                     "fingerprint":{"type":"boolean"},
-                    "humanize":{"type":"boolean"}
+                    "humanize":{"type":"boolean"},
+                    "visionNode":string(1, 128)
                 }),
                 &[]
             )

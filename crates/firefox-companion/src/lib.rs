@@ -1,11 +1,13 @@
 //! Firefox companion adapter with behavioral engine integration.
 
 pub mod bidi;
+pub mod bidi_endpoint;
 mod fingerprint_host;
 pub mod selection;
 mod worker;
 
 pub use bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
+pub use bidi_endpoint::{bidi_url_from_endpoint_file, read_bidi_url_from_profile_dir};
 pub use fingerprint_host::FirefoxBidiHost;
 pub use worker::{
     CompanionExtensionObserver, ExtensionControl, ExtensionObservation, ExtensionObserver,
