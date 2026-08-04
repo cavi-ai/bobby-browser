@@ -201,6 +201,7 @@ export async function bindPairButton(
       renderPopup(root, status);
     } else {
       showStatusUnavailable(root);
+      button.disabled = false;
     }
   });
 }

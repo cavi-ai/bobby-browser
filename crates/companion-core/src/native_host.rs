@@ -843,8 +843,10 @@ where
                                     {
                                         Ok(finalize) => finalize,
                                         Err(error) => {
+                                            // Extension already has a well-formed enrollFailed;
+                                            // exit the relay cleanly (not a protocol error).
                                             write_enroll_failed(&mut native_writer, error).await?;
-                                            break Err(NativeHostError::InvalidProtocol);
+                                            break Ok(ConnectionResult::NativeClosed);
                                         }
                                     };
                                     write_native_message(&mut native_writer, &value).await?;
