@@ -1,6 +1,10 @@
+mod vision_write;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+pub use vision_write::{ConfigWriteError, ensure_loopback_vision_defaults, upsert_vision_platform};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,6 +346,7 @@ impl Default for ServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BrowserConfig {
     pub executable: Option<PathBuf>,
     pub profiles_dir: PathBuf,
