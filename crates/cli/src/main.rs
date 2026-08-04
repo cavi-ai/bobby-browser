@@ -2,6 +2,7 @@ mod bootstrap_local;
 mod jobs_client;
 mod onboarding;
 mod vision_child;
+mod vision_connect;
 
 use anyhow::{Context, Result};
 use companion_core::{run_native_host, NativeHostConfig};
@@ -169,6 +170,27 @@ enum CliCommand {
     Jobs {
         #[command(subcommand)]
         command: JobsCommand,
+    },
+    /// Configure a vision provider profile in config.toml
+    VisionConnect {
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Provider preset: openai, ollama, lmstudio, or custom
+        #[arg(long)]
+        provider: Option<String>,
+        /// Upstream base URL (required for custom; overrides preset default)
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Model id (required for custom; overrides preset default)
+        #[arg(long)]
+        model: Option<String>,
+        /// Env var holding upstream API key (custom only; empty omits)
+        #[arg(long)]
+        api_key_env: Option<String>,
+        /// Accept defaults without interactive prompts
+        #[arg(long)]
+        yes: bool,
     },
     /// Run the loopback vision proxy (propose/extract → OpenAI)
     VisionProxy {
@@ -404,6 +426,21 @@ pub async fn run() -> Result<()> {
             }
         }
         CliCommand::Jobs { command } => run_jobs(command)?,
+        CliCommand::VisionConnect {
+            config,
+            provider,
+            base_url,
+            model,
+            api_key_env,
+            yes,
+        } => vision_connect::connect(vision_connect::ConnectOpts {
+            config,
+            provider,
+            base_url,
+            model,
+            api_key_env,
+            yes,
+        })?,
         CliCommand::VisionProxy {
             bind,
             path,
@@ -1919,6 +1956,34 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         );
         assert_eq!(policy_from_flags(true, false), VisionSpawnPolicy::ForceOn);
         assert_eq!(policy_from_flags(false, true), VisionSpawnPolicy::Off);
+    }
+
+    #[test]
+    fn vision_connect_clap_parses_non_interactive_flags() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "bobby",
+            "vision-connect",
+            "--yes",
+            "--provider",
+            "lmstudio",
+            "--config",
+            "/tmp/config.toml",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::VisionConnect {
+                yes,
+                provider,
+                config,
+                ..
+            }) => {
+                assert!(yes);
+                assert_eq!(provider.as_deref(), Some("lmstudio"));
+                assert_eq!(config.as_deref(), Some(Path::new("/tmp/config.toml")));
+            }
+            _ => panic!("unexpected vision-connect parse"),
+        }
     }
 
     #[test]
