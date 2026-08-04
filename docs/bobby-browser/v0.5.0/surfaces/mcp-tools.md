@@ -130,12 +130,15 @@ are also destructive.
 
 Tools that return structured content declare an `outputSchema` (always
 `type: object`), so a client can validate or render results without
-reverse-engineering evidence shapes.
+reverse-engineering evidence shapes. A command whose outcome status is not
+`completed` returns with MCP `isError: true` — check it before continuing a
+flow.
 
 ## Resources
 
-Four static resources ship with the gateway (`resources/list` /
-`resources/read`, both gated by `artifact:read`):
+Four static resources ship with the gateway, readable by any authenticated
+principal (`resources/list` / `resources/read`; only live `artifact://`
+entries are gated by `artifact:read`):
 
 | URI | Contents |
 |---|---|

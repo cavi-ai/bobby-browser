@@ -101,43 +101,49 @@ fn fill_and_submit_form(arguments: &Value) -> Option<Value> {
     let session_id = argument(arguments, "sessionId")?;
     let page_id = argument(arguments, "pageId")?;
     let text = format!(
-        "Fill and submit the form on page {page_id} in session {session_id}, then checkpoint \
-         the verified result.\n\
+        "Fill and submit the form on page {page_id} in session {session_id}, checkpointing \
+         before the boundary submit.\n\
          \n\
          1. Call a11y_snapshot with sessionId=\"{session_id}\", pageId=\"{page_id}\" to get \
          command-ready targets for the form's controls -- pass those targets into the intent_* \
          tools below rather than guessing a selector. Capture the workflowId the outcome \
          returns and thread that same workflowId into every following call, so the whole \
-         sequence stays inside one workflow; that is what keeps checkpoint_save reachable at \
-         the end.\n\
+         sequence stays inside one workflow; that is what keeps checkpoint_save reachable.\n\
          \n\
          2. Call intent_complete_form with sessionId=\"{session_id}\", pageId=\"{page_id}\", the \
-         workflowId from step 1, a purpose describing the form, and one field per control to \
-         fill, built from the a11y_snapshot targets. It fills and verifies each field in order \
-         before moving to the next, never submits on its own, and is Reconciliable: an \
-         interrupted fill is safe to inspect and redo. Capture the commandId its outcome \
-         carries.\n\
+         workflowId from step 1, a purpose describing the form, and fields: one entry per \
+         control to fill, each of shape {{\"name\": <control name>, \"purpose\": <what this \
+         field is for>, \"value\": <FillValue>}} where FillValue is exactly one of \
+         {{\"kind\":\"text\",\"text\":...}}, {{\"kind\":\"select\",\"option\":...}}, \
+         {{\"kind\":\"checked\",\"checked\":...}}, {{\"kind\":\"files\",\"paths\":[...]}}. \
+         All of name, purpose, and value are required -- omitting one fails validation. \
+         The tool fills and verifies each field in order, never submits on its own, and is \
+         Reconciliable: an interrupted fill is safe to inspect and redo. Capture the \
+         commandId its outcome carries.\n\
          \n\
-         3. Call intent_submit_and_verify with sessionId=\"{session_id}\", pageId=\"{page_id}\", \
-         the same workflowId, a purpose describing the submit control, and expectedState \
-         describing the page condition that proves the submit landed. This tool is Boundary \
-         class. If the outcome is needsReconciliation, do NOT retry it -- the submit may have \
-         already landed. Instead call recovery_status with the workflowId and follow \
-         workflow_recover if a checkpoint exists (see bobby://failure-taxonomy for the full \
-         repair). Only move to step 4 once the outcome is completed, and capture this call's \
-         commandId too.\n\
+         3. The submit is Boundary class: the runtime refuses it unless a matching checkpoint \
+         already exists, so checkpoint BEFORE submitting. Pick two fresh UUIDs -- one for the \
+         submit's commandId, one for its attemptId -- then call checkpoint_save with \
+         checkpoint set to a WorkflowCheckpoint for this workflowId, sessionId, and pageId \
+         (schemaVersion, checkpointId, attemptId set to your chosen attemptId, restartUrl and \
+         currentUrl from the page's current URL, recoveryClass set to \"boundary\", \
+         boundaryCommandId set to your chosen submit commandId, invariants, replayableInputs, \
+         createdAt -- its own evidence field is always saved empty), and evidenceRefs set to \
+         the commandIds captured in step 2. The runtime resolves each referenced command's \
+         evidence from its own journal; a reference with no journal record, one that never \
+         reached a terminal outcome, or one belonging to a session this principal does not \
+         own, is rejected.\n\
          \n\
-         4. Call checkpoint_save with checkpoint set to a WorkflowCheckpoint for this \
-         workflowId, sessionId, and pageId (schemaVersion, checkpointId, attemptId, \
-         restartUrl, currentUrl, recoveryClass set to \"boundary\", invariants, \
-         replayableInputs, createdAt -- its own evidence field is always saved empty), and \
-         evidenceRefs set to the commandIds captured in steps 2 and 3. The runtime resolves \
-         each referenced command's evidence from its own journal; a reference with no journal \
-         record, one that never reached a terminal outcome, or one belonging to a session this \
-         principal does not own, is rejected."
+         4. Call intent_submit_and_verify with sessionId=\"{session_id}\", pageId=\"{page_id}\", \
+         the same workflowId, the SAME commandId and attemptId you pinned in step 3, a purpose \
+         describing the submit control, and expectedState describing the page condition that \
+         proves the submit landed. If the outcome is needsReconciliation, do NOT retry it -- \
+         the submit may have already landed. Instead call recovery_status with the workflowId \
+         and follow workflow_recover if a checkpoint exists (see bobby://failure-taxonomy for \
+         the full repair). The call only counts as landed when the outcome is completed."
     );
     Some(json!({
-        "description": "Fill and submit a form, then checkpoint the verified result.",
+        "description": "Fill and submit a form, checkpointing before the boundary submit.",
         "messages": [message(text)]
     }))
 }
@@ -154,11 +160,14 @@ fn extract_from_page(arguments: &Value) -> Option<Value> {
          the outcome returns and thread it into the next call.\n\
          \n\
          2. Call intent_extract with sessionId=\"{session_id}\", pageId=\"{page_id}\", the \
-         workflowId from step 1, a purpose describing what you're reading, and one field per \
-         item to extract, each described by purpose/hints rather than a hardcoded selector. \
-         intent_extract is Replayable: it never mutates the page, so it is safe to call again \
-         on its own if it fails, and a field that can't be resolved is reported per-field \
-         rather than failing the whole call (see bobby://intents).\n\
+         workflowId from step 1, a purpose describing what you're reading, and fields: one \
+         entry per item to extract, each of shape {{\"name\": <field name>, \"purpose\": \
+         <what this value is>, \"value\": <ExtractValueKind>}} where ExtractValueKind is \
+         exactly one of {{\"kind\":\"text\"}}, {{\"kind\":\"attribute\",\"attribute\":...}}, \
+         {{\"kind\":\"href\"}}. All of name, purpose, and value are required -- omitting one \
+         fails validation. intent_extract is Replayable: it never mutates the page, so it is \
+         safe to call again on its own if it fails, and a field that can't be resolved is \
+         reported per-field rather than failing the whole call (see bobby://intents).\n\
          \n\
          There is no checkpoint step here: nothing mutated the page, so there is no side effect \
          a checkpoint would need to protect against replaying."

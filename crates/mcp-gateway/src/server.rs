@@ -579,45 +579,64 @@ impl Server {
     }
 
     async fn list_resources(&self, id: Value, params: Value) -> Value {
-        let context = self.request_context();
-        if let Err(interface_error) = self
-            .authorization
-            .authorize(&context, types::InterfaceOperation::ReadArtifact)
-        {
-            return interface_error_response(id, interface_error);
-        }
         if !valid_initial_list_params(&params) {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         }
+        // The static bobby:// documents (capabilities, failure taxonomy,
+        // intents, primitives) are repair documentation: a principal that
+        // merely lacks artifact:read still reads them, because an agent that
+        // just hit missingCapability is exactly the one that needs them. A
+        // principal that fails to authenticate at all (revoked, expired) is
+        // denied like anywhere else. Live artifact:// entries stay gated.
+        let context = self.request_context();
+        let artifact_entries = match self
+            .authorization
+            .authorize(&context, types::InterfaceOperation::ReadArtifact)
+        {
+            Ok(()) => self
+                .resources
+                .list()
+                .await
+                .into_iter()
+                .map(|artifact_id| {
+                    json!({
+                        "uri":format!("artifact://{artifact_id}"),
+                        "name":format!("artifact-{artifact_id}"),
+                        "description":"Authenticated runtime artifact"
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(error) if error.code == types::InterfaceErrorCode::MissingCapability => Vec::new(),
+            Err(error) => return interface_error_response(id, error),
+        };
         let resources = static_resources()
             .iter()
             .map(
                 |(uri, name, description)| json!({"uri":uri,"name":name,"description":description}),
             )
-            .chain(self.resources.list().await.into_iter().map(|artifact_id| {
-                json!({
-                    "uri":format!("artifact://{artifact_id}"),
-                    "name":format!("artifact-{artifact_id}"),
-                    "description":"Authenticated runtime artifact"
-                })
-            }))
+            .chain(artifact_entries)
             .collect::<Vec<_>>();
         success(id, json!({"resources":resources}))
     }
 
     async fn read_resource(&self, id: Value, params: Value) -> Value {
-        let context = self.request_context();
-        if let Err(interface_error) = self
-            .authorization
-            .authorize(&context, types::InterfaceOperation::ReadArtifact)
-        {
-            return interface_error_response(id, interface_error);
-        }
         let input: ResourceReadArgs = match bounded_parse(params) {
             Ok(input) => input,
             Err(()) => return error(id, INVALID_PARAMS, "Invalid params", None),
         };
         if let Some(text) = static_resource_body(&input.uri) {
+            let context = self.request_context();
+            // Repair docs are readable by any authenticated principal, even
+            // one missing artifact:read; a revoked/expired principal (any
+            // other authorization failure) is denied like anywhere else.
+            match self
+                .authorization
+                .authorize(&context, types::InterfaceOperation::ReadArtifact)
+            {
+                Ok(()) => {}
+                Err(error) if error.code == types::InterfaceErrorCode::MissingCapability => {}
+                Err(error) => return interface_error_response(id, error),
+            }
             return success(
                 id,
                 json!({"contents":[{"uri":input.uri,"mimeType":"text/markdown","text":text}]}),
@@ -626,6 +645,13 @@ impl Server {
         let Some(artifact_id) = parse_artifact_uri(&input.uri) else {
             return error(id, INVALID_PARAMS, "Invalid params", None);
         };
+        let context = self.request_context();
+        if let Err(error) = self
+            .authorization
+            .authorize(&context, types::InterfaceOperation::ReadArtifact)
+        {
+            return interface_error_response(id, error);
+        }
         let content = match self
             .resources
             .read(&self.handle, &context, artifact_id)
@@ -906,7 +932,7 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = primitive_envelope(
+                let (context, mut envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
@@ -918,6 +944,7 @@ impl Server {
                         expected_url: input.expected_url,
                     }),
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "type_text" => {
@@ -1004,13 +1031,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "intent_fill" => {
@@ -1027,13 +1055,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "intent_complete_form" => {
@@ -1049,13 +1078,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "intent_submit_and_verify" => {
@@ -1072,13 +1102,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "intent_wait_for_state" => {
@@ -1094,13 +1125,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "intent_follow" => {
@@ -1118,13 +1150,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "intent_dismiss_obstruction" => {
@@ -1144,13 +1177,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "intent_extract" => {
@@ -1166,13 +1200,14 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
-                let (context, envelope) = intent_envelope(
+                let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
                     input.page_id,
                     input.workflow_id,
                     intent,
                 );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 self.submit_envelope(context, envelope).await
             }
             "page_list" => {
@@ -1618,12 +1653,26 @@ impl Server {
                 "description":"Authenticated runtime artifact"
             }));
         }
+        // MCP `isError` mirrors the command status: a failed command is a
+        // failed tool call, not a successful one carrying a failure payload.
+        // `restarted`/`resumed` are recovery decisions, not failures, and
+        // tools whose result has no `status` never fail this way.
+        let is_error = matches!(
+            value.get("status").and_then(Value::as_str),
+            Some(
+                "retryableFailure"
+                    | "needsReconciliation"
+                    | "policyDenied"
+                    | "resourceExhausted"
+                    | "failed"
+            )
+        );
         success(
             id,
             json!({
                 "content":content,
                 "structuredContent":value,
-                "isError":false
+                "isError":is_error
             }),
         )
     }
@@ -1644,14 +1693,17 @@ impl Server {
                     Ok(mut value) => {
                         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
                         // `CommandOutcome` carries only `commandId`, so the
-                        // workflow id is echoed here. Callers pass it back as a
-                        // tool's `workflowId` to stay in the same workflow, and
-                        // `checkpoint_save` / `workflow_recover` need it.
+                        // workflow and attempt ids are echoed here. Callers
+                        // pass workflowId back to stay in the same workflow,
+                        // and the pair (commandId, attemptId) is what a
+                        // Boundary command's pre-action checkpoint must name.
                         if let Some(object) = value.as_object_mut() {
                             object.insert(
                                 "workflowId".to_owned(),
                                 json!(envelope.workflow_id.clone()),
                             );
+                            object
+                                .insert("attemptId".to_owned(), json!(envelope.attempt_id.clone()));
                         }
                         self.events
                             .append_for(
@@ -2021,8 +2073,10 @@ macro_rules! page_scoped_args {
 }
 
 /// Intent tools take the same page scope plus the intent's own payload.
-/// They mirror the flat primitive tools: the server builds the
-/// `CommandEnvelope`, so a caller mints no UUIDs and no deadline.
+/// The server builds the `CommandEnvelope`, so a caller mints no deadline.
+/// `commandId`/`attemptId` are optional: a Boundary intent's pre-action
+/// checkpoint must name the exact ids the submit will carry, so the caller
+/// pins them up front and the server threads them through unchanged.
 macro_rules! intent_args {
     ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
         #[derive(Deserialize)]
@@ -2032,6 +2086,10 @@ macro_rules! intent_args {
             page_id: types::PageId,
             #[serde(default)]
             workflow_id: Option<types::WorkflowId>,
+            #[serde(default)]
+            command_id: Option<types::CommandId>,
+            #[serde(default)]
+            attempt_id: Option<types::AttemptId>,
             #[serde(default)]
             idempotency_key: Option<String>,
             $($field : $ty,)*
@@ -2090,12 +2148,25 @@ page_scoped_args!(NavigateArgs {
     timeout_ms: Option<u64>,
 });
 
-page_scoped_args!(ClickArgs {
+/// Click is the one flat primitive that can be Boundary class, so — like the
+/// intent tools — it accepts caller-pinned `commandId`/`attemptId` for the
+/// pre-action checkpoint gate (see `pin_envelope_ids`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClickArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
+    #[serde(default)]
+    command_id: Option<types::CommandId>,
+    #[serde(default)]
+    attempt_id: Option<types::AttemptId>,
     selector: Option<String>,
     target: Option<types::TargetSpec>,
     boundary: Option<bool>,
     expected_url: Option<String>,
-});
+}
 
 page_scoped_args!(TypeTextArgs {
     selector: Option<String>,
@@ -2464,6 +2535,23 @@ fn command_envelope(
     )
 }
 
+/// Caller-pinned ids for Boundary flows: a Boundary command's pre-action
+/// checkpoint must name the exact `commandId`/`attemptId` the submit will
+/// carry, so the flat tools accept them optionally and they replace the
+/// minted ones here. Unset ids stay server-minted, as before.
+fn pin_envelope_ids(
+    envelope: &mut types::CommandEnvelope,
+    command_id: Option<types::CommandId>,
+    attempt_id: Option<types::AttemptId>,
+) {
+    if let Some(command_id) = command_id {
+        envelope.command_id = command_id;
+    }
+    if let Some(attempt_id) = attempt_id {
+        envelope.attempt_id = attempt_id;
+    }
+}
+
 fn apply_idempotency_key(
     context: &mut types::RequestContext,
     key: Option<String>,
@@ -2617,7 +2705,7 @@ fn tool_description(name: &str) -> &'static str {
         "events_read" => "Read retained runtime events for this principal after a cursor, bounded by a limit. Requires session:read. Long-polls: it blocks until an event past the cursor arrives or the request deadline expires (about 60s), so it is not a quick read. The notifications/bobby/event channel pushes the same frames without polling -- see bobby://failure-taxonomy.",
         "recovery_status" => "Read a workflow's checkpoint and recovery receipts without attempting recovery. Requires recovery:read.",
         "cookie_get" => "Read cookies visible to a page, optionally filtered by URL. Requires browser:mutate.",
-        "checkpoint_save" => "Persist a verified workflow checkpoint. Requires recovery:write. Pass evidenceRefs -- the command ids whose evidence the runtime already recorded; it resolves them from the journal. On failure with a missing command id, confirm the command completed before checkpointing it.",
+        "checkpoint_save" => "Persist a verified workflow checkpoint. Requires recovery:write. Pass evidenceRefs -- command ids whose evidence the runtime resolves from its journal. For a Boundary command, save BEFORE it with recoveryClass boundary and boundaryCommandId/attemptId equal to the ids you pass that command. On failure with a missing command id, confirm the command completed first.",
         "workflow_recover" => "Recover a workflow from its last verified checkpoint, resuming, restarting, or flagging reconciliation. Requires recovery:write. Produces recovery evidence and the decision reached. On failure with notFound, this principal doesn't own the checkpoint's session (it may be closed) -- verify with session_list. A missing checkpoint itself surfaces as an opaque internal error, not notFound.",
         "session_create" => "Create a browser session with a profile, optional proxy, and execution policy. Requires session:write. Produces the session's id and initial state. On failure with resourceExhausted, this principal already holds its session limit -- close an idle one first.",
         "session_close" => "Close a session and release its pages, workers, and artifacts. Requires session:write. Destructive: in-flight commands on the session are cancelled. On failure, the session may already be closed -- confirm with session_list.",
@@ -2642,12 +2730,12 @@ fn tool_description(name: &str) -> &'static str {
         "intent_locate" => "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
         "intent_fill" => "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
         "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable). Requires browser:mutate and intent:execute. Produces per-field resolution and fill evidence in order. On failure with verificationFailed, targetNotFound, or intentActionMismatch on one field, the fields before it are already filled -- re-run with only the remaining fields.",
-        "intent_submit_and_verify" => "Submit a form and verify the expected resulting state (Boundary; needs a matching checkpoint). Requires browser:mutate and intent:execute. Produces submission and state evidence. On failure with needsReconciliation, do not retry -- the submit may have already landed; call recovery_status for the workflow and reconcile before continuing.",
+        "intent_submit_and_verify" => "Submit a form and verify the expected resulting state (Boundary; refused without a matching pre-saved checkpoint). Requires browser:mutate and intent:execute. Pin commandId/attemptId, checkpoint_save with those exact ids first, then call with the same ones. On failure with needsReconciliation, do not retry -- the submit may have already landed; call recovery_status and reconcile before continuing.",
         "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
         "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and destination evidence. On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
-        "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure with verificationFailed, the runtime produced no HAR artifact -- not a caller-fixable condition; retry, and report if it persists.",
+        "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure: verificationFailed (no HAR captured), browserCommandFailed (engine could not persist it), or internal (write failed) -- none caller-fixable; retry, and report if it persists.",
         _ => "Runtime operation.",
     }
 }

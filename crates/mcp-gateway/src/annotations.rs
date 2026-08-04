@@ -20,6 +20,10 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "cookie_get"
             | "context_ask"
             | "toolset_select"
+            | "wait_for"
+            | "intent_locate"
+            | "intent_wait_for_state"
+            | "intent_extract"
     );
     let destructive = matches!(
         name,
@@ -42,10 +46,20 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
     // `Navigate` or `DownloadUrl` — the same commands that earn the
     // standalone tools their `openWorldHint`. A host gating "does this reach
     // the network" on this flag would otherwise miss envelope-mediated
-    // navigation entirely.
+    // navigation entirely. `page_open` navigates when given a URL; `click`,
+    // `intent_follow`, and `intent_submit_and_verify` can all carry the page
+    // to a new destination (they verify it with `expectedUrl` /
+    // `expectedDestination` / `expectedState` guards).
     let open_world = matches!(
         name,
-        "navigate" | "download_url" | "extract_structured" | "command_execute"
+        "navigate"
+            | "download_url"
+            | "extract_structured"
+            | "command_execute"
+            | "page_open"
+            | "click"
+            | "intent_follow"
+            | "intent_submit_and_verify"
     );
     json!({
         "readOnlyHint": read_only,

@@ -72,17 +72,27 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
 ## Rules that bite
 
 1. **Checkpoint before boundaries.** `intent_submit_and_verify` and
-   `intent_follow` with `boundary: true` are Boundary commands: call
-   `checkpoint_save` (with `evidenceRefs` from the commands you ran, not
-   hand-authored evidence) before them, or recovery cannot resume the flow.
-2. **Reuse the `workflowId`.** Every envelope-minting tool returns one; pass
-   it back so `checkpoint_save` / `workflow_recover` see the whole flow.
-3. **Fail-closed by design.** `verificationFailed` means the page did not end
+   `intent_follow` with `boundary: true` are Boundary commands: the runtime
+   refuses them without a matching checkpoint saved *first*. Pin two UUIDs
+   yourself, pass them as `commandId`/`attemptId` to both `checkpoint_save`
+   (`boundaryCommandId`/`attemptId` in the checkpoint) and the Boundary
+   call, and put the commands you already ran in `evidenceRefs` — never
+   hand-authored evidence.
+2. **Reuse the `workflowId`.** Every outcome echoes `workflowId`,
+   `commandId`, and `attemptId`; pass `workflowId` back so
+   `checkpoint_save` / `workflow_recover` see the whole flow.
+3. **Failed commands set `isError: true`.** A tool result whose
+   `structuredContent.status` is not `completed` is a failure — read the
+   `error.code` and repair via `bobby://failure-taxonomy`; do not continue
+   the flow as if it succeeded.
+4. **Fail-closed by design.** `verificationFailed` means the page did not end
    in the state you asked for — re-read the page (`inspect`, `a11y_snapshot`)
    instead of retrying blindly. `needsReconciliation` means stop and ask a
    human; do not replay the command.
-4. **Read before write.** Take an `a11y_snapshot`, pass its targets straight
+5. **Read before write.** Take an `a11y_snapshot`, pass its targets straight
    into `click` / `type_text` / `upload_files` — no selector guessing.
-5. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
+6. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
    come back as digest-verified artifacts, readable as `artifact://<id>`
-   resources with `artifact:read`.
+   resources with `artifact:read`. The `bobby://` documentation resources
+   (capabilities, intents, failure-taxonomy, primitives) are readable by any
+   principal.
