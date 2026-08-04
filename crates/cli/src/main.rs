@@ -214,6 +214,18 @@ struct VisionConnectArgs {
     /// Provider preset: openai, ollama, lmstudio, or custom
     #[arg(long)]
     provider: Option<String>,
+    /// Backend transport: direct or acp
+    #[arg(long, default_value = "direct")]
+    backend: String,
+    /// ACP harness executable (for --backend acp)
+    #[arg(long)]
+    command: Option<String>,
+    /// Argument passed to the ACP harness executable; repeatable
+    #[arg(long = "arg")]
+    args: Vec<String>,
+    /// Authentication path: advertised, oauth-authorization-code, oauth-device-code, environment, existing-session, or none
+    #[arg(long, default_value = "advertised")]
+    auth: String,
     /// Upstream base URL (required for custom; overrides preset default)
     #[arg(long)]
     base_url: Option<String>,
@@ -233,6 +245,10 @@ impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
         Self {
             config: args.config,
             provider: args.provider,
+            backend: args.backend,
+            command: args.command,
+            args: args.args,
+            auth: args.auth,
             base_url: args.base_url,
             model: args.model,
             api_key_env: args.api_key_env,
@@ -906,6 +922,54 @@ fn check_vision_upstream_key(vision: &VisionConfig) -> Option<DoctorCheck> {
     }
 }
 
+fn executable_available(command: &str) -> bool {
+    let path = Path::new(command);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| directory.join(command).is_file())
+    })
+}
+
+fn check_vision_acp(vision: &VisionConfig) -> Vec<DoctorCheck> {
+    let Some(config::VisionBackendSelection::Acp { name, profile }) = vision.selected_backend()
+    else {
+        return Vec::new();
+    };
+    vec![
+        DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-routing".into(),
+            detail: format!("ACP profile {name:?} selected"),
+        },
+        DoctorCheck {
+            status: if executable_available(&profile.command) {
+                DoctorStatus::Ok
+            } else {
+                DoctorStatus::Warn
+            },
+            name: "vision-acp-reachability".into(),
+            detail: if executable_available(&profile.command) {
+                format!("ACP harness executable {:?} is available", profile.command)
+            } else {
+                format!(
+                    "ACP harness executable {:?} was not found on PATH",
+                    profile.command
+                )
+            },
+        },
+        DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-auth-path".into(),
+            detail: format!(
+                "{:?}; credentials remain owned by the harness",
+                profile.auth
+            ),
+        },
+    ]
+}
+
 fn push_doctor_check(report: &mut DoctorReport, check: DoctorCheck) {
     match check.status {
         DoctorStatus::Ok => report.ok(&check.name, check.detail),
@@ -939,6 +1003,9 @@ fn run_doctor(
     };
 
     if let Some(config) = &config {
+        for check in check_vision_acp(&config.vision) {
+            push_doctor_check(&mut report, check);
+        }
         if let Some(check) = check_vision_provider(&config.vision) {
             push_doctor_check(&mut report, check);
         }
@@ -946,50 +1013,52 @@ fn run_doctor(
             push_doctor_check(&mut report, check);
         }
 
-        if let Some(endpoint) = config.vision.endpoint_url.as_deref() {
-            match Url::parse(endpoint) {
-                Ok(url) => {
-                    let reachable = url
-                        .socket_addrs(|| Some(url.port_or_known_default().unwrap_or(80)))
-                        .map(|addrs| {
-                            addrs.iter().any(|addr| {
-                                std::net::TcpStream::connect_timeout(
-                                    addr,
-                                    Duration::from_millis(500),
-                                )
-                                .is_ok()
+        if !matches!(config.vision.backend, Some(config::VisionBackendKind::Acp)) {
+            if let Some(endpoint) = config.vision.endpoint_url.as_deref() {
+                match Url::parse(endpoint) {
+                    Ok(url) => {
+                        let reachable = url
+                            .socket_addrs(|| Some(url.port_or_known_default().unwrap_or(80)))
+                            .map(|addrs| {
+                                addrs.iter().any(|addr| {
+                                    std::net::TcpStream::connect_timeout(
+                                        addr,
+                                        Duration::from_millis(500),
+                                    )
+                                    .is_ok()
+                                })
                             })
-                        })
-                        .unwrap_or(false);
-                    if reachable {
-                        report.ok("vision-endpoint", endpoint.to_string());
-                    } else {
+                            .unwrap_or(false);
+                        if reachable {
+                            report.ok("vision-endpoint", endpoint.to_string());
+                        } else {
+                            report.warn(
+                                "vision-endpoint",
+                                vision_endpoint_unreachable_detail(endpoint),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        report.warn("vision-endpoint", format!("invalid URL: {error}"));
+                    }
+                }
+
+                match config.vision.token_env.as_deref() {
+                    Some(name) if !name.is_empty() => match std::env::var(name) {
+                        Ok(value) if !value.is_empty() => {
+                            report.ok("vision-token-env", format!("{name} is set"));
+                        }
+                        _ => {
+                            report.warn("vision-token-env", format!("{name} is unset or empty"));
+                        }
+                    },
+                    _ => {
                         report.warn(
-                            "vision-endpoint",
-                            vision_endpoint_unreachable_detail(endpoint),
+                            "vision-token-env",
+                            "token_env unset; bobby will call the provider without a bearer"
+                                .to_string(),
                         );
                     }
-                }
-                Err(error) => {
-                    report.warn("vision-endpoint", format!("invalid URL: {error}"));
-                }
-            }
-
-            match config.vision.token_env.as_deref() {
-                Some(name) if !name.is_empty() => match std::env::var(name) {
-                    Ok(value) if !value.is_empty() => {
-                        report.ok("vision-token-env", format!("{name} is set"));
-                    }
-                    _ => {
-                        report.warn("vision-token-env", format!("{name} is unset or empty"));
-                    }
-                },
-                _ => {
-                    report.warn(
-                        "vision-token-env",
-                        "token_env unset; bobby will call the provider without a bearer"
-                            .to_string(),
-                    );
                 }
             }
         }
@@ -2115,6 +2184,27 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
             ..VisionConfig::default()
         };
         assert!(check_vision_upstream_key(&vision).is_none());
+    }
+
+    #[test]
+    fn doctor_acp_checks_are_separate_and_do_not_call_a_model() {
+        let vision = AppConfig::from_toml_str(
+            r#"
+[vision]
+backend = "acp"
+profile = "fake"
+[vision.acp_profiles.fake]
+command = "definitely-not-a-real-acp-harness"
+auth = "oauth-device-code"
+"#,
+        )
+        .unwrap()
+        .vision;
+        let checks = check_vision_acp(&vision);
+        assert_eq!(checks.len(), 3);
+        assert_eq!(checks[0].name, "vision-routing");
+        assert_eq!(checks[1].name, "vision-acp-reachability");
+        assert_eq!(checks[2].name, "vision-auth-path");
     }
 
     #[test]

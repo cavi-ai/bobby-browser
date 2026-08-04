@@ -71,6 +71,14 @@ request_timeout_ms = 30000
 max_concurrent_requests = 8
 
 [vision]
+# ACP harness example (OAuth stays in the harness):
+# backend = "acp"
+# profile = "codex"
+# [vision.acp_profiles.codex]
+# command = "codex"
+# args = ["acp"]
+# auth = "advertised"
+#
 # Vision-assist provider (disabled when endpoint_url is unset).
 #
 # Preferred setup:

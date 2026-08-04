@@ -67,7 +67,35 @@ socket: `allow_loopback`, `allow_private_network`, redirect/body/timeout caps,
 
 ## `[vision]`
 
-Deny-by-default HTTP vision-assist provider. Unset `endpoint_url` means
+Vision can use either a direct HTTP provider or an ACP harness. ACP is the
+recommended path when Codex, Claude, OpenCode, Hermes, OpenClaw, or another
+workflow harness already owns the model login: Bobby never receives or stores
+that provider token.
+
+```bash
+bobby vision connect --yes --backend acp --provider codex \
+  --command codex --arg acp --auth advertised
+```
+
+```toml
+[vision]
+backend = "acp"
+profile = "codex"
+
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "advertised"
+```
+
+Supported auth paths are `advertised`, `oauth-authorization-code`,
+`oauth-device-code`, `environment`, `existing-session`, and `none`. For the
+three OAuth/advertised modes, Bobby invokes the authentication method the ACP
+harness advertised; the harness conducts the login and retains credentials.
+Each vision task gets a new ACP child session, bounded text and image content,
+a strict JSON result, evidence-digest validation, and an explicit close.
+
+Deny-by-default direct HTTP vision-assist provider. Unset `endpoint_url` means
 escalation is unavailable even when the bearer and session opt in.
 
 | Field | Default | Meaning |
