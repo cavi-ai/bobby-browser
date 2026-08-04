@@ -1477,7 +1477,7 @@ impl Server {
                 let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
-                    None,
+                    Some(input.page_id),
                     input.workflow_id,
                     types::PrimitiveCommand::DownloadUrl(types::DownloadUrlCommand {
                         url: input.url,
@@ -2344,6 +2344,7 @@ struct ExtractStructuredArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DownloadUrlArgs {
     session_id: types::SessionId,
+    page_id: types::PageId,
     url: String,
     #[serde(default)]
     expected_content_type: Option<String>,

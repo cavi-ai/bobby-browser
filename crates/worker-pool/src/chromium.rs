@@ -524,7 +524,11 @@ impl ChromiumWorker {
         &self,
         page_id: &PageId,
     ) -> Result<Arc<crate::HarRecorder>, CommandError> {
-        if let Some(recorder) = self.har_recorders.lock().await.get(page_id) {
+        // Single-flight: the recorders-map guard stays held across the
+        // check-and-insert, so two concurrent network_log calls can never
+        // spawn duplicate collectors that split entries between them.
+        let mut recorders = self.har_recorders.lock().await;
+        if let Some(recorder) = recorders.get(page_id) {
             return Ok(recorder.clone());
         }
         let page = {
@@ -597,10 +601,8 @@ impl ChromiumWorker {
                 }
             }
         });
-        self.har_recorders
-            .lock()
-            .await
-            .insert(page_id.clone(), recorder.clone());
+        recorders.insert(page_id.clone(), recorder.clone());
+        drop(recorders);
         self.har_tasks.lock().await.insert(page_id.clone(), task);
         Ok(recorder)
     }
@@ -1300,8 +1302,13 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::SetCookiesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        // Clone the page handle and drop the pages guard before any browser
+        // I/O: the read-back below locks the same (non-reentrant) mutex, so
+        // holding it here deadlocks every cookie_set.
+        let page = {
+            let pages = self.pages.lock().await;
+            pages.get(page_id).cloned().ok_or_else(page_missing)?
+        };
         if command.cookies.len() > 128 {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
@@ -1330,8 +1337,12 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::DeleteCookiesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        // Same deadlock avoidance as set_cookies: take the handle, drop the
+        // guard, then do I/O (both get_cookies calls lock pages again).
+        let page = {
+            let pages = self.pages.lock().await;
+            pages.get(page_id).cloned().ok_or_else(page_missing)?
+        };
         let current = self
             .get_cookies(
                 page_id,

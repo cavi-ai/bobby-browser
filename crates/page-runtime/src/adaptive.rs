@@ -452,6 +452,19 @@ impl AdaptivePageEngine {
     }
 }
 
+/// Byte-index slicing a `String` panics mid-codepoint; back off to a char
+/// boundary so non-ASCII content cannot kill the request task.
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn safe_extension(filename: &str) -> &str {
     filename
         .rsplit_once('.')
@@ -815,11 +828,7 @@ async fn extract_structured(
             _ => None,
         })
         .unwrap_or_default();
-    let content = if content.len() > MAX_EXTRACT_CONTENT_BYTES {
-        content[..MAX_EXTRACT_CONTENT_BYTES].to_owned()
-    } else {
-        content
-    };
+    let content = truncate_utf8(&content, MAX_EXTRACT_CONTENT_BYTES).to_owned();
 
     let value = assist
         .extract_structured(intent_engine::StructuredExtractRequest {
@@ -877,4 +886,24 @@ async fn extract_structured(
         used_browser: true,
         prepared_http: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_utf8;
+
+    #[test]
+    fn truncation_never_splits_a_codepoint() {
+        // 'é' is two bytes; a cut at 1 would panic on a byte-index slice.
+        let text = "é".repeat(100);
+        let cut = truncate_utf8(&text, 51);
+        assert_eq!(cut.len(), 50);
+        assert!(cut.is_char_boundary(cut.len()));
+
+        let ascii = "a".repeat(100);
+        assert_eq!(truncate_utf8(&ascii, 51).len(), 51);
+
+        let short = "héllo";
+        assert_eq!(truncate_utf8(short, 100), short);
+    }
 }
