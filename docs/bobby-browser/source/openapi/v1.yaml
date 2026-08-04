@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: bobby-browser HTTP API
-  version: "{{INTERFACE_VERSION}}"
+  version: "{{PRODUCT_VERSION}}"
   summary: Authenticated broker routes under /v1/*
   description: |
     Browser automation runtime for agents. Prefer MCP for tool discovery; this

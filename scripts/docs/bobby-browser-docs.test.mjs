@@ -98,7 +98,6 @@ test("stamped docs substitute product and interface version tokens", async () =>
 });
 
 test("build publishes navigated OpenAPI assets", async () => {
-  const { INTERFACE_VERSION } = await import("./lib.mjs");
   await withSourceFixture(async (fixtureRoot) => {
     await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
     const openapi = await readFile(
@@ -106,11 +105,10 @@ test("build publishes navigated OpenAPI assets", async () => {
       "utf8",
     );
     assert.match(openapi, /^openapi: 3\.1\.0$/mu);
-    assert.doesNotMatch(openapi, /\{\{INTERFACE_VERSION\}\}/);
-    assert.doesNotMatch(openapi, /\{\{PRODUCT_VERSION\}\}/);
+    assert.doesNotMatch(openapi, /\{\{(?:PRODUCT|INTERFACE)_VERSION\}\}/);
     assert.match(
       openapi,
-      new RegExp(`^\\s*version:\\s*"${INTERFACE_VERSION.replaceAll(".", "\\.")}"\\s*$`, "mu"),
+      new RegExp(`^\\s*version:\\s*"${DOCUMENTED_VERSION.replaceAll(".", "\\.")}"\\s*$`, "mu"),
     );
     await verifyBobbyBrowserDocs(fixtureRoot, RELEASE);
   });
