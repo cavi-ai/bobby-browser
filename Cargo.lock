@@ -2345,6 +2345,7 @@ dependencies = [
  "checkpoint-store",
  "chrono",
  "config",
+ "dom-engine",
  "firefox-companion",
  "futures-util",
  "interface-core",

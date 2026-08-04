@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+mod common;
+
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use interface_core::{Authority, AuthorityStore, Event, EventStore};
@@ -637,75 +639,35 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
     );
 }
 
-/// A `WorkerFactory` that is never leased: `checkpoint_save` touches only the
-/// journal, so this exists to satisfy `PageRuntime::new`'s signature.
-struct UnusedFactory;
-
-#[async_trait]
-impl WorkerFactory for UnusedFactory {
-    async fn launch(
-        &self,
-        _session_id: &SessionId,
-    ) -> Result<Arc<dyn BrowserWorker>, types::CommandError> {
-        Err(types::CommandError {
-            code: types::ErrorCode::BrowserLaunchFailed,
-            message: "fixture worker factory never launches".into(),
-            layer: types::ErrorLayer::Driver,
-            retryable: false,
-        })
-    }
-}
-
 // `checkpoint_save` names a command via `evidenceRefs` and the server resolves the
 // evidence from the journal. Guards that a real journaled
 // `javaScriptResult`/`accessibilitySnapshot` outcome resolves by id and reaches
 // dispatch.
 #[tokio::test]
 async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_evidence_by_ref() {
-    let root = tempfile::tempdir().unwrap();
-    let journal = Arc::new(
-        JsonlJournal::open(root.path().join("journal.jsonl"))
-            .await
-            .unwrap(),
-    );
-    let workers = Arc::new(WorkerPool::new(1, Arc::new(UnusedFactory)));
-    let pages = PageRuntime::new(journal.clone(), workers);
-    let runtime_service = RuntimeService::new(SessionManager::default(), pages);
-
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000021")),
-            [Capability::RecoveryWrite],
+            [
+                Capability::RecoveryWrite,
+                Capability::RecoveryRead,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+                Capability::BrowserMutate,
+            ],
             Utc::now() + Duration::hours(1),
         )
         .await
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
-    let runtime = Arc::new(AuthenticatedRuntime::new(runtime_service, handle));
-    let server = Server::new(runtime.clone());
-    initialize(&server).await;
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 700;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
 
-    let checkpoint = WorkflowCheckpoint {
-        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
-        checkpoint_id: CheckpointId::new(),
-        workflow_id: WorkflowId::new(),
-        attempt_id: AttemptId::new(),
-        session_id: SessionId::new(),
-        page_id: types::PageId::new(),
-        restart_url: "https://example.test/".to_owned(),
-        current_url: "https://example.test/".to_owned(),
-        cursor: None,
-        boundary_command_id: None,
-        recovery_class: CommandClass::Reconciliable,
-        invariants: vec![],
-        replayable_inputs: vec![],
-        evidence: vec![],
-        recovery_history: vec![],
-        recovery_receipts: vec![],
-        created_at: Utc::now(),
-    };
-
+    let workflow_id = WorkflowId::new();
+    let attempt_id = AttemptId::new();
     let command_id = CommandId::new();
     let evidence = vec![
         Evidence::JavaScriptResult {
@@ -713,7 +675,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
             truncated: false,
         },
         Evidence::AccessibilitySnapshot {
-            page_id: checkpoint.page_id.clone(),
+            page_id: page_id.clone(),
             nodes: vec![types::AccessibilityNode {
                 role: Some("textbox".into()),
                 name: Some("Email".into()),
@@ -730,7 +692,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
     // The `Accepted` phase record carries the envelope (and so the owning session),
     // the terminal one carries the outcome. `resolve_command_evidence` needs both:
     // the envelope to verify ownership, the outcome for the evidence.
-    journal
+    live.journal
         .append(JournalRecord {
             sequence: 0,
             recorded_at: Utc::now(),
@@ -739,10 +701,10 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
             envelope: Some(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id: command_id.clone(),
-                workflow_id: checkpoint.workflow_id.clone(),
-                attempt_id: checkpoint.attempt_id.clone(),
-                session_id: checkpoint.session_id.clone(),
-                page_id: Some(checkpoint.page_id.clone()),
+                workflow_id: workflow_id.clone(),
+                attempt_id: attempt_id.clone(),
+                session_id: session_id.clone(),
+                page_id: Some(page_id.clone()),
                 deadline: Utc::now() + Duration::seconds(30),
                 command: RuntimeCommand::Primitive(PrimitiveCommand::Inspect(
                     types::InspectCommand::default(),
@@ -753,7 +715,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
         })
         .await
         .unwrap();
-    journal
+    live.journal
         .append(JournalRecord {
             sequence: 0,
             recorded_at: Utc::now(),
@@ -769,7 +731,28 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
         .await
         .unwrap();
 
-    let response = server
+    let checkpoint = WorkflowCheckpoint {
+        schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+        checkpoint_id: CheckpointId::new(),
+        workflow_id,
+        attempt_id,
+        session_id,
+        page_id,
+        restart_url: "https://example.test/".to_owned(),
+        current_url: "https://example.test/".to_owned(),
+        cursor: None,
+        boundary_command_id: None,
+        recovery_class: CommandClass::Reconciliable,
+        invariants: vec![],
+        replayable_inputs: vec![],
+        evidence: vec![],
+        recovery_history: vec![],
+        recovery_receipts: vec![],
+        created_at: Utc::now(),
+    };
+
+    let saved = live
+        .server
         .handle_message(request(
             54,
             "tools/call",
@@ -780,16 +763,31 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
         ))
         .await
         .unwrap();
+    assert!(saved["error"].is_null(), "{saved}");
 
-    // This `RuntimeService` has no `RecoveryCoordinator`, so the call fails
-    // downstream with an interface error. -32602 would mean the refs were rejected
-    // before `runtime.checkpoint` ran.
-    assert_ne!(response["error"]["code"], -32602, "{response}");
-    assert_eq!(
-        runtime.checkpoint_dispatch_count(),
-        1,
-        "evidenceRefs must resolve JavaScript and actionable accessibility evidence from the \
-         journal and reach dispatch: {response}"
+    // Read it back: the persisted checkpoint must carry the evidence the
+    // runtime resolved from the journal, not an empty bag.
+    let status = live
+        .server
+        .handle_message(request(
+            55,
+            "tools/call",
+            json!({
+                "name":"recovery_status",
+                "arguments":{"workflowId":checkpoint.workflow_id.0.to_string()}
+            }),
+        ))
+        .await
+        .unwrap();
+    let kinds: Vec<&str> = status["result"]["structuredContent"]["checkpoint"]["evidence"]
+        .as_array()
+        .unwrap_or_else(|| panic!("checkpoint has no evidence: {status}"))
+        .iter()
+        .filter_map(|item| item["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"javaScriptResult") && kinds.contains(&"accessibilitySnapshot"),
+        "resolved evidence must land in the checkpoint: {status}"
     );
 }
 
@@ -1052,23 +1050,29 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000022")),
-            [Capability::BrowserMutate, Capability::IntentExecute],
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
             Utc::now() + Duration::hours(1),
         )
         .await
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
-    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
-    let server = Server::new(runtime);
-    initialize(&server).await;
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 100;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
 
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
-        session_id: SessionId::new(),
-        page_id: None,
+        session_id,
+        page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Intent(IntentCommand::Locate(LocateIntent {
             purpose: "Continue".to_owned(),
@@ -1076,7 +1080,8 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
         })),
     };
 
-    let response = server
+    let response = live
+        .server
         .handle_message(request(
             70,
             "tools/call",
@@ -1088,21 +1093,51 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
         .await
         .unwrap();
 
-    // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
-    assert_ne!(response["error"]["code"], -32602, "{response}");
+    // The envelope must execute to a terminal outcome through the real
+    // runtime, not merely pass schema validation. The fake DOM has no
+    // candidates, so the intent engine's own evidence proves it ran:
+    // deterministic resolution, zero candidates, verification targetNotFound.
+    let content = &response["result"]["structuredContent"];
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(content["commandId"], envelope.command_id.0.to_string());
+    assert_eq!(content["status"], "failed", "{response}");
+    assert_eq!(response["result"]["isError"], json!(true), "{response}");
+    let record = &content["evidence"][0]["record"];
+    assert_eq!(record["intentKind"], "locate", "{response}");
+    assert_eq!(record["resolutionPath"], "deterministic", "{response}");
+    assert_eq!(record["candidates"], json!([]), "{response}");
+    assert_eq!(record["verification"], "targetNotFound", "{response}");
 }
 
 #[tokio::test]
 async fn command_execute_schema_accepts_fill_intent_with_snapshot_ordinal() {
-    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
-    initialize(&server).await;
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000071")),
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 200;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
-        session_id: SessionId::new(),
-        page_id: None,
+        session_id,
+        page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
             purpose: "enter the applicant name".into(),
@@ -1117,11 +1152,14 @@ async fn command_execute_schema_accepts_fill_intent_with_snapshot_ordinal() {
             },
         })),
     };
+    // The snapshot-produced hints shape (ordinal present) must parse AND run.
     let mut envelope_value = serde_json::to_value(&envelope).unwrap();
     envelope_value["command"]["input"]["input"]["hints"]["ordinal"] = json!(1);
-    let response = server
+    next_id += 1;
+    let response = live
+        .server
         .handle_message(request(
-            71,
+            next_id,
             "tools/call",
             json!({
                 "name":"command_execute", "arguments":{"envelope":envelope_value}
@@ -1129,23 +1167,38 @@ async fn command_execute_schema_accepts_fill_intent_with_snapshot_ordinal() {
         ))
         .await
         .unwrap();
-    assert_ne!(
-        response["error"]["code"], -32602,
-        "{response}; envelope={envelope_value}"
-    );
+    common::assert_intent_domain_failure(&response, &envelope, "fill");
 }
 
 #[tokio::test]
 async fn command_execute_schema_accepts_bounded_complete_form_intent() {
-    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
-    initialize(&server).await;
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000072")),
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 300;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
-        session_id: SessionId::new(),
-        page_id: None,
+        session_id,
+        page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Intent(IntentCommand::CompleteForm(CompleteFormIntent {
             purpose: "complete application form".into(),
@@ -1164,15 +1217,10 @@ async fn command_execute_schema_accepts_bounded_complete_form_intent() {
             }],
         })),
     };
-    let response = server
-        .handle_message(request(
-            72,
-            "tools/call",
-            json!({"name":"command_execute", "arguments":{"envelope":serde_json::to_value(envelope).unwrap()}}),
-        ))
-        .await
-        .unwrap();
-    assert_ne!(response["error"]["code"], -32602, "{response}");
+    let response = common::execute_envelope(&live.server, &mut next_id, &envelope).await;
+    // completeForm decomposes into per-field fill intents, and the harness
+    // DOM has no candidates, so the first field fails deterministically.
+    common::assert_intent_domain_failure(&response, &envelope, "fill");
 }
 
 #[tokio::test]
@@ -1228,23 +1276,29 @@ async fn command_execute_schema_accepts_follow_intent_envelope() {
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000024")),
-            [Capability::BrowserMutate, Capability::IntentExecute],
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
             Utc::now() + Duration::hours(1),
         )
         .await
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
-    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
-    let server = Server::new(runtime);
-    initialize(&server).await;
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 400;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
 
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
-        session_id: SessionId::new(),
-        page_id: None,
+        session_id,
+        page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Intent(IntentCommand::Follow(FollowIntent {
             purpose: "Details".to_owned(),
@@ -1259,20 +1313,8 @@ async fn command_execute_schema_accepts_follow_intent_envelope() {
         })),
     };
 
-    let response = server
-        .handle_message(request(
-            72,
-            "tools/call",
-            json!({
-                "name":"command_execute",
-                "arguments":{"envelope":envelope}
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
-    assert_ne!(response["error"]["code"], -32602, "{response}");
+    let response = common::execute_envelope(&live.server, &mut next_id, &envelope).await;
+    common::assert_intent_domain_failure(&response, &envelope, "follow");
 }
 
 #[tokio::test]
@@ -1338,23 +1380,29 @@ async fn command_execute_schema_accepts_dismiss_obstruction_intent_envelope() {
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000026")),
-            [Capability::BrowserMutate, Capability::IntentExecute],
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
             Utc::now() + Duration::hours(1),
         )
         .await
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
-    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
-    let server = Server::new(runtime);
-    initialize(&server).await;
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 500;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
 
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
-        session_id: SessionId::new(),
-        page_id: None,
+        session_id,
+        page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Intent(IntentCommand::DismissObstruction(
             DismissObstructionIntent {
@@ -1365,20 +1413,8 @@ async fn command_execute_schema_accepts_dismiss_obstruction_intent_envelope() {
         )),
     };
 
-    let response = server
-        .handle_message(request(
-            74,
-            "tools/call",
-            json!({
-                "name":"command_execute",
-                "arguments":{"envelope":envelope}
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
-    assert_ne!(response["error"]["code"], -32602, "{response}");
+    let response = common::execute_envelope(&live.server, &mut next_id, &envelope).await;
+    common::assert_intent_domain_failure(&response, &envelope, "dismissObstruction");
 }
 
 #[tokio::test]
@@ -1440,23 +1476,29 @@ async fn command_execute_schema_accepts_extract_intent_envelope() {
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000028")),
-            [Capability::BrowserMutate, Capability::IntentExecute],
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
             Utc::now() + Duration::hours(1),
         )
         .await
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
-    let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
-    let server = Server::new(runtime);
-    initialize(&server).await;
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 600;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
 
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
         workflow_id: WorkflowId::new(),
         attempt_id: AttemptId::new(),
-        session_id: SessionId::new(),
-        page_id: None,
+        session_id,
+        page_id: Some(page_id),
         deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Intent(IntentCommand::Extract(types::ExtractIntent {
             purpose: "Profile summary".to_owned(),
@@ -1477,20 +1519,29 @@ async fn command_execute_schema_accepts_extract_intent_envelope() {
         })),
     };
 
-    let response = server
-        .handle_message(request(
-            76,
-            "tools/call",
-            json!({
-                "name":"command_execute",
-                "arguments":{"envelope":envelope}
-            }),
-        ))
-        .await
-        .unwrap();
-
-    // Downstream may fail (unknown session, etc.); schema must not reject with INVALID_PARAMS.
-    assert_ne!(response["error"]["code"], -32602, "{response}");
+    let response = common::execute_envelope(&live.server, &mut next_id, &envelope).await;
+    // extract is Replayable: unresolvable fields are reported per-field
+    // rather than failing the call. The harness DOM has no candidates, so
+    // both fields come back deterministic-but-missing.
+    let content = &response["result"]["structuredContent"];
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(content["status"], "completed", "{response}");
+    assert_eq!(response["result"]["isError"], json!(false), "{response}");
+    let fields: Vec<&str> = content["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "extraction")
+        .filter_map(|item| item["field"].as_str())
+        .collect();
+    assert_eq!(fields, ["displayName", "profileLink"], "{response}");
+    let record = &content["evidence"][2]["record"];
+    assert_eq!(record["intentKind"], "extract", "{response}");
+    assert_eq!(record["resolutionPath"], "deterministic", "{response}");
+    assert_eq!(
+        record["verification"], "extractedPartial:missing=displayName,profileLink",
+        "{response}"
+    );
 }
 
 #[tokio::test]
@@ -2037,14 +2088,31 @@ async fn intent_tools_require_intent_execute_alongside_browser_mutate() {
 
 #[tokio::test]
 async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
-    let server = Server::new(Arc::new(authenticated_with_intents().await));
-    initialize(&server).await;
-
-    let session_id = SessionId::new().0.to_string();
-    let page_id = types::PageId::new().0.to_string();
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000073")),
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 900;
+    let (session, page) = common::create_session_and_page(&live.server, &mut next_id).await;
+    let session_id = session.0.to_string();
+    let page_id = page.0.to_string();
 
     // No commandId/workflowId/attemptId/deadline from the caller.
-    let located = server
+    let located = live
+        .server
         .handle_message(request(
             73,
             "tools/call",
@@ -2060,13 +2128,25 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
         located["result"]["structuredContent"]["commandId"].is_string(),
         "{located}"
     );
+    // The outcome is real too: the intent engine ran and found no candidates
+    // on the fake DOM.
+    assert_eq!(
+        located["result"]["structuredContent"]["status"], "failed",
+        "{located}"
+    );
+    assert_eq!(
+        located["result"]["structuredContent"]["evidence"][0]["record"]["verification"],
+        "targetNotFound",
+        "{located}"
+    );
     let minted = located["result"]["structuredContent"]["workflowId"]
         .as_str()
         .expect("outcome names its workflow");
 
     // Passing that workflow back keeps the next intent in the same workflow,
     // which is what makes `checkpoint_save` reachable from these tools.
-    let filled = server
+    let filled = live
+        .server
         .handle_message(request(
             74,
             "tools/call",
@@ -2092,7 +2172,8 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
     );
 
     // Omitting it mints a fresh workflow instead of reusing the last one.
-    let separate = server
+    let separate = live
+        .server
         .handle_message(request(
             75,
             "tools/call",
@@ -2110,7 +2191,8 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
     );
 
     // Arguments stay closed.
-    let unknown = server
+    let unknown = live
+        .server
         .handle_message(request(
             76,
             "tools/call",
@@ -2130,7 +2212,7 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
     assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
 
     // `intent_wait_for_state` carries no purpose of its own.
-    let waited = server
+    let waited = live.server
         .handle_message(request(77, "tools/call", json!({
             "name":"intent_wait_for_state",
             "arguments":{
@@ -2257,10 +2339,28 @@ async fn rejected_arguments_name_the_offending_field_and_constraint() {
 
 #[tokio::test]
 async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes() {
-    let server = fixture_server(vec![Capability::BrowserMutate]).await;
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000065")),
+            [
+                Capability::BrowserMutate,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 800;
+    let (session_id, _) = common::create_session_and_page(&live.server, &mut next_id).await;
     let deadline = (Utc::now() + Duration::seconds(270)).to_rfc3339();
 
-    let response = server
+    let response = live
+        .server
         .handle_message(request(
             65,
             "tools/call",
@@ -2271,7 +2371,7 @@ async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes(
                     "commandId":"10000000-0000-0000-0000-000000000101",
                     "workflowId":"10000000-0000-0000-0000-000000000102",
                     "attemptId":"10000000-0000-0000-0000-000000000103",
-                    "sessionId":"10000000-0000-0000-0000-000000000104",
+                    "sessionId":session_id.0.to_string(),
                     "pageId":null,
                     "deadline":deadline,
                     "command":{"kind":"primitive","input":{"kind":"listPages","input":null}}
@@ -2281,12 +2381,17 @@ async fn command_execute_accepts_an_agent_authored_deadline_within_five_minutes(
         .await
         .unwrap();
 
+    // The deadline is accepted AND the command completes through the real
+    // runtime: listPages is exempt from the pageId requirement, and the fake
+    // worker returns Pages evidence that verifies.
     assert!(response.get("error").is_none(), "{response}");
+    let content = &response["result"]["structuredContent"];
     assert_eq!(
-        response["result"]["structuredContent"]["commandId"],
-        "10000000-0000-0000-0000-000000000101",
+        content["commandId"], "10000000-0000-0000-0000-000000000101",
         "{response}"
     );
+    assert_eq!(content["status"], "completed", "{response}");
+    assert_eq!(content["evidence"][0]["kind"], "pages", "{response}");
 }
 
 #[tokio::test]
