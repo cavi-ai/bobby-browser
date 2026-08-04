@@ -1,6 +1,9 @@
 import {
   NativeCompanionTransport,
+  createEnrollProfileRequest,
+  enrollOperatorMessage,
   parseNativeInboundMessage,
+  type EnrollFailureCode,
   type NativePairRequest,
   type NativePort,
 } from "./native-transport.js";
@@ -22,14 +25,20 @@ import {
   type FingerprintProfile,
   type FingerprintStorage,
 } from "./fingerprint.js";
-import { buildPopupStatus, type PopupStatus } from "./popup-status.js";
+import { buildPopupStatus, type EnrollPhase, type PopupStatus } from "./popup-status.js";
 
 export const MAX_PAGE_LEASES = 256;
 export const PAGE_LEASE_TTL_MS = 60_000;
+export const ENROLL_PAIR_TIMEOUT_MS = 30_000;
+const ENROLL_OPERATOR_FALLBACK = "Start bobby serve, then Pair again";
 const OBSERVATION_RECEIVER_ATTEMPTS = 20;
 const OBSERVATION_RECEIVER_DELAY_MS = 50;
 const MAX_ID_COMPONENT_BYTES = 96;
 const PAGE_BINDING_TITLE_PREFIX = "automation-runtime-binding:";
+
+export type EnrollPairResult =
+  | { ok: true }
+  | { ok: false; code: string; message: string };
 
 export type BackgroundConnectOptions = {
   companionId: string;
@@ -83,6 +92,9 @@ export type BackgroundDependencies = {
   navigateTab(tabId: number, url: string): Promise<void>;
   createTargetId?: (target: DiscoveredTarget) => string;
   now?: () => number;
+  enrollTimeoutMs?: number;
+  scheduleTimeout?: (callback: () => void, delayMs: number) => unknown;
+  cancelTimeout?: (handle: unknown) => void;
   /** When true, Bobby worker owns fingerprint apply; extension registration clears. */
   setFingerprintManagedByHost?: (
     managed: boolean,
@@ -195,6 +207,14 @@ export class CompanionBackground {
   #started = false;
   #lastError: { code: string; message: string } | undefined;
   #unpairedReason = "waiting to pair";
+  #enrollPhase: EnrollPhase = "idle";
+  #enrollError: { code: string; message: string } | undefined;
+  #enrollWaiter:
+    | {
+        resolve(result: EnrollPairResult): void;
+        timeoutHandle: unknown;
+      }
+    | undefined;
 
   constructor(dependencies: BackgroundDependencies) {
     this.#dependencies = dependencies;
@@ -230,6 +250,7 @@ export class CompanionBackground {
 
   stop(): void {
     this.#paired = false;
+    this.#started = false;
     this.#unpairedReason = "disconnected";
     this.#leases.clear();
     this.#targets.clear();
@@ -237,6 +258,61 @@ export class CompanionBackground {
     this.#tabLifecycles.clear();
     void this.#setFingerprintManagedByHost(false);
     this.#dependencies.transport.stop();
+  }
+
+  async enrollPair(): Promise<EnrollPairResult> {
+    if (this.#enrollPhase === "pairing" && this.#enrollWaiter) {
+      return new Promise((resolve) => {
+        const prior = this.#enrollWaiter;
+        this.#enrollWaiter = {
+          timeoutHandle: prior?.timeoutHandle,
+          resolve: (result) => {
+            prior?.resolve(result);
+            resolve(result);
+          },
+        };
+      });
+    }
+
+    const options = this.#options;
+    if (!options) {
+      return this.#failEnroll("listenerUnavailable");
+    }
+
+    this.#enrollPhase = "pairing";
+    this.#enrollError = undefined;
+
+    // Fresh native port so enrollProfile is the first host frame (Task 5).
+    this.#dependencies.transport.stop();
+    this.#started = false;
+    this.#paired = false;
+    this.#unpairedReason = "waiting to pair";
+    this.#leases.clear();
+    this.#targets.clear();
+    this.#targetIdsByRoute.clear();
+    this.#tabLifecycles.clear();
+    void this.#setFingerprintManagedByHost(false);
+
+    this.#dependencies.transport.start((message) => this.receive(message));
+    this.#started = true;
+
+    if (this.#dependencies.transport.isConnected && !this.#dependencies.transport.isConnected()) {
+      return this.#failEnroll("listenerUnavailable");
+    }
+
+    try {
+      this.#dependencies.transport.send(createEnrollProfileRequest());
+    } catch {
+      return this.#failEnroll("listenerUnavailable");
+    }
+
+    try {
+      this.connect(options);
+    } catch {
+      return this.#failEnroll("listenerUnavailable");
+    }
+
+    return await this.#waitForEnrollResult();
   }
 
   async getPopupStatus(storage: FingerprintStorage): Promise<PopupStatus> {
@@ -261,6 +337,8 @@ export class CompanionBackground {
       fingerprintSessionId: sessionId,
       fingerprintSessionSeed: sessionSeed,
       lastError: this.#lastError,
+      enrollPhase: this.#enrollPhase,
+      enrollError: this.#enrollError,
       protocolVersion: PROTOCOL_VERSION,
     });
   }
@@ -269,13 +347,14 @@ export class CompanionBackground {
     message: unknown,
     sender: RuntimeSender,
     extensionId: string,
-  ): Promise<void> {
-    if (
-      !object(message) ||
-      sender.id !== extensionId ||
-      !validBrowserId(sender.tab?.id) ||
-      !validBrowserId(sender.frameId)
-    ) {
+  ): Promise<EnrollPairResult | void> {
+    if (!object(message) || sender.id !== extensionId) {
+      return;
+    }
+    if (exactKeys(message, ["type"]) && message.type === "enrollPair") {
+      return this.enrollPair();
+    }
+    if (!validBrowserId(sender.tab?.id) || !validBrowserId(sender.frameId)) {
       return;
     }
     const frameReady = exactKeys(message, ["type"]) && message.type === "companionFrameReady";
@@ -403,7 +482,10 @@ export class CompanionBackground {
       this.#acceptGrant(incoming.input);
       return;
     }
-    if (incoming.kind === "nativeStatus") return;
+    if (incoming.kind === "nativeStatus") {
+      this.#handleNativeStatus(incoming.output);
+      return;
+    }
 
     const { input } = incoming;
     const now = (this.#dependencies.now ?? Date.now)();
@@ -528,6 +610,83 @@ export class CompanionBackground {
       this.#registerTarget(target);
     }
     this.#sendDiscovery();
+    this.#resolveEnroll({ ok: true });
+  }
+
+  #handleNativeStatus(
+    output:
+      | { state: "invalidAuth" | "revoked" }
+      | { state: "enrollOk" }
+      | { state: "enrollFailed"; code: EnrollFailureCode },
+  ): void {
+    if (output.state === "enrollFailed") {
+      this.#resolveEnroll({
+        ok: false,
+        code: output.code,
+        message: enrollOperatorMessage(output.code) ?? ENROLL_OPERATOR_FALLBACK,
+      });
+      return;
+    }
+    if (output.state === "enrollOk") {
+      // paired already resolves the waiter; enrollOk alone still counts as success.
+      if (this.#paired) {
+        this.#resolveEnroll({ ok: true });
+      }
+    }
+  }
+
+  #waitForEnrollResult(): Promise<EnrollPairResult> {
+    return new Promise((resolve) => {
+      const schedule =
+        this.#dependencies.scheduleTimeout ??
+        ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+      const timeoutMs = this.#dependencies.enrollTimeoutMs ?? ENROLL_PAIR_TIMEOUT_MS;
+      const timeoutHandle = schedule(() => {
+        this.#resolveEnroll({
+          ok: false,
+          code: "timeout",
+          message: enrollOperatorMessage("timeout") ?? "Pairing timed out",
+        });
+      }, timeoutMs);
+      this.#enrollWaiter = { resolve, timeoutHandle };
+    });
+  }
+
+  #failEnroll(code: EnrollFailureCode): EnrollPairResult {
+    const result: EnrollPairResult = {
+      ok: false,
+      code,
+      message: enrollOperatorMessage(code) ?? ENROLL_OPERATOR_FALLBACK,
+    };
+    this.#enrollPhase = "failed";
+    this.#enrollError = { code: result.code, message: result.message };
+    return result;
+  }
+
+  #resolveEnroll(result: EnrollPairResult): void {
+    const waiter = this.#enrollWaiter;
+    if (!waiter) {
+      if (result.ok) {
+        this.#enrollPhase = "idle";
+        this.#enrollError = undefined;
+      } else {
+        this.#enrollPhase = "failed";
+        this.#enrollError = { code: result.code, message: result.message };
+      }
+      return;
+    }
+    this.#enrollWaiter = undefined;
+    if (waiter.timeoutHandle !== undefined) {
+      (this.#dependencies.cancelTimeout ?? clearTimeout)(waiter.timeoutHandle as never);
+    }
+    if (result.ok) {
+      this.#enrollPhase = "idle";
+      this.#enrollError = undefined;
+    } else {
+      this.#enrollPhase = "failed";
+      this.#enrollError = { code: result.code, message: result.message };
+    }
+    waiter.resolve(result);
   }
 
   async #setFingerprintManagedByHost(
@@ -807,6 +966,14 @@ export async function startProductionBackground(
       message.type === "popupStatus"
     ) {
       return background.getPopupStatus(browserApi.storage);
+    }
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "type" in message &&
+      message.type === "enrollPair"
+    ) {
+      return background.enrollPair();
     }
     void background
       .receiveRuntimeMessage(message, _sender, browserApi.runtime.id)
