@@ -46,16 +46,19 @@ impl SessionManager {
     }
 
     pub async fn delete(&self, id: &SessionId) -> Result<(), RuntimeError> {
-        let removed = self.inner.write().await.remove(id);
-        if removed.is_none() {
+        if !self.inner.read().await.contains_key(id) {
             return Err(RuntimeError::NotFound("session".into()));
         }
+        // Release before unregistering: if the release fails, the session
+        // stays listed so the caller can retry -- removing first would leak
+        // the browser with no handle left to close it.
         if let Some(workers) = &self.workers {
             workers
                 .release_session(id)
                 .await
                 .map_err(|error| RuntimeError::Internal(error.message))?;
         }
+        self.inner.write().await.remove(id);
         tracing::info!(session_id = %id.0, "session.deleted");
         Ok(())
     }

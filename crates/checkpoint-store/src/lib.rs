@@ -290,12 +290,13 @@ impl CheckpointStore {
     }
 
     async fn workflow_lock(&self, workflow_id: &WorkflowId) -> Arc<Mutex<()>> {
-        self.workflow_locks
-            .lock()
-            .await
-            .entry(workflow_id.clone())
-            .or_default()
-            .clone()
+        let mut locks = self.workflow_locks.lock().await;
+        // Amortized pruning: an entry whose only reference is the map itself
+        // has no operation holding or waiting on it, so it can never be
+        // contended again -- without this the map gains one entry per
+        // workflow id for the life of the process.
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        locks.entry(workflow_id.clone()).or_default().clone()
     }
 }
 

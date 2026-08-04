@@ -1,6 +1,10 @@
 use crate::wire::{ExtractResponse, ProposeResponse, VisionAction};
 
 const MAX_TEXT_BYTES: usize = 4096;
+/// Serialized-size bound on an upstream extract value: the proxy forwards
+/// this JSON to the runtime, so an unbounded upstream response would become
+/// an unbounded downstream one.
+const MAX_EXTRACT_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ValidateError {
@@ -29,7 +33,12 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
     }
 }
 
-pub fn validate_extract(_response: &ExtractResponse) -> Result<(), ValidateError> {
+pub fn validate_extract(response: &ExtractResponse) -> Result<(), ValidateError> {
+    let serialized =
+        serde_json::to_string(&response.value).map_err(|_| ValidateError::ExtractValueTooLong)?;
+    if serialized.len() > MAX_EXTRACT_VALUE_BYTES {
+        return Err(ValidateError::ExtractValueTooLong);
+    }
     Ok(())
 }
 
@@ -66,5 +75,24 @@ mod tests {
             action: VisionAction::Click { x: 12.0, y: 34.0 },
         };
         assert!(validate_proposal(&ok).is_ok());
+    }
+
+    #[test]
+    fn extract_rejects_an_oversized_value() {
+        let too_big = ExtractResponse {
+            value: serde_json::json!({"data": "x".repeat(128 * 1024)}),
+        };
+        assert_eq!(
+            validate_extract(&too_big),
+            Err(ValidateError::ExtractValueTooLong)
+        );
+    }
+
+    #[test]
+    fn extract_accepts_an_in_range_value() {
+        let ok = ExtractResponse {
+            value: serde_json::json!({"title": "Example", "price": 42}),
+        };
+        assert!(validate_extract(&ok).is_ok());
     }
 }

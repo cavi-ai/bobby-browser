@@ -1221,6 +1221,10 @@ impl FirefoxCompanionWorker {
                                 mark_destroyed_context(&cleanup_pages, &cleanup_registry, context)
                                     .await;
                             release_removed_pages(&task_failure, removals).await;
+                            // A prompt pending on a destroyed context can
+                            // never be handled; drop it or the map grows one
+                            // orphan per killed tab with an open dialog.
+                            cleanup_prompts.write().await.remove(context);
                         }
                     }
                     Ok(event) if event.method == "network.beforeRequestSent" => {
@@ -5203,8 +5207,11 @@ impl FirefoxCompanionWorker {
     }
 }
 
+/// JSON string serialization is a complete JS string-literal escape: the
+/// hand-rolled version escaped only `\` and `"`, so a cookie name/value with
+/// `;` or a newline could inject attributes or break the statement.
 fn js_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    serde_json::to_string(value).expect("serializing a &str cannot fail")
 }
 
 fn now_unix_seconds() -> f64 {
@@ -5392,5 +5399,17 @@ mod cookie_match_tests {
             "https://example.com/other"
         ));
         assert!(!cookie_matches_url("example.com", "/", "not a url"));
+    }
+}
+
+#[cfg(test)]
+mod js_string_tests {
+    use super::js_string;
+
+    #[test]
+    fn cookie_text_cannot_escape_its_string_literal() {
+        assert_eq!(js_string("a;b\n"), "\"a;b\\n\"");
+        assert_eq!(js_string("x\";alert(1);//"), "\"x\\\";alert(1);//\"");
+        assert_eq!(js_string("back\\slash"), "\"back\\\\slash\"");
     }
 }
