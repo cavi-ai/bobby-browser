@@ -182,7 +182,9 @@ async fn gate_b_session_without_execution_policy_grant_is_policy_denied_before_d
     )
     .await;
 
-    assert_eq!(outcome["result"]["isError"], false, "{outcome}");
+    // A non-completed outcome is a failed tool call: isError mirrors the
+    // policyDenied status rather than reporting transport-level success.
+    assert_eq!(outcome["result"]["isError"], true, "{outcome}");
     assert_eq!(
         outcome["result"]["structuredContent"]["status"], "policyDenied",
         "{outcome}"
