@@ -1,7 +1,7 @@
 //! WebGL vendor/renderer profile generation.
 
 use rand::rngs::StdRng;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

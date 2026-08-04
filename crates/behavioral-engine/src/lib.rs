@@ -20,7 +20,7 @@ pub use typing::{
 };
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -95,10 +95,18 @@ pub fn session_pause(random: &mut SessionRandom, config: &BehavioralConfig) -> D
 }
 
 /// Session-level randomness generator for consistent-but-unique behavior.
-#[derive(Clone)]
 pub struct SessionRandom {
     seed: u64,
     rng: StdRng,
+}
+
+impl Clone for SessionRandom {
+    fn clone(&self) -> Self {
+        // `StdRng` is no longer `Clone` in rand 0.10; recreate from the seed.
+        // Callers that need an independent mid-stream fork should track draws
+        // themselves — seed-only clone matches how SessionRandom is constructed.
+        Self::new(self.seed)
+    }
 }
 
 impl SessionRandom {
