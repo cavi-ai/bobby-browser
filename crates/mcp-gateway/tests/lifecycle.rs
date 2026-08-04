@@ -154,6 +154,69 @@ async fn stdio_is_one_bounded_object_per_line_and_eof_is_clean() {
     }
 }
 
+/// Clients often write `notifications/initialized` and the next request without
+/// waiting. Those frames must not be handled concurrently, or the request
+/// observes `AwaitingInitializedNotification` and returns -32002.
+#[tokio::test]
+async fn stdio_initialized_then_next_request_does_not_race_to_not_initialized() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    for _ in 0..64 {
+        let server = fixture_server(vec![Capability::SessionRead]).await;
+        let (client, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut reader = BufReader::new(client_read);
+
+        let driver = async {
+            // One write keeps initialized + tools/list adjacent on the wire —
+            // the race the concurrent pending dispatch used to lose.
+            client_write
+                .write_all(
+                    concat!(
+                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"race\",\"version\":\"1\"}}}\n",
+                        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n",
+                        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("handshake writes");
+
+            let mut lines = Vec::new();
+            while lines.len() < 2 {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("stdout reads");
+                lines.push(serde_json::from_str::<Value>(line.trim()).expect("json line"));
+            }
+            drop(client_write);
+            lines
+        };
+
+        let lines = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                result = server.serve(server_read, server_write) => {
+                    panic!("serve returned before handshake finished: {result:?}")
+                }
+                lines = driver => lines,
+            }
+        })
+        .await
+        .expect("handshake timed out");
+
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].get("result").is_some(), "{}", lines[0]);
+        assert_eq!(lines[1]["id"], 2, "{}", lines[1]);
+        assert_ne!(
+            lines[1].pointer("/error/code"),
+            Some(&json!(-32002)),
+            "initialized/tools/list raced: {}",
+            lines[1]
+        );
+        assert!(lines[1]["result"]["tools"].is_array(), "{}", lines[1]);
+    }
+}
+
 #[tokio::test]
 async fn initialize_rejects_non_object_and_oversized_capabilities_without_advancing() {
     for capabilities in [
