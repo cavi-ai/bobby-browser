@@ -2,6 +2,7 @@ import { PROTOCOL_VERSION } from "./protocol.js";
 
 export type FingerprintOwner = "host" | "popup";
 export type HumanizeStatus = "on" | "off" | "unknown";
+export type EnrollPhase = "idle" | "pairing" | "failed";
 
 export type PopupStatus = {
   paired: boolean;
@@ -18,6 +19,8 @@ export type PopupStatus = {
   };
   humanize: HumanizeStatus;
   lastError?: { code: string; message: string };
+  enrollPhase?: EnrollPhase;
+  enrollError?: { code: string; message: string };
   protocolVersion: number;
 };
 
@@ -33,6 +36,8 @@ export type PopupStatusInput = {
   fingerprintSessionId?: string;
   fingerprintSessionSeed?: number;
   lastError?: { code: string; message: string };
+  enrollPhase?: EnrollPhase;
+  enrollError?: { code: string; message: string };
   protocolVersion: number;
 };
 
@@ -64,6 +69,8 @@ export function buildPopupStatus(input: PopupStatusInput): PopupStatus {
     if (input.profileId !== undefined) status.profileId = input.profileId;
   }
   if (input.lastError !== undefined) status.lastError = input.lastError;
+  if (input.enrollPhase !== undefined) status.enrollPhase = input.enrollPhase;
+  if (input.enrollError !== undefined) status.enrollError = input.enrollError;
   return status;
 }
 
