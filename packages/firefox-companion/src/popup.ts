@@ -60,6 +60,11 @@ function renderConnection(el: HTMLElement, status: PopupStatus): void {
   const doc = el.ownerDocument;
   el.replaceChildren();
 
+  if (status.enrollPhase === "pairing") {
+    el.appendChild(doc.createTextNode("Pairing…"));
+    return;
+  }
+
   const badge = doc.createElement("span");
   if (status.paired) {
     badge.className = "badge badge-paired";
@@ -78,6 +83,17 @@ function renderConnection(el: HTMLElement, status: PopupStatus): void {
     const reason = status.unpairedReason ?? "Not paired";
     el.appendChild(doc.createTextNode(`\n${reason}`));
   }
+
+  if (status.enrollPhase === "failed" && status.enrollError) {
+    el.appendChild(doc.createTextNode(`\n${status.enrollError.message}`));
+  }
+}
+
+function renderPairButton(root: ParentNode, status: PopupStatus): void {
+  const button = root.querySelector("#pair-button") as HTMLButtonElement | null;
+  if (!button) return;
+  button.textContent = status.paired ? "Re-pair" : "Pair";
+  button.disabled = status.enrollPhase === "pairing";
 }
 
 export function renderPopup(root: ParentNode, status: PopupStatus): void {
@@ -85,6 +101,7 @@ export function renderPopup(root: ParentNode, status: PopupStatus): void {
   if (connection) {
     renderConnection(connection, status);
   }
+  renderPairButton(root, status);
 
   const session = sectionStatus(root, "session");
   if (session) {
@@ -146,12 +163,14 @@ export async function applyStatusOrFallback(
   if (!status) {
     showStatusUnavailable(root);
     await bindFingerprintToggle(browserApi, root);
+    await bindPairButton(browserApi, root);
     return;
   }
   renderPopup(root, status);
   if (status.fingerprint.owner === "popup") {
     await bindFingerprintToggle(browserApi, root);
   }
+  await bindPairButton(browserApi, root);
 }
 
 async function loadStatus(browserApi: BrowserApi): Promise<PopupStatus | undefined> {
@@ -160,6 +179,30 @@ async function loadStatus(browserApi: BrowserApi): Promise<PopupStatus | undefin
   } catch {
     return undefined;
   }
+}
+
+export async function bindPairButton(
+  browserApi: BrowserApi,
+  root: ParentNode,
+): Promise<void> {
+  const button = root.querySelector("#pair-button") as HTMLButtonElement | null;
+  if (!button || button.dataset.bound === "true") return;
+  button.dataset.bound = "true";
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await browserApi.runtime.sendMessage({ type: "enrollPair" });
+    } catch {
+      /* background may be restarting */
+    }
+    const status = await loadStatus(browserApi);
+    if (status) {
+      renderPopup(root, status);
+    } else {
+      showStatusUnavailable(root);
+    }
+  });
 }
 
 export async function bindFingerprintToggle(
