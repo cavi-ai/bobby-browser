@@ -64,6 +64,11 @@ Do not expect a preference alone to clear webdriver under an active BiDi session
 
 ### 3. Install the native messaging host
 
+`bobby install` (enable the Firefox companion item) copies the built extension,
+installs the native host, and writes `firefox-enroll-defaults.json` with the
+default profile path and descriptor location. The manual command below is
+equivalent when you need explicit paths:
+
 ```bash
 STATE="$HOME/Library/Application Support/bobby-browser"
 bobby install-firefox-native-host \
@@ -90,11 +95,48 @@ Firefox writes the BiDi endpoint to `$PROFILE/WebDriverBiDiServer.json`. A
 fixed port keeps `bidiUrl` stable across restarts; `--remote-debugging-port=0`
 also works if you read the port back from that file.
 
-### 5. Enroll the profile
+### 5. Enroll via popup Pair
 
-The extension generates and persists its own profile id on first run, so the
-selection config cannot be written before the first pairing. Enrollment
-discovers it:
+The extension generates and persists its own profile id on first run, so
+`browser-selection.json` cannot be written until enrollment completes. Use
+the companion toolbar popup (yellow **Bobby Companion** badge) as the
+primary enroll path:
+
+1. With Firefox still running under the Bobby profile (step 4), click the
+   toolbar badge and choose **Pair**.
+2. The native host infers `profileDir` from install defaults and the BiDi
+   URL from `$PROFILE/WebDriverBiDiServer.json`, runs the same enrollment
+   core as the CLI, and atomically persists
+   `<config-dir>/bobby-browser/browser-selection.json` (`0600` on Unix).
+3. First-time **Pair** bootstraps enrollment in the native host and does
+   **not** require `bobby serve` (serve needs the selection file first).
+   Day-2 **Re-pair** assumes `bobby serve` or the MCP gateway has
+   published a live descriptor.
+
+On success the popup shows a **Paired** badge with companion and profile
+ids. `bobby serve`, the MCP gateway, and `bobby doctor` then resolve the
+selection with no environment wiring:
+
+```json
+{"firefox":[{"attachmentTtlMs":300000,"bidiUrl":"ws://127.0.0.1:9222/session","companionBind":"127.0.0.1:9876","descriptorPath":"…/firefox-native-host-descriptor.json","pairingCodeTtlMs":300000,"profileDir":"…/firefox-profile","profileId":"…","timeoutMs":30000}],"preference":{"engine":"firefox","mode":"exact","profileId":"…"}}
+```
+
+Setting `AUTOMATION_RUNTIME_BROWSER_SELECTION` to that JSON remains
+supported as an override (it wins over the persisted file), e.g. for a
+one-off run against a different profile.
+
+If **Pair** fails, the popup shows an operator-safe message (no secrets):
+
+| Situation | Message |
+|---|---|
+| Re-pair while serve/gateway is down | Start bobby serve, then Pair again |
+| Firefox not started with remote debugging | Start Firefox with remote debugging, then Pair again |
+| Install defaults missing or profile path unknown | Profile path unknown — re-run bobby install (see docs) |
+| Enrollment timed out | Pairing timed out |
+
+#### CI / scripting
+
+For headless CI or automation, keep the CLI enroll command:
 
 ```bash
 bobby enroll-firefox-profile \
@@ -105,19 +147,8 @@ bobby enroll-firefox-profile \
   --timeout-secs 120
 ```
 
-On success it prints a single-line JSON value and persists it to
-`<config-dir>/bobby-browser/browser-selection.json` (atomic write;
-owner-only, `0600`, on Unix). From that point `bobby serve`, the MCP
-gateway, and `bobby doctor` resolve the selection with no environment
-wiring:
-
-```json
-{"firefox":[{"attachmentTtlMs":300000,"bidiUrl":"ws://127.0.0.1:9222/session","companionBind":"127.0.0.1:9876","descriptorPath":"…/firefox-native-host-descriptor.json","pairingCodeTtlMs":300000,"profileDir":"…/firefox-profile","profileId":"…","timeoutMs":30000}],"preference":{"engine":"firefox","mode":"exact","profileId":"…"}}
-```
-
-Setting `AUTOMATION_RUNTIME_BROWSER_SELECTION` to that JSON remains
-supported as an override (it wins over the persisted file), e.g. for a
-one-off run against a different profile.
+On success it prints a single-line JSON value and writes the same
+`browser-selection.json` as popup Pair.
 
 ### 6. Serve
 
@@ -147,6 +178,7 @@ backoff, so restarts of either side self-heal).
 
 The toolbar popup is the day-to-day operator panel for the companion:
 
+- **Pair / Re-pair** — enroll or refresh pairing (see step 5).
 - **Connection** — paired/unpaired badge, companion and profile ids when
   paired, or an unpaired reason.
 - **Session** — active lease count; when the host owns fingerprint spoofing,

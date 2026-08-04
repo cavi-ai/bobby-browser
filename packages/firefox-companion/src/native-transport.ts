@@ -26,6 +26,47 @@ export type NativePairRequest = {
   };
 };
 
+/** Secret-free enroll control frame; input must be exactly `{}`. */
+export type NativeEnrollProfileRequest = {
+  kind: "enrollProfile";
+  input: Record<string, never>;
+};
+
+export type EnrollFailureCode =
+  | "listenerUnavailable"
+  | "bindInUse"
+  | "bidiMissing"
+  | "defaultsMissing"
+  | "timeout";
+
+export const ENROLL_FAILURE_CODES = [
+  "listenerUnavailable",
+  "bindInUse",
+  "bidiMissing",
+  "defaultsMissing",
+  "timeout",
+] as const satisfies readonly EnrollFailureCode[];
+
+export const ENROLL_OPERATOR_MESSAGES: Record<EnrollFailureCode, string> = {
+  listenerUnavailable: "Start bobby serve, then Pair again",
+  bindInUse:
+    "Companion port already in use — if bobby serve is up, wait for its descriptor; otherwise free the bind",
+  bidiMissing: "Start Firefox with remote debugging, then Pair again",
+  defaultsMissing: "Profile path unknown — re-run bobby install (see docs)",
+  timeout: "Pairing timed out",
+};
+
+export function createEnrollProfileRequest(): NativeEnrollProfileRequest {
+  return { kind: "enrollProfile", input: {} };
+}
+
+export function enrollOperatorMessage(code: string): string | undefined {
+  if ((ENROLL_FAILURE_CODES as readonly string[]).includes(code)) {
+    return ENROLL_OPERATOR_MESSAGES[code as EnrollFailureCode];
+  }
+  return undefined;
+}
+
 type Listener<T> = { addListener(listener: T): void };
 
 export type NativePort = {
@@ -45,12 +86,20 @@ export type NativeTransportDependencies = {
 export type NativeInboundMessage =
   | Exclude<CompanionRequest, { kind: "pair" }>
   | Extract<CompanionEvent, { kind: "paired" }>
-  | NativeTerminalStatus;
+  | NativeTerminalStatus
+  | NativeEnrollStatus;
 
 export type NativeTerminalStatus = {
   kind: "nativeStatus";
   output: { state: "invalidAuth" | "revoked" };
 };
+
+export type NativeEnrollStatus =
+  | { kind: "nativeStatus"; output: { state: "enrollOk" } }
+  | {
+      kind: "nativeStatus";
+      output: { state: "enrollFailed"; code: EnrollFailureCode };
+    };
 
 const MAX_NATIVE_METADATA_BYTES = 256;
 const FORBIDDEN_SECRET_FIELD =
@@ -210,10 +259,52 @@ function isNativePairRequest(message: unknown): message is NativePairRequest {
   );
 }
 
+function isNativeEnrollProfileRequest(message: unknown): message is NativeEnrollProfileRequest {
+  return (
+    isObject(message) &&
+    message.kind === "enrollProfile" &&
+    exactKeys(message, ["kind", "input"]) &&
+    isObject(message.input) &&
+    exactKeys(message.input, [])
+  );
+}
+
+function isEnrollFailureCode(value: unknown): value is EnrollFailureCode {
+  return typeof value === "string" && (ENROLL_FAILURE_CODES as readonly string[]).includes(value);
+}
+
+function parseNativeStatus(decoded: Record<string, unknown>): NativeInboundMessage | undefined {
+  if (!exactKeys(decoded, ["kind", "output"]) || decoded.kind !== "nativeStatus") {
+    return undefined;
+  }
+  if (!isObject(decoded.output)) return undefined;
+  const output = decoded.output;
+  if (
+    exactKeys(output, ["state"]) &&
+    (output.state === "invalidAuth" || output.state === "revoked")
+  ) {
+    return decoded as NativeTerminalStatus;
+  }
+  if (exactKeys(output, ["state"]) && output.state === "enrollOk") {
+    return { kind: "nativeStatus", output: { state: "enrollOk" } };
+  }
+  if (
+    exactKeys(output, ["state", "code"]) &&
+    output.state === "enrollFailed" &&
+    isEnrollFailureCode(output.code)
+  ) {
+    return {
+      kind: "nativeStatus",
+      output: { state: "enrollFailed", code: output.code },
+    };
+  }
+  return undefined;
+}
+
 function validateOutbound(message: unknown): void {
   const encoded = encodeBounded(message);
   assertExtensionSafe(message);
-  if (isNativePairRequest(message)) return;
+  if (isNativePairRequest(message) || isNativeEnrollProfileRequest(message)) return;
   try {
     const event = parseCompanionEvent(encoded);
     if (event.kind !== "paired") return;
@@ -233,15 +324,9 @@ export function parseNativeInboundMessage(message: unknown): NativeInboundMessag
     throw new Error("native message is not valid JSON");
   }
   assertExtensionSafe(decoded);
-  if (
-    isObject(decoded) &&
-    exactKeys(decoded, ["kind", "output"]) &&
-    decoded.kind === "nativeStatus" &&
-    isObject(decoded.output) &&
-    exactKeys(decoded.output, ["state"]) &&
-    (decoded.output.state === "invalidAuth" || decoded.output.state === "revoked")
-  ) {
-    return decoded as NativeTerminalStatus;
+  if (isObject(decoded)) {
+    const status = parseNativeStatus(decoded);
+    if (status !== undefined) return status;
   }
   try {
     const request = parseCompanionRequest(encoded);
@@ -319,7 +404,10 @@ export class NativeCompanionTransport {
         if (port !== this.#port) return;
         const validated = validateInbound(message);
         if (validated === undefined || !this.#listener) return;
-        if (validated.kind === "nativeStatus") {
+        if (
+          validated.kind === "nativeStatus" &&
+          (validated.output.state === "invalidAuth" || validated.output.state === "revoked")
+        ) {
           // A terminal auth status (invalidAuth/revoked) means the host read a
           // stale or rotated descriptor, not that pairing is impossible
           // forever: the next respawn reads the current descriptor. Cool down

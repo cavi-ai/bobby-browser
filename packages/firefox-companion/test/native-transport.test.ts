@@ -6,6 +6,8 @@ import {
   MAX_NATIVE_MESSAGE_BYTES,
   NativeCompanionTransport,
   TERMINAL_AUTH_COOLDOWN_MS,
+  createEnrollProfileRequest,
+  parseNativeInboundMessage,
 } from "../src/native-transport.js";
 
 class ListenerSet<T extends (...arguments_: never[]) => unknown> {
@@ -57,6 +59,58 @@ function completedWithUrl(url: string): unknown {
     },
   };
 }
+
+test("enrollProfile outbound is exact and secret free", () => {
+  const msg = createEnrollProfileRequest();
+  assert.deepEqual(Object.keys(msg.input), []);
+  assert.equal(JSON.stringify(msg).includes("pairing"), false);
+
+  const port = new FakePort();
+  const transport = new NativeCompanionTransport({ connectNative: () => port });
+  transport.start(() => {});
+  transport.send(msg);
+  assert.deepEqual(port.sent, [{ kind: "enrollProfile", input: {} }]);
+});
+
+test("enroll nativeStatus frames are delivered and not treated as terminal auth", async () => {
+  const port = new FakePort();
+  const received: unknown[] = [];
+  const delays: number[] = [];
+  const transport = new NativeCompanionTransport({
+    connectNative: () => port,
+    scheduleReconnect(callback, delayMs) {
+      delays.push(delayMs);
+      return 1;
+    },
+    cancelReconnect() {},
+  });
+  transport.start((message) => {
+    received.push(message);
+  });
+
+  port.onMessage.emit({
+    kind: "nativeStatus",
+    output: { state: "enrollFailed", code: "bidiMissing" },
+  });
+  port.onMessage.emit({
+    kind: "nativeStatus",
+    output: { state: "enrollOk" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(received, [
+    { kind: "nativeStatus", output: { state: "enrollFailed", code: "bidiMissing" } },
+    { kind: "nativeStatus", output: { state: "enrollOk" } },
+  ]);
+  assert.deepEqual(delays, []);
+  assert.equal(
+    parseNativeInboundMessage({
+      kind: "nativeStatus",
+      output: { state: "enrollFailed", code: "timeout" },
+    }).kind,
+    "nativeStatus",
+  );
+});
 
 test("native transport connects only to the approved host and enforces message direction", () => {
   const port = new FakePort();
