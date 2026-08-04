@@ -667,25 +667,6 @@ async fn session_create_accepts_and_preserves_a_named_vision_node() {
     );
 }
 
-/// A `WorkerFactory` that is never leased: `checkpoint_save` touches only the
-/// journal, so this exists to satisfy `PageRuntime::new`'s signature.
-struct UnusedFactory;
-
-#[async_trait]
-impl WorkerFactory for UnusedFactory {
-    async fn launch(
-        &self,
-        _session_id: &SessionId,
-    ) -> Result<Arc<dyn BrowserWorker>, types::CommandError> {
-        Err(types::CommandError {
-            code: types::ErrorCode::BrowserLaunchFailed,
-            message: "fixture worker factory never launches".into(),
-            layer: types::ErrorLayer::Driver,
-            retryable: false,
-        })
-    }
-}
-
 // `checkpoint_save` names a command via `evidenceRefs` and the server resolves the
 // evidence from the journal. Guards that a real journaled
 // `javaScriptResult`/`accessibilitySnapshot` outcome resolves by id and reaches
