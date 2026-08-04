@@ -858,7 +858,10 @@ where
                                             break Ok(ConnectionResult::NativeClosed);
                                         }
                                         // Live serve already owns the bind; keep relaying.
-                                        EnrollFinalize::KeepRelay => {}
+                                        // Skip the fallthrough write — paired was already sent.
+                                        EnrollFinalize::KeepRelay => {
+                                            continue;
+                                        }
                                     }
                                 }
                             }
