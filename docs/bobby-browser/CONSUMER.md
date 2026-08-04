@@ -1,11 +1,11 @@
 # bobby-browser Documentation Consumer Contract
 
 This contract describes how a documentation host consumes the immutable
-documentation artifact built for bobby-browser `0.5.0`.
+documentation artifact built for bobby-browser `0.5.1`.
 
 ```text
-source: GitHub Release asset bobby-browser-docs-v0.5.0.tar.gz
-publicBasePath: /docs/bobby-browser/v0.5.0
+source: GitHub Release asset bobby-browser-docs-v0.5.1.tar.gz
+publicBasePath: /docs/bobby-browser/v0.5.1
 stableAlias: /docs/bobby-browser
 entrypoints: manifest.json, navigation.json
 identity: manifest.package / manifest.product
@@ -18,7 +18,7 @@ releaseProvenance: manifest.release.tag / manifest.release.commit
 
 Extract the complete `docs/` directory from the immutable GitHub Release asset
 after validating the schema-v1 `cavi-oss-release` envelope and archive SHA-256, then copy it to the host's
-`/docs/bobby-browser/v0.5.0` public base path. Serve `/docs/bobby-browser` as an
+`/docs/bobby-browser/v0.5.1` public base path. Serve `/docs/bobby-browser` as an
 alias to that immutable version only after validation succeeds. Do not merge
 files from another package version into this directory.
 
@@ -28,7 +28,7 @@ base path (page paths are relative to the version directory root).
 
 ## Integrity And Immutability
 
-The manifest version must equal the documented version, `0.5.0`.
+The manifest version must equal the documented version, `0.5.1`.
 `manifest.package` / `manifest.product` must be `bobby-browser`.
 
 Verify `manifest.contentSha256` by hashing every artifact file except
