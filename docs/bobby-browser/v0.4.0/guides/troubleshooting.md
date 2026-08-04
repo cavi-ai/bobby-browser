@@ -51,8 +51,10 @@ MCP HTTP still needs the broker context headers
 ## Browser / engine
 
 - Default engine preference is **Firefox**. If doctor warns on Firefox BiDi,
-  start Firefox with remote debugging and set
-  `AUTOMATION_RUNTIME_BROWSER_SELECTION` (see [Firefox companion](firefox-companion.md)).
+  start Firefox with remote debugging and run `bobby enroll-firefox-profile` —
+  the selection persists and is picked up by serve, the MCP gateway, and
+  doctor (see [Firefox companion](firefox-companion.md)).
+  `AUTOMATION_RUNTIME_BROWSER_SELECTION` remains an override.
 - Chromium live work needs an installed Chromium. Set
   `BOBBY_CHROMIUM_EXECUTABLE` when not in a standard location.
 - Gauntlet / championship tests are often `--ignored` until a browser is present —

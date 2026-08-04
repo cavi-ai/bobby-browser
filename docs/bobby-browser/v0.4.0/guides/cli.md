@@ -44,7 +44,10 @@ On loopback, if no bootstrap credential exists, `serve` may generate one and
 print the bearer once. Non-loopback binds require credentials up front.
 
 Optional: `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) overrides engine
-selection. Default engine preference is Firefox.
+selection. Without it, the selection persisted by
+`bobby enroll-firefox-profile` is used; default engine preference is Firefox.
+The same resolution order applies to the MCP gateway and `bobby doctor` —
+see [Configuration](configuration.md).
 
 Health: `GET http://<host>:<port>/healthz`.
 
@@ -117,7 +120,7 @@ See [Firefox companion](firefox-companion.md).
 | `BOBBY_BROWSER_BOOTSTRAP_ENV` | Default bootstrap dotenv path |
 | `AUTOMATION_RUNTIME_BOOTSTRAP_*` | Direct bootstrap env contract (see [Authentication](auth.md)) |
 | `AUTOMATION_RUNTIME_TOKEN` | Client bearer (SDK / curl) |
-| `AUTOMATION_RUNTIME_BROWSER_SELECTION` | JSON engine/profile selection |
+| `AUTOMATION_RUNTIME_BROWSER_SELECTION` | JSON engine/profile selection override (else the persisted enrollment, else the Firefox default) |
 
 ## Next
 
