@@ -23,6 +23,39 @@ Never claim an action worked without its evidence.
 2. `bobby doctor` validates the whole setup, including an MCP handshake
    (`initialize` + `tools/list`) against the gateway.
 
+## How the runtime is wired
+
+Your host spawns `bobby mcp-stdio`, which loads the bootstrap credential and
+execs the stdio gateway in-place. The gateway runs the entire runtime
+in-process: it loads `config.toml` (`BOBBY_BROWSER_CONFIG`, else
+`./config.toml`) and picks a browser engine exactly the way `bobby serve` and
+`bobby doctor` do — one shared resolution order:
+
+1. `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) — an override; wins when set.
+2. The persisted enrollment at
+   `<config-dir>/bobby-browser/browser-selection.json`, written by
+   `bobby enroll-firefox-profile`.
+3. The built-in default: exact Firefox, fail-closed. With nothing enrolled,
+   startup fails with an actionable error rather than silently downgrading.
+
+A malformed source is always an error, never skipped. `bobby doctor` reports
+which source resolved, so what it validates is what you are running.
+
+### Which engine you are driving
+
+- **Firefox companion (the default, and what enrollment sets up):** the
+  gateway attaches to a real, visible Firefox over WebDriver BiDi — a real
+  profile directory with real cookies. Logins persist across sessions. Sign
+  in once in that window; every later session is already authenticated.
+- **Managed Chromium (fallback when explicitly selected):** each session gets
+  a disposable profile keyed by session id. Nothing persists — no cookies, no
+  logins — by design.
+
+If a site demands a login and cookies vanish between sessions, you are on the
+Chromium path: ask the operator to run `bobby enroll-firefox-profile` (Firefox
+with `--remote-debugging-port`, the companion extension installed). Do not
+work around it by re-logging-in every session.
+
 ## Working loops
 
 Read these resources first; they are authoritative and always match the build:
