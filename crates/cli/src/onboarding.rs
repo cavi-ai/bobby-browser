@@ -845,6 +845,54 @@ mod install_tests {
     }
 
     #[test]
+    fn install_writes_enroll_defaults_next_to_descriptor() {
+        use firefox_companion::selection::{
+            enroll_defaults_path, read_enroll_defaults, FirefoxEnrollDefaults,
+        };
+
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
+        std::fs::write(dist.path().join("background.js"), "//").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            #[cfg(not(target_os = "macos"))]
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+        }
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(home.path().join("Library/Application Support")).unwrap();
+
+        let install = install_firefox_companion(Some(dist.path()));
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+
+        let install = install.expect("companion installs");
+        let config_dir = install.descriptor_path.parent().unwrap();
+        let defaults_path = enroll_defaults_path(config_dir);
+        assert!(defaults_path.is_file());
+        assert_eq!(
+            defaults_path.parent().unwrap(),
+            install.descriptor_path.parent().unwrap()
+        );
+
+        let defaults = read_enroll_defaults(&defaults_path).unwrap();
+        assert!(defaults.profile_dir.ends_with("firefox-profile"));
+        assert!(defaults.profile_dir.is_dir());
+        assert_eq!(defaults.companion_bind.to_string(), "127.0.0.1:9876");
+        assert_eq!(defaults.descriptor_path, install.descriptor_path);
+
+        let _unused: FirefoxEnrollDefaults = defaults;
+    }
+
+    #[test]
     fn companion_install_reports_a_missing_extension_build() {
         let missing = tempfile::tempdir().unwrap();
         let error = install_firefox_companion(Some(missing.path()))
@@ -960,6 +1008,19 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
         cli_path: exe,
         descriptor_path: install.descriptor_path.clone(),
     })?;
+    let profile_dir = config.join("firefox-profile");
+    std::fs::create_dir_all(&profile_dir)?;
+    let defaults = firefox_companion::selection::FirefoxEnrollDefaults {
+        profile_dir,
+        companion_bind: firefox_companion::selection::DEFAULT_COMPANION_BIND
+            .parse()
+            .expect("default companion bind is valid"),
+        descriptor_path: install.descriptor_path.clone(),
+    };
+    firefox_companion::selection::write_enroll_defaults(
+        &firefox_companion::selection::enroll_defaults_path(&config),
+        &defaults,
+    )?;
     Ok(install)
 }
 
