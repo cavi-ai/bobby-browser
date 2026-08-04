@@ -1,0 +1,804 @@
+openapi: 3.1.0
+info:
+  title: bobby-browser HTTP API
+  version: "{{INTERFACE_VERSION}}"
+  summary: Authenticated broker routes under /v1/*
+  description: |
+    Browser automation runtime for agents. Prefer MCP for tool discovery; this
+    document catalogs HTTP `/v1/*` for HTTP clients.
+
+    Every `/v1/*` request needs headers Authorization (Bearer),
+    x-interface-version, x-correlation-id, and x-deadline. Mutating POSTs also
+    take idempotency-key. See Authentication and HTTP API docs in
+    docs/bobby-browser/source/.
+  license:
+    name: MIT
+servers:
+  - url: http://127.0.0.1:7777
+    description: Local bobby serve default (config.toml http.port)
+tags:
+  - name: runtime
+  - name: sessions
+  - name: pages
+  - name: forms
+  - name: commands
+  - name: recovery
+  - name: events
+  - name: artifacts
+  - name: jobs
+  - name: principals
+  - name: health
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      tags: [health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Process is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, const: true }
+  /v1/runtime:
+    get:
+      operationId: getRuntime
+      tags: [runtime]
+      summary: Runtime info
+      description: Requires capability `session:read`.
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: Runtime snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sessions:
+    get:
+      operationId: listSessions
+      tags: [sessions]
+      summary: List sessions
+      description: Requires `session:read`. Full array (no pagination).
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createSession
+      tags: [sessions]
+      summary: Create session
+      description: Requires `session:write`.
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+            examples:
+              denyByDefault:
+                value:
+                  profile: default
+                  executionPolicy:
+                    javascriptEvaluation: false
+                    visionAssist: false
+                    fingerprint: false
+                    humanize: false
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sessions/{session}:
+    delete:
+      operationId: deleteSession
+      tags: [sessions]
+      summary: Delete session
+      description: Requires `session:write`.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/pages:
+    post:
+      operationId: openPage
+      tags: [pages]
+      summary: Open page
+      description: |
+        Requires `page:write`. Body uses snake_case `session_id`
+        (documented camelCase exception).
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id:
+                  type: string
+                  format: uuid
+            examples:
+              open:
+                value:
+                  session_id: "10000000-0000-4000-8000-000000000001"
+      responses:
+        "200":
+          description: Opened
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PageState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sessions/{session}/pages/{page}/forms:
+    get:
+      operationId: getFormSnapshot
+      tags: [forms]
+      summary: Form snapshot
+      description: Requires `page:read`. Same contract as MCP `form_snapshot`.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/PageId"
+        - name: maxControls
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 512
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: FormSnapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FormSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/commands:
+    post:
+      operationId: submitCommand
+      tags: [commands]
+      summary: Submit command envelope
+      description: |
+        Requires `browser:mutate` plus nested caps for upload / download / JS /
+        intents. Body is CommandEnvelope (`schemaVersion: 2`).
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandEnvelope"
+      responses:
+        "200":
+          description: CommandOutcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandOutcome"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          description: Retryable command failure (`retryableFailure`)
+          headers:
+            Retry-After:
+              description: Seconds to wait (default 1 when outcome has no ms hint)
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandOutcome"
+  /v1/checkpoints:
+    post:
+      operationId: saveCheckpoint
+      tags: [recovery]
+      summary: Persist workflow checkpoint
+      description: Requires `recovery:write`. Pass evidenceRefs; never author evidence.
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [checkpoint]
+              properties:
+                checkpoint:
+                  $ref: "#/components/schemas/WorkflowCheckpoint"
+                evidenceRefs:
+                  type: array
+                  maxItems: 128
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        "200":
+          description: Saved
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/recovery/{workflow}:
+    get:
+      operationId: getRecoveryStatus
+      tags: [recovery]
+      summary: Checkpoint and receipts
+      description: Requires `recovery:read`.
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: RecoveryStatus
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: recoverWorkflow
+      tags: [recovery]
+      summary: Recover workflow
+      description: Requires `recovery:write`. `needsReconciliation` → HTTP 409.
+      parameters:
+        - $ref: "#/components/parameters/WorkflowId"
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: RecoveryDecision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryDecision"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/events:
+    get:
+      operationId: readEvents
+      tags: [events]
+      summary: Read events
+      description: |
+        Requires `session:read`. Query `after` and `limit` (max 256).
+        Pass `stream=1` for SSE.
+      parameters:
+        - name: after
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 256 }
+        - name: stream
+          in: query
+          schema: { type: string, enum: ["1"] }
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: Event batch or SSE stream
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/artifacts/{id}:
+    get:
+      operationId: readArtifact
+      tags: [artifacts]
+      summary: Read artifact bytes
+      description: Requires `artifact:read`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: Artifact bytes
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/jobs:
+    post:
+      operationId: submitJob
+      tags: [jobs]
+      summary: Submit scheduled job
+      description: Requires `job:submit`.
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitJobRequest"
+            examples:
+              normal:
+                value:
+                  name: crawl
+                  payload: {}
+                  priority: normal
+                  maxRetries: 3
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobSubmitResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/jobs/{job}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Job status
+      description: Requires `job:read`.
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: Job record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    delete:
+      operationId: cancelJob
+      tags: [jobs]
+      summary: Cancel job
+      description: Requires `job:cancel`.
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: Updated job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/principals:
+    post:
+      operationId: issuePrincipal
+      tags: [principals]
+      summary: Issue scoped bearer
+      description: |
+        Requires `authority:admin`. Returns 201 with one-time bearer.
+        Issued capabilities must be a non-empty subset of the issuer's, must
+        not include `authority:admin`, and TTL is capped at 90 days.
+      parameters:
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [principalId, capabilities, expiresAt]
+              properties:
+                principalId: { type: string, format: uuid }
+                capabilities:
+                  type: array
+                  items: { type: string }
+                expiresAt: { type: string, format: date-time }
+      responses:
+        "201":
+          description: Issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bearer]
+                properties:
+                  bearer: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/principals/{principal}:
+    delete:
+      operationId: revokePrincipal
+      tags: [principals]
+      summary: Revoke principal
+      description: Requires `authority:admin`.
+      parameters:
+        - name: principal
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "204":
+          description: Revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Bootstrap or issued principal bearer
+  parameters:
+    Authorization:
+      name: Authorization
+      in: header
+      required: true
+      schema: { type: string }
+      description: "Bearer <token>"
+    InterfaceVersion:
+      name: x-interface-version
+      in: header
+      required: true
+      schema: { type: string }
+    CorrelationId:
+      name: x-correlation-id
+      in: header
+      required: true
+      schema: { type: string, format: uuid, maxLength: 64 }
+    Deadline:
+      name: x-deadline
+      in: header
+      required: true
+      schema: { type: string, format: date-time }
+      description: RFC3339; after now and within 5 minutes ahead
+    IdempotencyKey:
+      name: idempotency-key
+      in: header
+      required: false
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    SessionId:
+      name: session
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PageId:
+      name: page
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    WorkflowId:
+      name: workflow
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    JobId:
+      name: job
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Unauthorized:
+      description: Authentication failed or token expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InterfaceErrorBody"
+    Forbidden:
+      description: Missing capability or malformed scope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InterfaceErrorBody"
+    NotFound:
+      description: Not found or not owned
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InterfaceErrorBody"
+    Conflict:
+      description: Idempotency conflict or needs reconciliation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InterfaceErrorBody"
+    InvalidRequest:
+      description: Invalid request (422) or oversized (413)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InterfaceErrorBody"
+    TooManyRequests:
+      description: Principal quota or resource exhaustion
+      headers:
+        Retry-After:
+          description: Seconds to wait before retry
+          schema: { type: integer, minimum: 0 }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InterfaceErrorBody"
+  schemas:
+    InterfaceErrorBody:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/InterfaceError"
+    InterfaceError:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        correlationId: { type: string }
+        retryAfterMs: { type: integer, minimum: 0 }
+        layer: { type: string }
+    RuntimeInfo:
+      type: object
+      additionalProperties: true
+    SessionState:
+      type: object
+      additionalProperties: true
+    PageState:
+      type: object
+      additionalProperties: true
+    FormSnapshot:
+      type: object
+      additionalProperties: true
+    CommandEnvelope:
+      type: object
+      required:
+        [schemaVersion, commandId, workflowId, attemptId, sessionId, deadline, command]
+      additionalProperties: true
+      description: |
+        Wire envelope for POST /v1/commands. Server deserializes into the Rust
+        CommandEnvelope; unknown top-level fields are ignored by serde today,
+        but required fields below are mandatory. Prefer MCP named tools over
+        hand-building envelopes.
+      properties:
+        schemaVersion: { type: integer, const: 2 }
+        commandId: { type: string, format: uuid }
+        workflowId: { type: string, format: uuid }
+        attemptId: { type: string, format: uuid }
+        sessionId: { type: string, format: uuid }
+        pageId:
+          type: [string, "null"]
+          format: uuid
+        deadline: { type: string, format: date-time }
+        command:
+          type: object
+          description: "{ kind: primitive|intent, input: … }"
+          required: [kind, input]
+          properties:
+            kind: { type: string, enum: [primitive, intent] }
+            input: { type: object }
+    CommandOutcome:
+      type: object
+      additionalProperties: true
+    WorkflowCheckpoint:
+      type: object
+      additionalProperties: true
+    RecoveryStatus:
+      type: object
+      additionalProperties: true
+    RecoveryDecision:
+      type: object
+      additionalProperties: true
+    CreateSessionRequest:
+      type: object
+      required: [profile]
+      properties:
+        profile: { type: string }
+        proxy: { type: [string, "null"] }
+        executionPolicy:
+          type: object
+          properties:
+            javascriptEvaluation: { type: boolean }
+            visionAssist: { type: boolean }
+            fingerprint: { type: boolean }
+            humanize: { type: boolean }
+    SubmitJobRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string }
+        payload: {}
+        priority:
+          type: string
+          enum: [low, normal, high, critical]
+          default: normal
+        maxRetries: { type: integer, minimum: 0, default: 3 }
+        timeoutMs: { type: integer, minimum: 1 }
+    JobSubmitResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status: { type: string }
+    JobStatusResponse:
+      type: object
+      additionalProperties: true

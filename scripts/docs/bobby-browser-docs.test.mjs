@@ -97,6 +97,18 @@ test("stamped docs substitute product and interface version tokens", async () =>
   });
 });
 
+test("build publishes navigated OpenAPI assets", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    const openapi = await readFile(
+      path.join(fixtureRoot, OUTPUT_REL, "openapi/v1.yaml"),
+      "utf8",
+    );
+    assert.match(openapi, /^openapi: 3\.1\.0$/mu);
+    await verifyBobbyBrowserDocs(fixtureRoot, RELEASE);
+  });
+});
+
 test("verify fails when a page is tampered", async () => {
   await withSourceFixture(async (fixtureRoot) => {
     await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
