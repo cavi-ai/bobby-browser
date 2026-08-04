@@ -176,18 +176,16 @@ fn node_config(config: &AppConfig, name: &str) -> Option<NodeConfig> {
 
 fn parse_loopback_endpoint(endpoint_url: &str) -> Option<(SocketAddr, String)> {
     let url = Url::parse(endpoint_url).ok()?;
-    let host = url.host_str()?;
     let port = url.port_or_known_default()?;
-    // `SocketAddr` parsing needs an IP literal. Map hostname loopback and
-    // bracket IPv6 the way `NodeConfig::is_local` already treats as local.
-    let bind: SocketAddr = match host {
-        "localhost" => format!("127.0.0.1:{port}").parse().ok()?,
-        "::1" | "[::1]" => format!("[::1]:{port}").parse().ok()?,
-        host if host.starts_with('[') && host.ends_with(']') => {
-            format!("{host}:{port}").parse().ok()?
+    // Prefer typed host parsing so localhost / IPv6 match `NodeConfig::is_local`
+    // without stringly `"{host}:{port}"` SocketAddr failures.
+    let bind = match url.host()? {
+        url::Host::Ipv4(ip) => SocketAddr::new(std::net::IpAddr::V4(ip), port),
+        url::Host::Ipv6(ip) => SocketAddr::new(std::net::IpAddr::V6(ip), port),
+        url::Host::Domain(domain) if domain.eq_ignore_ascii_case("localhost") => {
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
         }
-        host if host.contains(':') => format!("[{host}]:{port}").parse().ok()?,
-        host => format!("{host}:{port}").parse().ok()?,
+        url::Host::Domain(_) => return None,
     };
     let path = if url.path().is_empty() {
         "/".to_string()

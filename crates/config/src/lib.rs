@@ -71,7 +71,7 @@ const fn default_attachment_ttl_ms() -> u64 {
     300_000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub server: ServerConfig,
@@ -405,21 +405,6 @@ impl Default for StorageConfig {
             checkpoints_dir: PathBuf::from("./data/storage/checkpoints"),
             authority_path: PathBuf::from("./data/storage/authority.json"),
             scheduler_journal_path: default_scheduler_journal_path(),
-        }
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            browser: BrowserConfig::default(),
-            storage: StorageConfig::default(),
-            http: HttpConfig::default(),
-            interface: InterfaceConfig::default(),
-            observability: ObservabilityConfig::default(),
-            vision: VisionConfig::default(),
-            nodes: std::collections::BTreeMap::new(),
         }
     }
 }
