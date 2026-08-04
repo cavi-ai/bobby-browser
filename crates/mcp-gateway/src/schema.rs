@@ -383,45 +383,24 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 /// (`clickAndWaitForPopup`, `clickAndWaitForDownload`, `setFocusEmulation`,
 /// `setEmulatedMedia`) are documented in the `bobby://primitives` resource.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
-    let mut schema = if name != "command_execute" {
-        tool_schema(name)
-    } else {
-        let mut schema = tool_schema(name);
-        let mut patched = definitions();
-        let patched = patched.as_object_mut().expect("definitions is an object");
-        if let Some(command_envelope) = patched.get_mut("CommandEnvelope") {
-            command_envelope["properties"]["command"] = json!({
-                "type": "object",
-                "description": "One command as {\"kind\":\"primitive\"|\"intent\",\"input\":{…}}. \
-            Prefer named tools for common actions; they build this envelope."
-            });
-        }
-        let seed = json!({"properties": schema["properties"], "required": schema["required"]});
-        schema["$defs"] = reachable_definitions_from(&seed, patched);
-        schema
-    };
-    if let Some(example) = tool_argument_example(name) {
-        schema["examples"] = json!([example]);
+    if name != "command_execute" {
+        return tool_schema(name);
     }
+    let mut schema = tool_schema(name);
+    let mut patched = definitions();
+    let patched = patched.as_object_mut().expect("definitions is an object");
+    if let Some(command_envelope) = patched.get_mut("CommandEnvelope") {
+        command_envelope["properties"]["command"] = json!({
+            "type": "object",
+            "description": "One command. Prefer the named tools — navigate, click, \
+        type_text, control_action, dialog, emulate, and the intent_* family — which \
+        build this envelope for you. Accepted here as {\"kind\":\"primitive\"|\"intent\", \
+        \"input\":{…}} for callers that need to mint their own envelope."
+        });
+    }
+    let seed = json!({"properties": schema["properties"], "required": schema["required"]});
+    schema["$defs"] = reachable_definitions_from(&seed, patched);
     schema
-}
-
-/// Compact argument templates for the first-run tools. Kept off the validation
-/// schema path so `validate_tool_arguments` stays lean; only `tools/list`
-/// advertises them. Limit these to the setup sequence so the full surface keeps
-/// enough room for another small tool.
-fn tool_argument_example(name: &str) -> Option<Value> {
-    let session = "10000000-0000-4000-8000-000000000001";
-    Some(match name {
-        "session_create" => json!({
-            "profile": "default"
-        }),
-        "page_open" => json!({
-            "sessionId": session,
-            "url": "https://example.test/"
-        }),
-        _ => return None,
-    })
 }
 
 /// The shape of a tool's `structuredContent`, resolved through the same
@@ -2056,9 +2035,6 @@ fn validate_at(
         return Err(SchemaViolation::at(pointer, "maxDepth"));
     }
     let depth = depth + 1;
-    // Agent-facing argument templates. Not enforced — this `.get` is also how
-    // `budget.rs` discovers supported keywords for advertised `inputSchema`s.
-    let _ = schema.get("examples");
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(name) = reference.strip_prefix("#/$defs/") else {
             return Err(SchemaViolation::at(pointer, "$ref"));

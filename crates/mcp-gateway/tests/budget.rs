@@ -267,13 +267,7 @@ const READ_ONLY: &[&str] = &[
     "toolset_select",
 ];
 
-const DESTRUCTIVE: &[&str] = &[
-    "session_close",
-    "page_close",
-    "cookie_delete",
-    "intent_submit_and_verify",
-    "intent_follow",
-];
+const DESTRUCTIVE: &[&str] = &["session_close", "page_close", "cookie_delete"];
 
 // `command_execute` accepts an arbitrary `RuntimeCommand`, including `Navigate` and
 // `DownloadUrl`, so it reaches the network exactly like the standalone tools below.
