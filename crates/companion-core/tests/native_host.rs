@@ -1,8 +1,8 @@
 use companion_core::{
-    encode_native_message, read_native_message, run_native_host, validate_extension_message,
-    validate_server_message, write_native_message, CompanionServer, CompanionServerConfig,
-    NativeConnectRequest, NativeHostConfig, NativeHostError, NativeReconnectBackoff,
-    MAX_NATIVE_MESSAGE_BYTES,
+    encode_native_message, read_native_message, run_native_host, run_native_host_with_enroll,
+    validate_extension_message, validate_server_message, write_native_message, CompanionServer,
+    CompanionServerConfig, EnrollHostError, NativeConnectRequest, NativeHostConfig,
+    NativeHostEnroll, NativeHostError, NativeReconnectBackoff, MAX_NATIVE_MESSAGE_BYTES,
 };
 use companion_protocol::{
     ActionRequest, ActionResult, BrowserEngine, BrowserIdentity, BrowserTarget,
@@ -11,8 +11,13 @@ use companion_protocol::{
 };
 use serde_json::json;
 use std::{
+    future::Future,
     net::SocketAddr,
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -518,4 +523,170 @@ async fn native_eof_cancels_connection_attempts_and_backoff_promptly() {
         .expect("native EOF must cancel connection attempts and backoff")
         .unwrap();
     assert!(result.is_ok());
+}
+
+
+#[test]
+fn enroll_profile_request_decodes_empty_input() {
+    let value = json!({ "kind": "enrollProfile", "input": {} });
+    let request = companion_core::decode_native_request(value).expect("enrollProfile");
+    assert!(matches!(
+        request,
+        companion_core::NativeRequest::EnrollProfile(_)
+    ));
+}
+
+#[test]
+fn enroll_profile_request_rejects_secret_fields() {
+    let value = json!({
+        "kind": "enrollProfile",
+        "input": { "pairingCode": "nope" }
+    });
+    assert!(matches!(
+        companion_core::decode_native_request(value),
+        Err(NativeHostError::InvalidProtocol)
+    ));
+}
+
+struct FakeEnroll {
+    config: NativeHostConfig,
+    completed: Arc<AtomicBool>,
+}
+
+impl NativeHostEnroll for FakeEnroll {
+    fn enroll_and_wait_for_pair(
+        &self,
+        _pair: NativeConnectRequest,
+    ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+        let config = self.config.clone();
+        async move { Ok(config) }
+    }
+
+    fn complete_enrollment(
+        &self,
+        _pair: &NativeConnectRequest,
+    ) -> impl Future<Output = Result<(), EnrollHostError>> + Send {
+        let completed = Arc::clone(&self.completed);
+        async move {
+            completed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn enroll_profile_then_pair_emits_enroll_ok_via_enroll_trait() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code.clone(),
+    );
+    let completed = Arc::new(AtomicBool::new(false));
+    let enroll = FakeEnroll {
+        config,
+        completed: Arc::clone(&completed),
+    };
+    let connect = connect_request();
+    let enroll_frame = json!({ "kind": "enrollProfile", "input": {} });
+    let pair_frame = json!({ "kind": "pair", "input": connect });
+
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host_with_enroll(
+        host_reader,
+        host_writer,
+        None,
+        Some(enroll),
+    ));
+
+    write_native_message(&mut extension_stream, &enroll_frame)
+        .await
+        .unwrap();
+    write_native_message(&mut extension_stream, &pair_frame)
+        .await
+        .unwrap();
+
+    let paired = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(paired["kind"], "paired");
+    assert!(!serde_json::to_string(&paired)
+        .unwrap()
+        .contains(&pairing_code));
+
+    let status = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status,
+        json!({ "kind": "nativeStatus", "output": { "state": "enrollOk" } })
+    );
+    assert!(completed.load(Ordering::SeqCst));
+
+    drop(extension_stream);
+    host.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn enroll_profile_reports_defaults_missing_from_enroll_trait() {
+    struct FailingEnroll;
+    impl NativeHostEnroll for FailingEnroll {
+        fn enroll_and_wait_for_pair(
+            &self,
+            _pair: NativeConnectRequest,
+        ) -> impl Future<Output = Result<NativeHostConfig, EnrollHostError>> + Send {
+            async { Err(EnrollHostError::DefaultsMissing) }
+        }
+
+        fn complete_enrollment(
+            &self,
+            _pair: &NativeConnectRequest,
+        ) -> impl Future<Output = Result<(), EnrollHostError>> + Send {
+            async { Ok(()) }
+        }
+    }
+
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host_with_enroll(
+        host_reader,
+        host_writer,
+        None,
+        Some(FailingEnroll),
+    ));
+
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "enrollProfile", "input": {} }),
+    )
+    .await
+    .unwrap();
+    write_native_message(
+        &mut extension_stream,
+        &json!({ "kind": "pair", "input": connect_request() }),
+    )
+    .await
+    .unwrap();
+
+    let status = read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "kind": "nativeStatus",
+            "output": { "state": "enrollFailed", "code": "defaultsMissing" }
+        })
+    );
+    host.await.unwrap().unwrap();
 }
