@@ -67,6 +67,29 @@ escalation is unavailable even when the bearer and session opt in.
 Request / response shapes and confidence floor: [Intent commands](intents.md#vision-provider).
 Capability + session gates: [Capabilities](../concepts/capabilities.md).
 
+Granting `vision:assist` and creating a session with
+`executionPolicy.visionAssist = true` is **not** enough for functional vision
+assist — the runtime must also reach a live provider at `[vision].endpoint_url`.
+When the URL is unset, escalation is unavailable even with capability and
+session opt-in. When the URL is set but nothing is listening,
+`bobby doctor` warns on `vision-endpoint` reachability.
+
+### Local OpenAI (two-process setup)
+
+Vision assist is a **two-process** setup: the broker (`bobby serve`) and a
+loopback vision provider. For local OpenAI, run `bobby vision-proxy` in a
+separate terminal (defaults: `http://127.0.0.1:9100/vision`):
+
+```bash
+export BOBBY_VISION_TOKEN=…   # bearer bobby sends to the proxy
+export OPENAI_API_KEY=…       # bearer the proxy sends to OpenAI
+bobby vision-proxy            # optional: --bind, --path, --model, --openai-base-url
+```
+
+Uncomment and point `[vision]` at that loopback URL, set `token_env` to
+`BOBBY_VISION_TOKEN`, then start `bobby serve`. The proxy accepts the same
+propose/extract JSON the runtime sends to any `[vision]` provider.
+
 `[vision]` is the single-provider form. `[nodes]` supersedes it — see below.
 
 ## `[nodes.<name>]`

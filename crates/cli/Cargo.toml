@@ -45,6 +45,7 @@ types = { path = "../types", version = "0.4.0" }
 uuid.workspace = true
 url.workspace = true
 worker-pool = { path = "../worker-pool", version = "0.4.0" }
+vision-proxy = { path = "../vision-proxy", version = "0.4.0" }
 reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]

@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use url::Url;
+use vision_proxy::{serve as serve_vision_proxy, OpenAiUpstream, ProxyConfig};
 
 #[derive(Clone)]
 pub struct NativeHostInstallConfig {
@@ -152,6 +153,24 @@ enum CliCommand {
     Jobs {
         #[command(subcommand)]
         command: JobsCommand,
+    },
+    /// Run the loopback vision proxy (propose/extract → OpenAI)
+    VisionProxy {
+        /// Bind address (loopback default)
+        #[arg(long, default_value = "127.0.0.1:9100")]
+        bind: String,
+        /// HTTP path for propose/extract POST
+        #[arg(long, default_value = "/vision")]
+        path: String,
+        /// Upstream provider (v1: openai only)
+        #[arg(long, default_value = "openai")]
+        upstream: String,
+        /// OpenAI model id
+        #[arg(long, default_value = "gpt-4o")]
+        model: String,
+        /// OpenAI API base URL (tests / proxies)
+        #[arg(long, default_value = "https://api.openai.com/v1")]
+        openai_base_url: String,
     },
 }
 
@@ -327,7 +346,60 @@ pub async fn run() -> Result<()> {
             skip_health,
         } => run_doctor(config, bootstrap_env, !skip_health)?,
         CliCommand::Jobs { command } => run_jobs(command)?,
+        CliCommand::VisionProxy {
+            bind,
+            path,
+            upstream,
+            model,
+            openai_base_url,
+        } => {
+            run_vision_proxy(bind, path, upstream, model, openai_base_url).await?;
+        }
     }
+
+    Ok(())
+}
+
+fn require_vision_proxy_env() -> Result<(String, String)> {
+    let bearer = std::env::var("BOBBY_VISION_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty());
+
+    match (bearer, api_key) {
+        (Some(bearer), Some(api_key)) => Ok((bearer, api_key)),
+        (None, None) => anyhow::bail!("BOBBY_VISION_TOKEN and OPENAI_API_KEY are missing or empty"),
+        (None, Some(_)) => anyhow::bail!("BOBBY_VISION_TOKEN is missing or empty"),
+        (Some(_), None) => anyhow::bail!("OPENAI_API_KEY is missing or empty"),
+    }
+}
+
+async fn run_vision_proxy(
+    bind: String,
+    path: String,
+    upstream: String,
+    model: String,
+    openai_base_url: String,
+) -> Result<()> {
+    if upstream != "openai" {
+        anyhow::bail!("unsupported upstream {upstream:?}; v1 supports only \"openai\"");
+    }
+
+    let (bearer_token, api_key) = require_vision_proxy_env()?;
+    let bind: SocketAddr = bind.parse().context("invalid --bind address")?;
+
+    let upstream = Arc::new(OpenAiUpstream::new(api_key, model, openai_base_url));
+    let config = ProxyConfig {
+        bind,
+        path,
+        bearer_token,
+    };
+
+    serve_vision_proxy(config, upstream)
+        .await
+        .context("vision-proxy server failed")?;
 
     Ok(())
 }
@@ -471,6 +543,66 @@ fn run_doctor(
             None
         }
     };
+
+    if let Some(config) = &config {
+        if let Some(endpoint) = config.vision.endpoint_url.as_deref() {
+            match Url::parse(endpoint) {
+                Ok(url) => {
+                    let reachable = url
+                        .socket_addrs(|| Some(url.port_or_known_default().unwrap_or(80)))
+                        .map(|addrs| {
+                            addrs.iter().any(|addr| {
+                                std::net::TcpStream::connect_timeout(
+                                    addr,
+                                    Duration::from_millis(500),
+                                )
+                                .is_ok()
+                            })
+                        })
+                        .unwrap_or(false);
+                    if reachable {
+                        report("ok", "vision-endpoint", endpoint.to_string());
+                    } else {
+                        warnings += 1;
+                        report(
+                            "warn",
+                            "vision-endpoint",
+                            format!("{endpoint} not reachable (is `bobby vision-proxy` running?)"),
+                        );
+                    }
+                }
+                Err(error) => {
+                    warnings += 1;
+                    report("warn", "vision-endpoint", format!("invalid URL: {error}"));
+                }
+            }
+
+            match config.vision.token_env.as_deref() {
+                Some(name) if !name.is_empty() => match std::env::var(name) {
+                    Ok(value) if !value.is_empty() => {
+                        report("ok", "vision-token-env", format!("{name} is set"));
+                    }
+                    _ => {
+                        warnings += 1;
+                        report(
+                            "warn",
+                            "vision-token-env",
+                            format!("{name} is unset or empty"),
+                        );
+                    }
+                },
+                _ => {
+                    warnings += 1;
+                    report(
+                        "warn",
+                        "vision-token-env",
+                        "token_env unset; bobby will call the provider without a bearer"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
 
     let selection_raw = std::env::var("AUTOMATION_RUNTIME_BROWSER_SELECTION").ok();
     let selection = match parse_selection(selection_raw.as_deref()) {
