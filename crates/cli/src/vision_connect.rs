@@ -6,20 +6,44 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use config::{upsert_vision_platform, VisionProviderConfig};
+use config::{
+    upsert_vision_acp_profile, upsert_vision_platform, VisionAcpProfile, VisionAuthKind,
+    VisionProviderConfig,
+};
 
 pub const LOOPBACK_ENDPOINT: &str = "http://127.0.0.1:9100/vision";
 pub const VISION_TOKEN_ENV: &str = "BOBBY_VISION_TOKEN";
 
 /// CLI flags for `bobby vision connect`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ConnectOpts {
     pub config: Option<PathBuf>,
     pub provider: Option<String>,
+    pub backend: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub auth: String,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key_env: Option<String>,
     pub yes: bool,
+}
+
+impl Default for ConnectOpts {
+    fn default() -> Self {
+        Self {
+            config: None,
+            provider: None,
+            backend: "direct".into(),
+            command: None,
+            args: Vec::new(),
+            auth: "advertised".into(),
+            base_url: None,
+            model: None,
+            api_key_env: None,
+            yes: false,
+        }
+    }
 }
 
 struct ResolvedProfile {
@@ -30,6 +54,43 @@ struct ResolvedProfile {
 /// Configure vision provider settings and persist them to config.toml.
 pub fn connect(opts: ConnectOpts) -> Result<()> {
     let config_path = crate::resolve_config_path(opts.config.clone());
+    if opts.backend.eq_ignore_ascii_case("acp") {
+        let name = opts
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("ACP setup requires --provider as the profile name"))?;
+        let command = opts
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("ACP setup requires --command"))?;
+        let auth = parse_auth(&opts.auth)?;
+        upsert_vision_acp_profile(
+            &config_path,
+            name,
+            &VisionAcpProfile {
+                command: command.to_owned(),
+                args: opts.args,
+                auth,
+            },
+        )
+        .map_err(|error| anyhow!("{error}"))?;
+        println!(
+            "Wrote ACP vision profile {name:?} to {}",
+            config_path.display()
+        );
+        eprintln!("Authentication is performed by the ACP harness using {auth:?}; no provider token was stored.");
+        return Ok(());
+    }
+    if !opts.backend.eq_ignore_ascii_case("direct") {
+        anyhow::bail!(
+            "unknown vision backend {:?}; expected direct or acp",
+            opts.backend
+        );
+    }
     let resolved = if opts.yes {
         resolve_non_interactive(&opts)?
     } else {
@@ -53,6 +114,18 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_auth(value: &str) -> Result<VisionAuthKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "advertised" => Ok(VisionAuthKind::Advertised),
+        "oauth-authorization-code" => Ok(VisionAuthKind::OAuthAuthorizationCode),
+        "oauth-device-code" => Ok(VisionAuthKind::OAuthDeviceCode),
+        "environment" => Ok(VisionAuthKind::Environment),
+        "existing-session" => Ok(VisionAuthKind::ExistingSession),
+        "none" => Ok(VisionAuthKind::None),
+        _ => anyhow::bail!("unsupported auth path {value:?}"),
+    }
 }
 
 fn resolve_non_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
@@ -347,6 +420,31 @@ mod tests {
         let text = std::fs::read_to_string(&config_path).unwrap();
         assert!(!text.contains("sk-"));
         assert!(!text.contains("api_key ="));
+    }
+
+    #[test]
+    fn connect_yes_acp_writes_no_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        connect(ConnectOpts {
+            config: Some(config_path.clone()),
+            backend: "acp".into(),
+            provider: Some("codex".into()),
+            command: Some("codex".into()),
+            args: vec!["acp".into()],
+            auth: "advertised".into(),
+            yes: true,
+            ..ConnectOpts::default()
+        })
+        .unwrap();
+        let loaded = AppConfig::load(&config_path).unwrap();
+        assert!(matches!(
+            loaded.vision.selected_backend(),
+            Some(config::VisionBackendSelection::Acp { name: "codex", .. })
+        ));
+        let text = std::fs::read_to_string(config_path).unwrap();
+        assert!(!text.contains("token"));
+        assert!(!text.contains("secret"));
     }
 
     #[test]

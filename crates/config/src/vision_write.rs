@@ -2,7 +2,7 @@ use std::path::Path;
 
 use toml_edit::{value, DocumentMut, Item, Table};
 
-use crate::{VisionConfig, VisionProviderConfig};
+use crate::{VisionAcpProfile, VisionAuthKind, VisionConfig, VisionProviderConfig};
 
 /// Error returned when surgically writing vision settings to a TOML file fails.
 #[derive(Debug)]
@@ -84,6 +84,43 @@ pub fn upsert_vision_platform(
 
     std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)?;
     Ok(())
+}
+
+/// Upsert an ACP harness profile. Only the executable, arguments, and auth
+/// strategy are persisted; provider credentials remain owned by the harness.
+pub fn upsert_vision_acp_profile(
+    path: &Path,
+    profile_name: &str,
+    profile: &VisionAcpProfile,
+) -> Result<(), ConfigWriteError> {
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(path)
+            .map_err(ConfigWriteError::Io)?
+            .parse::<DocumentMut>()
+            .map_err(ConfigWriteError::Parse)?
+    } else {
+        DocumentMut::new()
+    };
+    let vision = ensure_table(doc.as_table_mut(), "vision")?;
+    vision["backend"] = value("acp");
+    vision["profile"] = value(profile_name);
+    let profiles = ensure_table(vision, "acp_profiles")?;
+    let selected = ensure_table(profiles, profile_name)?;
+    selected["command"] = value(&profile.command);
+    let mut args = toml_edit::Array::new();
+    for arg in &profile.args {
+        args.push(arg);
+    }
+    selected["args"] = value(args);
+    selected["auth"] = value(match profile.auth {
+        VisionAuthKind::Advertised => "advertised",
+        VisionAuthKind::OAuthAuthorizationCode => "oauth-authorization-code",
+        VisionAuthKind::OAuthDeviceCode => "oauth-device-code",
+        VisionAuthKind::Environment => "environment",
+        VisionAuthKind::ExistingSession => "existing-session",
+        VisionAuthKind::None => "none",
+    });
+    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
 }
 
 fn ensure_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table, ConfigWriteError> {

@@ -3,6 +3,23 @@
 version = 4
 
 [[package]]
+name = "acp-client"
+version = "0.5.1"
+dependencies = [
+ "agent-client-protocol",
+ "async-trait",
+ "base64 0.23.0",
+ "intent-engine",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "types",
+]
+
+[[package]]
 name = "acp-gateway"
 version = "0.5.1"
 dependencies = [
@@ -331,6 +348,15 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "auth-broker"
+version = "0.5.1"
+dependencies = [
+ "async-trait",
+ "thiserror 2.0.18",
+ "tokio",
+]
 
 [[package]]
 name = "autocfg"
@@ -2427,6 +2453,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 name = "node-registry"
 version = "0.5.1"
 dependencies = [
+ "acp-client",
  "async-trait",
  "config",
  "intent-engine",

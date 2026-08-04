@@ -313,6 +313,7 @@ mod tests {
                 } else {
                     BTreeMap::new()
                 },
+                ..VisionConfig::default()
             },
             ..AppConfig::default()
         }
