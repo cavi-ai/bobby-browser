@@ -9,10 +9,11 @@ use companion_core::{run_native_host, NativeHostConfig};
 use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig};
 use firefox_companion::selection::NativeHostDescriptor;
 pub use firefox_companion::selection::{
-    compose_worker_factory, compose_worker_factory_with_enrolled_firefox,
-    compose_worker_factory_with_pairing_observer, default_selection_path, parse_selection,
-    persist_browser_selection, resolve_browser_selection, start_firefox_profile_enrollment,
-    EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig, SelectionSource, SELECTION_ENV,
+    build_enrolled_browser_selection, compose_worker_factory,
+    compose_worker_factory_with_enrolled_firefox, compose_worker_factory_with_pairing_observer,
+    default_selection_path, parse_selection, persist_browser_selection, resolve_browser_selection,
+    start_firefox_profile_enrollment, EnrolledFirefoxProfile, FirefoxProfileEnrollmentConfig,
+    SelectionSource, SELECTION_ENV,
 };
 use std::{
     net::SocketAddr,
@@ -694,25 +695,16 @@ async fn run_firefox_profile_enroll(
         .wait()
         .await
         .map_err(|error| anyhow::anyhow!("{}", error.message))?;
-    let profile_id = enrolled.profile_id().0.to_string();
-    let selection = serde_json::json!({
-        "preference": { "mode": "exact", "engine": "firefox", "profileId": profile_id },
-        "firefox": [{
-            "profileId": profile_id,
-            "bidiUrl": bidi_url,
-            "profileDir": profile_dir,
-            "companionBind": bind.to_string(),
-            "descriptorPath": descriptor,
-            "timeoutMs": 30_000,
-            "pairingCodeTtlMs": 300_000,
-            "attachmentTtlMs": 300_000,
-        }],
-    });
-    println!("{selection}");
-    let persist = default_selection_path().and_then(|path| {
-        let parsed = serde_json::from_value(selection)?;
-        persist_browser_selection(&path, &parsed).map(|()| path)
-    });
+    let selection = build_enrolled_browser_selection(
+        enrolled.profile_id(),
+        &bidi_url,
+        &profile_dir,
+        bind,
+        &descriptor,
+    );
+    println!("{}", serde_json::to_string(&selection)?);
+    let persist = default_selection_path()
+        .and_then(|path| persist_browser_selection(&path, &selection).map(|()| path));
     match persist {
         Ok(path) => eprintln!(
             "Enrollment paired and persisted to {}. `bobby serve`, the MCP gateway, and \
