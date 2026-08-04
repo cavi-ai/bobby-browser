@@ -20,7 +20,7 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | GET | `/v1/runtime` | Runtime info | `session:read` |
 | GET | `/v1/sessions` | List sessions | `session:read` |
 | POST | `/v1/sessions` | Create session | `session:write` |
-| DELETE | `/v1/sessions/{sessionId}` | Delete session (204) | `session:write` |
+| DELETE | `/v1/sessions/{session}` | Delete session (204) | `session:write` |
 | POST | `/v1/pages` | Open page | `page:write` |
 | POST | `/v1/commands` | Submit command envelope | `browser:mutate` (+ nested caps for upload / download / JS / intents) |
 | POST | `/v1/checkpoints` | Persist workflow checkpoint | `recovery:write` |
@@ -28,12 +28,18 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | GET | `/v1/recovery/{workflow}` | Checkpoint + receipts | `recovery:read` |
 | GET | `/v1/events` | Read events (`after`, `limit` query) | `session:read` |
 | GET | `/v1/artifacts/{id}` | Read artifact bytes | `artifact:read` |
+| GET | `/v1/sessions/{session}/pages/{page}/forms` | Form snapshot (`maxControls` query, 1–512) | `page:read` |
+| POST | `/v1/jobs` | Submit a scheduled job | `job:submit` |
+| GET | `/v1/jobs/{job}` | Job status | `job:read` |
+| DELETE | `/v1/jobs/{job}` | Cancel a job | `job:cancel` |
 | POST | `/v1/principals` | Issue scoped bearer | `authority:admin` |
 | DELETE | `/v1/principals/{principal}` | Revoke principal | `authority:admin` |
 
 MCP streamable HTTP is mounted at `POST /v1/mcp` (JSON-RPC) and
 `GET /v1/mcp` (SSE keep-alive channel) — see [MCP over HTTP](mcp-http.md)
 and [MCP tools](mcp-tools.md).
+
+Machine-readable catalog: [OpenAPI 3.1](../openapi/v1.yaml).
 
 ## Request bodies (high level)
 
@@ -47,7 +53,7 @@ validators / Rust types.
   session; `humanize` synthesizes human-like input timing and reports what it
   synthesized as `humanization` evidence. Both are written to the worker on
   every lease, so one session's opt-in never carries into another's.
-- **DELETE `/v1/sessions/{sessionId}`** — empty body; `204` on success
+- **DELETE `/v1/sessions/{session}`** — empty body; `204` on success
 - **POST `/v1/pages`** — `{ session_id }` (snake_case on this request; session/page state also uses `id` / `session_id` / `page_ids`)
 - **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,
   `command` where `command` is `{ kind: "primitive"|"intent", input: … }`).
@@ -71,6 +77,17 @@ validators / Rust types.
   Pass `stream=1` for a server-sent-event stream instead of a batch: each event
   arrives as an SSE frame whose `id` is its cursor, a cursor gap arrives as a
   terminal `event.gap` frame.
+- **GET `/v1/sessions/{session}/pages/{page}/forms`** — optional query
+  `maxControls` (integer 1–512). Returns a `FormSnapshot` (same contract as MCP
+  `form_snapshot`).
+- **POST `/v1/jobs`** — `{ name, payload?, priority?, maxRetries?, timeoutMs? }`
+  → `{ jobId, status }`. `priority` is `low` | `normal` | `high` | `critical`
+  (default `normal`); `maxRetries` defaults to `3`. Mutating: send
+  `idempotency-key` for safe retries.
+- **GET `/v1/jobs/{job}`** — job status record (`id`, `name`, `priority`,
+  `status`, `payload`, timestamps, `retryCount`, `maxRetries`, `result`,
+  `error`, …).
+- **DELETE `/v1/jobs/{job}`** — cancel; returns the updated job status.
 
 Nested command kinds include primitives (`navigate`, `click`, …) and
 `{ kind: "intent", input: … }`. Intents additionally need `intent:execute`.
@@ -96,6 +113,24 @@ Failures return JSON `{ "error": { … } }` where `error` is an `InterfaceError`
 
 Command outcomes may map to `200` / `403` / `409` / `429` / `503` depending on
 `CommandOutcome.status` — the TypeScript client checks status against the body.
+
+### Rate limits and retry
+
+Each principal has an independent in-flight request quota
+(`interface.max_in_flight_per_principal` — see
+[Multi-principal runtime](../concepts/multi-principal.md)). Exhaustion and
+command `resourceExhausted` outcomes return **HTTP 429** with:
+
+- Response header `Retry-After: <seconds>` (integer seconds)
+- Body field `error.retryAfterMs` when the runtime supplies a millisecond hint
+
+Treat 429 as retryable after the indicated delay. Do not spin. Connection /
+accept limits on the listener can also emit 429 with `Retry-After`.
+
+HTTP **503** appears for retryable command failures (`retryableFailure`). Those
+responses now include `Retry-After: 1` (one second) as a default backoff when
+the outcome does not carry an explicit millisecond hint. Prefer that header
+over spinning.
 
 ## Clients
 

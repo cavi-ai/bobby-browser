@@ -21,7 +21,14 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "context_ask"
             | "toolset_select"
     );
-    let destructive = matches!(name, "session_close" | "page_close" | "cookie_delete");
+    let destructive = matches!(
+        name,
+        "session_close"
+            | "page_close"
+            | "cookie_delete"
+            | "intent_submit_and_verify"
+            | "intent_follow"
+    );
     // `idempotentHint` per MCP is unconditional: "calling the tool repeatedly
     // with the same arguments will have no additional effect." An optional
     // `idempotencyKey` does not establish that — without a caller-supplied
