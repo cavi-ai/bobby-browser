@@ -273,6 +273,19 @@ struct HttpBridgeState {
 }
 
 impl ChromiumWorker {
+    /// Clone the Arc-backed page handle and drop the pages guard
+    /// immediately. Every command path goes through this instead of holding
+    /// the mutex across CDP I/O: one hung or slow page call used to
+    /// serialize (or, with no timeout, permanently stall) every page of the
+    /// session and block close/terminate.
+    async fn page_handle(&self, page_id: &PageId) -> Result<Page, CommandError> {
+        self.pages
+            .lock()
+            .await
+            .get(page_id)
+            .cloned()
+            .ok_or_else(page_missing)
+    }
     fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
         fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
             Box::new(TargetSpec {
@@ -527,10 +540,7 @@ impl ChromiumWorker {
         if let Some(recorder) = self.har_recorders.lock().await.get(page_id) {
             return Ok(recorder.clone());
         }
-        let page = {
-            let pages = self.pages.lock().await;
-            pages.get(page_id).cloned().ok_or_else(page_missing)?
-        };
+        let page = self.page_handle(page_id).await?;
         // Single-flight the collector spawn without holding this map's guard
         // across other lock acquisitions: re-lock and re-check, so the loser
         // of the race returns the winner's recorder instead of spawning a
@@ -731,8 +741,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         tokio::time::timeout(
             Duration::from_millis(command.timeout_ms),
             page.goto(command.url.as_str()),
@@ -758,8 +767,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let url = page
             .url()
             .await
@@ -774,17 +782,17 @@ impl BrowserWorker for ChromiumWorker {
             let resolved = self
                 .resolve_target(
                     page_id,
-                    page,
+                    &page,
                     command.selector.as_deref().unwrap_or(""),
                     command.target.as_ref(),
                 )
                 .await?;
-            let text = match resolved.value(page).await {
+            let text = match resolved.value(&page).await {
                 Ok(Some(value)) if !value.is_empty() => value,
-                _ => resolved.inner_text(page).await?.unwrap_or_default(),
+                _ => resolved.inner_text(&page).await?.unwrap_or_default(),
             };
             let html = if command.include_html {
-                Some(resolved.outer_html(page).await?.unwrap_or_default())
+                Some(resolved.outer_html(&page).await?.unwrap_or_default())
             } else {
                 None
             };
@@ -821,16 +829,15 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let resolved = self
-            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
-        let text = resolved.inner_text(page).await.ok().flatten();
+        let text = resolved.inner_text(&page).await.ok().flatten();
         if self.humanization_enabled() {
-            self.humanized_click(page, &resolved).await?;
+            self.humanized_click(&page, &resolved).await?;
         } else {
-            resolved.click(page).await?;
+            resolved.click(&page).await?;
         }
         Ok(vec![
             Evidence::Element {
@@ -853,8 +860,7 @@ impl BrowserWorker for ChromiumWorker {
                 "vision click coordinates must be finite",
             ));
         }
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         page.click(Point { x, y })
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
@@ -869,8 +875,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         if let Some(expected) = &command.expected_url {
             let current = page
                 .url()
@@ -885,23 +890,23 @@ impl BrowserWorker for ChromiumWorker {
             }
         }
         let resolved = self
-            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
         let mut humanization_evidence = None;
-        let observed = if resolved.is_checkable(page).await? {
+        let observed = if resolved.is_checkable(&page).await? {
             let checked = command.value.parse::<bool>().map_err(|_| {
                 driver_error(
                     ErrorCode::InvalidRequest,
                     "checkable controls require a boolean value",
                 )
             })?;
-            resolved.set_checked(page, checked).await?.to_string()
-        } else if resolved.is_select(page).await? {
-            resolved.select_option(page, &command.value).await?
+            resolved.set_checked(&page, checked).await?.to_string()
+        } else if resolved.is_select(&page).await? {
+            resolved.select_option(&page, &command.value).await?
         } else {
             if self.humanization_enabled() {
                 let synthesized = self
-                    .humanized_type_text(page, &resolved, &command.value, command.clear_first)
+                    .humanized_type_text(&page, &resolved, &command.value, command.clear_first)
                     .await?;
                 humanization_evidence = Some(Evidence::Humanization {
                     engine: "behavioral-engine".to_owned(),
@@ -910,12 +915,12 @@ impl BrowserWorker for ChromiumWorker {
                 });
             } else {
                 resolved
-                    .type_text(page, &command.value, command.clear_first)
+                    .type_text(&page, &command.value, command.clear_first)
                     .await?;
             }
-            resolved.value(page).await?.unwrap_or_default()
+            resolved.value(&page).await?.unwrap_or_default()
         };
-        let validity = resolved.form_control_validity(page).await?;
+        let validity = resolved.form_control_validity(&page).await?;
         let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -944,16 +949,15 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let requested = command.paths.iter().map(PathBuf::from).collect::<Vec<_>>();
         let paths = resolve_upload_paths(&self.upload_roots, &requested)?;
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let resolved = self
-            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
         let path_strings = paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        resolved.set_files(page, path_strings.clone()).await?;
+        resolved.set_files(&page, path_strings.clone()).await?;
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
@@ -972,8 +976,7 @@ impl BrowserWorker for ChromiumWorker {
             .action
             .validate()
             .map_err(|message| driver_error(ErrorCode::InvalidRequest, message))?;
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let read_snapshot = async || -> Result<types::FormSnapshot, CommandError> {
             let value: serde_json::Value = page
                 .evaluate(crate::form_snapshot_expression(page_id))
@@ -1009,18 +1012,18 @@ impl BrowserWorker for ChromiumWorker {
 
         let target = Self::control_target_spec(&command.target);
         let resolved = self
-            .resolve_target(page_id, page, "", Some(&target))
+            .resolve_target(page_id, &page, "", Some(&target))
             .await?;
         match &command.action {
-            ControlAction::SetText { value } => resolved.type_text(page, value, true).await?,
+            ControlAction::SetText { value } => resolved.type_text(&page, value, true).await?,
             ControlAction::SetChecked { checked } => {
-                resolved.set_checked(page, *checked).await?;
+                resolved.set_checked(&page, *checked).await?;
             }
             ControlAction::SelectOne { value } => {
-                resolved.select_option(page, value).await?;
+                resolved.select_option(&page, value).await?;
             }
             ControlAction::SelectMany { values } => {
-                resolved.select_options(page, values).await?;
+                resolved.select_options(&page, values).await?;
             }
             ControlAction::SetFiles { paths } => {
                 let requested = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -1028,16 +1031,16 @@ impl BrowserWorker for ChromiumWorker {
                     .into_iter()
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect();
-                resolved.set_files(page, paths).await?;
+                resolved.set_files(&page, paths).await?;
             }
             ControlAction::Clear => {
                 if before_control.control_kind == types::FormControlKind::File {
-                    resolved.set_files(page, Vec::new()).await?;
+                    resolved.set_files(&page, Vec::new()).await?;
                 } else {
-                    resolved.clear_control(page).await?;
+                    resolved.clear_control(&page).await?;
                 }
             }
-            ControlAction::Activate => resolved.click(page).await?,
+            ControlAction::Activate => resolved.click(&page).await?,
         }
 
         let after = read_snapshot().await?;
@@ -1067,13 +1070,11 @@ impl BrowserWorker for ChromiumWorker {
         };
         self.register_page(page_id.clone(), page).await?;
         if let Some(url) = command.url.as_deref() {
-            let pages = self.pages.lock().await;
-            let page = pages.get(&page_id).ok_or_else(page_missing)?;
+            let page = self.page_handle(&page_id).await?;
             page.goto(url).await.map_err(command_failed)?;
         }
-        let pages = self.pages.lock().await;
-        let page = pages.get(&page_id).ok_or_else(page_missing)?;
-        let evidence = page_evidence(page_id, page).await?;
+        let page = self.page_handle(&page_id).await?;
+        let evidence = page_evidence(page_id, &page).await?;
         Ok(vec![Evidence::Page {
             page_id: evidence.page_id,
             url: evidence.url,
@@ -1082,10 +1083,16 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let mut listed = Vec::with_capacity(pages.len());
-        for (page_id, page) in pages.iter() {
-            listed.push(page_evidence(page_id.clone(), page).await?);
+        let handles: Vec<(PageId, Page)> = self
+            .pages
+            .lock()
+            .await
+            .iter()
+            .map(|(page_id, page)| (page_id.clone(), page.clone()))
+            .collect();
+        let mut listed = Vec::with_capacity(handles.len());
+        for (page_id, page) in handles {
+            listed.push(page_evidence(page_id, &page).await?);
         }
         listed.sort_by_key(|page| page.page_id.0);
         Ok(vec![Evidence::Pages { pages: listed }])
@@ -1115,12 +1122,9 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         let recorder = self.ensure_har_collector(page_id).await?;
         let entries = recorder.take(command.clear).await;
-        let page_url = {
-            let pages = self.pages.lock().await;
-            match pages.get(page_id) {
-                Some(page) => page.url().await.ok().flatten().unwrap_or_default(),
-                None => String::new(),
-            }
+        let page_url = match self.page_handle(page_id).await {
+            Ok(page) => page.url().await.ok().flatten().unwrap_or_default(),
+            Err(_) => String::new(),
         };
         let document = crate::har::har_document(&entries, &page_url);
         let bytes = serde_json::to_vec(&document)
@@ -1151,8 +1155,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::EmulateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         if let Some(viewport) = command.viewport {
             if viewport.width == 0
                 || viewport.height == 0
@@ -1205,8 +1208,7 @@ impl BrowserWorker for ChromiumWorker {
         let timeout = std::time::Duration::from_millis(
             command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
         );
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let mut events = page
             .event_listener::<chromiumoxide::cdp::browser_protocol::page::EventJavascriptDialogOpening>()
             .await
@@ -1245,8 +1247,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::PrintToPdfCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         if let Some(scale) = command.scale {
             if !(0.1..=2.0).contains(&scale) {
                 return Err(driver_error(
@@ -1288,8 +1289,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::GetCookiesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let mut params = chromiumoxide::cdp::browser_protocol::network::GetCookiesParams::default();
         if !command.urls.is_empty() {
             params.urls = Some(command.urls.clone());
@@ -1309,10 +1309,7 @@ impl BrowserWorker for ChromiumWorker {
         // Clone the page handle and drop the pages guard before any browser
         // I/O: the read-back below locks the same (non-reentrant) mutex, so
         // holding it here deadlocks every cookie_set.
-        let page = {
-            let pages = self.pages.lock().await;
-            pages.get(page_id).cloned().ok_or_else(page_missing)?
-        };
+        let page = self.page_handle(page_id).await?;
         if command.cookies.len() > 128 {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
@@ -1343,10 +1340,7 @@ impl BrowserWorker for ChromiumWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         // Same deadlock avoidance as set_cookies: take the handle, drop the
         // guard, then do I/O (both get_cookies calls lock pages again).
-        let page = {
-            let pages = self.pages.lock().await;
-            pages.get(page_id).cloned().ok_or_else(page_missing)?
-        };
+        let page = self.page_handle(page_id).await?;
         let current = self
             .get_cookies(
                 page_id,
@@ -1387,8 +1381,7 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let bytes = page
             .screenshot(
                 ScreenshotParams::builder()
@@ -1411,8 +1404,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::AccessibilitySnapshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let result = page
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
@@ -1438,8 +1430,7 @@ impl BrowserWorker for ChromiumWorker {
         max_controls: Option<u32>,
     ) -> Result<Vec<Evidence>, CommandError> {
         let max_controls = max_controls.unwrap_or(512) as usize;
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let value: serde_json::Value = page
             .evaluate(crate::form_snapshot_expression_with_limit(
                 page_id,
@@ -1463,10 +1454,9 @@ impl BrowserWorker for ChromiumWorker {
         &self,
         command: &types::ActivatePageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(&command.page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(&command.page_id).await?;
         page.activate().await.map_err(command_failed)?;
-        let evidence = page_evidence(command.page_id.clone(), page).await?;
+        let evidence = page_evidence(command.page_id.clone(), &page).await?;
         Ok(vec![Evidence::Page {
             page_id: evidence.page_id,
             url: evidence.url,
@@ -1551,8 +1541,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &ClickAndWaitForDownloadCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         tokio::time::timeout(
             Duration::from_millis(command.timeout_ms),
             page.execute(
@@ -1576,9 +1565,9 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .map_err(command_failed)?;
         let resolved = self
-            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
-        resolved.click_js(page).await?;
+        resolved.click_js(&page).await?;
         let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), begins.next())
             .await
             .map_err(|_| timeout_error(command.timeout_ms))?
@@ -1643,18 +1632,16 @@ impl BrowserWorker for ChromiumWorker {
         loop {
             observations += 1;
             let tracker = self.network_trackers.lock().await.get(page_id).cloned();
-            let pages = self.pages.lock().await;
-            let page = pages.get(page_id).ok_or_else(page_missing)?;
+            let page = self.page_handle(page_id).await?;
             let (satisfied, excluded_classes) = wait_condition_satisfied(
                 &self.browser,
                 page_id,
-                page,
+                &page,
                 tracker.as_deref(),
                 &command.condition,
                 &mut quiet_since,
             )
             .await?;
-            drop(pages);
             if satisfied {
                 return Ok(vec![Evidence::Wait {
                     condition: command.condition.clone(),
@@ -1683,11 +1670,10 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         target: &types::TargetSpec,
     ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let mut browser = self.browser.lock().await;
         let browser = browser.as_mut().ok_or_else(closed_error)?;
-        gather_candidates(page, target, Some(browser)).await
+        gather_candidates(&page, target, Some(browser)).await
     }
 
     async fn capture_screenshot(
@@ -1695,8 +1681,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let (bytes, resolution) = match &command.mode {
             ScreenshotMode::Viewport => (
                 page.screenshot(
@@ -1720,8 +1705,10 @@ impl BrowserWorker for ChromiumWorker {
                 None,
             ),
             ScreenshotMode::Element { target } => {
-                let resolved = self.resolve_target(page_id, page, "", Some(target)).await?;
-                let bytes = resolved.screenshot(page).await.map_err(|error| {
+                let resolved = self
+                    .resolve_target(page_id, &page, "", Some(target))
+                    .await?;
+                let bytes = resolved.screenshot(&page).await.map_err(|error| {
                     driver_error(ErrorCode::ScreenshotCaptureFailed, error.message)
                 })?;
                 (bytes, Some(resolved.evidence))
@@ -1787,8 +1774,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &SetFocusEmulationCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         page.execute(SetFocusEmulationEnabledParams::new(command.enabled))
             .await
             .map_err(command_failed)?;
@@ -1803,8 +1789,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &SetEmulatedMediaCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let features = command
             .features
             .iter()
@@ -1836,8 +1821,7 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &EvaluateJavaScriptCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
 
         let mut params = EvaluateParams::new(command.expression.clone());
         params.await_promise = Some(command.await_promise);
@@ -1865,8 +1849,7 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     async fn http_state(&self, page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let state = self.http_state.lock().await;
         let current_url = page
             .url()
@@ -1908,8 +1891,7 @@ impl BrowserWorker for ChromiumWorker {
         expected_version: u64,
         delta: ResponseStateDelta,
     ) -> Result<(), CommandError> {
-        let pages = self.pages.lock().await;
-        let page = pages.get(page_id).ok_or_else(page_missing)?;
+        let page = self.page_handle(page_id).await?;
         let current_url =
             page.url().await.map_err(command_failed)?.ok_or_else(|| {
                 driver_error(ErrorCode::InvalidRequest, "page URL is unavailable")
