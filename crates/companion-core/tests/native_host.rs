@@ -836,6 +836,21 @@ async fn enroll_keep_relay_leaves_host_running_after_enroll_ok() {
         json!({ "kind": "nativeStatus", "output": { "state": "enrollOk" } })
     );
 
+    // Must not double-write the initial paired frame after enrollOk.
+    let third = tokio::time::timeout(
+        Duration::from_millis(100),
+        read_native_message(&mut extension_stream),
+    )
+    .await;
+    assert!(
+        third.is_err()
+            || matches!(
+                third.as_ref().ok().and_then(|r| r.as_ref().ok()),
+                Some(None)
+            ),
+        "KeepRelay must not emit a second paired after enrollOk; got {third:?}"
+    );
+
     // Live path must not exit after enrollOk — drop the extension side to finish.
     assert!(
         tokio::time::timeout(Duration::from_millis(150), &mut host)
