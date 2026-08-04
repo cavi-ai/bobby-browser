@@ -841,3 +841,72 @@ async fn production_adapters_claim_only_capabilities_known_from_runtime_construc
         );
     }
 }
+
+#[tokio::test]
+async fn timed_out_replacement_completes_cleanup_and_swaps_in_the_background() {
+    let release_started = Arc::new(Semaphore::new(0));
+    let release_finish = Arc::new(Semaphore::new(0));
+    let chromium_launches = Arc::new(AtomicUsize::new(0));
+    let selector = Arc::new(BrowserWorkerSelector::with_replacement_timeout(
+        vec![
+            FactoryRegistration::new(
+                BrowserEngine::Firefox,
+                None,
+                capabilities(),
+                Arc::new(DelayedReleaseFactory {
+                    name: "firefox",
+                    release_started: release_started.clone(),
+                    release_finish: release_finish.clone(),
+                    release_mutations: Arc::new(AtomicUsize::new(0)),
+                    terminations: Arc::new(AtomicUsize::new(0)),
+                }),
+            ),
+            registration(
+                BrowserEngine::Chromium,
+                "chromium",
+                chromium_launches.clone(),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+        ],
+        RequiredCapabilities::default(),
+        Duration::from_millis(50),
+    ));
+    let session = SessionId::new();
+    selector
+        .select(
+            &session,
+            &EnginePreference::Prefer {
+                engines: vec![BrowserEngine::Firefox],
+            },
+        )
+        .await
+        .unwrap()
+        .launch(&session)
+        .await
+        .unwrap();
+
+    let error = match selector
+        .replace_session(&session, &EnginePreference::ManagedChromium)
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("hung replacement unexpectedly completed"),
+    };
+    assert_eq!(error.code, types::ErrorCode::DeadlineExceeded);
+    // The contract: timeout is a reporting deadline, not a cancellation.
+    assert!(error.message.contains("cleanup continues"));
+
+    // Let the hung release finish AFTER the timeout: the swap must land
+    // (cleanup completes atomically), and exactly once.
+    release_finish.add_permits(1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let swapped = selector
+        .select(&session, &EnginePreference::ManagedChromium)
+        .await
+        .unwrap();
+    assert_eq!(
+        swapped.launch(&session).await.unwrap().profile_dir(),
+        Path::new("chromium")
+    );
+    assert_eq!(chromium_launches.load(Ordering::SeqCst), 1);
+}

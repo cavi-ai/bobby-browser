@@ -173,6 +173,12 @@ impl BrowserWorkerSelector {
         match tokio::time::timeout(self.replacement_cleanup_timeout, &mut replacement).await {
             Ok(result) => Ok(result
                 .map_err(|error| policy_error(format!("replacement task failed: {error}")))?),
+            // The timeout is a reporting deadline, not a cancellation: the
+            // task keeps running so the old factory's cleanup completes and
+            // the swap lands atomically -- aborting mid-release could serve
+            // a half-closed factory to the next select. Concurrent selects
+            // block on the selection mutex until cleanup finishes (pinned by
+            // replacement_timeout_keeps_selection_unavailable_until_owned_cleanup_finishes).
             Err(_) => Err(replacement_timeout_error()),
         }
     }
@@ -342,7 +348,9 @@ impl WorkerFactory for PreferenceWorkerFactory {
 fn replacement_timeout_error() -> CommandError {
     CommandError {
         code: types::ErrorCode::DeadlineExceeded,
-        message: "browser worker replacement cleanup exceeded its deadline".into(),
+        message: "browser worker replacement cleanup exceeded its deadline; cleanup continues \
+                  in the background and the swap lands when it completes"
+            .into(),
         layer: types::ErrorLayer::Driver,
         retryable: true,
     }
