@@ -169,9 +169,7 @@ async fn compact_journal<'a>(
             JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
         )
     });
-    terminal.sort_by_key(|job| {
-        std::cmp::Reverse(job.completed_at.unwrap_or(job.created_at))
-    });
+    terminal.sort_by_key(|job| std::cmp::Reverse(job.completed_at.unwrap_or(job.created_at)));
     terminal.truncate(COMPACT_RETAINED_TERMINAL);
     jobs.extend(terminal);
     jobs.sort_by_key(|job| job.created_at);

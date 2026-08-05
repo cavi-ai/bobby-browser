@@ -203,6 +203,21 @@ async fn sweep_drops_only_expired_records() {
     assert_eq!(report.sites_loaded, 2);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn sweep_reports_persistence_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store
+        .upsert_site("https://stale.example", site(&["Email"], 1))
+        .await;
+    assert!(store.flush().await.is_empty());
+    std::fs::remove_dir_all(store.root()).unwrap();
+
+    let error = store.sweep(90, 200).await.unwrap_err();
+    assert!(matches!(error, ContextStoreError::Io(_)));
+}
+
 #[tokio::test]
 async fn failed_flush_keeps_data_session_only() {
     let temp = tempfile::tempdir().unwrap();

@@ -286,9 +286,17 @@ impl ContextStore {
             }
         }
         for key in emptied {
-            let _ = tokio::fs::remove_file(self.path(&key)).await;
+            tokio::fs::remove_file(self.path(&key)).await?;
         }
-        self.flush().await;
+        let failed = self.flush().await;
+        if !failed.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "retention sweep failed to persist {} site(s): {}",
+                failed.len(),
+                failed.join(", ")
+            ))
+            .into());
+        }
         Ok(dropped)
     }
 
@@ -373,7 +381,9 @@ impl Lockfile {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         let file = options.open(&path)?;
         let path_metadata = std::fs::symlink_metadata(&path)?;

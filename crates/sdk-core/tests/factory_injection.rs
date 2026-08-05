@@ -107,7 +107,9 @@ async fn build_with_worker_factory_consumes_the_injected_factory() {
 async fn context_ttl_is_applied_during_runtime_build() {
     let root = tempfile::tempdir().unwrap();
     let context_root = root.path().join("context");
-    let (store, _) = ContextStore::open(&context_root, "profile-a").await.unwrap();
+    let (store, _) = ContextStore::open(&context_root, "profile-a")
+        .await
+        .unwrap();
     let mut intents = std::collections::BTreeMap::new();
     intents.insert(
         "fill".to_string(),
@@ -155,5 +157,9 @@ async fn context_ttl_is_applied_during_runtime_build() {
     .unwrap();
 
     let promotion = runtime.pages.context_promotion().unwrap();
-    assert!(promotion.store().site("https://example.com").await.is_none());
+    assert!(promotion
+        .store()
+        .site("https://example.com")
+        .await
+        .is_none());
 }
