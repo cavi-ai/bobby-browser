@@ -15,32 +15,32 @@ test-support = []
 anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true
-config = { path = "../config", version = "0.5.1" }
-behavioral-engine = { path = "../behavioral-engine", version = "0.5.1" }
-dom-engine = { path = "../dom-engine", version = "0.5.1" }
-fingerprinting = { path = "../fingerprinting", version = "0.5.1" }
-js-engine = { path = "../js-engine", version = "0.5.1" }
-network-engine = { path = "../network-engine", version = "0.5.1" }
+config = { path = "../config", version = "0.6.0" }
+behavioral-engine = { path = "../behavioral-engine", version = "0.6.0" }
+dom-engine = { path = "../dom-engine", version = "0.6.0" }
+fingerprinting = { path = "../fingerprinting", version = "0.6.0" }
+js-engine = { path = "../js-engine", version = "0.6.0" }
+network-engine = { path = "../network-engine", version = "0.6.0" }
 futures.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-skill-runtime = { path = "../skill-runtime", version = "0.5.1" }
+skill-runtime = { path = "../skill-runtime", version = "0.6.0" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.5.1" }
+types = { path = "../types", version = "0.6.0" }
 url.workspace = true
-artifact-store = { path = "../artifact-store", version = "0.5.1" }
-companion-protocol = { path = "../companion-protocol", version = "0.5.1" }
+artifact-store = { path = "../artifact-store", version = "0.6.0" }
+companion-protocol = { path = "../companion-protocol", version = "0.6.0" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-test-site = { path = "../test-site", version = "0.5.1" }
+test-site = { path = "../test-site", version = "0.6.0" }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
