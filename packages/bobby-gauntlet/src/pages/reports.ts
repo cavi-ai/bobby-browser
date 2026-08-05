@@ -15,6 +15,11 @@ export async function reportsPage(document: Document, api: NorthstarApi): Promis
   const result = element(document, "div", { className: "report-result" });
   form.append(customer.label, format.label, submit, result);
   page.append(form);
+  void api.latestReport()
+    .then((report) => {
+      if (report.status === "complete") result.replaceChildren(reportDownload(document, report));
+    })
+    .catch(() => undefined);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     submit.disabled = true;

@@ -9,7 +9,7 @@ use modern_gauntlet::evidence::{
 };
 use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 use sha2::{Digest, Sha256};
-use types::Evidence;
+use types::{Evidence, RecoveryDecision};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -32,6 +32,22 @@ fn release_suite_names_are_stable() {
             .len(),
         5
     );
+    let source = include_str!("modern_gauntlet_e2e.rs");
+    assert_eq!(
+        source.matches("#[tokio::test]\nasync fn ").count(),
+        5,
+        "release file must contain exactly five Tokio browser tests"
+    );
+    assert!(
+        !source.contains(concat!("#[", "ignore")),
+        "release tests may not be ignored"
+    );
+    for name in REQUIRED_JOURNEYS {
+        assert!(
+            source.contains(&format!("#[tokio::test]\nasync fn {name}")),
+            "missing mandatory release test {name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -120,6 +136,17 @@ async fn validated_onboarding_preserves_accepted_values() -> TestResult<()> {
         .await?;
     let snapshot = server.snapshot().await;
     assert_effect_count("onboarding record", snapshot.onboarding_records, 1)?;
+    assert_eq!(
+        snapshot.onboarding,
+        Some(modern_gauntlet::scenario::OnboardingRecord {
+            full_name: "Maya Chen".into(),
+            email: "maya@atlas.example".into(),
+            company_name: "Atlas Labs".into(),
+            postal_code: "10001".into(),
+            plan: "growth".into(),
+            billing_cycle: "annual".into(),
+        })
+    );
     persist_evidence("onboarding", &server, &runtime).await?;
     Ok(())
 }
@@ -155,6 +182,12 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
     let snapshot = server.snapshot().await;
     let expected = format!("{:x}", Sha256::digest(std::fs::read(&fixture)?));
     assert_eq!(snapshot.uploaded_sha256.as_deref(), Some(expected.as_str()));
+    assert_eq!(snapshot.uploaded_customer_id.as_deref(), Some("cus_atlas"));
+    assert_eq!(
+        snapshot.uploaded_filename.as_deref(),
+        Some("approved-upload.txt")
+    );
+    assert_eq!(snapshot.uploaded_media_type.as_deref(), Some("text/plain"));
     assert_effect_count("preview confirmation", snapshot.preview_confirmations, 1)?;
     persist_evidence("documents", &server, &runtime).await?;
     Ok(())
@@ -172,6 +205,7 @@ async fn popup_authorization_survives_obstruction() -> TestResult<()> {
         .await?;
     runtime.click_on(&popup, "#authorize").await?;
     runtime.wait_visible("[data-connected='true']").await?;
+    assert_eq!(runtime.page_count().await?, 1, "authorization popup leaked");
     runtime
         .click(
             "button[aria-label='Dismiss notification preferences']",
@@ -188,20 +222,30 @@ async fn popup_authorization_survives_obstruction() -> TestResult<()> {
 async fn interrupted_report_recovers_once_and_downloads() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("report-recovery")).await?;
     let runtime = ModernRuntime::launch(&server, Journey::ReportRecovery).await?;
-    runtime
-        .click("form[aria-label='Generate report'] button", true)
+    let workflow_id = runtime
+        .click_boundary_with_workflow("form[aria-label='Generate report'] button")
         .await?;
-    runtime
+    server.wait_for_report_generation().await?;
+    let (runtime, recovery) = runtime
+        .restart_and_recover(&workflow_id, &server.application_url("/reports"))
+        .await?;
+    assert!(
+        matches!(
+            recovery,
+            RecoveryDecision::Resumed { .. } | RecoveryDecision::Restarted { .. }
+        ),
+        "recovery did not resume or restart from the verified checkpoint: {recovery:?}"
+    );
+    if let Err(error) = runtime
         .wait_visible("a[download='atlas-operations.csv']")
-        .await?;
-    let report_url = server.application_url("/reports");
-    let runtime = runtime.restart_from_journal(&report_url).await?;
-    runtime
-        .click("form[aria-label='Generate report'] button", true)
-        .await?;
-    runtime
-        .wait_visible("a[download='atlas-operations.csv']")
-        .await?;
+        .await
+    {
+        return Err(format!(
+            "{error}; recovered page: {:?}",
+            runtime.inspect(None).await?
+        )
+        .into());
+    }
     let evidence = runtime
         .click_download("a[download='atlas-operations.csv']")
         .await?;

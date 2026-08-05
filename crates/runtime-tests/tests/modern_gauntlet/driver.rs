@@ -8,10 +8,10 @@ use types::{
     AccessibilitySnapshotCommand, AttemptId, CaptureScreenshotCommand, CheckpointId,
     CheckpointInvariant, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
     CommandClass, CommandEnvelope, CommandId, CommandOutcome, ControlAction, ControlActionCommand,
-    CreateSessionRequest, Evidence, FormControlTarget, InspectCommand, NavigateCommand,
-    OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId,
-    TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
-    WorkflowCheckpoint, WorkflowId,
+    CreateSessionRequest, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
+    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision, RuntimeCommand,
+    ScreenshotMode, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 use super::scenario::ScenarioServer;
@@ -68,7 +68,7 @@ pub struct ModernRuntime {
     runtime: RuntimeService,
     session_id: SessionId,
     page_id: PageId,
-    root: tempfile::TempDir,
+    root: PathBuf,
     journal_path: PathBuf,
     downloads_dir: PathBuf,
     artifacts_dir: PathBuf,
@@ -81,7 +81,7 @@ impl fmt::Debug for ModernRuntime {
             .debug_struct("ModernRuntime")
             .field("session_id", &self.session_id)
             .field("page_id", &self.page_id)
-            .field("root", &self.root.path())
+            .field("root", &self.root)
             .finish()
     }
 }
@@ -122,11 +122,18 @@ impl ModernRuntime {
         if !chrome.is_file() {
             return Err(Box::new(HarnessError::MissingBrowser { path: chrome }));
         }
-        let root = tempfile::tempdir()?;
-        let journal_path = root.path().join("commands.jsonl");
-        let downloads_dir = root.path().join("downloads");
-        let artifacts_dir = root.path().join("artifacts");
-        let uploads_dir = root.path().join("uploads");
+        let root = repository_root()
+            .join("target/modern-gauntlet-artifacts/runtime")
+            .join(format!(
+                "{journey}-{}-{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+        std::fs::create_dir_all(&root)?;
+        let journal_path = root.join("commands.jsonl");
+        let downloads_dir = root.join("downloads");
+        let artifacts_dir = root.join("artifacts");
+        let uploads_dir = root.join("uploads");
         std::fs::create_dir_all(&uploads_dir)?;
         let config = AppConfig {
             http: config::HttpConfig {
@@ -140,7 +147,7 @@ impl ModernRuntime {
             },
             browser: BrowserConfig {
                 executable: Some(chrome),
-                profiles_dir: root.path().join("profiles"),
+                profiles_dir: root.join("profiles"),
                 headless: true,
                 max_active: 1,
                 upload_roots: vec![
@@ -156,9 +163,9 @@ impl ModernRuntime {
             },
             storage: StorageConfig {
                 journal_path: journal_path.clone(),
-                checkpoints_dir: root.path().join("checkpoints"),
-                authority_path: root.path().join("authority.json"),
-                scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+                checkpoints_dir: root.join("checkpoints"),
+                authority_path: root.join("authority.json"),
+                scheduler_journal_path: root.join("scheduler-jobs.jsonl"),
             },
             interface: config::InterfaceConfig::default(),
             observability: config::ObservabilityConfig::default(),
@@ -252,6 +259,17 @@ impl ModernRuntime {
             },
         ))
         .await
+    }
+
+    pub async fn page_count(&self) -> TestResult<usize> {
+        self.submit(PrimitiveCommand::ListPages(ListPagesCommand))
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::Pages { pages } => Some(pages.len()),
+                _ => None,
+            })
+            .ok_or_else(|| "list-pages command completed without page evidence".into())
     }
 
     pub async fn select_one(
@@ -401,7 +419,10 @@ impl ModernRuntime {
     }
 
     async fn submit_boundary(&self, command: PrimitiveCommand) -> TestResult<Vec<Evidence>> {
-        self.submit_boundary_on(&self.page_id, command).await
+        Ok(self
+            .submit_boundary_on_with_workflow(&self.page_id, command)
+            .await?
+            .0)
     }
 
     async fn submit_boundary_on(
@@ -409,6 +430,17 @@ impl ModernRuntime {
         page_id: &PageId,
         command: PrimitiveCommand,
     ) -> TestResult<Vec<Evidence>> {
+        Ok(self
+            .submit_boundary_on_with_workflow(page_id, command)
+            .await?
+            .0)
+    }
+
+    async fn submit_boundary_on_with_workflow(
+        &self,
+        page_id: &PageId,
+        command: PrimitiveCommand,
+    ) -> TestResult<(Vec<Evidence>, WorkflowId)> {
         let workflow_id = WorkflowId::new();
         let attempt_id = AttemptId::new();
         let inspect_id = CommandId::new();
@@ -472,7 +504,7 @@ impl ModernRuntime {
             .submit(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id,
-                workflow_id,
+                workflow_id: workflow_id.clone(),
                 attempt_id,
                 session_id: self.session_id.clone(),
                 page_id: Some(page_id.clone()),
@@ -481,12 +513,31 @@ impl ModernRuntime {
             })
             .await
         {
-            CommandOutcome::Completed { evidence, .. } => Ok(evidence),
+            CommandOutcome::Completed { evidence, .. } => Ok((evidence, workflow_id)),
             other => Err(format!("public boundary command {debug} failed: {other:?}").into()),
         }
     }
 
-    pub async fn restart_from_journal(self, url: &str) -> TestResult<Self> {
+    pub async fn click_boundary_with_workflow(&self, selector: &str) -> TestResult<WorkflowId> {
+        let (_, workflow_id) = self
+            .submit_boundary_on_with_workflow(
+                &self.page_id,
+                PrimitiveCommand::Click(ClickCommand {
+                    selector: selector.into(),
+                    target: None,
+                    boundary: true,
+                    expected_url: None,
+                }),
+            )
+            .await?;
+        Ok(workflow_id)
+    }
+
+    pub async fn restart_and_recover(
+        self,
+        workflow_id: &WorkflowId,
+        application_url: &str,
+    ) -> TestResult<(Self, RecoveryDecision)> {
         let Self {
             runtime,
             root,
@@ -497,15 +548,16 @@ impl ModernRuntime {
             ..
         } = self;
         drop(runtime);
-        let chrome = chrome_executable();
         let config = runtime_config(
-            root.path(),
-            chrome,
+            &root,
+            chrome_executable(),
             journal_path.clone(),
             downloads_dir.clone(),
             artifacts_dir.clone(),
         );
         let runtime = RuntimeService::build(&config).await?;
+        let decision = runtime.recover(workflow_id).await?;
+        let _checkpoint = runtime.recovery_status(workflow_id).await?.checkpoint;
         let session = runtime
             .create_session(CreateSessionRequest {
                 profile: format!("{profile}-replacement"),
@@ -528,8 +580,8 @@ impl ModernRuntime {
             artifacts_dir,
             profile,
         };
-        replacement.navigate(url).await?;
-        Ok(replacement)
+        replacement.navigate(application_url).await?;
+        Ok((replacement, decision))
     }
 
     pub fn journal_path(&self) -> &Path {
