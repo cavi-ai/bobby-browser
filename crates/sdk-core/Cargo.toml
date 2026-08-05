@@ -12,6 +12,7 @@ artifact-store = { path = "../artifact-store", version = "0.6.0" }
 async-trait.workspace = true
 chrono.workspace = true
 checkpoint-store = { path = "../checkpoint-store", version = "0.6.0" }
+context-store = { path = "../context-store", version = "0.6.0" }
 node-registry = { path = "../node-registry", version = "0.6.0" }
 config = { path = "../config", version = "0.6.0" }
 interface-core = { path = "../interface-core", version = "0.6.0" }
@@ -27,6 +28,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 checkpoint-store = { path = "../checkpoint-store", version = "0.6.0" }
+context-store = { path = "../context-store", version = "0.6.0" }
 dom-engine = { path = "../dom-engine", version = "0.6.0" }
 tempfile.workspace = true
 tokio.workspace = true

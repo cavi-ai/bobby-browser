@@ -410,7 +410,7 @@ pub async fn run() -> Result<()> {
             let policy = policy_from_flags(vision, no_vision);
             let config = AppConfig::load(&config_path)
                 .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let (config, decision, _vision_child) =
+            let (mut config, decision, _vision_child) =
                 prepare_vision_child(&config_path, config, policy)?;
             if decision.should_spawn {
                 tracing::info!(
@@ -454,8 +454,29 @@ pub async fn run() -> Result<()> {
                 );
             }
             let (selection, _source) = resolve_browser_selection()?;
+            let durable_profile_id = match &selection.preference {
+                config::EnginePreferenceConfig::Exact {
+                    engine: config::BrowserEngineConfig::Firefox,
+                    profile_id: Some(profile_id),
+                } => Some(profile_id.clone()),
+                _ => None,
+            };
+            if durable_profile_id.is_some() && config.context.dir.is_none() {
+                config.context.dir = Some(
+                    dirs::config_dir()
+                        .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
+                        .join("bobby-browser")
+                        .join("context"),
+                );
+            }
             let factory = compose_worker_factory(&config, selection)?;
-            broker::serve_with_worker_factory(config, startup, factory).await?
+            match durable_profile_id {
+                Some(profile_id) => {
+                    broker::serve_with_context_promotion(config, startup, factory, profile_id)
+                        .await?
+                }
+                None => broker::serve_with_worker_factory(config, startup, factory).await?,
+            }
         }
         CliCommand::FirefoxNativeHost { descriptor } => {
             let _telemetry = observability::init(&Default::default())?;
