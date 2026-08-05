@@ -125,6 +125,17 @@ async fn lock_contention_refuses_the_second_writer() {
 }
 
 #[tokio::test]
+async fn stale_lockfile_does_not_block_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("70726f66696c652d61");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(profile_dir.join(".context-store.lock"), b"stale-pid\n").unwrap();
+
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    drop(store);
+}
+
+#[tokio::test]
 async fn forget_removes_memory_and_file() {
     let temp = tempfile::tempdir().unwrap();
     let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();

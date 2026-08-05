@@ -7,6 +7,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+use context_store::{
+    ContextStore, ControlContext, FormContext, IntentStats, PageContext, SiteContext,
+};
 use sdk_core::RuntimeService;
 use types::{
     CommandError, CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, PageId,
@@ -98,4 +101,59 @@ async fn build_with_worker_factory_consumes_the_injected_factory() {
         .unwrap();
 
     assert_eq!(launches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn context_ttl_is_applied_during_runtime_build() {
+    let root = tempfile::tempdir().unwrap();
+    let context_root = root.path().join("context");
+    let (store, _) = ContextStore::open(&context_root, "profile-a").await.unwrap();
+    let mut intents = std::collections::BTreeMap::new();
+    intents.insert(
+        "fill".to_string(),
+        IntentStats {
+            success_count: 1,
+            last_verified_day: Some(1),
+            ..IntentStats::default()
+        },
+    );
+    let site = SiteContext {
+        pages: std::collections::BTreeMap::from([(
+            "/login".to_string(),
+            PageContext {
+                forms: std::collections::BTreeMap::from([(
+                    "page".to_string(),
+                    FormContext {
+                        controls: vec![ControlContext {
+                            role: "textbox".to_string(),
+                            accessible_name: "Email".to_string(),
+                            ordinal: None,
+                            form_membership: "page".to_string(),
+                            intents,
+                        }],
+                    },
+                )]),
+            },
+        )]),
+    };
+    store.upsert_site("https://example.com", site).await;
+    assert!(store.flush().await.is_empty());
+    drop(store);
+
+    let mut config = config::AppConfig::default();
+    config.storage.journal_path = root.path().join("commands.jsonl");
+    config.storage.checkpoints_dir = root.path().join("checkpoints");
+    config.browser.artifacts_dir = root.path().join("artifacts");
+    config.context.dir = Some(context_root);
+    config.context.ttl_days = 90;
+    let runtime = RuntimeService::build_with_context_promotion(
+        &config,
+        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)))),
+        "profile-a",
+    )
+    .await
+    .unwrap();
+
+    let promotion = runtime.pages.context_promotion().unwrap();
+    assert!(promotion.store().site("https://example.com").await.is_none());
 }
