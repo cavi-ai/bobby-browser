@@ -21,8 +21,8 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use types::{
     AttachmentId, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
     ClosePageCommand, CommandError, CompanionId, ErrorCode, ErrorLayer, Evidence, InspectCommand,
-    NavigateCommand, OpenPageCommand, PageId, ProfileId, SessionId, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    NavigateCommand, OpenPageCommand, PageId, ProfileId, SessionId, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 use worker_pool::BrowserWorker;
 
@@ -333,6 +333,62 @@ struct FakeObserver {
     releases: Arc<AtomicUsize>,
     release_error: Option<CommandError>,
     observation: ExtensionObservation,
+}
+
+struct CandidateObserver;
+
+#[async_trait]
+impl ExtensionObserver for CandidateObserver {
+    async fn begin_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        Ok(Box::new(FakePageBinding {
+            nonce: "c9506f20-3021-4c15-b389-0ca762f89415".into(),
+        }))
+    }
+
+    async fn observe(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        panic!("candidate collection must use the bounded accessibility snapshot")
+    }
+
+    async fn release_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        max_nodes: u32,
+    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        assert_eq!(max_nodes, 100);
+        Ok((
+            vec![types::AccessibilityNode {
+                role: Some("main".into()),
+                name: Some("Example".into()),
+                children: vec![types::AccessibilityNode {
+                    role: Some("link".into()),
+                    name: Some("Learn more".into()),
+                    description: Some("Documentation".into()),
+                    children: Vec::new(),
+                    ..types::AccessibilityNode::default()
+                }],
+                ..types::AccessibilityNode::default()
+            }],
+            false,
+        ))
+    }
 }
 
 impl FakeObserver {
@@ -671,6 +727,120 @@ async fn worker(bidi: Arc<FakeBidi>, observer: Arc<FakeObserver>) -> FirefoxComp
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn semantic_candidate_collection_uses_firefox_accessibility_snapshot() {
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(CandidateObserver),
+    )
+    .await
+    .unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let candidates = worker
+        .collect_candidates(
+            &page_id,
+            &TargetSpec {
+                role: Some("link".into()),
+                accessible_name: Some("Learn more".into()),
+                ..TargetSpec::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[1].role.as_deref(), Some("link"));
+    assert_eq!(candidates[1].name.as_deref(), Some("Learn more"));
+    assert_eq!(candidates[1].text, "Learn more Documentation");
+    assert!(candidates[1].state.attached);
+    assert!(candidates[1].state.visible);
+    assert!(candidates[1].state.enabled);
+}
+
+#[tokio::test]
+async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(CandidateObserver),
+    )
+    .await
+    .unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    for target in [
+        TargetSpec {
+            frame_path: vec![Box::new(TargetSpec {
+                css: Some("iframe".into()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        },
+        TargetSpec {
+            shadow_path: vec![Box::new(TargetSpec {
+                css: Some("custom-element".into()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        },
+    ] {
+        let error = worker
+            .collect_candidates(&page_id, &target)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "Firefox candidate collection does not support frame or shadow paths"
+        );
+        assert!(!error.retryable);
+    }
+}
+
+#[tokio::test]
+async fn vision_coordinate_click_uses_firefox_viewport_pointer_actions() {
+    let bidi = FakeBidi::new(Vec::new());
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let evidence = worker.click_xy(&page_id, 245.5, 171.25).await.unwrap();
+
+    let calls = bidi.calls().await;
+    let pointer = calls
+        .iter()
+        .find(|call| call.method == "input.performActions")
+        .expect("vision click must emit native pointer actions");
+    assert_eq!(
+        pointer.params["actions"][0]["actions"][0]["origin"],
+        "viewport"
+    );
+    assert_eq!(pointer.params["actions"][0]["actions"][0]["x"], 245.5);
+    assert_eq!(pointer.params["actions"][0]["actions"][0]["y"], 171.25);
+    assert_eq!(
+        pointer.params["actions"][0]["actions"][1]["type"],
+        "pointerDown"
+    );
+    assert_eq!(
+        pointer.params["actions"][0]["actions"][2]["type"],
+        "pointerUp"
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, value }
+            if name == "visionClick" && value == "245.5,171.25"
+    )));
+    assert_engine_native(&evidence);
 }
 
 async fn wait_for_release_count(releases: &AtomicUsize, expected: usize) {
