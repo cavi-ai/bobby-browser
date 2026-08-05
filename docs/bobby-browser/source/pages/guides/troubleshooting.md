@@ -156,7 +156,7 @@ Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
 | `unsupportedInterfaceVersion` | Bad or missing interface version |
 | `invalidIdempotencyKey` | Idempotency key shape/bounds |
 | `idempotencyConflict` | Same key, different payload |
-| `deadlineExceeded` | Past `x-deadline` |
+| `deadlineExceeded` | Past `x-deadline`, or the command's `timeoutMs` envelope deadline expired mid-flight (retryable) |
 | `authenticationFailed` | Bad/missing bearer |
 | `tokenExpired` | Principal expired |
 | `missingCapability` | Capability check failed |

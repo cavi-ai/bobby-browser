@@ -11,13 +11,13 @@ publish = false
 agent-client-protocol.workspace = true
 async-trait.workspace = true
 base64.workspace = true
-intent-engine = { path = "../intent-engine", version = "0.5.1" }
+intent-engine = { path = "../intent-engine", version = "0.6.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-types = { path = "../types", version = "0.5.1" }
+types = { path = "../types", version = "0.6.0" }
 
 [dev-dependencies]
 tempfile.workspace = true

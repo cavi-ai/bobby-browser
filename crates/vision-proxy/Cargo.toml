@@ -18,6 +18,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-intent-engine = { path = "../intent-engine", version = "0.5.1" }
+intent-engine = { path = "../intent-engine", version = "0.6.0" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tower = { workspace = true, features = ["util"] }
