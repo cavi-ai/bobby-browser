@@ -1,0 +1,391 @@
+//! Durable shared context graph (Spec C): per-profile, per-site structural
+//! memory of forms and controls, promoted from the session-hot
+//! `page-runtime` context layer on verified success.
+//!
+//! What persists (schema v1), and only this: site key, page patterns, form
+//! keys, control `{role, accessible_name, ordinal, form_membership}`, and
+//! per-intent counters with a coarse day-precision `last_verified_day`.
+//! Never: typed values, credentials, page text, screenshots, journal ids,
+//! or exact timestamps.
+//!
+//! Storage is one JSON document per site under
+//! `<root>/<profile-id>/<site-key>.json` with atomic temp-write-then-rename
+//! and an in-memory index built at open — the checkpoint-store pattern, no
+//! database. A lockfile enforces the single-writer rule: only the runtime
+//! process opens the store, and a second opener is refused.
+
+mod sitekey;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
+
+pub use sitekey::site_key;
+
+pub const SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Error)]
+pub enum ContextStoreError {
+    #[error("context store I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("context store serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("context store is already open by another writer")]
+    AlreadyLocked,
+    #[error("unsupported context schema {actual}; expected {expected}")]
+    UnsupportedSchema { actual: u16, expected: u16 },
+}
+
+/// How a control record entered the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordSource {
+    /// Promoted from a verified runtime observation.
+    Observed,
+    /// Promoted from a verified vision proposal (Spec B prefill).
+    VisionPromoted,
+}
+
+/// Per-intent-kind counters for one control. `last_verified_day` is days
+/// since the Unix epoch — coarse day precision by construction, so no exact
+/// timestamp can ever persist.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentStats {
+    pub success_count: u64,
+    pub failure_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_day: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<RecordSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlContext {
+    pub role: String,
+    pub accessible_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<u32>,
+    /// Key of the enclosing form within the page, or a stable page-level
+    /// marker for controls outside any form.
+    pub form_membership: String,
+    #[serde(default)]
+    pub intents: BTreeMap<String, IntentStats>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormContext {
+    #[serde(default)]
+    pub controls: Vec<ControlContext>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageContext {
+    #[serde(default)]
+    pub forms: BTreeMap<String, FormContext>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteContext {
+    #[serde(default)]
+    pub pages: BTreeMap<String, PageContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SiteEnvelope {
+    schema: u16,
+    /// The real site key; the filename is a sanitized encoding of it and
+    /// does not round-trip.
+    site_key: String,
+    site: SiteContext,
+}
+
+/// A site file that failed to load. Corruption is reported and skipped —
+/// never panics, never fails the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedSite {
+    pub file: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Default)]
+pub struct OpenReport {
+    pub sites_loaded: usize,
+    pub skipped: Vec<SkippedSite>,
+}
+
+/// Days since the Unix epoch for a wall-clock time — the only timestamp
+/// precision this store can express.
+pub fn day_since_epoch(time: chrono::DateTime<chrono::Utc>) -> u32 {
+    (time.timestamp().max(0) / 86_400) as u32
+}
+
+pub struct ContextStore {
+    root: Arc<PathBuf>,
+    sites: Mutex<BTreeMap<String, SiteContext>>,
+    dirty: Mutex<BTreeMap<String, bool>>,
+    _lock: Lockfile,
+}
+
+impl ContextStore {
+    /// Opens the store for one profile, creating directories, claiming the
+    /// single-writer lockfile, and building the in-memory index. Corrupt or
+    /// unsupported files are skipped and reported, never fatal.
+    pub async fn open(
+        root: impl AsRef<Path>,
+        profile_id: &str,
+    ) -> Result<(Self, OpenReport), ContextStoreError> {
+        let root = root.as_ref().join(sanitize_component(profile_id));
+        tokio::fs::create_dir_all(&root).await?;
+        let lock = Lockfile::claim(&root).await?;
+        let mut index = BTreeMap::new();
+        let mut report = OpenReport::default();
+        let mut entries = tokio::fs::read_dir(&root).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            match load_envelope(&path).await {
+                Ok((key, site)) => {
+                    index.insert(key, site);
+                    report.sites_loaded += 1;
+                }
+                Err(reason) => {
+                    tracing::warn!(file = %path.display(), %reason, "context.site_skipped");
+                    report.skipped.push(SkippedSite {
+                        file: path,
+                        reason,
+                    });
+                }
+            }
+        }
+        Ok((
+            Self {
+                root: Arc::new(root),
+                sites: Mutex::new(index),
+                dirty: Mutex::new(BTreeMap::new()),
+                _lock: lock,
+            },
+            report,
+        ))
+    }
+
+    /// In-memory view of a site, if present.
+    pub async fn site(&self, site_key: &str) -> Option<SiteContext> {
+        self.sites.lock().await.get(site_key).cloned()
+    }
+
+    pub async fn list_sites(&self) -> Vec<String> {
+        self.sites.lock().await.keys().cloned().collect()
+    }
+
+    /// Replaces (or inserts) a site's context, buffering the write behind
+    /// `flush`. Never fails the caller's workflow: persistence happens on
+    /// flush, and flush errors degrade to session-only.
+    pub async fn upsert_site(&self, site_key: &str, site: SiteContext) {
+        self.sites
+            .lock()
+            .await
+            .insert(site_key.to_string(), site);
+        self.dirty.lock().await.insert(site_key.to_string(), true);
+    }
+
+    /// Persists every dirty site. Returns the keys that failed to write;
+    /// they stay dirty and remain available in memory for this session.
+    pub async fn flush(&self) -> Vec<String> {
+        let dirty_keys: Vec<String> = {
+            let mut dirty = self.dirty.lock().await;
+            let keys = dirty.keys().cloned().collect();
+            dirty.clear();
+            keys
+        };
+        let mut failed = Vec::new();
+        for key in dirty_keys {
+            let site = self.sites.lock().await.get(&key).cloned();
+            let Some(site) = site else { continue };
+            if let Err(error) = self.write_site(&key, &site).await {
+                tracing::warn!(site = %key, %error, "context.flush_failed");
+                self.dirty.lock().await.insert(key.clone(), true);
+                failed.push(key);
+            }
+        }
+        failed
+    }
+
+    /// Removes a site's context entirely — memory and file. Total and
+    /// immediate.
+    pub async fn forget(&self, site_key: &str) -> Result<(), ContextStoreError> {
+        self.sites.lock().await.remove(site_key);
+        self.dirty.lock().await.remove(site_key);
+        match tokio::fs::remove_file(self.path(site_key)).await {
+            Ok(()) => {
+                File::open(self.root.as_ref()).await?.sync_all().await?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Drops intent stats not verified within `ttl_days` of `today` (a
+    /// day-since-epoch value). Empty forms, pages, and sites are pruned and
+    /// their files removed. Returns the number of stats dropped.
+    pub async fn sweep(&self, ttl_days: u32, today: u32) -> Result<u64, ContextStoreError> {
+        let cutoff = today.saturating_sub(ttl_days);
+        let mut dropped = 0_u64;
+        let mut emptied = Vec::new();
+        let mut changed = Vec::new();
+        {
+            let mut sites = self.sites.lock().await;
+            for (key, site) in sites.iter_mut() {
+                let before_pages = site.pages.len();
+                let before = dropped;
+                for page in site.pages.values_mut() {
+                    for form in page.forms.values_mut() {
+                        for control in &mut form.controls {
+                            control.intents.retain(|_, stats| {
+                                let keep = stats
+                                    .last_verified_day
+                                    .is_some_and(|day| day >= cutoff);
+                                if !keep {
+                                    dropped += 1;
+                                }
+                                keep
+                            });
+                        }
+                        form.controls.retain(|control| !control.intents.is_empty());
+                    }
+                    page.forms.retain(|_, form| !form.controls.is_empty());
+                }
+                site.pages.retain(|_, page| !page.forms.is_empty());
+                if site.pages.is_empty() {
+                    emptied.push(key.clone());
+                } else if dropped != before || site.pages.len() != before_pages {
+                    changed.push(key.clone());
+                }
+            }
+            for key in &emptied {
+                sites.remove(key);
+            }
+        }
+        {
+            let mut dirty = self.dirty.lock().await;
+            for key in changed {
+                dirty.insert(key, true);
+            }
+        }
+        for key in emptied {
+            let _ = tokio::fs::remove_file(self.path(&key)).await;
+        }
+        self.flush().await;
+        Ok(dropped)
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn path(&self, site_key: &str) -> PathBuf {
+        self.root.join(format!("{}.json", sanitize_component(site_key)))
+    }
+
+    async fn write_site(&self, key: &str, site: &SiteContext) -> Result<(), ContextStoreError> {
+        let envelope = SiteEnvelope {
+            schema: SCHEMA_VERSION,
+            site_key: key.to_string(),
+            site: site.clone(),
+        };
+        let destination = self.path(key);
+        let temporary = self
+            .root
+            .join(format!(".{}.{}.tmp", sanitize_component(key), uuid::Uuid::new_v4()));
+        let result = async {
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            // Context is remembered form structure; owner-only, matching the
+            // checkpoint and authority stores.
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary).await?;
+            file.write_all(&serde_json::to_vec(&envelope)?).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&temporary, destination).await?;
+            File::open(self.root.as_ref()).await?.sync_all().await?;
+            Ok::<_, ContextStoreError>(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+        }
+        result
+    }
+}
+
+async fn load_envelope(path: &Path) -> Result<(String, SiteContext), String> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let envelope: SiteEnvelope =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if envelope.schema != SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported schema {}; expected {SCHEMA_VERSION}",
+            envelope.schema
+        ));
+    }
+    Ok((envelope.site_key, envelope.site))
+}
+
+/// Site keys are `scheme://host`, so `/` and `:` must not reach the
+/// filesystem verbatim.
+fn sanitize_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+struct Lockfile {
+    path: PathBuf,
+}
+
+impl Lockfile {
+    async fn claim(root: &Path) -> Result<Self, ContextStoreError> {
+        let path = root.join(".context-store.lock");
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&path).await {
+            Ok(mut file) => {
+                file.write_all(format!("{}\n", std::process::id()).as_bytes())
+                    .await?;
+                file.sync_all().await?;
+                Ok(Self { path })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ContextStoreError::AlreadyLocked)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for Lockfile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
