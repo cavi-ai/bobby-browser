@@ -2573,6 +2573,26 @@ impl BrowserWorker for FirefoxCompanionWorker {
         Ok(())
     }
 
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        self.context(page_id).await?;
+        if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "Firefox candidate collection does not support frame or shadow paths",
+                false,
+            ));
+        }
+        let (nodes, _) = self
+            .observer
+            .a11y_snapshot(&self.current_lease(), page_id, 100)
+            .await?;
+        Ok(accessibility_candidates(&nodes))
+    }
+
     async fn evaluate_javascript(
         &self,
         page_id: &PageId,
@@ -3007,6 +3027,53 @@ impl BrowserWorker for FirefoxCompanionWorker {
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: None,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "vision click coordinates must be finite",
+                false,
+            ));
+        }
+        let context = self.context(page_id).await?;
+        self.transport
+            .send(
+                "input.performActions",
+                json!({
+                    "context": context,
+                    "actions": [{
+                        "type": "pointer",
+                        "id": "automation-runtime-vision-pointer",
+                        "parameters": {"pointerType": "mouse"},
+                        "actions": [
+                            {
+                                "type": "pointerMove",
+                                "x": x,
+                                "y": y,
+                                "duration": 0,
+                                "origin": "viewport"
+                            },
+                            {"type": "pointerDown", "button": 0},
+                            {"type": "pointerUp", "button": 0}
+                        ]
+                    }]
+                }),
+            )
+            .await?;
+        Ok(vec![
+            Evidence::Configuration {
+                name: "visionClick".into(),
+                value: format!("{x},{y}"),
             },
             self.evidence(InteractionPath::EngineNative),
         ])
@@ -4469,6 +4536,47 @@ impl BrowserWorker for FirefoxCompanionWorker {
         }
         self.wait_for_shutdown().await
     }
+}
+
+fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate> {
+    fn collect(nodes: &[types::AccessibilityNode], candidates: &mut Vec<Candidate>) {
+        for node in nodes {
+            let mut text = Vec::new();
+            if let Some(name) = node.name.as_deref().filter(|value| !value.is_empty()) {
+                text.push(name);
+            }
+            if let Some(description) = node
+                .description
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                text.push(description);
+            }
+            if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
+                text.push(value);
+            }
+            candidates.push(Candidate {
+                id: format!("firefox-a11y-{}", candidates.len()),
+                css: None,
+                test_id: None,
+                role: node.role.clone(),
+                name: node.name.clone(),
+                label: None,
+                text: text.join(" "),
+                attributes: Default::default(),
+                state: CandidateState {
+                    attached: true,
+                    visible: true,
+                    enabled: node.disabled != Some(true),
+                },
+            });
+            collect(&node.children, candidates);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    collect(nodes, &mut candidates);
+    candidates
 }
 
 impl Drop for FirefoxCompanionWorker {
