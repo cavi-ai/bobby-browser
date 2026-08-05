@@ -59,6 +59,18 @@ A source that is present but malformed is always an error, never skipped.
 | `checkpoints_dir` | `./data/storage/checkpoints` | Journal checkpoints |
 | `authority_path` | `./data/storage/authority.json` | Authority storage |
 
+## `[context]`
+
+Durable shared context graph (remembered form structure per site). Only
+runtimes whose engine selection carries a durable profile identity (Firefox
+companion enrollment) open the store; Chromium sessions read and write
+nothing.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `dir` | `<config-dir>/bobby-browser/context` (filled by `bobby serve`) | Store root; the profile id is appended as a subdirectory. Unset disables promotion |
+| `ttl_days` | `90` | Days a control record is kept without a verified success; swept at store open |
+
 ## `[http]` (outbound)
 
 Controls egress from the runtime (downloads, fetches), not the broker listen

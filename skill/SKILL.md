@@ -89,7 +89,9 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
    in the state you asked for — re-read the page (`inspect`, `a11y_snapshot`)
    instead of retrying blindly. `needsReconciliation` means stop and ask a
    human; do not replay the command.
-5. **Read before write.** Take an `a11y_snapshot`, pass its targets straight
+5. **Read before write.** On a site this runtime has seen before, ask
+   `context_ask` first — a remembered answer (marked `persisted`) beats a
+   snapshot. Otherwise take an `a11y_snapshot`, pass its targets straight
    into `click` / `type_text` / `upload_files` — no selector guessing.
 6. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
    come back as digest-verified artifacts, readable as `artifact://<id>`
