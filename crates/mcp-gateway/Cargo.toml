@@ -33,6 +33,7 @@ jsonschema.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
 checkpoint-store = { path = "../checkpoint-store", version = "0.5.1" }
+dom-engine = { path = "../dom-engine", version = "0.5.1" }
 page-runtime = { path = "../page-runtime", version = "0.5.1" }
 session-manager = { path = "../session-manager", version = "0.5.1" }
 worker-pool = { path = "../worker-pool", version = "0.5.1" }
