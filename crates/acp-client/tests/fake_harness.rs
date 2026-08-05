@@ -64,6 +64,76 @@ async fn one_task_uses_one_child_and_closes_it() {
     assert_eq!(lifecycle.lines().collect::<Vec<_>>(), ["new", "close"]);
 }
 
+#[tokio::test]
+async fn advertised_authentication_precedes_child_creation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let reply = client_for_mode(&log, "auth")
+        .delegate(packet())
+        .await
+        .expect("authenticated vision reply");
+
+    assert_eq!(reply.capabilities.auth_method_ids, ["opencode-login"]);
+    assert_eq!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["authenticate:opencode-login", "new", "close"]
+    );
+}
+
+#[tokio::test]
+async fn rejected_advertised_authentication_fails_before_child_creation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let error = client_for_mode(&log, "auth-fail")
+        .delegate(packet())
+        .await
+        .expect_err("rejected authentication must fail closed");
+
+    assert!(
+        matches!(error, AcpClientError::Authentication(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("opencode-login"), "{error:?}");
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "authenticate:opencode-login\n"
+    );
+}
+
+#[tokio::test]
+async fn transport_loss_during_advertised_authentication_stays_transport() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let error = client_for_mode(&log, "auth-disconnect")
+        .delegate(packet())
+        .await
+        .expect_err("transport loss must fail the task");
+
+    assert!(matches!(error, AcpClientError::Transport(_)), "{error:?}");
+    assert!(error.to_string().contains("opencode-login"), "{error:?}");
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "authenticate:opencode-login\n"
+    );
+}
+
+#[tokio::test]
+async fn disabled_advertised_authentication_does_not_invoke_login() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let reply = client_for_mode(&log, "auth")
+        .with_advertised_auth(false)
+        .delegate(packet())
+        .await
+        .expect("vision reply without advertised login");
+
+    assert_eq!(reply.capabilities.auth_method_ids, ["opencode-login"]);
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "new\nclose\n");
+}
+
 fn client_for_mode(log: &std::path::Path, mode: &str) -> AcpHarnessClient {
     AcpHarnessClient::new(
         env!("CARGO_BIN_EXE_fake_acp_harness"),
