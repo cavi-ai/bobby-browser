@@ -39,9 +39,11 @@ HTTP runtime / TypeScript SDK.
 ## Client config example
 
 The easy path is the installer — it writes the bootstrap credential, merges
-the server entry into your host's config, installs the agent skill, and can
-install the Firefox companion (extension + native host; pairing finishes
-against a running Firefox with `bobby enroll-firefox-profile`):
+the server entry into your host's config, installs the agent skill into
+`~/.agents/skills/bobby-browser/` (project: `.agents/skills/` with
+`--project-skill`; optional `--skill-claude` / `--skill-openclaw`), and can
+install the Firefox companion (extension + native host; pairing finishes via
+toolbar **Pair**, or `bobby enroll-firefox-profile` for CI):
 
 ```bash
 bobby install                    # interactive checklist

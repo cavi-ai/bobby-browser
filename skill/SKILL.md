@@ -5,7 +5,7 @@ description: >
   the task involves browsing a page, filling or submitting a form, extracting
   page data, taking screenshots, reading cookies or network logs, or
   checkpointing and recovering a browser workflow. Covers session setup,
-  the intent tools, evidence, and recovery.
+  intent tools, evidence, error handling, and recovery.
 ---
 
 # bobby-browser
@@ -16,52 +16,54 @@ Never claim an action worked without its evidence.
 
 ## Setup
 
-1. `bobby init --emit claude` (or `zed` / `vscode` / `json`) writes the
-   bootstrap credential and prints the MCP client config fragment. Merge the
-   fragment into the host's MCP config and source `bootstrap.env` into the
-   host's environment so the `${...}` placeholders resolve.
-2. `bobby doctor` validates the whole setup, including an MCP handshake
+1. Operator runs `bobby install` (or `bobby install --host <claude|zed|vscode>
+   --skill --yes`). That writes the bootstrap credential, merges MCP config,
+   and installs this skill into `~/.agents/skills/bobby-browser/` (project:
+   `.agents/skills/` with `--project-skill`). Optional: `--skill-claude`,
+   `--skill-openclaw`.
+2. For the Firefox companion (persistent logins): `bobby install --companion`
+   or `make firefox`, start Firefox with `--remote-debugging-port` (`make
+   firefox-start` if using the launchd agent), then **Pair** from the toolbar
+   popup. That writes `browser-selection.json`. CLI
+   `bobby enroll-firefox-profile` is for CI/scripting only.
+3. `bobby doctor` validates the setup, including an MCP handshake
    (`initialize` + `tools/list`) against the gateway.
+
+Your host should spawn `bobby mcp-stdio` (loads the credential itself). Prefer
+that over raw `mcp-gateway` + env placeholders.
 
 ## How the runtime is wired
 
-Your host spawns `bobby mcp-stdio`, which loads the bootstrap credential and
-execs the stdio gateway in-place. The gateway runs the entire runtime
-in-process: it loads `config.toml` (`BOBBY_BROWSER_CONFIG`, else
-`./config.toml`) and picks a browser engine exactly the way `bobby serve` and
-`bobby doctor` do — one shared resolution order:
+`bobby mcp-stdio` execs the stdio gateway in-process. The gateway loads
+`config.toml` (`BOBBY_BROWSER_CONFIG`, else `./config.toml`) and resolves the
+browser engine the same way `bobby serve` and `bobby doctor` do:
 
-1. `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) — an override; wins when set.
-2. The persisted enrollment at
-   `<config-dir>/bobby-browser/browser-selection.json`, written by
-   `bobby enroll-firefox-profile`.
-3. The built-in default: exact Firefox, fail-closed. With nothing enrolled,
+1. `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) — override; wins when set.
+2. Persisted enrollment at
+   `<config-dir>/bobby-browser/browser-selection.json` (written by popup
+   **Pair** or `bobby enroll-firefox-profile`).
+3. Built-in default: exact Firefox, fail-closed. With nothing enrolled,
    startup fails with an actionable error rather than silently downgrading.
 
-A malformed source is always an error, never skipped. `bobby doctor` reports
-which source resolved, so what it validates is what you are running.
+A malformed source is always an error, never skipped.
 
 ### Which engine you are driving
 
-- **Firefox companion (the default, and what enrollment sets up):** the
-  gateway attaches to a real, visible Firefox over WebDriver BiDi — a real
-  profile directory with real cookies. Logins persist across sessions. Sign
-  in once in that window; every later session is already authenticated.
-- **Managed Chromium (fallback when explicitly selected):** each session gets
-  a disposable profile keyed by session id. Nothing persists — no cookies, no
-  logins — by design.
+- **Firefox companion (default after Pair):** real headed Firefox over
+  WebDriver BiDi with a real profile — cookies and logins persist. Sign in
+  once in that window; later sessions stay authenticated.
+- **Managed Chromium (only when explicitly selected):** disposable profile
+  per session. Nothing persists.
 
-If a site demands a login and cookies vanish between sessions, you are on the
-Chromium path: ask the operator to run `bobby enroll-firefox-profile` (Firefox
-with `--remote-debugging-port`, the companion extension installed). Do not
-work around it by re-logging-in every session.
+If a site needs login and cookies vanish between sessions, you are on
+Chromium: ask the operator to Pair the Firefox companion. Do not work around
+it by re-logging-in every session.
 
 ## Working loops
 
-Read these resources first; they are authoritative and always match the build:
+Read these resources first; they always match the build:
 
-- `bobby://capabilities` — what each capability gates. A `missingCapability`
-  error means the principal's token lacks the named capability.
+- `bobby://capabilities` — what each capability gates.
 - `bobby://intents` — the eight intent tools and what each verifies.
 - `bobby://failure-taxonomy` — every error code and its repair action.
 - `bobby://primitives` — the flat browser tools.
@@ -72,11 +74,11 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
 ## Rules that bite
 
 1. **Checkpoint before boundaries.** `intent_submit_and_verify` and
-   `intent_follow` with `boundary: true` are Boundary commands: the runtime
-   refuses them without a matching checkpoint saved *first*. Pin two UUIDs
-   yourself, pass them as `commandId`/`attemptId` to both `checkpoint_save`
+   `intent_follow` with `boundary: true` are Boundary commands: refused
+   without a matching checkpoint saved *first*. Pin two UUIDs yourself, pass
+   them as `commandId`/`attemptId` to both `checkpoint_save`
    (`boundaryCommandId`/`attemptId` in the checkpoint) and the Boundary
-   call, and put the commands you already ran in `evidenceRefs` — never
+   call, and put commands you already ran in `evidenceRefs` — never
    hand-authored evidence.
 2. **Reuse the `workflowId`.** Every outcome echoes `workflowId`,
    `commandId`, and `attemptId`; pass `workflowId` back so
@@ -84,15 +86,45 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
 3. **Failed commands set `isError: true`.** A tool result whose
    `structuredContent.status` is not `completed` is a failure — read the
    `error.code` and repair via `bobby://failure-taxonomy`; do not continue
-   the flow as if it succeeded.
+   as if it succeeded.
 4. **Fail-closed by design.** `verificationFailed` means the page did not end
-   in the state you asked for — re-read the page (`inspect`, `a11y_snapshot`)
-   instead of retrying blindly. `needsReconciliation` means stop and ask a
-   human; do not replay the command.
+   in the state you asked for — re-read (`inspect`, `a11y_snapshot`) instead
+   of retrying blindly. `needsReconciliation` means stop and ask a human; do
+   not replay the command.
 5. **Read before write.** Take an `a11y_snapshot`, pass its targets straight
    into `click` / `type_text` / `upload_files` — no selector guessing.
 6. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
-   come back as digest-verified artifacts, readable as `artifact://<id>`
-   resources with `artifact:read`. The `bobby://` documentation resources
-   (capabilities, intents, failure-taxonomy, primitives) are readable by any
-   principal.
+   come back as digest-verified artifacts (`artifact://<id>` via
+   `artifact:read`). The `bobby://` docs are readable by any principal.
+
+## Error handling
+
+Always inspect `structuredContent` (status, error code, evidence) before the
+next mutating call.
+
+| Signal | Meaning | Repair |
+|---|---|---|
+| `missingCapability` | Token lacks a required capability | Re-issue credential with that capability, or pick a covered tool |
+| `authenticationFailed` / `tokenExpired` | Bootstrap credential bad or expired | Operator re-runs `bobby init --force`; reconnect |
+| `targetNotFound` / ambiguous target | Stale or guessed selector | Fresh `a11y_snapshot`; pass the new target |
+| `verificationFailed` | Action ran; expected state not proven | Re-inspect; adjust expectation or fill; do not blind-retry |
+| `needsReconciliation` | Side effect may already have landed | Call `recovery_status`; never retry the Boundary command |
+| `deadlineExceeded` | Deadline before/during dispatch | Longer deadline; retry only if Replayable |
+| `idempotencyConflict` | Same key, different body | Mint a fresh idempotency key |
+
+When unsure, open `bobby://failure-taxonomy` — tool-specific descriptions win
+over the general table.
+
+## Anti-patterns
+
+- Claiming success from a chat summary without evidence / `status: completed`.
+- Blind-retrying after `verificationFailed` or any `needsReconciliation`.
+- Calling Boundary tools without a prior matching `checkpoint_save`.
+- Inventing CSS/XPath selectors instead of snapshot targets.
+- Re-logging into sites every session instead of using the paired Firefox
+  profile.
+- Treating Chromium disposable profiles as if they keep cookies.
+- Hand-authoring `evidenceRefs` or forging artifact digests.
+- Ignoring `isError: true` because the prose message looked optimistic.
+- Skipping `bobby://capabilities` after a `missingCapability` and retrying
+  the same tool with the same token.
