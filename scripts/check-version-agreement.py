@@ -70,6 +70,19 @@ def package_versions(expected: str) -> list[str]:
     return problems
 
 
+def firefox_companion_extension_version(expected: str) -> list[str]:
+    """Firefox about:addons shows packages/firefox-companion/manifest.json,
+    not package.json. Keep them locked together."""
+    path = REPO / "packages" / "firefox-companion" / "manifest.json"
+    if not path.is_file():
+        return [f"{path.relative_to(REPO)}: missing"]
+    data = json.loads(path.read_text())
+    version = data.get("version")
+    if version != expected:
+        return [f"firefox-companion manifest.json: {version} != {expected}"]
+    return []
+
+
 def npm_scope() -> list[str]:
     """One scope. `@bobby-browser` is not an org we own; `@cavi-ai` is."""
     problems = []
@@ -102,6 +115,7 @@ def main() -> int:
     problems = (
         crate_versions(expected)
         + package_versions(expected)
+        + firefox_companion_extension_version(expected)
         + npm_scope()
         + publishable_crates()
     )
