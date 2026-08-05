@@ -136,7 +136,14 @@ impl RuntimeService {
         profile_id: &str,
     ) -> Result<Self, RuntimeError> {
         let promotion = match &config.context.dir {
-            Some(dir) => match context_store::ContextStore::open(dir, profile_id).await {
+            Some(dir) => match context_store::ContextStore::open_with_ttl(
+                dir,
+                profile_id,
+                config.context.ttl_days,
+                context_store::day_since_epoch(Utc::now()),
+            )
+            .await
+            {
                 Ok((store, report)) => {
                     if !report.skipped.is_empty() {
                         tracing::warn!(
