@@ -20,8 +20,9 @@ export async function customersPage(document: Document, api: NorthstarApi, route
   search.addEventListener("submit", (event) => {
     event.preventDefault();
     results.replaceChildren(loading(document, "Searching customer records"));
-    void api.customers(input.value).then((customers) => results.replaceChildren(customerTable(document, customers, router))).catch(() => {
-      results.replaceChildren(element(document, "p", { className: "error-panel", text: "Customer search failed. Try again." }));
+    void api.customers(input.value).then((customers) => results.replaceChildren(customerTable(document, customers, router))).catch((error: unknown) => {
+      const detail = error instanceof Error ? ` ${error.message}` : "";
+      results.replaceChildren(element(document, "p", { className: "error-panel", text: `Customer search failed.${detail}` }));
     });
   });
   return page;

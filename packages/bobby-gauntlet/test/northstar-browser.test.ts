@@ -184,3 +184,21 @@ test("completed report exposes an ordinary download link", async () => {
   assert.equal(download.getAttribute("href"), "/api/reports/rep_17/download");
   assert.match(root.textContent ?? "", /Report ready/);
 });
+
+test("customer search exposes the transport failure instead of hiding it", async () => {
+  const api = new NorthstarApi("run-search-error", async () => {
+    throw new TypeError("Network request could not be constructed");
+  });
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/customers" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, api);
+  await app.navigate("/customers");
+  window.document.querySelector<HTMLFormElement>("form[aria-label='Customer search']")?.requestSubmit();
+
+  await eventually(window.document, ".error-panel");
+
+  assert.match(root.textContent ?? "", /Network request could not be constructed/);
+});

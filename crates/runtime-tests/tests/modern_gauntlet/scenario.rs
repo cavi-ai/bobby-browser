@@ -19,7 +19,6 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub struct ScenarioConfig {
     pub seed: String,
     pub reject_postal_once: bool,
-    pub report_interrupt: bool,
 }
 
 impl ScenarioConfig {
@@ -27,7 +26,6 @@ impl ScenarioConfig {
         Self {
             seed: seed.into(),
             reject_postal_once: true,
-            report_interrupt: false,
         }
     }
 }
@@ -340,7 +338,7 @@ async fn upload_document(
 
 async fn document_preview(AxumPath(id): AxumPath<String>) -> Html<String> {
     Html(format!(
-        r#"<!doctype html><title>Document preview</title><main><h1>Approved customer document</h1><p>Document {id}</p><form method="post" action="/api/documents/{id}/confirm"><button type="submit" aria-label="Confirm document preview">Confirm document</button></form></main>"#
+        r#"<!doctype html><title>Document preview</title><main><h1>Approved customer document</h1><p>Document {id}</p><form method="post" action="/api/documents/{id}/confirm"><button id="confirm-preview" type="submit" aria-label="Confirm document preview">Confirm document</button></form></main>"#
     ))
 }
 

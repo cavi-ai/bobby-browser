@@ -59,3 +59,33 @@ test("a non-JSON failure remains a structured API error", async () => {
     return true;
   });
 });
+
+test("browser API requests resolve against the active application origin", async () => {
+  const requests: Request[] = [];
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: new URL("https://workspace.example/customers"),
+  });
+  const api = new NorthstarApi("run-origin", async (input, init) => {
+    requests.push(new Request(input, init));
+    return Response.json({ activeCustomers: 1, pendingOnboarding: 0, documentsProcessed: 0, reportsReady: 0 });
+  });
+
+  await api.dashboard();
+
+  assert.equal(new URL(requests[0]?.url ?? "https://invalid.test").origin, "https://workspace.example");
+  Reflect.deleteProperty(globalThis, "location");
+});
+
+test("the injected fetch function is invoked without rebinding its receiver", async () => {
+  let receiver: unknown = "not-called";
+  const fetcher = function (this: unknown): Promise<Response> {
+    receiver = this;
+    return Promise.resolve(Response.json({ activeCustomers: 1, pendingOnboarding: 0, documentsProcessed: 0, reportsReady: 0 }));
+  } as typeof fetch;
+  const api = new NorthstarApi("run-fetch-receiver", fetcher);
+
+  await api.dashboard();
+
+  assert.equal(receiver, undefined);
+});
