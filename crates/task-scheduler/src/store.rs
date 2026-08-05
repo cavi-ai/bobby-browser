@@ -163,20 +163,23 @@ async fn compact_journal<'a>(
         .open(&temporary)
         .await?;
     let mut sequence = 0_u64;
-    let mut terminal_written = 0_usize;
-    let mut jobs: Vec<&Job> = jobs.collect();
+    let (mut terminal, mut jobs): (Vec<&Job>, Vec<&Job>) = jobs.partition(|job| {
+        matches!(
+            job.status,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+        )
+    });
+    terminal.sort_by_key(|job| {
+        std::cmp::Reverse(job.completed_at.unwrap_or(job.created_at))
+    });
+    terminal.truncate(COMPACT_RETAINED_TERMINAL);
+    jobs.extend(terminal);
     jobs.sort_by_key(|job| job.created_at);
     for job in jobs {
         let terminal = matches!(
             job.status,
             JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
         );
-        if terminal {
-            terminal_written += 1;
-            if terminal_written > COMPACT_RETAINED_TERMINAL {
-                continue;
-            }
-        }
         let event = if terminal {
             JobEvent::from_status(&job.status)
         } else {

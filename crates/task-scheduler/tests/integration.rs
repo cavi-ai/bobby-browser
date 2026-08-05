@@ -1036,7 +1036,7 @@ fn terminal_jobs_are_pruned_beyond_the_retention_bound() {
 }
 
 #[test]
-fn oversized_journal_compacts_on_open_and_stays_loadable() {
+fn oversized_journal_retains_newest_terminal_jobs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("jobs.jsonl");
     let rt = runtime();
@@ -1045,13 +1045,16 @@ fn oversized_journal_compacts_on_open_and_stays_loadable() {
         // paying the per-record fsync of real submits.
         let mut text = String::new();
         for index in 0..4_200_u64 {
+            let created_at = chrono::DateTime::from_timestamp(index as i64, 0)
+                .unwrap()
+                .to_rfc3339();
             let job = serde_json::json!({
                 "id": format!("job-{index}"),
                 "name": "echo",
                 "priority": "Normal",
                 "status": if index % 21 == 0 { "Pending" } else { "Completed" },
                 "payload": {},
-                "createdAt": "2026-08-05T00:00:00Z",
+                "createdAt": created_at,
                 "startedAt": null,
                 "completedAt": null,
                 "retryCount": 0,
@@ -1092,6 +1095,14 @@ fn oversized_journal_compacts_on_open_and_stays_loadable() {
                 .count()
                 <= 1024,
             "terminal history must be bounded by compaction"
+        );
+        assert!(
+            jobs.iter().any(|job| job.id.0 == "job-4199"),
+            "the newest terminal job must survive compaction"
+        );
+        assert!(
+            !jobs.iter().any(|job| job.id.0 == "job-1"),
+            "the oldest terminal job must be pruned"
         );
     });
 }
