@@ -263,8 +263,9 @@ Vision-assisted resolution is **deny-by-default**. All three must pass:
 
 1. Bearer holds `vision:assist`
 2. Session created with `executionPolicy.visionAssist = true`
-3. A reachable assist endpoint is configured (`[vision].endpoint_url` or a
-   `[nodes]` vision node; no endpoint, no escalation)
+3. A reachable assist backend is configured — `[vision].endpoint_url`, a
+   `[nodes]` vision node, or an ACP profile (`[vision].backend = "acp"`); no
+   backend, no escalation
 
 Otherwise vision escalation is denied (`VisionAssistDenied` / failed).
 
@@ -277,13 +278,35 @@ missing or its required API key env is empty. Preferred local path:
 [Configuration — Setup](configuration.md#setup-preferred).
 
 When gates pass and deterministic resolution sticks, the engine captures a real
-PNG via `screenshot_bytes` (Chromium and Firefox) and posts it to the provider.
-Empty frames are not sent.
+PNG via `screenshot_bytes` (Chromium and Firefox) and posts it to the backend.
+Empty frames are not sent. Both engines execute the returned coordinates
+natively — Chromium through CDP input, Firefox through BiDi pointer actions
+against the bounded accessibility snapshot's candidates.
+
+## Vision backend
+
+Two backends, selected by `[vision].backend`:
+
+- **`direct`** (default) — Bobby posts propose/extract to the endpoint in
+  `[vision]` (or a `[nodes.*.kind=vision]` node) and holds the upstream key.
+- **`acp`** — Bobby delegates the vision task to an ACP harness that already
+  owns the model login (Codex, Claude, OpenCode, Hermes, OpenClaw). Bobby never
+  receives or stores that provider token. Each task runs in a new ACP child
+  session with bounded text and image content, a strict JSON result,
+  evidence-digest validation, and an explicit close. A harness that asks for
+  interactive permission is cancelled and its child session closed.
+
+```bash
+bobby vision connect --yes --backend acp --provider codex \
+  --command codex --arg acp --auth advertised
+```
+
+Both are configured in [Configuration](configuration.md#vision). A session
+picks a named node with `executionPolicy.visionNode`.
 
 ## Vision provider
 
-Bobby posts propose/extract to the HTTP endpoint in `[vision]` (or a
-`[nodes.*.kind=vision]` node). Upstream models are configured as named
+For the `direct` backend, upstream models are configured as named
 OpenAI-compatible profiles under `[vision.providers]` — see
 [Configuration](configuration.md#vision).
 

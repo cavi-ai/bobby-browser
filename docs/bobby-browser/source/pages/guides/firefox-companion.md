@@ -204,6 +204,10 @@ popup code, rebuild and re-sideload `dist/` (see re-sideload note above).
 
 ## Notes
 
+- Vision-assisted intents run on Firefox under the same double gate as
+  Chromium: the bounded accessibility snapshot supplies the semantic
+  candidates, and vision-selected coordinates execute as native BiDi pointer
+  actions. See [Intent commands](intents.md#vision-double-gate).
 - Firefox's RemoteAgent accepts a single WebDriver BiDi session per browser,
   so all runtime sessions on a profile share one BiDi connection; page
   attachments stay per-session and renew automatically before their TTL.
