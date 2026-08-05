@@ -60,7 +60,9 @@ async fn round_trip_persists_site_structure() {
 #[tokio::test]
 async fn corrupt_and_unsupported_files_are_skipped_and_reported() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = temp.path().join("profile-a");
+    // Literal UTF-8 hex encoding of `profile-a`; keep this independent of the
+    // production encoder so a lossy encoding regression cannot bless itself.
+    let profile_dir = temp.path().join("70726f66696c652d61");
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(profile_dir.join("garbage.json"), b"{not json").unwrap();
     std::fs::write(
@@ -88,6 +90,24 @@ async fn profiles_are_isolated() {
     let (store_b, report) = ContextStore::open(temp.path(), "profile-b").await.unwrap();
     assert_eq!(report.sites_loaded, 0);
     assert!(store_b.site("https://example.com").await.is_none());
+}
+
+#[tokio::test]
+async fn profiles_with_colliding_sanitized_names_are_isolated() {
+    let temp = tempfile::tempdir().unwrap();
+    let (slash_profile, _) = ContextStore::open(temp.path(), "a/b").await.unwrap();
+    slash_profile
+        .upsert_site("https://example.com", site(&["Slash profile"], 100))
+        .await;
+    assert!(slash_profile.flush().await.is_empty());
+    drop(slash_profile);
+
+    let (underscore_profile, report) = ContextStore::open(temp.path(), "a_b").await.unwrap();
+    assert_eq!(report.sites_loaded, 0);
+    assert!(underscore_profile
+        .site("https://example.com")
+        .await
+        .is_none());
 }
 
 #[tokio::test]
