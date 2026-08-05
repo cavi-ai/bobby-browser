@@ -682,9 +682,11 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         run: Box::new(move || {
             let install = install_firefox_companion(extension_path.as_deref())?;
             Ok(format!(
-                "extension at {}, native host manifest at {}. Next: start Firefox with --remote-debugging-port, then `bobby enroll-firefox-profile`",
+                "sideloaded into {}; config copy at {}; native host at {}. Next: start the Bobby Firefox profile ({}) with --remote-debugging-port (make firefox-start if you use the launchd agent), then Pair from the toolbar popup",
+                install.sideload_dir.display(),
                 install.extension_dir.display(),
-                install.manifest_path.display()
+                install.manifest_path.display(),
+                install.profile_dir.display()
             ))
         }),
     });
@@ -854,6 +856,8 @@ mod install_tests {
         // SAFETY: single-threaded test process env; restored after.
         let previous = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", home.path()) };
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(home.path().join("Library/Application Support")).unwrap();
         let result = install_firefox_companion(Some(dist.path()));
         match previous {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
@@ -870,6 +874,84 @@ mod install_tests {
             install.descriptor_path.parent().unwrap(),
             install.extension_dir.parent().unwrap()
         );
+        assert!(install.sideload_dir.join("manifest.json").is_file());
+        assert!(install.sideload_dir.join("background.js").is_file());
+        assert_eq!(
+            install.sideload_dir,
+            install
+                .profile_dir
+                .join("extensions")
+                .join(COMPANION_GECKO_ID)
+        );
+        let user_js = std::fs::read_to_string(install.profile_dir.join("user.js")).unwrap();
+        for &(name, _) in FIREFOX_PROFILE_PREFS {
+            assert!(
+                user_js.contains(&format!("user_pref(\"{name}\"")),
+                "missing pref {name} in user.js:\n{user_js}"
+            );
+        }
+    }
+
+    #[test]
+    fn companion_install_sideload_upgrades_and_preserves_custom_user_js() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("manifest.json"), r#"{"v":1}"#).unwrap();
+        std::fs::write(dist.path().join("background.js"), "// v1").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            #[cfg(not(target_os = "macos"))]
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+        }
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(home.path().join("Library/Application Support")).unwrap();
+
+        let first = install_firefox_companion(Some(dist.path())).expect("first install");
+        let user_js_path = first.profile_dir.join("user.js");
+        let mut user_js = std::fs::read_to_string(&user_js_path).unwrap();
+        user_js.push_str("user_pref(\"bobby.test.custom\", true);\n");
+        std::fs::write(&user_js_path, &user_js).unwrap();
+        // Stale xpi from an older manual install must not block unpacked sideload.
+        let stale_xpi = first
+            .profile_dir
+            .join("extensions")
+            .join(format!("{COMPANION_GECKO_ID}.xpi"));
+        std::fs::write(&stale_xpi, b"stale").unwrap();
+        std::fs::write(first.sideload_dir.join("stale-asset.js"), "// gone").unwrap();
+
+        std::fs::write(dist.path().join("manifest.json"), r#"{"v":2}"#).unwrap();
+        std::fs::write(dist.path().join("background.js"), "// v2").unwrap();
+        std::fs::write(dist.path().join("popup.js"), "// new").unwrap();
+        let second = install_firefox_companion(Some(dist.path())).expect("reinstall");
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(second.sideload_dir.join("manifest.json")).unwrap(),
+            r#"{"v":2}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.sideload_dir.join("background.js")).unwrap(),
+            "// v2"
+        );
+        assert!(second.sideload_dir.join("popup.js").is_file());
+        assert!(!second.sideload_dir.join("stale-asset.js").exists());
+        assert!(!stale_xpi.exists());
+        let preserved = std::fs::read_to_string(second.profile_dir.join("user.js")).unwrap();
+        assert!(preserved.contains("user_pref(\"bobby.test.custom\", true);"));
+        for &(name, _) in FIREFOX_PROFILE_PREFS {
+            assert!(preserved.contains(&format!("user_pref(\"{name}\"")));
+        }
     }
 
     #[test]
@@ -939,14 +1021,28 @@ mod install_tests {
 
 /// Where the Firefox companion pieces live after installation: extension
 /// copy, native-host wrapper, and pairing descriptor under the bobby config
-/// dir; the manifest goes to Mozilla's per-platform native-messaging dir.
+/// dir; the manifest goes to Mozilla's per-platform native-messaging dir;
+/// the profile receives an unpacked sideload plus `user.js` prefs.
 #[derive(Debug)]
 pub struct CompanionInstall {
     pub extension_dir: PathBuf,
     pub wrapper_path: PathBuf,
     pub manifest_path: PathBuf,
     pub descriptor_path: PathBuf,
+    pub profile_dir: PathBuf,
+    pub sideload_dir: PathBuf,
 }
+
+/// Gecko add-on id from `packages/firefox-companion/manifest.json`.
+const COMPANION_GECKO_ID: &str = "firefox-companion@bobby-browser.local";
+
+/// Prefs required for unsigned permanent sideload on Dev Edition / Nightly / ESR.
+const FIREFOX_PROFILE_PREFS: &[(&str, &str)] = &[
+    ("xpinstall.signatures.required", "false"),
+    ("extensions.autoDisableScopes", "14"),
+    ("privacy.resistFingerprinting", "false"),
+    ("ui.systemUsesDarkTheme", "1"),
+];
 
 fn bobby_config_dir() -> Result<PathBuf> {
     Ok(dirs::config_dir()
@@ -1013,18 +1109,26 @@ fn find_companion_dist(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// Install the Firefox companion: copy the built extension into the bobby
-/// config dir (so the source tree can move), then install the native-host
-/// wrapper and manifest. Pairing against a running Firefox is a later step.
+/// config dir, install the native-host wrapper and manifest, ensure the Bobby
+/// Firefox profile prefs, and permanently sideload an unpacked extension into
+/// that profile. Pairing is a later step (toolbar Pair).
 pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionInstall> {
     let dist = find_companion_dist(extension)?;
     let config = bobby_config_dir()?;
     let extension_dir = config.join("firefox-companion");
     copy_dir(&dist, &extension_dir)?;
+    let profile_dir = config.join("firefox-profile");
+    std::fs::create_dir_all(&profile_dir)?;
+    ensure_firefox_profile_user_js(&profile_dir)?;
+    let sideload_dir = profile_dir.join("extensions").join(COMPANION_GECKO_ID);
+    sideload_unpacked_extension(&dist, &sideload_dir)?;
     let install = CompanionInstall {
         extension_dir,
         wrapper_path: config.join("firefox-native-host"),
         manifest_path: native_messaging_dir()?.join("com.bobby_browser.companion.json"),
         descriptor_path: config.join("firefox-native-host-descriptor.json"),
+        profile_dir: profile_dir.clone(),
+        sideload_dir,
     };
     let exe = std::env::current_exe().context("current executable unknown")?;
     crate::install_native_host(crate::NativeHostInstallConfig {
@@ -1033,8 +1137,6 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
         cli_path: exe,
         descriptor_path: install.descriptor_path.clone(),
     })?;
-    let profile_dir = config.join("firefox-profile");
-    std::fs::create_dir_all(&profile_dir)?;
     let defaults = firefox_companion::selection::FirefoxEnrollDefaults {
         profile_dir,
         companion_bind: firefox_companion::selection::DEFAULT_COMPANION_BIND
@@ -1047,6 +1149,51 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
         &defaults,
     )?;
     Ok(install)
+}
+
+/// Create or append missing `user.js` prefs without wiping operator-owned lines.
+fn ensure_firefox_profile_user_js(profile_dir: &Path) -> Result<()> {
+    let path = profile_dir.join("user.js");
+    let existing = if path.is_file() {
+        std::fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    let mut additions = String::new();
+    for &(name, value) in FIREFOX_PROFILE_PREFS {
+        let marker = format!("user_pref(\"{name}\"");
+        if !existing.contains(&marker) {
+            additions.push_str(&format!("user_pref(\"{name}\", {value});\n"));
+        }
+    }
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&additions);
+    std::fs::write(path, out)?;
+    Ok(())
+}
+
+/// Replace the unpacked sideload directory so upgrades drop removed assets.
+/// Also removes a stale `{id}.xpi` if present so Firefox does not see two copies.
+fn sideload_unpacked_extension(dist: &Path, sideload_dir: &Path) -> Result<()> {
+    let extensions_dir = sideload_dir
+        .parent()
+        .ok_or_else(|| anyhow!("sideload path has no parent"))?;
+    std::fs::create_dir_all(extensions_dir)?;
+    let stale_xpi = extensions_dir.join(format!("{COMPANION_GECKO_ID}.xpi"));
+    if stale_xpi.is_file() {
+        std::fs::remove_file(&stale_xpi)?;
+    }
+    if sideload_dir.exists() {
+        std::fs::remove_dir_all(sideload_dir)?;
+    }
+    copy_dir(dist, sideload_dir)?;
+    Ok(())
 }
 
 fn copy_dir(source: &Path, dest: &Path) -> Result<()> {
