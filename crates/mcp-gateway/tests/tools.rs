@@ -144,6 +144,46 @@ async fn tools_are_capability_filtered_sorted_and_have_closed_schemas() {
 }
 
 #[tokio::test]
+async fn session_create_advertises_only_execution_policies_the_principal_can_grant() {
+    let limited = fixture_server(vec![Capability::SessionWrite]).await;
+    let limited_list = limited
+        .handle_message(request(2, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let limited_session_create = limited_list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "session_create")
+        .unwrap();
+    let limited_policy =
+        &limited_session_create["inputSchema"]["properties"]["executionPolicy"]["properties"];
+    assert!(limited_policy.get("fingerprint").is_none());
+    assert!(limited_policy.get("humanize").is_none());
+
+    let privileged = fixture_server(vec![
+        Capability::SessionWrite,
+        Capability::BrowserFingerprint,
+        Capability::BrowserHumanize,
+    ])
+    .await;
+    let privileged_list = privileged
+        .handle_message(request(3, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let privileged_session_create = privileged_list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "session_create")
+        .unwrap();
+    let privileged_policy =
+        &privileged_session_create["inputSchema"]["properties"]["executionPolicy"]["properties"];
+    assert_eq!(privileged_policy["fingerprint"]["type"], "boolean");
+    assert_eq!(privileged_policy["humanize"]["type"], "boolean");
+}
+
+#[tokio::test]
 async fn page_open_with_url_requires_browser_mutate_before_opening_a_page() {
     let server = fixture_server(vec![Capability::SessionWrite, Capability::PageWrite]).await;
     let created = server

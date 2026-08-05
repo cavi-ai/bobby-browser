@@ -19,6 +19,8 @@ jobs:
     name: rust · build · test · lint
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
+    env:
+      BOBBY_CHROME_NO_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -44,9 +46,33 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
+      - uses: pnpm/action-setup@v6.0.9
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+
+      - name: Build the Northstar browser app for workspace tests
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @cavi-ai/bobby-gauntlet build
+
+      - name: Install Chrome for workspace tests
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: 150.0.7871.124
+          install-dependencies: true
+
+      - name: Locate Chrome for workspace tests
+        run: |
+          BIN="$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)"
+          echo "BOBBY_CHROME_EXECUTABLE=$(readlink -f "$BIN")" >> "$GITHUB_ENV"
+          "$(readlink -f "$BIN")" --version
+
       - name: Test
-        # Logic/contract tests. Chromium-dependent tests are #[ignore]d here and
-        # run live in the `chromium` job below.
+        # Workspace tests include the mandatory Northstar browser journeys.
+        # The chromium job below runs them again against the pinned release browser.
         run: cargo test --workspace --locked
 
       - name: Version and naming agreement
@@ -111,6 +137,19 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - uses: pnpm/action-setup@v6.0.9
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+
+      - name: Build and test the Northstar browser app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @cavi-ai/bobby-gauntlet test
+          pnpm --filter @cavi-ai/bobby-gauntlet build
+
       - name: Install Chrome
         uses: browser-actions/setup-chrome@latest
         with:
@@ -133,6 +172,17 @@ jobs:
 
       - name: Worker live tests
         run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
+
+      - name: Northstar end-to-end release gate
+        run: cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
+
+      - name: Upload Northstar failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: modern-gauntlet-evidence
+          path: target/modern-gauntlet-artifacts
+          if-no-files-found: warn
 
       - name: Runtime live tests
         run: >-
