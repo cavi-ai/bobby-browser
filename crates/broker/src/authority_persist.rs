@@ -46,7 +46,22 @@ impl PersistentAuthority {
     /// raised and they are reissued.
     pub async fn open(inner: EnrolledAuthority, path: PathBuf) -> anyhow::Result<Self> {
         let loaded = match tokio::fs::read(&path).await {
-            Ok(bytes) => serde_json::from_slice::<Vec<PersistedRecord>>(&bytes)?,
+            Ok(bytes) => match serde_json::from_slice::<Vec<PersistedRecord>>(&bytes) {
+                Ok(records) => records,
+                Err(error) => {
+                    // A torn or foreign file must not brick boot: move it
+                    // aside and start empty rather than failing closed
+                    // forever with every issued token stranded.
+                    let quarantine = path.with_extension("corrupt");
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "authority persistence file unreadable; moving aside and booting empty"
+                    );
+                    tokio::fs::rename(&path, &quarantine).await?;
+                    Vec::new()
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error.into()),
         };
@@ -120,12 +135,24 @@ impl PersistentAuthority {
             .await
             .map_err(|_| internal_error())?;
         file.write_all(&json).await.map_err(|_| internal_error())?;
-        file.flush().await.map_err(|_| internal_error())?;
+        // Durable before the rename: flush() is userspace-only, so a crash
+        // between rename and writeback leaves a torn authority file that
+        // bricks the next boot. Match checkpoint-store: sync the file, then
+        // the directory after the rename.
+        file.sync_all().await.map_err(|_| internal_error())?;
         drop(file);
 
         tokio::fs::rename(&tmp_path, &self.path)
             .await
             .map_err(|_| internal_error())?;
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::File::open(parent)
+                .await
+                .map_err(|_| internal_error())?
+                .sync_all()
+                .await
+                .map_err(|_| internal_error())?;
+        }
         Ok(())
     }
 }

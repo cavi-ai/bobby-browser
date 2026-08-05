@@ -610,3 +610,41 @@ fn the_digest_still_distinguishes_different_values() {
         canonical_sha256(&other).expect("canonicalizes")
     );
 }
+
+#[tokio::test]
+async fn a_dropped_permit_releases_its_reservation_instead_of_wedging_the_key() {
+    let store = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let principal = principal("10000000-0000-0000-0000-000000000701");
+    let key = key("dropped-permit");
+    let digest = canonical_sha256(&serde_json::json!({"value": 1})).unwrap();
+
+    let reservation = reserve(
+        &store,
+        principal.clone(),
+        key.clone(),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap();
+    let IdempotencyReservation::Acquired(permit) = reservation else {
+        panic!("first reservation must be acquired");
+    };
+    // The request task dies here: no finish, no abandon.
+    drop(permit);
+
+    // The retry must not park on the wedged reservation: the same key
+    // reserves again promptly (previously it waited for a release that never
+    // came and failed DeadlineExceeded at the request deadline).
+    let reservation = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        reserve(&store, principal, key, digest, CorrelationId::new()),
+    )
+    .await
+    .expect("dropped permit must release its reservation promptly")
+    .unwrap();
+    assert!(
+        matches!(reservation, IdempotencyReservation::Acquired(_)),
+        "key stayed wedged after the permit was dropped"
+    );
+}

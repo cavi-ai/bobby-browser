@@ -1,9 +1,11 @@
 use companion_protocol::{BrowserEngine, BrowserIdentity, CompanionCapabilities};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fmt,
     time::{Duration, Instant},
 };
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use types::{AttachmentId, CompanionId, ProfileId};
@@ -103,7 +105,9 @@ struct CompanionRecord {
     profile_id: ProfileId,
     identity: BrowserIdentity,
     capabilities: CompanionCapabilities,
-    credential: CompanionCredential,
+    // Only the digest is stored: a registry memory read must not expose
+    // every live reconnect credential.
+    credential_sha256: [u8; 32],
     revoked: bool,
 }
 
@@ -127,12 +131,16 @@ impl PairingCodeClaim {
     }
 }
 
+fn credential_sha256(credential: &str) -> [u8; 32] {
+    Sha256::digest(credential.as_bytes()).into()
+}
+
 #[derive(Default)]
 struct RegistryState {
     pairing_codes: HashMap<String, Instant>,
     companions: HashMap<CompanionId, CompanionRecord>,
     profiles: HashMap<ProfileId, CompanionId>,
-    credentials: HashMap<String, CompanionId>,
+    credentials: HashMap<[u8; 32], CompanionId>,
     attachments: HashMap<AttachmentId, AttachmentLease>,
 }
 
@@ -167,11 +175,18 @@ impl CompanionRegistry {
 
     pub async fn issue_pairing_code(&self) -> String {
         let code = Uuid::new_v4().to_string();
-        self.state
-            .write()
-            .await
+        let mut state = self.state.write().await;
+        // Amortized pruning: unclaimed codes and expired attachment leases
+        // are dead weight; dropping them here keeps both maps bounded for
+        // the life of the process.
+        let now = Instant::now();
+        state
             .pairing_codes
-            .insert(code.clone(), Instant::now() + self.pairing_code_ttl);
+            .retain(|_, expires_at| *expires_at > now);
+        state.attachments.retain(|_, lease| lease.expires_at > now);
+        state
+            .pairing_codes
+            .insert(code.clone(), now + self.pairing_code_ttl);
         code
     }
 
@@ -222,9 +237,10 @@ impl CompanionRegistry {
                 expires_at,
             }));
         }
+        let bearer_sha256 = credential_sha256(bearer);
         let companion_id = state
             .credentials
-            .get(bearer)
+            .get(&bearer_sha256)
             .ok_or(RegistryError::CredentialInvalid)?;
         let record = state
             .companions
@@ -233,7 +249,7 @@ impl CompanionRegistry {
         if record.revoked {
             return Err(RegistryError::Revoked);
         }
-        if record.credential.expose_secret() != bearer {
+        if record.credential_sha256.ct_eq(&bearer_sha256).unwrap_u8() != 1 {
             return Err(RegistryError::CredentialInvalid);
         }
         Ok(ConnectionAuthentication::Reconnect(PairedCompanion {
@@ -291,22 +307,22 @@ impl CompanionRegistry {
         if let Some(previous) = state
             .companions
             .get(&input.companion_id)
-            .map(|record| record.credential.expose_secret().to_owned())
+            .map(|record| record.credential_sha256)
         {
             state.credentials.remove(&previous);
         }
         let credential = CompanionCredential(Uuid::new_v4().to_string());
-        state.credentials.insert(
-            credential.expose_secret().to_owned(),
-            input.companion_id.clone(),
-        );
+        let credential_sha256 = credential_sha256(credential.expose_secret());
+        state
+            .credentials
+            .insert(credential_sha256, input.companion_id.clone());
         state.companions.insert(
             input.companion_id,
             CompanionRecord {
                 profile_id: input.profile_id,
                 identity: input.identity,
                 capabilities: input.capabilities,
-                credential: credential.clone(),
+                credential_sha256,
                 revoked: false,
             },
         );
@@ -321,9 +337,10 @@ impl CompanionRegistry {
         credential: &str,
     ) -> Result<PairedCompanion, RegistryError> {
         let state = self.state.read().await;
+        let credential_sha256 = credential_sha256(credential);
         let companion_id = state
             .credentials
-            .get(credential)
+            .get(&credential_sha256)
             .ok_or(RegistryError::CredentialInvalid)?;
         let record = state
             .companions
@@ -332,7 +349,12 @@ impl CompanionRegistry {
         if record.revoked {
             return Err(RegistryError::Revoked);
         }
-        if record.credential.expose_secret() != credential {
+        if record
+            .credential_sha256
+            .ct_eq(&credential_sha256)
+            .unwrap_u8()
+            != 1
+        {
             return Err(RegistryError::CredentialInvalid);
         }
         Ok(PairedCompanion {
@@ -369,6 +391,9 @@ impl CompanionRegistry {
             capabilities: record.capabilities.clone(),
             expires_at: Instant::now() + self.attachment_ttl,
         };
+        state
+            .attachments
+            .retain(|_, lease| lease.expires_at > Instant::now());
         state
             .attachments
             .insert(lease.attachment_id.clone(), lease.clone());
