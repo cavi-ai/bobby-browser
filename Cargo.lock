@@ -990,6 +990,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "context-store"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2670,6 +2685,7 @@ dependencies = [
  "checkpoint-store",
  "chrono",
  "companion-protocol",
+ "context-store",
  "dom-engine",
  "intent-engine",
  "jsonschema",
@@ -2683,6 +2699,7 @@ dependencies = [
  "tokio",
  "tracing",
  "types",
+ "url",
  "worker-pool",
  "workflow-journal",
 ]
@@ -3451,6 +3468,7 @@ dependencies = [
  "checkpoint-store",
  "chrono",
  "config",
+ "context-store",
  "dom-engine",
  "intent-engine",
  "interface-core",

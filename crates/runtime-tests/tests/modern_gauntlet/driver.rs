@@ -171,6 +171,7 @@ impl ModernRuntime {
             interface: config::InterfaceConfig::default(),
             observability: config::ObservabilityConfig::default(),
             vision: config::VisionConfig::default(),
+            context: Default::default(),
             nodes: Default::default(),
         };
         let profile = format!("northstar-{journey}");
@@ -754,6 +755,7 @@ fn runtime_config(
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
+        context: Default::default(),
         nodes: Default::default(),
     }
 }

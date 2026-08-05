@@ -49,6 +49,7 @@ fn config(root: &tempfile::TempDir) -> AppConfig {
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
+        context: Default::default(),
         nodes: Default::default(),
     }
 }

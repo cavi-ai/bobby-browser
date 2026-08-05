@@ -18,6 +18,7 @@ async-trait.workspace = true
 checkpoint-store = { path = "../checkpoint-store", version = "0.6.0" }
 chrono.workspace = true
 companion-protocol = { path = "../companion-protocol", version = "0.6.0" }
+context-store = { path = "../context-store", version = "0.6.0" }
 dom-engine = { path = "../dom-engine", version = "0.6.0" }
 intent-engine = { path = "../intent-engine", version = "0.6.0" }
 network-engine = { path = "../network-engine", version = "0.6.0" }
@@ -29,6 +30,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 types = { path = "../types", version = "0.6.0" }
+url.workspace = true
 worker-pool = { path = "../worker-pool", version = "0.6.0" }
 workflow-journal = { path = "../workflow-journal", version = "0.6.0" }
 
