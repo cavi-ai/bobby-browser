@@ -82,10 +82,10 @@ async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
     let visible = runtime.inspect(Some("[role='status']")).await?;
     assert!(inspection_text(&visible).contains("Priority saved"));
     let snapshot = server.snapshot().await;
+    persist_evidence("customer-update", &server, &runtime).await?;
     assert_eq!(snapshot.atlas_priority, "high");
     assert_effect_count("priority update", snapshot.priority_updates, 1)?;
     assert_journal_terminal_once(runtime.journal_path())?;
-    persist_evidence("customer-update", &server, &runtime).await?;
     Ok(())
 }
 
@@ -135,6 +135,7 @@ async fn validated_onboarding_preserves_accepted_values() -> TestResult<()> {
         .wait_visible("form[aria-label='Customer onboarding'] [role='status']")
         .await?;
     let snapshot = server.snapshot().await;
+    persist_evidence("onboarding", &server, &runtime).await?;
     assert_effect_count("onboarding record", snapshot.onboarding_records, 1)?;
     assert_eq!(
         snapshot.onboarding,
@@ -147,7 +148,6 @@ async fn validated_onboarding_preserves_accepted_values() -> TestResult<()> {
             billing_cycle: "annual".into(),
         })
     );
-    persist_evidence("onboarding", &server, &runtime).await?;
     Ok(())
 }
 
@@ -181,6 +181,7 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
         .await?;
     let snapshot = server.snapshot().await;
     let expected = format!("{:x}", Sha256::digest(std::fs::read(&fixture)?));
+    persist_evidence("documents", &server, &runtime).await?;
     assert_eq!(snapshot.uploaded_sha256.as_deref(), Some(expected.as_str()));
     assert_eq!(snapshot.uploaded_customer_id.as_deref(), Some("cus_atlas"));
     assert_eq!(
@@ -189,7 +190,6 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
     );
     assert_eq!(snapshot.uploaded_media_type.as_deref(), Some("text/plain"));
     assert_effect_count("preview confirmation", snapshot.preview_confirmations, 1)?;
-    persist_evidence("documents", &server, &runtime).await?;
     Ok(())
 }
 
@@ -213,8 +213,8 @@ async fn popup_authorization_survives_obstruction() -> TestResult<()> {
         )
         .await?;
     let snapshot = server.snapshot().await;
-    assert_effect_count("authorization grant", snapshot.authorization_grants, 1)?;
     persist_evidence("authorization", &server, &runtime).await?;
+    assert_effect_count("authorization grant", snapshot.authorization_grants, 1)?;
     Ok(())
 }
 
@@ -256,6 +256,7 @@ async fn interrupted_report_recovers_once_and_downloads() -> TestResult<()> {
             _ => None,
         })
         .ok_or("download command completed without download evidence")?;
+    persist_evidence("report-recovery", &server, &runtime).await?;
     assert_file_digest(std::path::Path::new(path), digest)?;
     assert_eq!(
         std::fs::read_to_string(path)?,
@@ -264,7 +265,6 @@ async fn interrupted_report_recovers_once_and_downloads() -> TestResult<()> {
     let snapshot = server.snapshot().await;
     assert_effect_count("report generation", snapshot.report_generations, 1)?;
     assert_journal_terminal_once(runtime.journal_path())?;
-    persist_evidence("report-recovery", &server, &runtime).await?;
     Ok(())
 }
 
@@ -293,6 +293,7 @@ async fn persist_evidence(
     server: &ScenarioServer,
     runtime: &ModernRuntime,
 ) -> TestResult<()> {
+    runtime.capture_diagnostics(journey).await?;
     let bundle = EvidenceBundle::create(journey, server.run_id())?;
     bundle.write_json("server-state.json", &server.snapshot().await)?;
     bundle.write_json("request-log.json", &server.request_log().await)?;
