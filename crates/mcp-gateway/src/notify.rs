@@ -127,6 +127,14 @@ impl NotificationStream {
         self
     }
 
+    /// Re-evaluate event delivery mid-stream: a token rotation can drop (or
+    /// grant) `SubscribeEvents` after the channel opened, so transports
+    /// re-check the guard per poll and toggle delivery without tearing down
+    /// the channel.
+    pub fn set_events_open(&mut self, open: bool) {
+        self.events_open = open;
+    }
+
     /// The next frame to write to the client, or `None` once the owning
     /// `Server` is gone.
     ///

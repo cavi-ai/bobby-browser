@@ -865,7 +865,12 @@ impl CdpConnection {
                 } else {
                     self.bind_identifier(IdentifierFamily::Frame, scope, "main", RuntimeGeneration(0)).await
                 };
-                let pending = request.session_id.as_deref().and_then(|id| self.pending_page_loads.try_lock().ok().and_then(|loads| loads.get(id).cloned()));
+                // Not try_lock: contention must wait, not silently report a
+                // fabricated about:blank frame.
+                let pending = match request.session_id.as_deref() {
+                    Some(id) => self.pending_page_loads.lock().await.get(id).cloned(),
+                    None => None,
+                };
                 let (loader_id, url) = pending.map(|(_, url, loader)| (loader, url)).unwrap_or_else(|| ("initial".into(), "about:blank".into()));
                 Ok(json!({"frameTree":{"frame":{"id":frame_id,"loaderId":loader_id,"url":url,"domainAndRegistry":"","securityOrigin":"://","mimeType":"text/html","secureContextType":"SecureLocalhost","crossOriginIsolatedContextType":"NotIsolated","gatedAPIFeatures":[]}}}))
             }
@@ -945,7 +950,9 @@ impl CdpConnection {
                 let Some(params)=request.params.as_object() else { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.eventsRead requires object parameters")); };
                 let cursor=params.get("cursor").and_then(Value::as_u64).unwrap_or(0);
                 if params.keys().any(|key| key!="cursor") { return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::InvalidParams,"Automation.eventsRead accepts only cursor")); }
-                self.record_interface_event("events.read", json!({"cursor":cursor,"limit":64})).await;
+                // No read receipt is recorded: journaling every poll would
+                // flood the bounded event store with the client's own reads
+                // and evict the real events it is trying to fetch.
                 match self.interface_events.read_after_for(self.handle.principal_id(),types::EventCursor(cursor),64).await {
                     Ok(batch)=>Ok(serde_json::to_value(batch).unwrap_or(Value::Null)),
                     Err(_)=>return CdpResponse::failure(&request,CdpError::new(CdpErrorCode::RuntimeFailure,"browser interface event history gap")),

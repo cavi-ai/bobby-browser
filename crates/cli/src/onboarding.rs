@@ -109,7 +109,11 @@ fn resolve_gateway() -> Result<PathBuf> {
 struct JsonRpcChild {
     child: Child,
     stdin: std::process::ChildStdin,
-    stdout: BufReader<std::process::ChildStdout>,
+    /// Lines from the child's stdout, produced on a reader thread so a mute
+    /// gateway trips the 15s deadline instead of blocking `read_line`
+    /// forever. The thread exits at EOF; if the child never closes, the
+    /// thread leaks until process exit (doctor is short-lived).
+    lines: std::sync::mpsc::Receiver<std::io::Result<String>>,
     next_id: u64,
 }
 
@@ -127,11 +131,21 @@ impl JsonRpcChild {
         self.stdin.flush()?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
-            if std::time::Instant::now() > deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
                 return Err(anyhow!("{method}: gateway did not answer within 15s"));
             }
-            let mut line = String::new();
-            let read = self.stdout.read_line(&mut line)?;
+            let line = match self.lines.recv_timeout(remaining) {
+                Ok(Ok(line)) => line,
+                Ok(Err(error)) => return Err(error.into()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(anyhow!("{method}: gateway did not answer within 15s"));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("{method}: gateway closed stdout"));
+                }
+            };
+            let read = line.len();
             if read == 0 {
                 return Err(anyhow!("{method}: gateway closed stdout"));
             }
@@ -182,11 +196,20 @@ pub fn mcp_handshake(bootstrap: &BTreeMap<String, String>) -> Result<HandshakeRe
         .spawn()
         .with_context(|| format!("failed to spawn {}", gateway.display()))?;
     let stdin = child.stdin.take().expect("stdin piped");
-    let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
+    let (sender, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || loop {
+        let mut line = String::new();
+        let result = stdout.read_line(&mut line).map(|_| line);
+        let done = matches!(&result, Ok(line) if line.is_empty()) || result.is_err();
+        if sender.send(result).is_err() || done {
+            return;
+        }
+    });
     let mut rpc = JsonRpcChild {
         child,
         stdin,
-        stdout,
+        lines,
         next_id: 0,
     };
     let initialized = rpc.call(

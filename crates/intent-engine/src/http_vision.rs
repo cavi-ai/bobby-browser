@@ -134,15 +134,7 @@ impl StructuredExtractor for HttpVisionAssist {
         if !response.status().is_success() {
             return Err(provider_error("extract endpoint rejected the request"));
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| provider_error("extract endpoint response could not be read"))?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(provider_error(
-                "extract endpoint response exceeded its bound",
-            ));
-        }
+        let bytes = read_bounded_body(response, "extract").await?;
         let result: ExtractResultBody = serde_json::from_slice(&bytes)
             .map_err(|_| provider_error("extract endpoint returned an invalid result"))?;
         Ok(result.value)
@@ -175,15 +167,7 @@ impl VisionAssist for HttpVisionAssist {
                 "vision endpoint rejected the proposal request",
             ));
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| provider_error("vision endpoint response could not be read"))?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(provider_error(
-                "vision endpoint response exceeded its bound",
-            ));
-        }
+        let bytes = read_bounded_body(response, "vision").await?;
         let proposal: ProposalBody = serde_json::from_slice(&bytes)
             .map_err(|_| provider_error("vision endpoint returned an invalid proposal"))?;
         if !proposal.confidence.is_finite() || !(0.0..=1.0).contains(&proposal.confidence) {
@@ -223,6 +207,38 @@ fn stuck_name(stuck: StuckKind) -> &'static str {
         StuckKind::ObstructionSuspected => "obstructionSuspected",
         StuckKind::VerifyNoDomSignal => "verifyNoDomSignal",
     }
+}
+
+/// Read a response body with the bound enforced DURING the read: content
+/// longer than MAX_RESPONSE_BYTES must fail the call, not exhaust runtime
+/// memory before a length check ever runs.
+async fn read_bounded_body(
+    response: reqwest::Response,
+    what: &str,
+) -> Result<Vec<u8>, CommandError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(provider_error(format!(
+            "{what} endpoint response exceeded its bound"
+        )));
+    }
+    let mut bytes = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| provider_error(format!("{what} endpoint response could not be read")))?
+    {
+        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(provider_error(format!(
+                "{what} endpoint response exceeded its bound"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 fn provider_error(message: impl Into<String>) -> CommandError {
