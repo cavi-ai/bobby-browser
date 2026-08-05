@@ -158,10 +158,7 @@ impl RuntimeService {
             .map(|runtime| runtime.with_promotion(promotion))
     }
 
-    fn with_promotion(
-        mut self,
-        promotion: Option<Arc<page_runtime::ContextPromotion>>,
-    ) -> Self {
+    fn with_promotion(mut self, promotion: Option<Arc<page_runtime::ContextPromotion>>) -> Self {
         if let Some(promotion) = promotion {
             self.pages = self.pages.with_context_promotion(promotion);
         }

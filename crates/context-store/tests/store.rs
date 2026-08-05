@@ -28,7 +28,10 @@ fn site(names: &[&str], verified_day: u32) -> SiteContext {
     forms.insert(
         "login".to_string(),
         FormContext {
-            controls: names.iter().map(|name| control(name, verified_day)).collect(),
+            controls: names
+                .iter()
+                .map(|name| control(name, verified_day))
+                .collect(),
         },
     );
     let mut pages = std::collections::BTreeMap::new();
@@ -144,7 +147,9 @@ async fn sweep_drops_only_expired_records() {
                     .for_each(|stats| stats.last_verified_day = Some(today - 120));
             }
         });
-    store.upsert_site("https://mixed.example", two.clone()).await;
+    store
+        .upsert_site("https://mixed.example", two.clone())
+        .await;
     assert!(store.flush().await.is_empty());
 
     let dropped = store.sweep(90, today).await.unwrap();

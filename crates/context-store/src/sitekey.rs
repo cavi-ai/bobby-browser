@@ -14,11 +14,11 @@
 /// over a table this small.
 const MULTI_LABEL_SUFFIXES: &[&str] = &[
     "ac.jp", "ac.kr", "ac.nz", "ac.th", "ac.uk", "co.id", "co.il", "co.in", "co.jp", "co.kr",
-    "co.nz", "co.th", "co.uk", "co.za", "com.ar", "com.au", "com.br", "com.cn", "com.co",
-    "com.hk", "com.mx", "com.my", "com.ph", "com.pl", "com.sa", "com.sg", "com.tr", "com.tw",
-    "com.vn", "edu.au", "edu.cn", "edu.sg", "firm.in", "gov.au", "gov.cn", "gov.in", "gov.uk",
-    "ne.jp", "net.au", "net.cn", "net.in", "net.uk", "or.jp", "or.kr", "org.au", "org.cn",
-    "org.in", "org.nz", "org.uk", "org.za",
+    "co.nz", "co.th", "co.uk", "co.za", "com.ar", "com.au", "com.br", "com.cn", "com.co", "com.hk",
+    "com.mx", "com.my", "com.ph", "com.pl", "com.sa", "com.sg", "com.tr", "com.tw", "com.vn",
+    "edu.au", "edu.cn", "edu.sg", "firm.in", "gov.au", "gov.cn", "gov.in", "gov.uk", "ne.jp",
+    "net.au", "net.cn", "net.in", "net.uk", "or.jp", "or.kr", "org.au", "org.cn", "org.in",
+    "org.nz", "org.uk", "org.za",
 ];
 
 /// Derives the persisted site key for a page URL.
@@ -61,7 +61,10 @@ mod tests {
     #[test]
     fn site_key_table() {
         let cases: &[(&str, Option<&str>)] = &[
-            ("https://example.com/path?q=1#frag", Some("https://example.com")),
+            (
+                "https://example.com/path?q=1#frag",
+                Some("https://example.com"),
+            ),
             ("https://app.example.com/a", Some("https://example.com")),
             ("https://deep.app.example.com/", Some("https://example.com")),
             ("http://example.com/", Some("http://example.com")),
@@ -73,7 +76,10 @@ mod tests {
             ("https://127.0.0.1:3000/app", Some("https://127.0.0.1")),
             ("http://[::1]:8080/x", Some("http://[::1]")),
             ("http://localhost:9000/", Some("http://localhost")),
-            ("https://xn--nxasmq6b.example.se/", Some("https://example.se")),
+            (
+                "https://xn--nxasmq6b.example.se/",
+                Some("https://example.se"),
+            ),
             ("about:blank", None),
             ("data:text/html,<p>hi</p>", None),
             ("not a url", None),

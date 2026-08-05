@@ -45,10 +45,17 @@ impl ContextPromotion {
     /// exact target that was acted on, an `IntentExecution` record supplies
     /// the intent kind, the resolution path, and (on failure, where no
     /// resolution was reached) the best candidate seen.
-    pub async fn record_outcome(&self, page_url: Option<&str>, evidence: &[Evidence], success: bool) {
+    pub async fn record_outcome(
+        &self,
+        page_url: Option<&str>,
+        evidence: &[Evidence],
+        success: bool,
+    ) {
         let Some(url) = page_url else { return };
         let Some(site) = site_key(url) else { return };
-        let Some(pattern) = page_pattern(url) else { return };
+        let Some(pattern) = page_pattern(url) else {
+            return;
+        };
         let record = evidence.iter().find_map(|item| match item {
             Evidence::IntentExecution { record } => Some(record),
             _ => None,
@@ -155,7 +162,11 @@ fn page_pattern(page_url: &str) -> Option<String> {
         })
         .collect();
     let joined = pattern.join("/");
-    Some(if joined.is_empty() { "/".to_string() } else { joined })
+    Some(if joined.is_empty() {
+        "/".to_string()
+    } else {
+        joined
+    })
 }
 
 fn templated(segment: &str) -> bool {
@@ -178,8 +189,14 @@ mod tests {
             ("https://example.com/login?next=/home#form", Some("/login")),
             ("https://example.com/", Some("/")),
             ("https://example.com", Some("/")),
-            ("https://example.com/customers/cus_1042", Some("/customers/{}")),
-            ("https://example.com/customers/42/orders/7", Some("/customers/{}/orders/{}")),
+            (
+                "https://example.com/customers/cus_1042",
+                Some("/customers/{}"),
+            ),
+            (
+                "https://example.com/customers/42/orders/7",
+                Some("/customers/{}/orders/{}"),
+            ),
             ("https://example.com/a/b", Some("/a/b")),
             ("about:blank", None),
         ];
