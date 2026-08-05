@@ -80,6 +80,7 @@ struct SharedState {
     dist: PathBuf,
     inner: Mutex<RunState>,
     report_generated: Notify,
+    preview_confirmed: Notify,
 }
 
 pub struct ScenarioServer {
@@ -115,6 +116,7 @@ impl ScenarioServer {
                 requests: Vec::new(),
             }),
             report_generated: Notify::new(),
+            preview_confirmed: Notify::new(),
         });
         let app = Router::new()
             .route("/api/dashboard", get(dashboard))
@@ -193,6 +195,17 @@ impl ScenarioServer {
         tokio::time::timeout(std::time::Duration::from_secs(10), notified)
             .await
             .map_err(|_| "report generation was not observed within 10 seconds")?;
+        Ok(())
+    }
+
+    pub async fn wait_for_preview_confirmation(&self) -> TestResult<()> {
+        let notified = self.state.preview_confirmed.notified();
+        if self.state.inner.lock().await.preview_confirmations == 1 {
+            return Ok(());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), notified)
+            .await
+            .map_err(|_| "preview confirmation was not observed within 10 seconds")?;
         Ok(())
     }
 }
@@ -414,7 +427,9 @@ async fn confirm_preview(
     State(state): State<Arc<SharedState>>,
     AxumPath(_id): AxumPath<String>,
 ) -> impl IntoResponse {
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     state.inner.lock().await.preview_confirmations += 1;
+    state.preview_confirmed.notify_waiters();
     Html("<!doctype html><title>Document confirmed</title><p role=status>Document confirmed</p>")
 }
 

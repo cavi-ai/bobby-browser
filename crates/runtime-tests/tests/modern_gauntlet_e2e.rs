@@ -181,6 +181,7 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
     runtime
         .click_in_frame("#document-preview", "#confirm-preview")
         .await?;
+    server.wait_for_preview_confirmation().await?;
     let snapshot = server.snapshot().await;
     let expected = format!("{:x}", Sha256::digest(std::fs::read(&fixture)?));
     persist_evidence("documents", &server, &runtime).await?;
