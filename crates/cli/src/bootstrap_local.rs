@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -262,6 +263,162 @@ pub fn load_bootstrap_capabilities_csv(path: &Path) -> Result<String> {
     })
 }
 
+/// Outcome of an additive capability heal against [`DEFAULT_CAPABILITIES`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HealBootstrapReport {
+    /// Wire strings appended from the current default set.
+    pub added: Vec<&'static str>,
+    /// True when the bootstrap.env file was rewritten.
+    pub file_rewritten: bool,
+    /// True when process env `AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES` was updated.
+    pub env_updated: bool,
+}
+
+impl HealBootstrapReport {
+    pub fn changed(&self) -> bool {
+        !self.added.is_empty() || self.file_rewritten || self.env_updated
+    }
+
+    pub fn merge(&mut self, other: HealBootstrapReport) {
+        for wire in other.added {
+            if !self.added.contains(&wire) {
+                self.added.push(wire);
+            }
+        }
+        self.file_rewritten |= other.file_rewritten;
+        self.env_updated |= other.env_updated;
+    }
+}
+
+/// Union an existing capabilities CSV with [`DEFAULT_CAPABILITIES`].
+///
+/// Preserves existing order and any non-default capabilities; appends only
+/// missing defaults. Returns the new CSV and the wire strings that were added.
+pub fn union_capabilities_csv(existing_csv: &str) -> Result<(String, Vec<&'static str>)> {
+    let mut present = BTreeSet::new();
+    let mut ordered = Vec::new();
+    for part in existing_csv.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let capability = parse_capability(trimmed)?;
+        if present.insert(capability) {
+            ordered.push(capability);
+        }
+    }
+    let mut added = Vec::new();
+    for &capability in DEFAULT_CAPABILITIES {
+        if present.insert(capability) {
+            ordered.push(capability);
+            added.push(capability.as_str());
+        }
+    }
+    let csv = ordered
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok((csv, added))
+}
+
+/// Rewrite `bootstrap.env` capabilities when the file is missing any
+/// [`DEFAULT_CAPABILITIES`] entry. Preserves token, principal, and expiry.
+///
+/// No-op when the path does not exist.
+pub fn heal_bootstrap_env_file(path: &Path) -> Result<HealBootstrapReport> {
+    if !path.exists() {
+        return Ok(HealBootstrapReport::default());
+    }
+    let fields = read_bootstrap_env_fields(path)?;
+    let token = fields.token.with_context(|| {
+        format!(
+            "bootstrap env {} missing required key {ENV_TOKEN}",
+            path.display()
+        )
+    })?;
+    let principal = fields.principal.with_context(|| {
+        format!(
+            "bootstrap env {} missing required key {ENV_PRINCIPAL}",
+            path.display()
+        )
+    })?;
+    let capabilities = fields.capabilities.with_context(|| {
+        format!(
+            "bootstrap env {} missing required key {ENV_CAPABILITIES}",
+            path.display()
+        )
+    })?;
+    let expires_at = fields.expires_at.with_context(|| {
+        format!(
+            "bootstrap env {} missing required key {ENV_EXPIRES_AT}",
+            path.display()
+        )
+    })?;
+    let (healed_csv, added) = union_capabilities_csv(&capabilities)?;
+    if added.is_empty() {
+        return Ok(HealBootstrapReport::default());
+    }
+    let export = if bootstrap_env_uses_export_prefix(path)? {
+        "export "
+    } else {
+        ""
+    };
+    let contents = format!(
+        "{export}{ENV_TOKEN}={token}\n{export}{ENV_PRINCIPAL}={principal}\n{export}{ENV_CAPABILITIES}={healed_csv}\n{export}{ENV_EXPIRES_AT}={expires_at}\n"
+    );
+    write_private_file(path, contents.as_bytes())
+        .with_context(|| format!("failed to heal bootstrap env at {}", path.display()))?;
+    Ok(HealBootstrapReport {
+        added,
+        file_rewritten: true,
+        env_updated: false,
+    })
+}
+
+/// Expand process-env bootstrap capabilities to include [`DEFAULT_CAPABILITIES`].
+///
+/// No-op when `AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES` is unset.
+pub fn heal_process_env_capabilities() -> Result<HealBootstrapReport> {
+    let Ok(existing) = std::env::var(ENV_CAPABILITIES) else {
+        return Ok(HealBootstrapReport::default());
+    };
+    let (healed_csv, added) = union_capabilities_csv(&existing)?;
+    if added.is_empty() {
+        return Ok(HealBootstrapReport::default());
+    }
+    // Caps only enter this process's environment; never printed.
+    unsafe { std::env::set_var(ENV_CAPABILITIES, &healed_csv) };
+    Ok(HealBootstrapReport {
+        added,
+        file_rewritten: false,
+        env_updated: true,
+    })
+}
+
+/// Heal bootstrap.env (when present) and process env so local installs stay
+/// unrestricted as defaults grow. Call before credential load on serve,
+/// mcp-stdio, and doctor.
+///
+/// Also heals `~/.config/bobby-browser/bootstrap.env` when that file exists and
+/// differs from `path`. Launchd wrappers on macOS often `source` the XDG-style
+/// path while `dirs::config_dir()` resolves to Application Support.
+pub fn ensure_unrestricted_bootstrap(path: &Path) -> Result<HealBootstrapReport> {
+    let mut report = heal_bootstrap_env_file(path)?;
+    if let Some(legacy) = xdg_config_bootstrap_path() {
+        if legacy != *path {
+            report.merge(heal_bootstrap_env_file(&legacy)?);
+        }
+    }
+    report.merge(heal_process_env_capabilities()?);
+    Ok(report)
+}
+
+fn xdg_config_bootstrap_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(home.join(".config").join("bobby-browser").join("bootstrap.env"))
+}
+
 struct BootstrapEnvFields {
     token: Option<String>,
     principal: Option<String>,
@@ -315,6 +472,8 @@ fn read_bootstrap_env_fields(path: &Path) -> Result<BootstrapEnvFields> {
                 path.display()
             ));
         };
+        // Accept both `KEY=value` and shell-sourced `export KEY=value`.
+        let key = key.trim().strip_prefix("export ").unwrap_or(key).trim();
         match key {
             ENV_TOKEN => fields.token = Some(value.to_owned()),
             ENV_PRINCIPAL => fields.principal = Some(value.to_owned()),
@@ -324,6 +483,17 @@ fn read_bootstrap_env_fields(path: &Path) -> Result<BootstrapEnvFields> {
         }
     }
     Ok(fields)
+}
+
+/// True when the bootstrap dotenv uses shell `export KEY=` lines (common for
+/// launchd `source` wrappers). Heal rewrites preserve that style.
+fn bootstrap_env_uses_export_prefix(path: &Path) -> Result<bool> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read bootstrap env from {}", path.display()))?;
+    Ok(contents.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("export ") && line.contains('=')
+    }))
 }
 
 fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -523,5 +693,120 @@ mod tests {
             .is_some_and(|error| {
                 matches!(error, broker::StartupCredentialError::InvalidPrincipal)
             }));
+    }
+
+    #[test]
+    fn union_capabilities_csv_is_additive_and_idempotent() {
+        let stale = "authority:admin,session:read,session:write,page:read,page:write,browser:mutate,file:upload,file:download,artifact:read,artifact:capture,recovery:read,recovery:write";
+        let (healed, added) = union_capabilities_csv(stale).unwrap();
+        assert!(added.contains(&"browser:fingerprint"));
+        assert!(added.contains(&"browser:humanize"));
+        assert!(added.contains(&"javascript:evaluate"));
+        assert!(added.contains(&"intent:execute"));
+        assert!(added.contains(&"vision:assist"));
+        assert!(added.contains(&"job:submit"));
+        assert!(healed.contains("browser:fingerprint"));
+        assert!(healed.starts_with("authority:admin,session:read"));
+        let (again, added_again) = union_capabilities_csv(&healed).unwrap();
+        assert!(added_again.is_empty());
+        assert_eq!(again, healed);
+    }
+
+    #[test]
+    fn heal_bootstrap_env_file_rewrites_once() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        // Write a deliberately stale capability set while keeping other fields.
+        let stale = "authority:admin,session:read,session:write,page:read,page:write,browser:mutate,file:upload,file:download,artifact:read,artifact:capture,recovery:read,recovery:write";
+        let contents = format!(
+            "{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={stale}\n{ENV_EXPIRES_AT}={}\n",
+            material.bearer(),
+            material.principal_id().as_uuid(),
+            material.expires_at().to_rfc3339(),
+        );
+        write_private_file(&path, contents.as_bytes()).unwrap();
+
+        let first = heal_bootstrap_env_file(&path).unwrap();
+        assert!(first.file_rewritten);
+        assert!(first.added.contains(&"browser:fingerprint"));
+        let caps = load_bootstrap_capabilities_csv(&path).unwrap();
+        assert!(caps.contains("browser:fingerprint"));
+        assert!(caps.contains("job:submit"));
+        // Token preserved.
+        let loaded = load_startup_from_env_file(&path).unwrap();
+        assert_eq!(loaded.expires_at(), material.expires_at());
+
+        let second = heal_bootstrap_env_file(&path).unwrap();
+        assert!(!second.changed());
+        assert_eq!(load_bootstrap_capabilities_csv(&path).unwrap(), caps);
+    }
+
+    #[test]
+    fn heal_bootstrap_env_file_noop_when_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.env");
+        let report = heal_bootstrap_env_file(&path).unwrap();
+        assert!(!report.changed());
+    }
+
+    #[test]
+    fn ensure_unrestricted_bootstrap_heals_file_before_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let stale = "session:read,session:write,page:read,page:write,browser:mutate,artifact:read,artifact:capture,recovery:read,recovery:write,authority:admin";
+        let contents = format!(
+            "{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={stale}\n{ENV_EXPIRES_AT}={}\n",
+            material.bearer(),
+            material.principal_id().as_uuid(),
+            material.expires_at().to_rfc3339(),
+        );
+        write_private_file(&path, contents.as_bytes()).unwrap();
+
+        let report = ensure_unrestricted_bootstrap(&path).unwrap();
+        assert!(report.file_rewritten);
+        let caps = load_bootstrap_capabilities_csv(&path).unwrap();
+        assert!(caps.split(',').any(|c| c.trim() == "browser:fingerprint"));
+        load_startup_from_env_file(&path).unwrap();
+    }
+
+    #[test]
+    fn heal_preserves_export_prefix_style() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let stale = "session:read,session:write,page:read,page:write,browser:mutate,artifact:read,artifact:capture,recovery:read,recovery:write,authority:admin";
+        let contents = format!(
+            "export {ENV_TOKEN}={}\nexport {ENV_PRINCIPAL}={}\nexport {ENV_CAPABILITIES}={stale}\nexport {ENV_EXPIRES_AT}={}\n",
+            material.bearer(),
+            material.principal_id().as_uuid(),
+            material.expires_at().to_rfc3339(),
+        );
+        write_private_file(&path, contents.as_bytes()).unwrap();
+        let report = heal_bootstrap_env_file(&path).unwrap();
+        assert!(report.file_rewritten);
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(rewritten.lines().all(|line| {
+            line.trim().is_empty() || line.trim().starts_with("export ") || line.trim().starts_with('#')
+        }));
+        assert!(rewritten.contains("browser:fingerprint"));
+        load_startup_from_env_file(&path).unwrap();
+    }
+
+    #[test]
+    fn read_accepts_export_prefixed_keys() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let material = generate_bootstrap(chrono::Duration::days(1)).unwrap();
+        let contents = format!(
+            "export {ENV_TOKEN}={}\nexport {ENV_PRINCIPAL}={}\nexport {ENV_CAPABILITIES}={}\nexport {ENV_EXPIRES_AT}={}\n",
+            material.bearer(),
+            material.principal_id().as_uuid(),
+            material.capabilities_csv(),
+            material.expires_at().to_rfc3339(),
+        );
+        write_private_file(&path, contents.as_bytes()).unwrap();
+        load_startup_from_env_file(&path).unwrap();
     }
 }

@@ -392,6 +392,14 @@ fn apply_config_env(config_path: &Path) {
 /// Load bootstrap credential env vars into this process when they are not
 /// already present in the environment.
 fn load_bootstrap_into_env(bootstrap_path: &Path) -> Result<()> {
+    // Expand stale capability lists before credential load so local installs
+    // stay unrestricted as DEFAULT_CAPABILITIES grows.
+    crate::bootstrap_local::ensure_unrestricted_bootstrap(bootstrap_path).with_context(|| {
+        format!(
+            "failed to heal bootstrap capabilities at {}",
+            bootstrap_path.display()
+        )
+    })?;
     if broker::StartupCredential::from_env().is_err() {
         let env =
             crate::bootstrap_local::load_bootstrap_env_map(bootstrap_path).with_context(|| {
