@@ -168,7 +168,10 @@ async fn typed_values_never_reach_the_context_store() {
     let handle = authority
         .issue(
             types::PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-            [types::Capability::SessionWrite, types::Capability::SessionRead],
+            [
+                types::Capability::SessionWrite,
+                types::Capability::SessionRead,
+            ],
             Utc::now() + Duration::minutes(5),
         )
         .await
@@ -181,7 +184,10 @@ async fn typed_values_never_reach_the_context_store() {
         &authed,
         types::RequestContext::new_for_test(
             principal,
-            [types::Capability::SessionWrite, types::Capability::SessionRead],
+            [
+                types::Capability::SessionWrite,
+                types::Capability::SessionRead,
+            ],
             Utc::now() + Duration::minutes(1),
         ),
         session.id.clone(),
