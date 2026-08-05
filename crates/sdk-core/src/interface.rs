@@ -398,7 +398,22 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::ReadPage)?;
         self.require_owned_session(&ctx, &session)?;
-        Ok(self.inner.pages.context().ask(&page, &description))
+        if let Some(answer) = self.inner.pages.context().ask(&page, &description) {
+            return Ok(Some(answer));
+        }
+        // Hot miss: a durable-profile runtime answers from the persisted
+        // context graph (cold start); any other runtime behaves as before.
+        let Some(promotion) = self.inner.pages.context_promotion() else {
+            return Ok(None);
+        };
+        let url = self
+            .inner
+            .pages
+            .get(&page)
+            .await
+            .ok()
+            .and_then(|page| page.url);
+        Ok(promotion.ask(url.as_deref(), &description).await)
     }
 
     async fn form_snapshot(

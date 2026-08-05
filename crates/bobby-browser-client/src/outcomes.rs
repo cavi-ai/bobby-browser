@@ -37,6 +37,40 @@ pub struct AccessibilityTarget {
 pub struct ContextAnswer {
     pub target: AccessibilityTarget,
     pub confidence: f32,
+    /// Whether the answer was observed live this session (stamped with the
+    /// page's generation) or remembered from a prior session's persisted
+    /// context. Additive; absent means a live generation-0 answer.
+    #[serde(default)]
+    pub observed_at: ContextObservedAt,
+    /// How the underlying record entered the graph. Absent for live answers
+    /// (always direct observation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ContextAnswerSource>,
+}
+
+impl Default for ContextObservedAt {
+    fn default() -> Self {
+        Self::Generation { generation: 0 }
+    }
+}
+
+/// Provenance of a [`ContextAnswer`]: live-observed under a page generation,
+/// or remembered from the persisted per-profile context store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ContextObservedAt {
+    Generation { generation: u64 },
+    Persisted,
+}
+
+/// How a remembered control record entered the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextAnswerSource {
+    Observed,
+    VisionPromoted,
 }
 
 /// One node in an `accessibilitySnapshot` result tree.
