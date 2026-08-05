@@ -1744,6 +1744,8 @@ fn write_exact_file_atomic(path: &Path, contents: &[u8], mode: u32) -> std::io::
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(mode);
         }
+        #[cfg(not(unix))]
+        let _ = mode;
         let mut file = options.open(&pending)?;
         file.write_all(contents)?;
         file.flush()?;
