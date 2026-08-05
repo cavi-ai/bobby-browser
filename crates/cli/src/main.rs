@@ -1556,7 +1556,44 @@ fn is_bobby_managed_wrapper(contents: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(contents) else {
         return false;
     };
-    text.starts_with("#!/bin/sh\n") && text.contains(" firefox-native-host --descriptor ")
+    let Some(command) = text
+        .strip_prefix("#!/bin/sh\nexec ")
+        .and_then(|text| text.strip_suffix('\n'))
+    else {
+        return false;
+    };
+    if command.contains('\n') {
+        return false;
+    }
+    let Some(rest) = consume_shell_quoted(command) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix(" firefox-native-host --descriptor ") else {
+        return false;
+    };
+    consume_shell_quoted(rest).is_some_and(str::is_empty)
+}
+
+/// Consume exactly the single-quoted form emitted by [`shell_quote`],
+/// including its close-escape-reopen form for an embedded apostrophe.
+fn consume_shell_quoted(input: &str) -> Option<&str> {
+    let bytes = input.as_bytes();
+    if bytes.first() != Some(&b'\'') {
+        return None;
+    }
+    let mut index = 1;
+    while index < bytes.len() {
+        if bytes[index] != b'\'' {
+            index += 1;
+            continue;
+        }
+        if bytes.get(index..index + 4) == Some(b"'\\''") {
+            index += 4;
+            continue;
+        }
+        return Some(&input[index + 1..]);
+    }
+    None
 }
 
 fn is_bobby_managed_manifest(contents: &[u8]) -> bool {
@@ -2299,6 +2336,39 @@ mod tests {
         std::fs::remove_file(wrapper).unwrap();
         std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn native_host_wrapper_ownership_requires_exact_generated_grammar() {
+        for managed in [
+            b"#!/bin/sh\nexec '/opt/bobby' firefox-native-host --descriptor '/tmp/descriptor.json'\n"
+                .as_slice(),
+            b"#!/bin/sh\nexec '/opt/bob'\\''by' firefox-native-host --descriptor '/tmp/descriptor with space.json'\n"
+                .as_slice(),
+        ] {
+            assert!(is_bobby_managed_wrapper(managed), "managed: {managed:?}");
+        }
+
+        for operator_owned in [
+            b"#!/bin/sh\n# example firefox-native-host --descriptor config.json\nexec /opt/operator\n"
+                .as_slice(),
+            b"#!/bin/sh\nexec /opt/operator\nprintf ' firefox-native-host --descriptor '\n"
+                .as_slice(),
+            b"#!/bin/sh\n'/opt/bobby' firefox-native-host --descriptor '/tmp/descriptor.json'\n"
+                .as_slice(),
+            b"#!/bin/sh\nexec '/opt/bobby' firefox-native-host --descriptor '/tmp/descriptor.json'\necho extra\n"
+                .as_slice(),
+            b"#!/bin/sh\nexec '/opt/bobby firefox-native-host --descriptor '/tmp/descriptor.json'\n"
+                .as_slice(),
+            b"#!/bin/sh\nexec '/opt/bobby' other-command --descriptor '/tmp/descriptor.json'\n"
+                .as_slice(),
+            b"\xff\xfe".as_slice(),
+        ] {
+            assert!(
+                !is_bobby_managed_wrapper(operator_owned),
+                "operator-owned: {operator_owned:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
