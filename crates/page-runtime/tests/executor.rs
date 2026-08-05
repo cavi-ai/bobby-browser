@@ -22,6 +22,7 @@ enum DriverMode {
     Succeed,
     FailInspect,
     SlowInspect,
+    InspectMismatch,
     FailClick,
     StateConflict,
     CommitFail,
@@ -122,6 +123,15 @@ impl BrowserWorker for FakeWorker {
         self.events.lock().await.push("browser:inspect".into());
         if matches!(self.mode, DriverMode::SlowInspect) {
             tokio::time::sleep(StdDuration::from_secs(30)).await;
+        }
+        if matches!(self.mode, DriverMode::InspectMismatch) {
+            return Ok(vec![Evidence::Inspection {
+                selector: command.selector.clone(),
+                url: "https://example.test/".into(),
+                title: "Fixture".into(),
+                text: "not-the-typed-value".into(),
+                html: None,
+            }]);
         }
         if matches!(self.mode, DriverMode::FailInspect) {
             return Err(driver_failure());
@@ -1544,4 +1554,33 @@ async fn a_command_that_outlives_its_deadline_fails_instead_of_hanging() {
         other => panic!("hung command must fail at its deadline: {other:?}"),
     };
     assert_eq!(error.code, ErrorCode::DeadlineExceeded, "{error:?}");
+}
+
+#[tokio::test]
+async fn a_typed_value_that_never_lands_fails_verification() {
+    // The positive case above only proves the happy path because the fake
+    // echoes the typed value back. This one returns a different page state:
+    // the runtime's post-type verification must fail the command, or the
+    // whole "verify every effect" contract is decorative.
+    let (runtime, session, page, _) = runtime(DriverMode::InspectMismatch, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::TypeText(TypeTextCommand {
+                selector: "input[name='email']".into(),
+                target: None,
+                value: "ada@example.test".into(),
+                clear_first: true,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    let error = match outcome {
+        CommandOutcome::Failed { error, .. } | CommandOutcome::RetryableFailure { error, .. } => {
+            error
+        }
+        other => panic!("mismatched page state must fail verification: {other:?}"),
+    };
+    assert_eq!(error.code, ErrorCode::VerificationFailed, "{error:?}");
 }
