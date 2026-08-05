@@ -2,9 +2,10 @@ use std::{fs::OpenOptions, io::Write as _, path::PathBuf};
 
 use agent_client_protocol::{
     schema::v1::{
-        AgentCapabilities, CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
-        InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
-        PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+        AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
+        CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk, InitializeRequest,
+        InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
+        PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
         RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason, TextContent,
         ToolCallUpdate, ToolCallUpdateFields,
     },
@@ -25,19 +26,35 @@ async fn main() -> agent_client_protocol::Result<()> {
     let log = PathBuf::from(std::env::args().nth(1).expect("lifecycle log path"));
     let mode = std::env::args().nth(2).unwrap_or_else(|| "success".into());
     let initialize_mode = mode.clone();
+    let authenticate_mode = mode.clone();
+    let authenticate_log = log.clone();
     let new_log = log.clone();
     let close_log = log;
     Agent
         .builder()
         .on_receive_request(
             async move |request: InitializeRequest, responder, _connection| {
-                responder.respond(
-                    InitializeResponse::new(request.protocol_version).agent_capabilities(
-                        AgentCapabilities::new().prompt_capabilities(
-                            PromptCapabilities::new().image(initialize_mode != "no-image"),
-                        ),
-                    ),
-                )
+                let mut response = InitializeResponse::new(request.protocol_version)
+                    .agent_capabilities(AgentCapabilities::new().prompt_capabilities(
+                        PromptCapabilities::new().image(initialize_mode != "no-image"),
+                    ));
+                if matches!(initialize_mode.as_str(), "auth" | "auth-fail") {
+                    response = response.auth_methods(vec![AuthMethod::Agent(
+                        AuthMethodAgent::new("opencode-login", "OpenCode Login"),
+                    )]);
+                }
+                responder.respond(response)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |_request: AuthenticateRequest, responder, _connection| {
+                record(&authenticate_log, "authenticate");
+                if authenticate_mode == "auth-fail" {
+                    responder.respond_with_internal_error("auth rejected")
+                } else {
+                    responder.respond(AuthenticateResponse::new())
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )
