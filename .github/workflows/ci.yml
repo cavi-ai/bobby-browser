@@ -19,6 +19,8 @@ jobs:
     name: rust · build · test · lint
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
     runs-on: ubuntu-latest
+    env:
+      BOBBY_CHROME_NO_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -55,6 +57,18 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm --filter @cavi-ai/bobby-gauntlet build
+
+      - name: Install Chrome for workspace tests
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: 150.0.7871.124
+          install-dependencies: true
+
+      - name: Locate Chrome for workspace tests
+        run: |
+          BIN="$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)"
+          echo "BOBBY_CHROME_EXECUTABLE=$(readlink -f "$BIN")" >> "$GITHUB_ENV"
+          "$(readlink -f "$BIN")" --version
 
       - name: Test
         # Workspace tests include the mandatory Northstar browser journeys.
