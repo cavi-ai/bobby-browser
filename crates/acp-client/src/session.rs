@@ -267,10 +267,13 @@ async fn run_task(
             }
             if authenticate_advertised {
                 if let Some(method) = initialized.auth_methods.first() {
-                    connection
+                    if let Err(error) = connection
                         .send_request(AuthenticateRequest::new(method.id().clone()))
                         .block_task()
-                        .await?;
+                        .await
+                    {
+                        return Ok(Err(AcpClientError::Authentication(error.to_string())));
+                    }
                 }
             }
 
