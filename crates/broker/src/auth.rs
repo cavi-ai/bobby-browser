@@ -331,15 +331,22 @@ pub(crate) async fn acquire_principal_permit(
     let existing = state.principal_permits.read().await.get(principal).cloned();
     let semaphore = match existing {
         Some(semaphore) => semaphore,
-        None => state
-            .principal_permits
-            .write()
-            .await
-            .entry(principal.clone())
-            .or_insert_with(|| {
-                Arc::new(Semaphore::new(state.interface.max_in_flight_per_principal))
-            })
-            .clone(),
+        None => {
+            let mut permits = state.principal_permits.write().await;
+            // Bound churn: past max_principals entries, evict fully idle
+            // semaphores (every permit available means nothing in flight).
+            // A reauthenticating principal just gets a fresh semaphore.
+            if permits.len() >= state.interface.max_principals {
+                let max = state.interface.max_in_flight_per_principal;
+                permits.retain(|_, semaphore| semaphore.available_permits() < max);
+            }
+            permits
+                .entry(principal.clone())
+                .or_insert_with(|| {
+                    Arc::new(Semaphore::new(state.interface.max_in_flight_per_principal))
+                })
+                .clone()
+        }
     };
     semaphore.try_acquire_owned().map_err(|_| {
         ProtocolError::from(interface_error(

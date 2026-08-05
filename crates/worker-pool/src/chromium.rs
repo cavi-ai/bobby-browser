@@ -1174,7 +1174,7 @@ impl BrowserWorker for ChromiumWorker {
                 .mobile(command.mobile.unwrap_or(false))
                 .build()
                 .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))?;
-            page.execute(params).await.map_err(command_failed)?;
+            bounded_cdp(page.execute(params), command_failed).await?;
         }
         if let Some(coordinates) = command.geolocation {
             if !coordinates.latitude.is_finite()
@@ -1192,7 +1192,7 @@ impl BrowserWorker for ChromiumWorker {
                 .longitude(coordinates.longitude)
                 .accuracy(coordinates.accuracy.unwrap_or(1.0))
                 .build();
-            page.execute(params).await.map_err(command_failed)?;
+            bounded_cdp(page.execute(params), command_failed).await?;
         }
         Ok(vec![Evidence::Emulation {
             viewport: command.viewport,
@@ -1294,7 +1294,9 @@ impl BrowserWorker for ChromiumWorker {
         if !command.urls.is_empty() {
             params.urls = Some(command.urls.clone());
         }
-        let result = page.execute(params).await.map_err(command_failed)?.result;
+        let result = bounded_cdp(page.execute(params), command_failed)
+            .await?
+            .result;
         Ok(vec![Evidence::CookieState {
             page_id: Some(page_id.clone()),
             cookies: result.cookies.into_iter().map(cookie_record).collect(),
@@ -1319,7 +1321,7 @@ impl BrowserWorker for ChromiumWorker {
         let params = chromiumoxide::cdp::browser_protocol::network::SetCookiesParams {
             cookies: command.cookies.iter().map(set_cookie_param).collect(),
         };
-        page.execute(params).await.map_err(command_failed)?;
+        bounded_cdp(page.execute(params), command_failed).await?;
         self.get_cookies(
             page_id,
             &types::GetCookiesCommand {
@@ -1369,7 +1371,7 @@ impl BrowserWorker for ChromiumWorker {
             });
             params.domain = Some(cookie.domain.clone());
             params.path = Some(cookie.path.clone());
-            page.execute(params).await.map_err(command_failed)?;
+            bounded_cdp(page.execute(params), command_failed).await?;
         }
         self.get_cookies(
             page_id,
@@ -1684,33 +1686,35 @@ impl BrowserWorker for ChromiumWorker {
         let page = self.page_handle(page_id).await?;
         let (bytes, resolution) = match &command.mode {
             ScreenshotMode::Viewport => (
-                page.screenshot(
-                    ScreenshotParams::builder()
-                        .format(CaptureScreenshotFormat::Png)
-                        .build(),
+                bounded_cdp(
+                    page.screenshot(
+                        ScreenshotParams::builder()
+                            .format(CaptureScreenshotFormat::Png)
+                            .build(),
+                    ),
+                    screenshot_error,
                 )
-                .await
-                .map_err(screenshot_error)?,
+                .await?,
                 None,
             ),
             ScreenshotMode::FullPage => (
-                page.screenshot(
-                    ScreenshotParams::builder()
-                        .format(CaptureScreenshotFormat::Png)
-                        .full_page(true)
-                        .build(),
+                bounded_cdp(
+                    page.screenshot(
+                        ScreenshotParams::builder()
+                            .format(CaptureScreenshotFormat::Png)
+                            .full_page(true)
+                            .build(),
+                    ),
+                    screenshot_error,
                 )
-                .await
-                .map_err(screenshot_error)?,
+                .await?,
                 None,
             ),
             ScreenshotMode::Element { target } => {
                 let resolved = self
                     .resolve_target(page_id, &page, "", Some(target))
                     .await?;
-                let bytes = resolved.screenshot(&page).await.map_err(|error| {
-                    driver_error(ErrorCode::ScreenshotCaptureFailed, error.message)
-                })?;
+                let bytes = bounded_cmd(resolved.screenshot(&page)).await?;
                 (bytes, Some(resolved.evidence))
             }
             ScreenshotMode::Clip {
@@ -1732,20 +1736,22 @@ impl BrowserWorker for ChromiumWorker {
                     ));
                 }
                 (
-                    page.screenshot(
-                        ScreenshotParams::builder()
-                            .format(CaptureScreenshotFormat::Png)
-                            .clip(Viewport {
-                                x: *x,
-                                y: *y,
-                                width: *width,
-                                height: *height,
-                                scale: 1.0,
-                            })
-                            .build(),
+                    bounded_cdp(
+                        page.screenshot(
+                            ScreenshotParams::builder()
+                                .format(CaptureScreenshotFormat::Png)
+                                .clip(Viewport {
+                                    x: *x,
+                                    y: *y,
+                                    width: *width,
+                                    height: *height,
+                                    scale: 1.0,
+                                })
+                                .build(),
+                        ),
+                        screenshot_error,
                     )
-                    .await
-                    .map_err(screenshot_error)?,
+                    .await?,
                     None,
                 )
             }
@@ -1892,10 +1898,9 @@ impl BrowserWorker for ChromiumWorker {
         delta: ResponseStateDelta,
     ) -> Result<(), CommandError> {
         let page = self.page_handle(page_id).await?;
-        let current_url =
-            page.url().await.map_err(command_failed)?.ok_or_else(|| {
-                driver_error(ErrorCode::InvalidRequest, "page URL is unavailable")
-            })?;
+        let current_url = bounded_cdp(page.url(), command_failed)
+            .await?
+            .ok_or_else(|| driver_error(ErrorCode::InvalidRequest, "page URL is unavailable"))?;
         let parsed_url = url::Url::parse(&current_url)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))?;
         validate_state_delta(&delta, &parsed_url)?;
@@ -2343,6 +2348,48 @@ async fn page_evidence(page_id: PageId, page: &Page) -> Result<PageEvidence, Com
             .map_err(command_failed)?
             .unwrap_or_default(),
     })
+}
+
+/// Upper bound on a single CDP call that carries no command timeout of its
+/// own: a hung browser must fail the command at 30s, not park it for the
+/// whole envelope deadline. The envelope deadline (executor) still bounds
+/// the command as a whole; this bounds each browser round trip inside it.
+const DEFAULT_CDP_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn cdp_deadline_error() -> CommandError {
+    CommandError {
+        code: ErrorCode::DeadlineExceeded,
+        message: format!(
+            "browser did not answer within {}ms",
+            DEFAULT_CDP_CALL_TIMEOUT.as_millis()
+        ),
+        layer: ErrorLayer::Driver,
+        retryable: true,
+    }
+}
+
+async fn bounded_cdp<T, E, F>(
+    future: impl std::future::Future<Output = Result<T, E>>,
+    map: F,
+) -> Result<T, CommandError>
+where
+    E: std::fmt::Display,
+    F: FnOnce(E) -> CommandError,
+{
+    match tokio::time::timeout(DEFAULT_CDP_CALL_TIMEOUT, future).await {
+        Ok(result) => result.map_err(map),
+        Err(_) => Err(cdp_deadline_error()),
+    }
+}
+
+/// Same bound for calls that already return CommandError.
+async fn bounded_cmd<T>(
+    future: impl std::future::Future<Output = Result<T, CommandError>>,
+) -> Result<T, CommandError> {
+    match tokio::time::timeout(DEFAULT_CDP_CALL_TIMEOUT, future).await {
+        Ok(result) => result,
+        Err(_) => Err(cdp_deadline_error()),
+    }
 }
 
 fn command_failed(error: chromiumoxide::error::CdpError) -> CommandError {

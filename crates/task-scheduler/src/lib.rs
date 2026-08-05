@@ -46,6 +46,10 @@ pub struct SchedulerConfig {
     /// How long `run` waits for in-flight work after shutdown before aborting.
     #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
+    /// Terminal jobs (Completed/Failed/Cancelled) retained in memory, oldest
+    /// dropped first. Bounds the registry for the life of the process.
+    #[serde(default = "default_retained_terminal_jobs")]
+    pub retained_terminal_jobs: usize,
     /// When set, [`JobScheduler::from_config`] opens a journal at this path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_path: Option<PathBuf>,
@@ -61,6 +65,7 @@ impl Default for SchedulerConfig {
             retry_backoff_max_ms: default_retry_max_ms(),
             job_timeout_ms: default_job_timeout_ms(),
             drain_timeout_ms: default_drain_timeout_ms(),
+            retained_terminal_jobs: default_retained_terminal_jobs(),
             journal_path: None,
         }
     }
@@ -88,6 +93,10 @@ fn default_retry_max_ms() -> u64 {
 
 fn default_job_timeout_ms() -> u64 {
     300000 // 5 minutes
+}
+
+fn default_retained_terminal_jobs() -> usize {
+    1024
 }
 
 fn default_drain_timeout_ms() -> u64 {
