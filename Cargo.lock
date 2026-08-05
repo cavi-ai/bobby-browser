@@ -3236,6 +3236,7 @@ dependencies = [
  "chrono",
  "companion-protocol",
  "config",
+ "context-store",
  "fingerprinting",
  "firefox-companion",
  "futures-util",
