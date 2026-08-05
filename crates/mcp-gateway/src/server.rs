@@ -539,11 +539,23 @@ impl Server {
                 .iter()
                 .all(|capability| capabilities.contains(*capability))
             {
+                let mut input_schema = advertised_tool_schema(name);
+                if name == "session_create" {
+                    let policy = &mut input_schema["properties"]["executionPolicy"]["properties"];
+                    if let Some(policy) = policy.as_object_mut() {
+                        if !capabilities.contains(types::Capability::BrowserFingerprint) {
+                            policy.remove("fingerprint");
+                        }
+                        if !capabilities.contains(types::Capability::BrowserHumanize) {
+                            policy.remove("humanize");
+                        }
+                    }
+                }
                 tools.push(json!({
                     "name": name,
                     "title": tool_title(name),
                     "description": tool_description(name),
-                    "inputSchema": advertised_tool_schema(name),
+                    "inputSchema": input_schema,
                     "outputSchema": tool_output_schema(name),
                     "annotations": tool_annotations(name)
                 }));
@@ -2479,13 +2491,26 @@ fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
 }
 
 fn interface_error_response(id: Value, mut interface_error: types::InterfaceError) -> Value {
+    let code = serde_json::to_value(interface_error.code)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "internal".to_owned());
+    let diagnostic = match interface_error.required_capability {
+        Some(capability) => format!(
+            "Runtime interface error: {code} (requires {})",
+            capability.as_str()
+        ),
+        None => format!("Runtime interface error: {code}"),
+    };
     interface_error.message = "runtime interface request failed".to_owned();
-    error(
+    let mut response = error(
         id,
         INTERFACE_ERROR,
         "Runtime interface error",
         Some(json!({"interfaceError":interface_error})),
-    )
+    );
+    response["error"]["message"] = json!(diagnostic);
+    response
 }
 
 fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
@@ -2913,5 +2938,28 @@ mod tests {
         assert_eq!(error["retryAfterMs"], 1_234);
         assert_eq!(error["reconciliationRequired"], true);
         assert_eq!(error["requiredCapability"], "session:read");
+    }
+
+    #[test]
+    fn interface_error_message_surfaces_safe_recovery_fields() {
+        let secret = "planted-secret-diagnostic";
+        let response = interface_error_response(
+            json!(8),
+            types::InterfaceError {
+                code: types::InterfaceErrorCode::MissingCapability,
+                layer: types::ErrorLayer::Interface,
+                message: secret.to_owned(),
+                correlation_id: types::CorrelationId::new(),
+                command_id: None,
+                retryable: false,
+                retry_after_ms: None,
+                reconciliation_required: false,
+                required_capability: Some(types::Capability::BrowserFingerprint),
+            },
+        );
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(message.contains("missingCapability"), "{message}");
+        assert!(message.contains("browser:fingerprint"), "{message}");
+        assert!(!response.to_string().contains(secret));
     }
 }
