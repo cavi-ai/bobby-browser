@@ -1092,7 +1092,13 @@ impl BrowserWorker for ChromiumWorker {
             .collect();
         let mut listed = Vec::with_capacity(handles.len());
         for (page_id, page) in handles {
-            listed.push(page_evidence(page_id, &page).await?);
+            match page_evidence(page_id.clone(), &page).await {
+                Ok(evidence) => listed.push(evidence),
+                Err(error) if is_closed_page_message(&error.message) => {
+                    self.unregister_page(&page_id).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
         listed.sort_by_key(|page| page.page_id.0);
         Ok(vec![Evidence::Pages { pages: listed }])
@@ -2344,6 +2350,10 @@ fn is_missing_css_node(error: &CommandError) -> bool {
         && error.message.contains("Could not find node with given id")
 }
 
+fn is_closed_page_message(message: &str) -> bool {
+    message.contains("receiver is gone") || message.contains("session closed")
+}
+
 fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {
     match matcher {
         types::TextMatch::Exact(expected) => Ok(value == expected),
@@ -2694,8 +2704,9 @@ mod tests {
     };
 
     use super::{
-        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, is_missing_css_node,
-        snapshot_cookie, text_matches, unscoped_css_wait_selector, HttpBridgeState,
+        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, is_closed_page_message,
+        is_missing_css_node, snapshot_cookie, text_matches, unscoped_css_wait_selector,
+        HttpBridgeState,
     };
     use types::{ErrorCode, TargetSpec, TextMatch};
 
@@ -2722,6 +2733,16 @@ mod tests {
         };
 
         assert!(is_missing_css_node(&error));
+    }
+
+    #[test]
+    fn list_pages_recognizes_a_window_closed_by_the_site() {
+        assert!(is_closed_page_message(
+            "send failed because receiver is gone"
+        ));
+        assert!(!is_closed_page_message(
+            "connection temporarily unavailable"
+        ));
     }
 
     #[test]

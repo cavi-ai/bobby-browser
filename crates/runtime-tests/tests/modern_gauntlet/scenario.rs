@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -35,10 +35,25 @@ pub struct ScenarioSnapshot {
     pub atlas_priority: String,
     pub priority_updates: u64,
     pub onboarding_records: u64,
+    pub onboarding: Option<OnboardingRecord>,
     pub uploaded_sha256: Option<String>,
+    pub uploaded_customer_id: Option<String>,
+    pub uploaded_filename: Option<String>,
+    pub uploaded_media_type: Option<String>,
     pub preview_confirmations: u64,
     pub authorization_grants: u64,
     pub report_generations: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingRecord {
+    pub full_name: String,
+    pub email: String,
+    pub company_name: String,
+    pub postal_code: String,
+    pub plan: String,
+    pub billing_cycle: String,
 }
 
 #[derive(Debug)]
@@ -46,8 +61,12 @@ struct RunState {
     atlas_priority: String,
     priority_updates: u64,
     onboarding_records: u64,
+    onboarding: Option<OnboardingRecord>,
     reject_postal_remaining: bool,
     uploaded: Option<Vec<u8>>,
+    uploaded_customer_id: Option<String>,
+    uploaded_filename: Option<String>,
+    uploaded_media_type: Option<String>,
     preview_confirmations: u64,
     connected: bool,
     authorization_grants: u64,
@@ -60,6 +79,7 @@ struct SharedState {
     run_id: String,
     dist: PathBuf,
     inner: Mutex<RunState>,
+    report_generated: Notify,
 }
 
 pub struct ScenarioServer {
@@ -82,14 +102,19 @@ impl ScenarioServer {
                 atlas_priority: "normal".into(),
                 priority_updates: 0,
                 onboarding_records: 0,
+                onboarding: None,
                 reject_postal_remaining: config.reject_postal_once,
                 uploaded: None,
+                uploaded_customer_id: None,
+                uploaded_filename: None,
+                uploaded_media_type: None,
                 preview_confirmations: 0,
                 connected: false,
                 authorization_grants: 0,
                 report_generations: 0,
                 requests: Vec::new(),
             }),
+            report_generated: Notify::new(),
         });
         let app = Router::new()
             .route("/api/dashboard", get(dashboard))
@@ -107,6 +132,7 @@ impl ScenarioServer {
                 post(complete_authorization),
             )
             .route("/api/reports", post(create_report))
+            .route("/api/reports/latest", get(latest_report))
             .route("/api/reports/{id}", get(report_state))
             .route("/api/reports/{id}/download", get(download_report))
             .fallback(get(static_file))
@@ -141,10 +167,14 @@ impl ScenarioServer {
             atlas_priority: state.atlas_priority.clone(),
             priority_updates: state.priority_updates,
             onboarding_records: state.onboarding_records,
+            onboarding: state.onboarding.clone(),
             uploaded_sha256: state
                 .uploaded
                 .as_ref()
                 .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+            uploaded_customer_id: state.uploaded_customer_id.clone(),
+            uploaded_filename: state.uploaded_filename.clone(),
+            uploaded_media_type: state.uploaded_media_type.clone(),
             preview_confirmations: state.preview_confirmations,
             authorization_grants: state.authorization_grants,
             report_generations: state.report_generations,
@@ -154,10 +184,47 @@ impl ScenarioServer {
     pub async fn request_log(&self) -> Vec<String> {
         self.state.inner.lock().await.requests.clone()
     }
+
+    pub async fn wait_for_report_generation(&self) -> TestResult<()> {
+        let notified = self.state.report_generated.notified();
+        if self.state.inner.lock().await.report_generations == 1 {
+            return Ok(());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), notified)
+            .await
+            .map_err(|_| "report generation was not observed within 10 seconds")?;
+        Ok(())
+    }
 }
 
 impl Drop for ScenarioServer {
     fn drop(&mut self) {
+        if let Ok(inner) = self.state.inner.try_lock() {
+            let directory = repository_root()
+                .join("target/modern-gauntlet-artifacts/server")
+                .join(&self.state.run_id);
+            if std::fs::create_dir_all(&directory).is_ok() {
+                let snapshot = json!({
+                    "atlasPriority": inner.atlas_priority,
+                    "priorityUpdates": inner.priority_updates,
+                    "onboardingRecords": inner.onboarding_records,
+                    "onboarding": inner.onboarding,
+                    "uploadedSha256": inner.uploaded.as_ref().map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+                    "uploadedCustomerId": inner.uploaded_customer_id,
+                    "uploadedFilename": inner.uploaded_filename,
+                    "uploadedMediaType": inner.uploaded_media_type,
+                    "previewConfirmations": inner.preview_confirmations,
+                    "authorizationGrants": inner.authorization_grants,
+                    "reportGenerations": inner.report_generations,
+                });
+                if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) {
+                    let _ = std::fs::write(directory.join("server-state.json"), bytes);
+                }
+                if let Ok(bytes) = serde_json::to_vec_pretty(&inner.requests) {
+                    let _ = std::fs::write(directory.join("request-log.json"), bytes);
+                }
+            }
+        }
         self.task.abort();
     }
 }
@@ -277,11 +344,7 @@ fn customer_json(state: &RunState) -> Value {
     json!({ "id": "cus_atlas", "name": "Atlas Labs", "email": "ops@atlas.example", "company": "Atlas Labs", "joinedAt": "2026-01-15", "priority": state.atlas_priority, "status": "active" })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OnboardingBody {
-    postal_code: String,
-}
+type OnboardingBody = OnboardingRecord;
 
 async fn onboard(
     State(state): State<Arc<SharedState>>,
@@ -298,6 +361,7 @@ async fn onboard(
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "code": "postal_rejected", "message": "Review the highlighted field.", "fields": { "postalCode": "Use 10001 for this account." } }))).into_response();
     }
     inner.onboarding_records += 1;
+    inner.onboarding = Some(body);
     Json(json!({ "id": "onb_atlas_01", "status": "complete" })).into_response()
 }
 
@@ -332,7 +396,11 @@ async fn upload_document(
             .into_response();
     };
     let digest = format!("{:x}", Sha256::digest(&bytes));
-    state.inner.lock().await.uploaded = Some(bytes);
+    let mut inner = state.inner.lock().await;
+    inner.uploaded = Some(bytes);
+    inner.uploaded_customer_id = customer_id.clone();
+    inner.uploaded_filename = filename.clone();
+    inner.uploaded_media_type = media_type.clone();
     Json(json!({ "id": "doc_atlas_01", "customerId": customer_id.unwrap_or_else(|| "cus_atlas".into()), "filename": filename.unwrap_or_else(|| "document.txt".into()), "mediaType": media_type.unwrap_or_else(|| "application/octet-stream".into()), "sha256": digest, "previewUrl": "/api/documents/doc_atlas_01/preview" })).into_response()
 }
 
@@ -368,7 +436,7 @@ async fn integration_state(
 
 async fn authorize_page() -> Html<&'static str> {
     Html(
-        r#"<!doctype html><title>Ledger Cloud authorization</title><main><h1>Authorize Ledger Cloud</h1><button id="authorize" type="button">Authorize account</button><p role="status"></p></main><script>document.querySelector('#authorize').addEventListener('click', async () => { await fetch('/api/integrations/ledger-cloud/complete', {method:'POST',headers:{'content-type':'application/json','x-northstar-run':sessionStorage.getItem('northstar.run') ?? new URLSearchParams(location.search).get('run') ?? ''},body:'{"code":"approved"}'}); document.querySelector('[role=status]').textContent='Authorization complete'; window.opener?.postMessage({type:'northstar.authorization.complete'}, location.origin); });</script>"#,
+        r#"<!doctype html><title>Ledger Cloud authorization</title><main><h1>Authorize Ledger Cloud</h1><button id="authorize" type="button">Authorize account</button><p role="status"></p></main><script>document.querySelector('#authorize').addEventListener('click', async () => { await fetch('/api/integrations/ledger-cloud/complete', {method:'POST',headers:{'content-type':'application/json','x-northstar-run':sessionStorage.getItem('northstar.run') ?? new URLSearchParams(location.search).get('run') ?? ''},body:'{"code":"approved"}'}); document.querySelector('[role=status]').textContent='Authorization complete'; window.opener?.postMessage({type:'northstar.authorization.complete'}, location.origin); window.close(); });</script>"#,
     )
 }
 
@@ -397,6 +465,7 @@ async fn create_report(
     let mut inner = state.inner.lock().await;
     if inner.report_generations == 0 {
         inner.report_generations = 1;
+        state.report_generated.notify_waiters();
     }
     Json(json!({ "id": "rep_atlas_01", "status": "pending" })).into_response()
 }
@@ -410,6 +479,23 @@ async fn report_state(
         return error.into_response();
     }
     Json(json!({ "id": id, "status": "complete", "filename": "atlas-operations.csv", "mediaType": "text/csv", "downloadUrl": "/api/reports/rep_atlas_01/download", "sha256": format!("{:x}", Sha256::digest(b"customer,priority\nAtlas Labs,high\n")) })).into_response()
+}
+
+async fn latest_report(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    if state.inner.lock().await.report_generations == 0 {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "code": "report_not_found", "message": "No report has been generated." })),
+        )
+            .into_response();
+    }
+    Json(json!({ "id": "rep_atlas_01", "status": "complete", "filename": "atlas-operations.csv", "mediaType": "text/csv", "downloadUrl": "/api/reports/rep_atlas_01/download", "sha256": format!("{:x}", Sha256::digest(b"customer,priority\nAtlas Labs,high\n")) })).into_response()
 }
 
 async fn download_report() -> Response<Body> {

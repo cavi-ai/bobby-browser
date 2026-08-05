@@ -94,6 +94,10 @@ export class NorthstarApi {
     return this.request(`/api/reports/${encodeURIComponent(id)}`);
   }
 
+  latestReport(): Promise<ReportState> {
+    return this.request("/api/reports/latest");
+  }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("x-northstar-run", this.runId);
