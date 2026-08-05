@@ -6,6 +6,7 @@ SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 
 .PHONY: help \
 	build install firefox cli \
+	start stop firefox-start firefox-stop \
 	reload verify status \
 	fmt lint test \
 	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
@@ -21,9 +22,13 @@ help:
 	@echo "  cli        build + install bobby (+ mcp-gateway) onto PATH"
 	@echo
 	@echo "Service (launchd)"
-	@echo "  reload     build, restart launchd service, verify MCP handshake"
-	@echo "  verify     restart and verify without rebuilding"
-	@echo "  status     launchd state, port health, binary freshness"
+	@echo "  start          start bobby serve MCP HTTP (com.mirza.bobby-browser)"
+	@echo "  stop           stop it for real (bootout; kill alone respawns)"
+	@echo "  firefox-start  start KeepAlive Firefox companion agent"
+	@echo "  firefox-stop   stop KeepAlive Firefox companion agent"
+	@echo "  reload         build, restart bobby serve, verify MCP handshake"
+	@echo "  verify         restart and verify without rebuilding"
+	@echo "  status         launchd state, port health, binary freshness"
 	@echo
 	@echo "Quality"
 	@echo "  fmt        cargo fmt --all"
@@ -79,8 +84,35 @@ cli:
 # Service
 # ---------------------------------------------------------------------------
 
+FIREFOX_SERVICE_LABEL := com.mirza.bobby-browser-firefox
+FIREFOX_SERVICE_PLIST := $(HOME)/Library/LaunchAgents/$(FIREFOX_SERVICE_LABEL).plist
+
 # The service keeps serving whatever binary existed when launchd last started
 # it, so a rebuild alone changes nothing. Always go through reload/verify.
+# KeepAlive=true: `kill` respawns — use `make stop` (bootout) to shut down.
+start:
+	@$(SERVICE) start
+
+stop:
+	@$(SERVICE) stop
+
+firefox-start:
+	@if launchctl print "gui/$$(id -u)/$(FIREFOX_SERVICE_LABEL)" >/dev/null 2>&1; then \
+		echo "==> $(FIREFOX_SERVICE_LABEL) already loaded"; \
+	else \
+		test -f "$(FIREFOX_SERVICE_PLIST)" || { echo "error: no plist at $(FIREFOX_SERVICE_PLIST)" >&2; exit 1; }; \
+		echo "==> starting $(FIREFOX_SERVICE_LABEL)"; \
+		launchctl bootstrap "gui/$$(id -u)" "$(FIREFOX_SERVICE_PLIST)"; \
+	fi
+
+firefox-stop:
+	@if ! launchctl print "gui/$$(id -u)/$(FIREFOX_SERVICE_LABEL)" >/dev/null 2>&1; then \
+		echo "==> $(FIREFOX_SERVICE_LABEL) not loaded"; \
+	else \
+		echo "==> stopping $(FIREFOX_SERVICE_LABEL) (bootout — KeepAlive will not respawn)"; \
+		launchctl bootout "gui/$$(id -u)/$(FIREFOX_SERVICE_LABEL)"; \
+	fi
+
 reload:
 	@$(SERVICE) reload
 

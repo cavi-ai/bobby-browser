@@ -2,6 +2,8 @@
 #
 # Manage the long-running launchd service that hosts `target/release/bobby serve`.
 #
+#   service.sh start    bootstrap the launchd agent (no rebuild)
+#   service.sh stop     bootout the launchd agent (KeepAlive cannot respawn)
 #   service.sh reload   rebuild, restart, verify
 #   service.sh verify   restart and verify without rebuilding
 #   service.sh status   report launchd state, port health, and binary freshness
@@ -10,6 +12,9 @@
 # started, so editing Rust source changes nothing until both a rebuild AND a
 # restart happen. A stale binary looks completely healthy — port open, /healthz
 # green — while answering with old protocol behavior.
+#
+# KeepAlive=true on the plist means `kill` alone does nothing useful — launchd
+# respawns. Use `stop` (bootout) to actually shut the MCP HTTP server down.
 #
 # The MCP check sends `initialize` twice on purpose. One `mcp_gateway::Server` is
 # cached per principal for the life of the process, so a server that rejects a
@@ -55,6 +60,25 @@ restart() {
     [ -f "$SERVICE_PLIST" ] || die "service not loaded and no plist at $SERVICE_PLIST"
     launchctl bootstrap "gui/$(id -u)" "$SERVICE_PLIST"
   fi
+}
+
+start() {
+  if launchctl print "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1; then
+    log "$SERVICE_LABEL already loaded"
+    return 0
+  fi
+  [ -f "$SERVICE_PLIST" ] || die "no plist at $SERVICE_PLIST"
+  log "starting $SERVICE_LABEL"
+  launchctl bootstrap "gui/$(id -u)" "$SERVICE_PLIST"
+}
+
+stop() {
+  if ! launchctl print "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1; then
+    log "$SERVICE_LABEL not loaded"
+    return 0
+  fi
+  log "stopping $SERVICE_LABEL (bootout — KeepAlive will not respawn)"
+  launchctl bootout "gui/$(id -u)/$SERVICE_LABEL"
 }
 
 wait_healthy() {
@@ -176,6 +200,15 @@ status() {
 }
 
 case "${1:-reload}" in
+  start)
+    start
+    wait_healthy
+    log "done"
+    ;;
+  stop)
+    stop
+    log "done"
+    ;;
   reload)
     build
     [ -x "$BINARY" ] || die "missing release binary: $BINARY"
@@ -195,6 +228,6 @@ case "${1:-reload}" in
     status
     ;;
   *)
-    die "usage: service.sh {reload|verify|status}"
+    die "usage: service.sh {start|stop|reload|verify|status}"
     ;;
 esac
