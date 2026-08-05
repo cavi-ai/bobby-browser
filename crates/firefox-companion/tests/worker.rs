@@ -765,6 +765,49 @@ async fn semantic_candidate_collection_uses_firefox_accessibility_snapshot() {
 }
 
 #[tokio::test]
+async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(CandidateObserver),
+    )
+    .await
+    .unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    for target in [
+        TargetSpec {
+            frame_path: vec![Box::new(TargetSpec {
+                css: Some("iframe".into()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        },
+        TargetSpec {
+            shadow_path: vec![Box::new(TargetSpec {
+                css: Some("custom-element".into()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        },
+    ] {
+        let error = worker
+            .collect_candidates(&page_id, &target)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            error.message,
+            "Firefox candidate collection does not support frame or shadow paths"
+        );
+        assert!(!error.retryable);
+    }
+}
+
+#[tokio::test]
 async fn vision_coordinate_click_uses_firefox_viewport_pointer_actions() {
     let bidi = FakeBidi::new(Vec::new());
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;

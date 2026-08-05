@@ -2576,9 +2576,16 @@ impl BrowserWorker for FirefoxCompanionWorker {
     async fn collect_candidates(
         &self,
         page_id: &PageId,
-        _target: &TargetSpec,
+        target: &TargetSpec,
     ) -> Result<Vec<Candidate>, CommandError> {
         self.context(page_id).await?;
+        if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "Firefox candidate collection does not support frame or shadow paths",
+                false,
+            ));
+        }
         let (nodes, _) = self
             .observer
             .a11y_snapshot(&self.current_lease(), page_id, 100)
