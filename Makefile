@@ -22,7 +22,7 @@ help:
 	@echo "  cli        build + install bobby (+ mcp-gateway) onto PATH"
 	@echo
 	@echo "Service (launchd)"
-	@echo "  start          start bobby serve MCP HTTP (com.mirza.bobby-browser)"
+	@echo "  start          start bobby serve MCP HTTP (com.bobby_browser.serve)"
 	@echo "  stop           stop it for real (bootout; kill alone respawns)"
 	@echo "  firefox-start  start KeepAlive Firefox companion agent"
 	@echo "  firefox-stop   stop KeepAlive Firefox companion agent"
@@ -84,7 +84,7 @@ cli:
 # Service
 # ---------------------------------------------------------------------------
 
-FIREFOX_SERVICE_LABEL := com.mirza.bobby-browser-firefox
+FIREFOX_SERVICE_LABEL := com.bobby_browser.firefox
 FIREFOX_SERVICE_PLIST := $(HOME)/Library/LaunchAgents/$(FIREFOX_SERVICE_LABEL).plist
 
 # The service keeps serving whatever binary existed when launchd last started

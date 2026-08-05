@@ -96,12 +96,18 @@ enum CliCommand {
         /// Host to wire (repeatable; non-interactive when given)
         #[arg(long)]
         host: Vec<onboarding::HostKind>,
-        /// Install the agent skill (to ~/.claude/skills/, or the project with --project-skill)
+        /// Install the agent skill (to ~/.agents/skills/, or the project with --project-skill)
         #[arg(long)]
         skill: bool,
-        /// Install the skill into this project's .claude/skills/ instead of user-level
+        /// Install the agents skill into this project's .agents/skills/ instead of user-level
         #[arg(long)]
         project_skill: bool,
+        /// Also install the skill for Claude Code (~/.claude/skills/, or project with --project-skill)
+        #[arg(long)]
+        skill_claude: bool,
+        /// Also install the skill for OpenClaw (~/.openclaw/skills/)
+        #[arg(long)]
+        skill_openclaw: bool,
         /// Install the Firefox companion (extension, native host, descriptor)
         #[arg(long)]
         companion: bool,
@@ -374,6 +380,8 @@ pub async fn run() -> Result<()> {
             host,
             skill,
             project_skill,
+            skill_claude,
+            skill_openclaw,
             companion,
             extension,
             cli,
@@ -391,6 +399,8 @@ pub async fn run() -> Result<()> {
                     hosts: host,
                     skill,
                     project_skill,
+                    skill_claude,
+                    skill_openclaw,
                     companion,
                     extension,
                     cli,

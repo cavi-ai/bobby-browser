@@ -23,7 +23,7 @@
 # reconnect, so only the second handshake catches that class of regression.
 #
 # Environment:
-#   SERVICE_LABEL        launchd label             (default com.mirza.bobby-browser)
+#   SERVICE_LABEL        launchd label             (default com.bobby_browser.serve)
 #   SERVICE_PLIST        launchd plist path        (default ~/Library/LaunchAgents/$SERVICE_LABEL.plist)
 #   BOBBY_BROWSER_PORT   serve port                (default 7777)
 #   BOBBY_BROWSER_TOKEN  bearer for the MCP check  (default: skip the MCP check)
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-SERVICE_LABEL="${SERVICE_LABEL:-com.mirza.bobby-browser}"
+SERVICE_LABEL="${SERVICE_LABEL:-com.bobby_browser.serve}"
 SERVICE_PLIST="${SERVICE_PLIST:-$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist}"
 PORT="${BOBBY_BROWSER_PORT:-7777}"
 BINARY="$REPO_ROOT/target/release/bobby"
