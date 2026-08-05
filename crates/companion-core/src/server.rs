@@ -266,8 +266,9 @@ async fn serve_socket(
     let (sink, mut stream) = socket.split();
     let (outbound, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
     let writer = tokio::spawn(write_socket(sink, receiver));
+    let mut revocations = state.registry.subscribe_revocations();
 
-    let (profile_id, connection_id) = match authentication {
+    let (profile_id, connection_id, companion_id) = match authentication {
         ConnectionAuthentication::Pairing(claim) => {
             let Some(session) =
                 complete_pairing(&mut stream, &outbound, &state.registry, claim).await
@@ -282,11 +283,12 @@ async fn serve_socket(
                 let _ = writer.await;
                 return;
             }
+            let companion_id = session.companion.companion_id.clone();
             let connection_id = state
                 .coordinator
                 .register(session.companion, outbound.clone())
                 .await;
-            (profile_id, connection_id)
+            (profile_id, connection_id, companion_id)
         }
         ConnectionAuthentication::Reconnect(paired) => {
             let profile_id = paired.profile_id.clone();
@@ -304,8 +306,9 @@ async fn serve_socket(
                 let _ = writer.await;
                 return;
             }
+            let companion_id = paired.companion_id.clone();
             let connection_id = state.coordinator.register(paired, outbound.clone()).await;
-            (profile_id, connection_id)
+            (profile_id, connection_id, companion_id)
         }
     };
 
@@ -316,6 +319,12 @@ async fn serve_socket(
                     let _ = outbound.send(Message::Close(None)).await;
                 }
                 break;
+            }
+            revoked = revocations.changed() => {
+                if revoked.is_ok() && *revocations.borrow() == companion_id {
+                    let _ = outbound.send(Message::Close(None)).await;
+                    break;
+                }
             }
             event = next_event(&mut stream, &outbound) => {
                 let Some(event) = event else {

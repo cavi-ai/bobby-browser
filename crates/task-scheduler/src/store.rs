@@ -67,6 +67,12 @@ pub trait JobStore: Send + Sync {
     async fn update(&self, job: &Job, event: JobEvent) -> Result<(), StoreError>;
     async fn pending(&self) -> Result<Vec<Job>, StoreError>;
     async fn load_all(&self) -> Result<Vec<Job>, StoreError>;
+    /// Drop terminal jobs beyond `retained`, oldest first; pending/running
+    /// jobs are never removed. Default no-op for stores without retention.
+    async fn prune_terminal(&self, retained: usize) -> Result<(), StoreError> {
+        let _ = retained;
+        Ok(())
+    }
 }
 
 /// In-memory job index (no durability).
@@ -113,6 +119,26 @@ impl JobStore for MemoryJobStore {
         let jobs = self.jobs.lock().await;
         Ok(jobs.values().cloned().collect())
     }
+
+    async fn prune_terminal(&self, retained: usize) -> Result<(), StoreError> {
+        let mut jobs = self.jobs.lock().await;
+        let mut terminal: Vec<(JobId, Option<DateTime<Utc>>)> = jobs
+            .iter()
+            .filter(|(_, job)| {
+                matches!(
+                    job.status,
+                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                )
+            })
+            .map(|(id, job)| (id.clone(), job.completed_at))
+            .collect();
+        let excess = terminal.len().saturating_sub(retained);
+        terminal.sort_by_key(|(_, completed_at)| *completed_at);
+        for (id, _) in terminal.into_iter().take(excess) {
+            jobs.remove(&id);
+        }
+        Ok(())
+    }
 }
 
 struct WriterState {
@@ -121,6 +147,65 @@ struct WriterState {
 }
 
 /// Memory index backed by an append-only JSONL journal.
+/// Rewrite the journal as one current-state record per job, durably
+/// (temp file, sync, rename, directory sync). Terminal jobs past
+/// `COMPACT_RETAINED_TERMINAL` are dropped from the file entirely; recovery
+/// only needs current state, not history.
+async fn compact_journal<'a>(
+    path: &Path,
+    jobs: impl Iterator<Item = &'a Job>,
+) -> Result<(), StoreError> {
+    let temporary = path.with_extension("compact.tmp");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temporary)
+        .await?;
+    let mut sequence = 0_u64;
+    let mut terminal_written = 0_usize;
+    let mut jobs: Vec<&Job> = jobs.collect();
+    jobs.sort_by_key(|job| job.created_at);
+    for job in jobs {
+        let terminal = matches!(
+            job.status,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+        );
+        if terminal {
+            terminal_written += 1;
+            if terminal_written > COMPACT_RETAINED_TERMINAL {
+                continue;
+            }
+        }
+        let event = if terminal {
+            JobEvent::from_status(&job.status)
+        } else {
+            JobEvent::Submitted
+        };
+        let record = JournalRecord {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            sequence,
+            recorded_at: Utc::now(),
+            event,
+            job: job.clone(),
+        };
+        let mut bytes = serde_json::to_vec(&record)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes).await?;
+        sequence += 1;
+    }
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&temporary, path).await?;
+    if let Some(parent) = path.parent() {
+        File::open(parent).await?.sync_all().await?;
+    }
+    Ok(())
+}
+
+const COMPACT_THRESHOLD: usize = 4096;
+const COMPACT_RETAINED_TERMINAL: usize = 1024;
+
 pub struct JournalJobStore {
     path: Arc<PathBuf>,
     index: MemoryJobStore,
@@ -169,7 +254,26 @@ impl JournalJobStore {
             }
         }
 
-        let next_sequence = max_sequence.map_or(0, |sequence| sequence + 1);
+        // Compaction: the journal is append-only, so it would grow forever
+        // and every restart would re-read all of it. Past the threshold,
+        // rewrite it as one current-state record per known job.
+        let (compacted_jobs, next_sequence) = {
+            let jobs = index.jobs.lock().await;
+            if max_sequence.is_some_and(|sequence| sequence as usize >= COMPACT_THRESHOLD) {
+                compact_journal(&path, jobs.values()).await?;
+                let next_sequence = jobs.len() as u64;
+                (true, next_sequence)
+            } else {
+                (false, max_sequence.map_or(0, |sequence| sequence + 1))
+            }
+        };
+        if compacted_jobs {
+            tracing::info!(
+                path = %path.display(),
+                threshold = COMPACT_THRESHOLD,
+                "job journal compacted to current state"
+            );
+        }
         let file = OpenOptions::new()
             .create(true)
             .append(true)

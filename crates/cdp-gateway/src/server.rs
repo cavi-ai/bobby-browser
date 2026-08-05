@@ -304,6 +304,12 @@ impl CdpGateway {
     }
 }
 
+const MAX_REMOTE_OBJECTS: usize = 4096;
+const MAX_PENDING_PAGE_LOADS: usize = 256;
+const MAX_ISOLATED_WORLDS: usize = 256;
+const MAX_PENDING_TAB_CHILDREN: usize = 256;
+const MAX_BROWSER_OBSERVERS: usize = 512;
+
 pub struct CdpConnection {
     connection_id: String,
     handle: CapabilityHandle,
@@ -730,7 +736,11 @@ impl CdpConnection {
                 if discovery.as_ref().is_some_and(|filters| domains::target::filter_matches(filters, "tab")) { events.push(CdpEvent { method:"Target.targetCreated".into(), params:json!({"targetInfo":tab_info.clone()}), session_id:None }); }
                 if discovery.as_ref().is_some_and(|filters| domains::target::filter_matches(filters, "page")) { events.push(CdpEvent { method:"Target.targetCreated".into(), params:json!({"targetInfo":page_info.clone()}), session_id:None }); }
                 if let Some((waiting, _)) = attach {
-                    self.pending_tab_children.lock().await.insert(tab_session_id.clone(), (page_session_id, page_info));
+                    let mut children = self.pending_tab_children.lock().await;
+                    if children.len() >= MAX_PENDING_TAB_CHILDREN {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "pending tab registry exhausted"));
+                    }
+                    children.insert(tab_session_id.clone(), (page_session_id, page_info));
                     events.push(CdpEvent { method:"Target.attachedToTarget".into(), params:json!({"sessionId":tab_session_id,"targetInfo":tab_info,"waitingForDebugger":waiting}), session_id:None });
                 }
                 if let Err(error) = self.queue_events(events).await {
@@ -799,7 +809,11 @@ impl CdpConnection {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.attachToBrowserTarget takes no parameters"));
                 }
                 let session_id = Uuid::new_v4().to_string();
-                self.browser_observers.lock().await.insert(session_id.clone());
+                let mut observers = self.browser_observers.lock().await;
+                if observers.len() >= MAX_BROWSER_OBSERVERS {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "observer registry exhausted"));
+                }
+                observers.insert(session_id.clone());
                 Ok(json!({"sessionId": session_id}))
             }
             Some(Handler::TargetDetachFromTarget) => {
@@ -1054,7 +1068,10 @@ impl CdpConnection {
                 Ok(mut result) => {
                     let class_name = result["result"]["className"].as_str().unwrap_or_default();
                     let internal = if class_name == "InjectedScript" { "playwright-injected-script" } else { "playwright-utility-script" };
-                    let opaque = self.issue_remote_object(request.session_id.as_deref(), internal).await;
+                    let opaque = match self.issue_remote_object(request.session_id.as_deref(), internal).await {
+                        Ok(opaque) => opaque,
+                        Err(error) => return CdpResponse::failure(&request, error),
+                    };
                     result["result"]["objectId"] = Value::String(opaque);
                     Ok(result)
                 }
@@ -1203,7 +1220,10 @@ impl CdpConnection {
                 let evaluated_expression = find_serialized_string(serialized, "expression");
                 if expression.contains("globalThis.eval(expression3)")
                     && evaluated_expression.is_some_and(|value| value.contains("window.innerWidth") && value.contains("window.innerHeight")) {
-                    let object_id = self.issue_remote_object(request.session_id.as_deref(), "viewport-poller").await;
+                    let object_id = match self.issue_remote_object(request.session_id.as_deref(), "viewport-poller").await {
+                        Ok(object_id) => object_id,
+                        Err(error) => return CdpResponse::failure(&request, error),
+                    };
                     return CdpResponse::success(&request, json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":object_id}}));
                 }
                 if viewport_poller.is_some() && expression.trim() == "(h) => h.result" {
@@ -1220,7 +1240,10 @@ impl CdpConnection {
                 }
                 if let Some(handle) = locator_handle.as_deref().filter(|_| expression.trim() == "(r) => r.element") {
                     let label = handle.trim_start_matches("semantic-locator:");
-                    let object_id = self.issue_remote_object(request.session_id.as_deref(), &format!("semantic-element:{}", label)).await;
+                    let object_id = match self.issue_remote_object(request.session_id.as_deref(), &format!("semantic-element:{}", label)).await {
+                        Ok(object_id) => object_id,
+                        Err(error) => return CdpResponse::failure(&request, error),
+                    };
                     return CdpResponse::success(&request, json!({"result":{"type":"object","subtype":"node","className":"HTMLInputElement","description":"input","objectId":object_id}}));
                 }
                 if element_handle.is_some() && expression.contains("injected.previewNode(e)") {
@@ -1232,7 +1255,10 @@ impl CdpConnection {
                 }) {
                     return CdpResponse::success(&request, json!({"result":{
                         "type":"object", "subtype":"node", "className":"HTMLInputElement",
-                        "description":"input", "objectId":self.issue_remote_object(request.session_id.as_deref(), handle).await
+                        "description":"input", "objectId":match self.issue_remote_object(request.session_id.as_deref(), handle).await {
+                            Ok(object_id) => object_id,
+                            Err(error) => return CdpResponse::failure(&request, error),
+                        }
                     }}));
                 }
                 if let Some(handle) = element_handle.as_deref().filter(|_| {
@@ -1407,7 +1433,11 @@ impl CdpConnection {
                                     return CdpResponse::failure(&request, error);
                                 }
                                 let loader_id = Uuid::new_v4().simple().to_string();
-                                self.pending_page_loads.lock().await.insert(popup_session, (target_id, url, loader_id));
+                                let mut loads = self.pending_page_loads.lock().await;
+                                if loads.len() >= MAX_PENDING_PAGE_LOADS {
+                                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "pending page load registry exhausted"));
+                                }
+                                loads.insert(popup_session, (target_id, url, loader_id));
                                 CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}}))
                             }
                             Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime popup did not complete")),
@@ -1447,8 +1477,13 @@ impl CdpConnection {
                     session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
                     command:RuntimeCommand::Primitive(PrimitiveCommand::Inspect(InspectCommand { selector:None, target:Some(target), include_html:false })) };
                 match self.runtime.submit(ctx, envelope).await {
-                    Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Element { .. } | types::Evidence::Inspection { .. })) =>
-                        Ok(json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":self.issue_remote_object(request.session_id.as_deref(), &format!("semantic-locator:{}", descriptor)).await}})),
+                    Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Element { .. } | types::Evidence::Inspection { .. })) => {
+                        let object_id = match self.issue_remote_object(request.session_id.as_deref(), &format!("semantic-locator:{}", descriptor)).await {
+                            Ok(object_id) => object_id,
+                            Err(error) => return CdpResponse::failure(&request, error),
+                        };
+                        Ok(json!({"result":{"type":"object","subtype":"object","className":"Object","description":"Object","objectId":object_id}}))
+                    }
                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "semantic target was not verified")),
                     Err(error) => Err(error),
                 }
@@ -1469,7 +1504,11 @@ impl CdpConnection {
                 let world_name = request.params.get("worldName").and_then(Value::as_str).filter(|name| !name.is_empty() && name.len() <= 256);
                 let valid = frame_id.is_some() && world_name.is_some();
                 if !valid { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid isolated world request")); }
-                self.isolated_worlds.lock().await.insert(
+                let mut worlds = self.isolated_worlds.lock().await;
+                if worlds.len() >= MAX_ISOLATED_WORLDS {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "isolated world registry exhausted"));
+                }
+                worlds.insert(
                     request.session_id.clone().unwrap_or_else(|| "browser".into()),
                     world_name.unwrap().to_owned(),
                 );
@@ -1793,7 +1832,15 @@ impl CdpConnection {
             .remove_connection(&self.connection_id);
     }
 
-    async fn issue_remote_object(&self, session_id: Option<&str>, internal: &str) -> String {
+    /// Per-connection registries are insert-mostly; cap each and fail
+    /// closed so one long-lived client cannot grow heap without bound.
+    /// identifiers/bind_family eviction needs a fallible bind and is
+    /// tracked separately.
+    async fn issue_remote_object(
+        &self,
+        session_id: Option<&str>,
+        internal: &str,
+    ) -> Result<String, CdpError> {
         let scope = session_id.unwrap_or("browser").to_owned();
         let generation = *self
             .execution_generations
@@ -1802,7 +1849,14 @@ impl CdpConnection {
             .get(&scope)
             .unwrap_or(&0);
         let opaque = Uuid::new_v4().to_string();
-        self.remote_objects.lock().await.insert(
+        let mut objects = self.remote_objects.lock().await;
+        if objects.len() >= MAX_REMOTE_OBJECTS {
+            return Err(CdpError::new(
+                CdpErrorCode::RuntimeFailure,
+                "remote object registry exhausted",
+            ));
+        }
+        objects.insert(
             opaque.clone(),
             RemoteObject {
                 internal: internal.to_owned(),
@@ -1810,7 +1864,7 @@ impl CdpConnection {
                 generation,
             },
         );
-        opaque
+        Ok(opaque)
     }
 
     async fn resolve_remote_object(
