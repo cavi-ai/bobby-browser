@@ -3321,3 +3321,50 @@ async fn download_url_requires_and_threads_a_page_id() {
         "{outcome}"
     );
 }
+
+#[tokio::test]
+async fn context_neighbors_is_gated_on_context_read() {
+    let page_reader = fixture_server(vec![Capability::PageRead]).await;
+    let listed = page_reader
+        .handle_message(request(80, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"context_ask"),
+        "context_ask must stay visible to page:read: {names:?}"
+    );
+    assert!(
+        !names.contains(&"context_neighbors"),
+        "context_neighbors must be hidden without context:read: {names:?}"
+    );
+    let denied = page_reader
+        .handle_message(request(81, "tools/call", json!({
+            "name":"context_neighbors",
+            "arguments":{"sessionId":SessionId::new().0.to_string(),"pageId":types::PageId::new().0.to_string(),"description":"Email address"}
+        })))
+        .await
+        .unwrap();
+    assert_eq!(denied["error"]["code"], -32601, "{denied}");
+
+    let context_reader = fixture_server(vec![Capability::PageRead, Capability::ContextRead]).await;
+    let listed = context_reader
+        .handle_message(request(82, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.contains(&"context_neighbors"),
+        "context_neighbors must be visible with context:read: {names:?}"
+    );
+}

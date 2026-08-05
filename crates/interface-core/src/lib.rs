@@ -36,6 +36,37 @@ pub type InterfaceResult<T> = Result<T, InterfaceError>;
 #[async_trait]
 pub trait RuntimeInterface: Send + Sync {
     async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo>;
+
+    /// Authorizes `operation` against the caller's capability set without
+    /// performing it. Lets read surfaces gate a compound request on an
+    /// operation whose capability differs from the method that serves it.
+    async fn authorize_operation(
+        &self,
+        _ctx: RequestContext,
+        _operation: InterfaceOperation,
+    ) -> InterfaceResult<()> {
+        Ok(())
+    }
+
+    /// The remembered structure of one site in the persisted context graph.
+    /// `Ok(None)` for an unknown site. Gated on `context:read`.
+    async fn context_site(
+        &self,
+        _ctx: RequestContext,
+        _site_key: String,
+    ) -> InterfaceResult<Option<types::ContextSiteView>> {
+        Err(InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: "context questions are not supported".into(),
+            correlation_id: _ctx.correlation_id,
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
     async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>>;
     async fn delete_session(&self, ctx: RequestContext, session: SessionId) -> InterfaceResult<()>;
     async fn create_session(
@@ -60,6 +91,29 @@ pub trait RuntimeInterface: Send + Sync {
         _page: types::PageId,
         _description: String,
     ) -> InterfaceResult<Option<types::ContextAnswer>> {
+        Err(InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: "context questions are not supported".into(),
+            correlation_id: _ctx.correlation_id,
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
+
+    /// The remembered form structure around a located control, from the
+    /// persisted context graph. `Ok(None)` mirrors `context_ask`: the
+    /// context does not know. Gated on `context:read`.
+    async fn context_neighbors(
+        &self,
+        _ctx: RequestContext,
+        _session: SessionId,
+        _page: types::PageId,
+        _description: String,
+    ) -> InterfaceResult<Option<types::ContextNeighbors>> {
         Err(InterfaceError {
             code: types::InterfaceErrorCode::UnsupportedOperation,
             layer: types::ErrorLayer::Interface,

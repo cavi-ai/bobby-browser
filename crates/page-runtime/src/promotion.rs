@@ -170,6 +170,65 @@ impl ContextPromotion {
         })
     }
 
+    /// The remembered structure of one whole site, or `None` when the
+    /// store has never seen it.
+    pub async fn site_view(&self, site: &str) -> Option<types::ContextSiteView> {
+        let site_context = self.store.site(site).await?;
+        Some(types::ContextSiteView {
+            site_key: site.to_string(),
+            pages: site_context
+                .pages
+                .iter()
+                .map(|(pattern, page)| {
+                    (
+                        pattern.clone(),
+                        page.forms
+                            .iter()
+                            .map(|(form, context)| {
+                                (
+                                    form.clone(),
+                                    context.controls.iter().map(control_view).collect(),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// The remembered form structure around a located control: the answer
+    /// plus the enclosing form's controls with their per-intent counters.
+    /// `None` when the store cannot locate the control, exactly like `ask`.
+    pub async fn neighbors(
+        &self,
+        page_url: Option<&str>,
+        description: &str,
+    ) -> Option<types::ContextNeighbors> {
+        let url = page_url?;
+        let site = site_key(url)?;
+        let answer = self.ask(page_url, description).await?;
+        let site_context = self.store.site(&site).await?;
+        for (pattern, page) in &site_context.pages {
+            for (form_key, form) in &page.forms {
+                if !form.controls.iter().any(|control| {
+                    control.role == answer.target.role
+                        && control.accessible_name == answer.target.accessible_name
+                        && control.ordinal.map(|ordinal| ordinal as usize) == answer.target.ordinal
+                }) {
+                    continue;
+                }
+                return Some(types::ContextNeighbors {
+                    answer,
+                    form: form_key.clone(),
+                    page_pattern: pattern.clone(),
+                    controls: form.controls.iter().map(control_view).collect(),
+                });
+            }
+        }
+        None
+    }
+
     /// Flushes buffered writes; failures stay session-only (the store keeps
     /// them dirty) and are reported once here, never to the command path.
     pub async fn flush(&self) {
@@ -180,6 +239,32 @@ impl ContextPromotion {
                 "context.promotion_degraded"
             );
         }
+    }
+}
+
+fn control_view(control: &context_store::ControlContext) -> types::ContextNeighborControl {
+    types::ContextNeighborControl {
+        role: control.role.clone(),
+        accessible_name: control.accessible_name.clone(),
+        ordinal: control.ordinal.map(|ordinal| ordinal as usize),
+        intents: control
+            .intents
+            .iter()
+            .map(|(kind, stats)| {
+                (
+                    kind.clone(),
+                    types::ContextNeighborStats {
+                        success_count: stats.success_count,
+                        failure_count: stats.failure_count,
+                        last_verified_day: stats.last_verified_day,
+                        source: stats.source.map(|source| match source {
+                            RecordSource::Observed => ContextAnswerSource::Observed,
+                            RecordSource::VisionPromoted => ContextAnswerSource::VisionPromoted,
+                        }),
+                    },
+                )
+            })
+            .collect(),
     }
 }
 

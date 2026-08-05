@@ -50,6 +50,8 @@ pub enum Capability {
     VisionAssist,
     #[serde(rename = "artifact:read")]
     ArtifactRead,
+    #[serde(rename = "context:read")]
+    ContextRead,
     #[serde(rename = "artifact:capture")]
     ArtifactCapture,
     #[serde(rename = "recovery:read")]
@@ -84,6 +86,7 @@ impl Capability {
             Self::IntentExecute => "intent:execute",
             Self::VisionAssist => "vision:assist",
             Self::ArtifactRead => "artifact:read",
+            Self::ContextRead => "context:read",
             Self::ArtifactCapture => "artifact:capture",
             Self::RecoveryRead => "recovery:read",
             Self::RecoveryWrite => "recovery:write",
@@ -121,6 +124,7 @@ impl std::str::FromStr for Capability {
             "intent:execute" => Self::IntentExecute,
             "vision:assist" => Self::VisionAssist,
             "artifact:read" => Self::ArtifactRead,
+            "context:read" => Self::ContextRead,
             "artifact:capture" => Self::ArtifactCapture,
             "recovery:read" => Self::RecoveryRead,
             "recovery:write" => Self::RecoveryWrite,

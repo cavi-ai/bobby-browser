@@ -73,6 +73,58 @@ pub enum ContextAnswerSource {
     VisionPromoted,
 }
 
+/// The remembered form structure around a located control (`context_neighbors`).
+/// Structure only: roles, names, ordinals, and per-intent counters — never
+/// values, page text, or timestamps finer than a day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextNeighbors {
+    pub answer: ContextAnswer,
+    /// Key of the enclosing form within the remembered page.
+    pub form: String,
+    /// Pattern of the remembered page the form belongs to.
+    pub page_pattern: String,
+    pub controls: Vec<ContextNeighborControl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextNeighborControl {
+    pub role: String,
+    pub accessible_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<usize>,
+    /// Per-intent-kind counters, keyed by intent kind.
+    pub intents: std::collections::BTreeMap<String, ContextNeighborStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextNeighborStats {
+    pub success_count: u64,
+    pub failure_count: u64,
+    /// Days since the Unix epoch of the last verified success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_day: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ContextAnswerSource>,
+}
+
+/// One remembered site's structure: page pattern → form key → controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextSiteView {
+    pub site_key: String,
+    pub pages: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Vec<ContextNeighborControl>>,
+    >,
+}
+
 /// One node in an `accessibilitySnapshot` result tree.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

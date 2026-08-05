@@ -19,6 +19,7 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "recovery_status"
             | "cookie_get"
             | "context_ask"
+            | "context_neighbors"
             | "toolset_select"
             | "wait_for"
             | "intent_locate"
@@ -109,6 +110,7 @@ pub(crate) fn tool_title(name: &str) -> &'static str {
         "pdf" => "Print to PDF",
         "recovery_status" => "Recovery status",
         "context_ask" => "Ask where a control is",
+        "context_neighbors" => "Show remembered form structure around a control",
         "toolset_select" => "Select a toolset phase",
         "runtime_info" => "Runtime info",
         "screenshot" => "Screenshot",

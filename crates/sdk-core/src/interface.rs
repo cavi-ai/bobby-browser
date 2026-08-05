@@ -416,6 +416,50 @@ impl RuntimeInterface for AuthenticatedRuntime {
         Ok(promotion.ask(url.as_deref(), &description).await)
     }
 
+    async fn authorize_operation(
+        &self,
+        ctx: RequestContext,
+        operation: InterfaceOperation,
+    ) -> InterfaceResult<()> {
+        self.authorization.authorize(&ctx, operation)
+    }
+
+    async fn context_site(
+        &self,
+        ctx: RequestContext,
+        site_key: String,
+    ) -> InterfaceResult<Option<types::ContextSiteView>> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::ReadContext)?;
+        let Some(promotion) = self.inner.pages.context_promotion() else {
+            return Ok(None);
+        };
+        Ok(promotion.site_view(&site_key).await)
+    }
+
+    async fn context_neighbors(
+        &self,
+        ctx: RequestContext,
+        session: SessionId,
+        page: types::PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextNeighbors>> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::ReadContext)?;
+        self.require_owned_session(&ctx, &session)?;
+        let Some(promotion) = self.inner.pages.context_promotion() else {
+            return Ok(None);
+        };
+        let url = self
+            .inner
+            .pages
+            .get(&page)
+            .await
+            .ok()
+            .and_then(|page| page.url);
+        Ok(promotion.neighbors(url.as_deref(), &description).await)
+    }
+
     async fn form_snapshot(
         &self,
         ctx: RequestContext,

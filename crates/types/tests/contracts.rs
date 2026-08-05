@@ -526,6 +526,7 @@ fn every_capability_round_trips_its_wire_string_through_from_str() {
         Capability::IntentExecute,
         Capability::VisionAssist,
         Capability::ArtifactRead,
+        Capability::ContextRead,
         Capability::ArtifactCapture,
         Capability::RecoveryRead,
         Capability::RecoveryWrite,
