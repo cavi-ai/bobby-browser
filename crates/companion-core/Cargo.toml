@@ -13,6 +13,8 @@ axum = { workspace = true, features = ["ws"] }
 companion-protocol = { path = "../companion-protocol", version = "0.5.1" }
 futures-util.workspace = true
 serde.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

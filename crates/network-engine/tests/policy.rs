@@ -23,6 +23,12 @@ async fn denies_non_public_destinations_by_default() {
         "[::]",
         "224.0.0.1",
         "[ff02::1]",
+        // IPv4-compatible and 6to4/Teredo forms of loopback must not slip
+        // past the v4 guard as "v6".
+        "[::127.0.0.1]",
+        "[2002:7f00:1::]",
+        "255.255.255.255",
+        "100.64.0.1",
     ] {
         assert!(!validate(host, NetworkPolicy::default()).await, "{host}");
     }

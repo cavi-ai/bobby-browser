@@ -335,7 +335,28 @@ impl JobScheduler {
             self.abort_handles
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(job_id_for_map, abort_handle);
+                .insert(job_id_for_map.clone(), abort_handle);
+            // A task that finished before this insert left finish_job with
+            // nothing to remove; without this re-check the dead handle lives
+            // forever. Completion after the re-check is covered by
+            // finish_job's own removal.
+            let finished = self
+                .job_registry
+                .lock()
+                .await
+                .get(&job_id_for_map)
+                .is_some_and(|job| {
+                    matches!(
+                        job.status,
+                        JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                    )
+                });
+            if finished {
+                self.abort_handles
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&job_id_for_map);
+            }
         }
 
         while let Some(res) = in_flight.join_next().await {

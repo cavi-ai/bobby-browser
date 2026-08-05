@@ -621,9 +621,32 @@ fn scan_ownership_usage_locked(
         let Some(reference) = name.strip_suffix(".json") else {
             continue;
         };
-        let reference_id = Uuid::parse_str(reference).map_err(|_| BoundaryError::Denied)?;
-        let (_, bytes) = read_ownership_from_directory(ownership_fd, reference_id)?
-            .ok_or(BoundaryError::Denied)?;
+        // A foreign or corrupt record must not brick every future
+        // registration: rename it aside and keep scanning. `read_ownership`
+        // returning None mid-scan is a race with an unlinked tmp file, not
+        // corruption, so only hard parse/read failures quarantine.
+        let Ok(reference_id) = Uuid::parse_str(reference) else {
+            let _ = rustix::fs::renameat(
+                ownership_fd,
+                name,
+                ownership_fd,
+                format!("{name}.quarantined"),
+            );
+            continue;
+        };
+        let (_, bytes) = match read_ownership_from_directory(ownership_fd, reference_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(_) => {
+                let _ = rustix::fs::renameat(
+                    ownership_fd,
+                    name,
+                    ownership_fd,
+                    format!("{name}.quarantined"),
+                );
+                continue;
+            }
+        };
         if let Some(observer) = test_observer {
             observer.ownership_record_scanned();
         }

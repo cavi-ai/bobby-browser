@@ -248,6 +248,8 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                 operation,
                 canonical_sha256,
                 generation,
+                store: Arc::clone(&self.state),
+                armed: true,
                 correlation_id,
             }));
         }
@@ -255,16 +257,18 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
 
     pub async fn finish(
         &self,
-        permit: IdempotencyPermit,
+        permit: IdempotencyPermit<O>,
         outcome: O,
         now: DateTime<Utc>,
     ) -> Result<(), InterfaceError> {
+        let mut permit = permit;
+        permit.armed = false;
         let mut state = self.state.lock().await;
         let Some(entries) = state.entries.get_mut(&permit.principal_id) else {
-            return Err(conflict_error(permit.correlation_id));
+            return Err(conflict_error(permit.correlation_id.clone()));
         };
         let Some(index) = entries.iter().position(|entry| entry.key == permit.key) else {
-            return Err(conflict_error(permit.correlation_id));
+            return Err(conflict_error(permit.correlation_id.clone()));
         };
         let mut entry = entries.remove(index);
         if entry.operation != permit.operation
@@ -275,7 +279,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             )
         {
             entries.push(entry);
-            return Err(conflict_error(permit.correlation_id));
+            return Err(conflict_error(permit.correlation_id.clone()));
         }
         let changed = match &entry.state {
             EntryState::Reserved { changed, .. } => changed.clone(),
@@ -308,32 +312,18 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         Ok(())
     }
 
-    pub async fn abandon(&self, permit: IdempotencyPermit) {
+    pub async fn abandon(&self, permit: IdempotencyPermit<O>) {
+        let mut permit = permit;
+        permit.armed = false;
         let mut state = self.state.lock().await;
-        let changed = state
-            .entries
-            .get_mut(&permit.principal_id)
-            .and_then(|entries| {
-                let index = entries.iter().position(|entry| {
-                    entry.key == permit.key
-                        && entry.operation == permit.operation
-                        && entry.canonical_sha256 == permit.canonical_sha256
-                        && matches!(
-                            &entry.state,
-                            EntryState::Reserved { generation, .. }
-                                if *generation == permit.generation
-                        )
-                })?;
-                let entry = entries.remove(index);
-                match entry.state {
-                    EntryState::Reserved { changed, .. } => Some(changed),
-                    EntryState::Retained { .. } => None,
-                }
-            });
-        remove_empty_buckets(&mut state);
-        if let Some(changed) = changed {
-            changed.send_replace(ReservationUpdate::Released);
-        }
+        abandon_entry(
+            &mut state,
+            &permit.principal_id,
+            &permit.key,
+            permit.operation,
+            &permit.canonical_sha256,
+            permit.generation,
+        );
     }
 }
 
@@ -378,12 +368,12 @@ impl IdempotencyStore<CommandOutcome> {
     }
 }
 
-pub enum IdempotencyReservation<O = CommandOutcome> {
-    Acquired(IdempotencyPermit),
+pub enum IdempotencyReservation<O: Send + Sync + 'static = CommandOutcome> {
+    Acquired(IdempotencyPermit<O>),
     Replay(O),
 }
 
-impl<O: std::fmt::Debug> std::fmt::Debug for IdempotencyReservation<O> {
+impl<O: std::fmt::Debug + Send + Sync + 'static> std::fmt::Debug for IdempotencyReservation<O> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Acquired(_) => formatter.write_str("Acquired([REDACTED])"),
@@ -392,18 +382,95 @@ impl<O: std::fmt::Debug> std::fmt::Debug for IdempotencyReservation<O> {
     }
 }
 
-pub struct IdempotencyPermit {
+pub struct IdempotencyPermit<O: Send + Sync + 'static = CommandOutcome> {
     principal_id: PrincipalId,
     key: IdempotencyKey,
     operation: InterfaceOperation,
     canonical_sha256: [u8; 32],
     generation: u64,
     correlation_id: CorrelationId,
+    /// Back-reference so a dropped permit (cancelled or panicked request
+    /// task) abandons its reservation instead of wedging the key forever.
+    store: Arc<Mutex<StoreState<O>>>,
+    armed: bool,
 }
 
-impl std::fmt::Debug for IdempotencyPermit {
+impl<O: Send + Sync + 'static> std::fmt::Debug for IdempotencyPermit<O> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("IdempotencyPermit([REDACTED])")
+    }
+}
+
+/// Shared abandon body: remove a still-Reserved entry matching every permit
+/// field and release its waiters. Used by `abandon` and by the permit's
+/// `Drop`.
+fn abandon_entry<O>(
+    state: &mut StoreState<O>,
+    principal_id: &PrincipalId,
+    key: &IdempotencyKey,
+    operation: InterfaceOperation,
+    canonical_sha256: &[u8; 32],
+    generation: u64,
+) {
+    let changed = state.entries.get_mut(principal_id).and_then(|entries| {
+        let index = entries.iter().position(|entry| {
+            entry.key == *key
+                && entry.operation == operation
+                && entry.canonical_sha256 == *canonical_sha256
+                && matches!(
+                    &entry.state,
+                    EntryState::Reserved { generation: g, .. } if *g == generation
+                )
+        })?;
+        let entry = entries.remove(index);
+        match entry.state {
+            EntryState::Reserved { changed, .. } => Some(changed),
+            EntryState::Retained { .. } => None,
+        }
+    });
+    remove_empty_buckets(state);
+    if let Some(changed) = changed {
+        changed.send_replace(ReservationUpdate::Released);
+    }
+}
+
+impl<O: Send + Sync + 'static> Drop for IdempotencyPermit<O> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Abandon inline when uncontended; spawn otherwise (dropping on the
+        // executor while the store lock is held must not block the reactor).
+        if let Ok(mut state) = self.store.try_lock() {
+            abandon_entry(
+                &mut state,
+                &self.principal_id,
+                &self.key,
+                self.operation,
+                &self.canonical_sha256,
+                self.generation,
+            );
+            return;
+        }
+        let store = self.store.clone();
+        let principal_id = self.principal_id.clone();
+        let key = self.key.clone();
+        let operation = self.operation;
+        let canonical_sha256 = self.canonical_sha256;
+        let generation = self.generation;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let mut state = store.lock().await;
+                abandon_entry(
+                    &mut state,
+                    &principal_id,
+                    &key,
+                    operation,
+                    &canonical_sha256,
+                    generation,
+                );
+            });
+        }
     }
 }
 

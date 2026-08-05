@@ -103,8 +103,15 @@ impl DestinationPolicy {
         match ip {
             IpAddr::V4(ip) => self.ipv4_is_allowed(ip),
             IpAddr::V6(ip) => {
-                if let Some(ipv4) = ip.to_ipv4_mapped() {
+                if let Some(ipv4) = ip.to_ipv4_mapped().or_else(|| ipv4_compatible(&ip)) {
                     return self.ipv4_is_allowed(ipv4);
+                }
+                // Transitional tunnels embed an IPv4 address the v4 policy
+                // never sees: 6to4 (2002::/16) carries it in bits 16..48,
+                // Teredo (2001::/32) in the tail. Reject both outright.
+                let segments = ip.segments();
+                if segments[0] == 0x2002 || (segments[0] == 0x2001 && segments[1] == 0) {
+                    return false;
                 }
                 if ip.is_loopback() {
                     return self.network.allow_loopback;
@@ -121,9 +128,38 @@ impl DestinationPolicy {
         if ip.is_loopback() {
             return self.network.allow_loopback;
         }
-        if ip.is_unspecified() || ip.is_multicast() || ip.is_link_local() {
+        if ip.is_unspecified()
+            || ip.is_multicast()
+            || ip.is_link_local()
+            || ip.is_broadcast()
+            || is_cgnat(ip)
+        {
             return false;
         }
         !ip.is_private() || self.network.allow_private_network
     }
+}
+
+/// IPv4-compatible (`::a.b.c.d`): deprecated, but still routed by some
+/// stacks, so it must hit the v4 policy rather than slip through as "v6".
+fn ipv4_compatible(ip: &std::net::Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = ip.segments();
+    if segments[..6] == [0; 6] && segments[6] != 0 {
+        let [a, b, c, d] = [
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        ];
+        Some(Ipv4Addr::new(a, b, c, d))
+    } else {
+        None
+    }
+}
+
+/// CGNAT/shared address space (100.64.0.0/10): not public, not RFC1918
+/// private, and never a legitimate automation target.
+fn is_cgnat(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
 }
