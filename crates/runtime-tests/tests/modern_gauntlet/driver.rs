@@ -90,6 +90,7 @@ impl ModernRuntime {
     pub async fn launch(server: &ScenarioServer, journey: Journey) -> TestResult<Self> {
         let dist = repository_root().join("packages/bobby-gauntlet/dist");
         let runtime = Self::launch_at(&dist, journey.id()).await?;
+        runtime.write_run_manifest(journey.id(), "running", None)?;
         runtime
             .navigate(&server.application_url(match journey {
                 Journey::CustomerUpdate => "/customers",
@@ -414,7 +415,11 @@ impl ModernRuntime {
             .await;
         match outcome {
             CommandOutcome::Completed { evidence, .. } => Ok(evidence),
-            other => Err(format!("public runtime command {debug} failed: {other:?}").into()),
+            other => {
+                self.capture_failure_state(page_id, &debug, &format!("{other:?}"))
+                    .await;
+                Err(format!("public runtime command {debug} failed: {other:?}").into())
+            }
         }
     }
 
@@ -461,7 +466,11 @@ impl ModernRuntime {
             .await;
         let observed = match preflight {
             CommandOutcome::Completed { evidence, .. } => evidence,
-            other => return Err(format!("boundary preflight failed: {other:?}").into()),
+            other => {
+                self.capture_failure_state(page_id, "boundary preflight", &format!("{other:?}"))
+                    .await;
+                return Err(format!("boundary preflight failed: {other:?}").into());
+            }
         };
         let (url, title) = observed
             .iter()
@@ -514,7 +523,11 @@ impl ModernRuntime {
             .await
         {
             CommandOutcome::Completed { evidence, .. } => Ok((evidence, workflow_id)),
-            other => Err(format!("public boundary command {debug} failed: {other:?}").into()),
+            other => {
+                self.capture_failure_state(page_id, &debug, &format!("{other:?}"))
+                    .await;
+                Err(format!("public boundary command {debug} failed: {other:?}").into())
+            }
         }
     }
 
@@ -586,6 +599,83 @@ impl ModernRuntime {
 
     pub fn journal_path(&self) -> &Path {
         &self.journal_path
+    }
+
+    pub async fn capture_diagnostics(&self, journey: &str) -> TestResult<()> {
+        let evidence = self
+            .submit(PrimitiveCommand::CaptureScreenshot(
+                CaptureScreenshotCommand {
+                    mode: ScreenshotMode::Viewport,
+                },
+            ))
+            .await?;
+        std::fs::write(
+            self.root.join("final-evidence.json"),
+            serde_json::to_vec_pretty(&evidence)?,
+        )?;
+        self.write_run_manifest(journey, "completed", None)
+    }
+
+    async fn capture_failure_state(&self, page_id: &PageId, operation: &str, outcome: &str) {
+        let mut evidence = Vec::new();
+        for command in [
+            PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            }),
+            PrimitiveCommand::AccessibilitySnapshot(AccessibilitySnapshotCommand {
+                max_nodes: Some(512),
+            }),
+            PrimitiveCommand::Inspect(InspectCommand {
+                selector: Some("body".into()),
+                target: None,
+                include_html: true,
+            }),
+        ] {
+            if let CommandOutcome::Completed {
+                evidence: captured, ..
+            } = self
+                .runtime
+                .submit(CommandEnvelope {
+                    schema_version: CommandEnvelope::SCHEMA_VERSION,
+                    command_id: CommandId::new(),
+                    workflow_id: WorkflowId::new(),
+                    attempt_id: AttemptId::new(),
+                    session_id: self.session_id.clone(),
+                    page_id: Some(page_id.clone()),
+                    deadline: Utc::now() + Duration::seconds(10),
+                    command: RuntimeCommand::Primitive(command),
+                })
+                .await
+            {
+                evidence.extend(captured);
+            }
+        }
+        let _ = std::fs::write(
+            self.root.join("failure-evidence.json"),
+            serde_json::to_vec_pretty(&evidence).unwrap_or_default(),
+        );
+        let _ = self.write_run_manifest(operation, "failed", Some(outcome));
+    }
+
+    fn write_run_manifest(
+        &self,
+        journey: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> TestResult<()> {
+        std::fs::write(
+            self.root.join("run-manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "journey": journey,
+                "status": status,
+                "error": error,
+                "browser": chrome_executable(),
+                "journal": self.journal_path,
+                "artifacts": self.artifacts_dir,
+                "capturedAt": Utc::now(),
+            }))?,
+        )?;
+        Ok(())
     }
     pub fn fixture_path(&self, name: &str) -> PathBuf {
         repository_root()
