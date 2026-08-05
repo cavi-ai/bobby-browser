@@ -38,7 +38,10 @@ async fn main() -> agent_client_protocol::Result<()> {
                     .agent_capabilities(AgentCapabilities::new().prompt_capabilities(
                         PromptCapabilities::new().image(initialize_mode != "no-image"),
                     ));
-                if matches!(initialize_mode.as_str(), "auth" | "auth-fail") {
+                if matches!(
+                    initialize_mode.as_str(),
+                    "auth" | "auth-fail" | "auth-disconnect"
+                ) {
                     response = response.auth_methods(vec![AuthMethod::Agent(
                         AuthMethodAgent::new("opencode-login", "OpenCode Login"),
                     )]);
@@ -48,10 +51,15 @@ async fn main() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |_request: AuthenticateRequest, responder, _connection| {
-                record(&authenticate_log, "authenticate");
+            async move |request: AuthenticateRequest, responder, _connection| {
+                record(
+                    &authenticate_log,
+                    &format!("authenticate:{}", request.method_id.0),
+                );
                 if authenticate_mode == "auth-fail" {
-                    responder.respond_with_internal_error("auth rejected")
+                    responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                } else if authenticate_mode == "auth-disconnect" {
+                    std::process::exit(0)
                 } else {
                     responder.respond(AuthenticateResponse::new())
                 }

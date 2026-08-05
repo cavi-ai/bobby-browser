@@ -17,7 +17,7 @@ use agent_client_protocol::{
         },
         ProtocolVersion,
     },
-    AcpAgent, AcpAgentConfig, Agent, ConnectionTo,
+    AcpAgent, AcpAgentConfig, Agent, ConnectionTo, ErrorCode as AcpErrorCode,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use intent_engine::{VisionAction, VisionBackendResult, VisionTaskPacket};
@@ -267,12 +267,13 @@ async fn run_task(
             }
             if authenticate_advertised {
                 if let Some(method) = initialized.auth_methods.first() {
+                    let method_id = method.id().0.to_string();
                     if let Err(error) = connection
                         .send_request(AuthenticateRequest::new(method.id().clone()))
                         .block_task()
                         .await
                     {
-                        return Ok(Err(AcpClientError::Authentication(error.to_string())));
+                        return Ok(Err(classify_authentication_error(&method_id, error)));
                     }
                 }
             }
@@ -386,4 +387,18 @@ fn decode_result(raw: &str) -> Result<VisionBackendResult, AcpClientError> {
 
 fn transport(error: impl std::fmt::Display) -> AcpClientError {
     AcpClientError::Transport(error.to_string())
+}
+
+fn classify_authentication_error(
+    method_id: &str,
+    error: agent_client_protocol::Error,
+) -> AcpClientError {
+    let message = format!("method {method_id}: {error}");
+    if error.code == AcpErrorCode::AuthRequired {
+        AcpClientError::Authentication(message)
+    } else {
+        AcpClientError::Transport(format!(
+            "ACP advertised authentication failed for {message}"
+        ))
+    }
 }

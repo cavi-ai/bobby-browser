@@ -79,7 +79,7 @@ async fn advertised_authentication_precedes_child_creation() {
             .unwrap()
             .lines()
             .collect::<Vec<_>>(),
-        ["authenticate", "new", "close"]
+        ["authenticate:opencode-login", "new", "close"]
     );
 }
 
@@ -96,7 +96,28 @@ async fn rejected_advertised_authentication_fails_before_child_creation() {
         matches!(error, AcpClientError::Authentication(_)),
         "{error:?}"
     );
-    assert_eq!(std::fs::read_to_string(log).unwrap(), "authenticate\n");
+    assert!(error.to_string().contains("opencode-login"), "{error:?}");
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "authenticate:opencode-login\n"
+    );
+}
+
+#[tokio::test]
+async fn transport_loss_during_advertised_authentication_stays_transport() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let error = client_for_mode(&log, "auth-disconnect")
+        .delegate(packet())
+        .await
+        .expect_err("transport loss must fail the task");
+
+    assert!(matches!(error, AcpClientError::Transport(_)), "{error:?}");
+    assert!(error.to_string().contains("opencode-login"), "{error:?}");
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "authenticate:opencode-login\n"
+    );
 }
 
 #[tokio::test]
