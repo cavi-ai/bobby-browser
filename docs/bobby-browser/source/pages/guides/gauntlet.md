@@ -2,36 +2,24 @@
 documentedVersion: {{PRODUCT_VERSION}}
 ---
 
-# Bobby browser gauntlet
+# Northstar browser release gate
 
-`@cavi-ai/bobby-gauntlet` is a deterministic static application with ten isolated browser stations and a championship route. A version, seed, and difficulty produce an immutable manifest; every result is controller-verified and bound to that manifest. The course covers redirects, DOM replacement, semantic forms, validation, iframes, shadow roots, popups, file attachment, downloads, and a combined championship submission.
+`@cavi-ai/bobby-gauntlet` is the Northstar Ops application: a responsive, API-backed customer operations workspace. It replaces the synthetic station/championship course. Package tests cover application contracts; five non-ignored installed-Chromium journeys prove the public runtime boundary, visible state, durable effects, recovery, uploads, frames, popups, and downloads.
 
-Run the deterministic contract suite and build the static course:
+Build and test the production application:
 
 ```bash
 pnpm --filter @cavi-ai/bobby-gauntlet test
 pnpm --filter @cavi-ai/bobby-gauntlet build
 ```
 
-The production-runtime championship is intentionally ignored by the ordinary test suite because it needs an installed browser. Firefox is the default and does not fall back to Chromium. Build and install the companion native host once:
+Run the complete release gate with an installed Chrome or Chromium:
 
 ```bash
-export BOBBY_FIREFOX_BIN="/path/to/firefox"
-export BOBBY_FIREFOX_PROFILE="/path/to/dedicated-profile"
-export BOBBY_COMPANION_EXTENSION="$PWD/packages/firefox-companion/dist"
-scripts/dev/firefox-companion.sh
+export BOBBY_CHROME_EXECUTABLE="/path/to/chrome"
+cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
 ```
 
-Then run the championship with the same three variables:
+The five mandatory journeys are customer discovery and durable priority update, validated onboarding with preserved values, document upload with iframe confirmation, popup authorization with obstruction handling, and interrupted report recovery with a verified download. None is ignored, and a manifest test protects their stable names.
 
-```bash
-cargo test -p runtime-tests --test bobby_skills_gauntlet \
-  production_bobby_passes_seeded_championship_with_replayable_evidence \
-  -- --ignored --exact --nocapture
-```
-
-The gate launches Firefox, opens its WebDriver BiDi endpoint, installs the companion into the dedicated profile, enrolls the profile, and tears the browser down after the run. Set `BOBBY_CHAMPIONSHIP_HEADED=1` to watch the run and `BOBBY_CHAMPIONSHIP_SEED` to select a fixed release sample.
-
-Chromium remains available only through explicit opt-in: set `BOBBY_CHAMPIONSHIP_ENGINE=chromium` and, when needed, `BOBBY_CHROMIUM_EXECUTABLE`.
-
-Successful runs retain a redacted replayable scorecard and ten screenshot artifacts below `target/bobby-championship/<engine>/<seed>/`. The gate fails closed on pairing, capability, station, screenshot-integrity, manifest-replay, or redaction failures. Package tests establish deterministic behavior but do not replace live-engine release proof.
+Each run uses isolated seeded server state. Passing requires the relevant UI state plus authoritative server counts, file digests, and runtime journal evidence; application-private scorecards are not accepted. Evidence bundles are written under `target/modern-gauntlet-artifacts/<journey>/<run-id>/` and CI uploads that directory when the gate fails.
