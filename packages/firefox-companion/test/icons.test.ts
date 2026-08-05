@@ -15,6 +15,12 @@ test("manifest wires browser_action icons at 16/32/48/96", () => {
   }
 });
 
+test("manifest version matches package.json", () => {
+  const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.equal(manifest.version, pkg.version);
+});
+
 test("16px SVG source has no Chinese glyphs", () => {
   const svg = readFileSync(join(root, "icons/icon-16.svg"), "utf8");
   assert.equal(svg.includes("鲍"), false);
