@@ -1092,7 +1092,13 @@ impl BrowserWorker for ChromiumWorker {
             .collect();
         let mut listed = Vec::with_capacity(handles.len());
         for (page_id, page) in handles {
-            listed.push(page_evidence(page_id, &page).await?);
+            match page_evidence(page_id.clone(), &page).await {
+                Ok(evidence) => listed.push(evidence),
+                Err(error) if is_closed_page_message(&error.message) => {
+                    self.unregister_page(&page_id).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
         listed.sort_by_key(|page| page.page_id.0);
         Ok(vec![Evidence::Pages { pages: listed }])
@@ -2198,24 +2204,33 @@ async fn wait_condition_satisfied(
 ) -> Result<(bool, Vec<String>), CommandError> {
     match condition {
         WaitCondition::Element { target, state } => {
-            let mut browser = browser.lock().await;
-            let resolved = match browser.as_mut() {
-                Some(browser) => {
-                    resolve_target_with_visibility(
-                        page_id,
-                        page,
-                        "",
-                        Some(target),
-                        false,
-                        Some(browser),
-                    )
-                    .await
+            let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
+                resolve_target_with_visibility(page_id, page, selector, None, false, None).await
+            } else {
+                let mut browser = browser.lock().await;
+                match browser.as_mut() {
+                    Some(browser) => {
+                        resolve_target_with_visibility(
+                            page_id,
+                            page,
+                            "",
+                            Some(target),
+                            false,
+                            Some(browser),
+                        )
+                        .await
+                    }
+                    None => Err(closed_error()),
                 }
-                None => Err(closed_error()),
             };
             let resolved = match resolved {
                 Ok(resolved) => Some(resolved),
-                Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => None,
+                Err(error)
+                    if matches!(error.code, ErrorCode::TargetNotFound)
+                        || is_missing_css_node(&error) =>
+                {
+                    None
+                }
                 Err(error) => return Err(error),
             };
             let Some(resolved) = resolved else {
@@ -2314,6 +2329,29 @@ async fn wait_condition_satisfied(
             }
         }
     }
+}
+
+fn unscoped_css_wait_selector(target: &TargetSpec) -> Option<&str> {
+    target.css.as_deref().filter(|_| {
+        target.test_id.is_none()
+            && target.role.is_none()
+            && target.accessible_name.is_none()
+            && target.label.is_none()
+            && target.text.is_none()
+            && target.attributes.is_empty()
+            && target.frame_path.is_empty()
+            && target.shadow_path.is_empty()
+            && target.ordinal.is_none()
+    })
+}
+
+fn is_missing_css_node(error: &CommandError) -> bool {
+    error.code == ErrorCode::BrowserCommandFailed
+        && error.message.contains("Could not find node with given id")
+}
+
+fn is_closed_page_message(message: &str) -> bool {
+    message.contains("receiver is gone") || message.contains("session closed")
 }
 
 fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {
@@ -2666,10 +2704,46 @@ mod tests {
     };
 
     use super::{
-        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, snapshot_cookie, text_matches,
+        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, is_closed_page_message,
+        is_missing_css_node, snapshot_cookie, text_matches, unscoped_css_wait_selector,
         HttpBridgeState,
     };
-    use types::{ErrorCode, TextMatch};
+    use types::{ErrorCode, TargetSpec, TextMatch};
+
+    #[test]
+    fn element_wait_recognizes_an_unscoped_css_query() {
+        let target = TargetSpec {
+            css: Some("a[href='/customers/cus_atlas']".into()),
+            ..TargetSpec::default()
+        };
+
+        assert_eq!(
+            unscoped_css_wait_selector(&target),
+            Some("a[href='/customers/cus_atlas']")
+        );
+    }
+
+    #[test]
+    fn element_wait_treats_chromes_missing_node_as_not_yet_present() {
+        let error = types::CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "Error -32000: Could not find node with given id".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert!(is_missing_css_node(&error));
+    }
+
+    #[test]
+    fn list_pages_recognizes_a_window_closed_by_the_site() {
+        assert!(is_closed_page_message(
+            "send failed because receiver is gone"
+        ));
+        assert!(!is_closed_page_message(
+            "connection temporarily unavailable"
+        ));
+    }
 
     #[test]
     fn accessibility_snapshot_preserves_form_state_and_redacts_masked_values() {

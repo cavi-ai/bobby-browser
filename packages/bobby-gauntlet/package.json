@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "pnpm run typecheck && esbuild src/app.ts --bundle --format=esm --platform=browser --outfile=dist/app.js && mkdir -p dist/championship dist/station/route/redirect dist/station/route/complete dist/station/dom-drift dist/station/semantic-form dist/station/validation dist/station/iframe dist/station/shadow-root dist/station/popup dist/station/file-attachment dist/station/download dist/station/championship && cp index.html dist/index.html && cp index.html dist/championship/index.html && cp index.html dist/station/route/index.html && cp route-redirect.html dist/station/route/redirect/index.html && cp index.html dist/station/route/complete/index.html && cp index.html dist/station/dom-drift/index.html && cp index.html dist/station/semantic-form/index.html && cp index.html dist/station/validation/index.html && cp index.html dist/station/iframe/index.html && cp index.html dist/station/shadow-root/index.html && cp index.html dist/station/popup/index.html && cp index.html dist/station/file-attachment/index.html && cp index.html dist/station/download/index.html && cp index.html dist/station/championship/index.html && cp dist/app.js dist/championship/app.js && cp dist/app.js dist/station/route/app.js && cp dist/app.js dist/station/route/complete/app.js && cp dist/app.js dist/station/dom-drift/app.js && cp dist/app.js dist/station/semantic-form/app.js && cp dist/app.js dist/station/validation/app.js && cp dist/app.js dist/station/iframe/app.js && cp dist/app.js dist/station/shadow-root/app.js && cp dist/app.js dist/station/popup/app.js && cp dist/app.js dist/station/file-attachment/app.js && cp dist/app.js dist/station/download/app.js && cp dist/app.js dist/station/championship/app.js",
+    "build": "pnpm run typecheck && esbuild src/app.ts --bundle --format=esm --platform=browser --outfile=dist/app.js && esbuild src/styles.css --bundle --outfile=dist/app.css && cp index.html dist/index.html",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm run typecheck && node --import tsx --test test/*.test.ts"
   },
@@ -17,4 +17,3 @@
     "typescript": "7.0.2"
   }
 }
-
