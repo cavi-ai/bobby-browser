@@ -26,6 +26,7 @@ members = [
   "crates/js-engine",
   "crates/artifact-store",
   "crates/checkpoint-store",
+  "crates/context-store",
   "crates/workflow-journal",
   "crates/worker-pool",
   "crates/observability",

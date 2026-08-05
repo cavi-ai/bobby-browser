@@ -980,6 +980,40 @@ pub async fn serve_with_worker_factory(
     startup: StartupCredential,
     factory: Arc<dyn worker_pool::WorkerFactory>,
 ) -> anyhow::Result<()> {
+    serve_with_runtime(config, startup, move |config| async move {
+        RuntimeService::build_with_worker_factory(&config, factory)
+            .await
+            .map_err(anyhow::Error::new)
+    })
+    .await
+}
+
+/// Serve with a durable profile identity: verified intent outcomes promote
+/// structural control memory into the per-profile context store (Spec C).
+/// `None` behaves exactly like [`serve_with_worker_factory`].
+pub async fn serve_with_context_promotion(
+    config: AppConfig,
+    startup: StartupCredential,
+    factory: Arc<dyn worker_pool::WorkerFactory>,
+    durable_profile_id: String,
+) -> anyhow::Result<()> {
+    serve_with_runtime(config, startup, move |config| async move {
+        RuntimeService::build_with_context_promotion(&config, factory, &durable_profile_id)
+            .await
+            .map_err(anyhow::Error::new)
+    })
+    .await
+}
+
+async fn serve_with_runtime<B, F>(
+    config: AppConfig,
+    startup: StartupCredential,
+    build: B,
+) -> anyhow::Result<()>
+where
+    B: FnOnce(AppConfig) -> F,
+    F: std::future::Future<Output = anyhow::Result<RuntimeService>>,
+{
     let max_connections = config.interface.max_connections;
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
@@ -987,11 +1021,7 @@ pub async fn serve_with_worker_factory(
         config,
         startup,
         chrono::Utc::now,
-        |config| async move {
-            RuntimeService::build_with_worker_factory(&config, factory)
-                .await
-                .map_err(anyhow::Error::new)
-        },
+        build,
         |addr| async move {
             tokio::net::TcpListener::bind(addr)
                 .await

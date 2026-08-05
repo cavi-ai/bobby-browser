@@ -182,6 +182,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
+        context: Default::default(),
         nodes: Default::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();

@@ -90,9 +90,29 @@ pub struct AppConfig {
     pub observability: ObservabilityConfig,
     #[serde(default)]
     pub vision: VisionConfig,
+    #[serde(default)]
+    pub context: ContextConfig,
     /// Named nodes, selected per session. Absent means no node is reachable.
     #[serde(default)]
     pub nodes: std::collections::BTreeMap<String, NodeConfig>,
+}
+
+/// Durable shared-context-graph configuration (Spec C). The store only ever
+/// opens for runtimes whose engine selection carries a durable profile
+/// identity (Firefox companion); `dir` unset disables promotion entirely.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContextConfig {
+    /// Store root; profile id is appended as a subdirectory. The CLI fills
+    /// `<config-dir>/bobby-browser/context` when unset.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    /// Days a control record is kept without a successful verification.
+    #[serde(default = "default_context_ttl_days")]
+    pub ttl_days: u32,
+}
+
+const fn default_context_ttl_days() -> u32 {
+    90
 }
 
 /// Vision-assist provider configuration. Deny by default: no endpoint means

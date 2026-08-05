@@ -1,5 +1,6 @@
 mod adaptive;
 mod executor;
+mod promotion;
 mod recovery;
 mod skill_recovery;
 
@@ -22,6 +23,7 @@ pub use adaptive::{AdaptiveExecution, AdaptivePageEngine, NodeSelection, Session
 pub use context::{ContextGraph, CONTEXT_CONFIDENCE_FLOOR};
 pub use executor::ExecutorError;
 pub use intent_engine::VisionAssist;
+pub use promotion::ContextPromotion;
 pub use recovery::{
     evaluate_invariants, InvariantEvaluation, RecoveryCoordinator, RecoveryError,
     VerifiedRecoveryCheckpoint,
@@ -50,6 +52,10 @@ pub struct PageRuntime {
     /// until something records into it, and an `Option` would add a branch to the one path
     /// where forgetting to invalidate is the bug.
     context: Arc<ContextGraph>,
+    /// Durable promotion sink. `None` unless the runtime's engine selection
+    /// carries a durable profile identity (Firefox companion); Chromium
+    /// sessions never promote.
+    promotion: Option<Arc<ContextPromotion>>,
 }
 
 impl PageRuntime {
@@ -67,6 +73,7 @@ impl PageRuntime {
             adaptive: AdaptivePageEngine::browser_only(),
             phase_observer: None,
             context: Arc::new(ContextGraph::new()),
+            promotion: None,
         }
     }
 
@@ -83,6 +90,7 @@ impl PageRuntime {
             adaptive: AdaptivePageEngine::browser_only(),
             phase_observer: None,
             context: Arc::new(ContextGraph::new()),
+            promotion: None,
         }
     }
 
@@ -100,6 +108,7 @@ impl PageRuntime {
             adaptive,
             phase_observer: None,
             context: Arc::new(ContextGraph::new()),
+            promotion: None,
         }
     }
 
@@ -110,6 +119,18 @@ impl PageRuntime {
     ) -> Self {
         self.phase_observer = Some(observer);
         self
+    }
+
+    /// Attaches the durable context promotion sink (Firefox-companion
+    /// runtimes only; see [`ContextPromotion`]).
+    pub fn with_context_promotion(mut self, promotion: Arc<ContextPromotion>) -> Self {
+        self.promotion = Some(promotion);
+        self
+    }
+
+    /// The durable promotion sink, if this runtime has one.
+    pub fn context_promotion(&self) -> Option<&Arc<ContextPromotion>> {
+        self.promotion.as_ref()
     }
 
     pub(crate) async fn observe_durable_phase(&self, phase: CommandPhase) {
