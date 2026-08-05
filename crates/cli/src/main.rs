@@ -1460,23 +1460,101 @@ pub fn install_native_host(config: NativeHostInstallConfig) -> Result<()> {
         shell_quote(&config.cli_path),
         shell_quote(&config.descriptor_path),
     );
-    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
-        "name": "com.bobby_browser.companion",
-        "description": "Bobby Browser Firefox companion native host",
-        "path": config.wrapper_path,
-        "type": "stdio",
-        "allowed_extensions": ["firefox-companion@bobby-browser.local"],
-    }))?;
-    preflight_exact_file(&config.wrapper_path, wrapper.as_bytes(), 0o700)?;
-    preflight_exact_file(&config.manifest_path, &manifest, 0o600)?;
-    let wrapper_install = install_exact_file(&config.wrapper_path, wrapper.as_bytes(), 0o700)?;
-    if let Err(error) = install_exact_file(&config.manifest_path, &manifest, 0o600) {
-        if let Some(created) = wrapper_install {
-            created.rollback(&config.wrapper_path);
-        }
+    let manifest = native_host_manifest_bytes(&config.wrapper_path)?;
+    // Refuse operator-owned destinations before writing either file.
+    preflight_install_destination(
+        &config.wrapper_path,
+        wrapper.as_bytes(),
+        0o700,
+        NativeHostFileKind::Wrapper,
+    )?;
+    preflight_install_destination(
+        &config.manifest_path,
+        &manifest,
+        0o600,
+        NativeHostFileKind::Manifest,
+    )?;
+    let wrapper_install = install_exact_file(
+        &config.wrapper_path,
+        wrapper.as_bytes(),
+        0o700,
+        NativeHostFileKind::Wrapper,
+    )?;
+    if let Err(error) = install_exact_file(
+        &config.manifest_path,
+        &manifest,
+        0o600,
+        NativeHostFileKind::Manifest,
+    ) {
+        wrapper_install.rollback(&config.wrapper_path);
         return Err(error.into());
     }
     Ok(())
+}
+
+/// Stable Firefox native-messaging manifest bytes (alphabetical keys).
+fn native_host_manifest_bytes(wrapper_path: &Path) -> Result<Vec<u8>> {
+    // Insert alphabetically so reinstalls stay byte-stable across serde versions.
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "allowed_extensions".to_owned(),
+        serde_json::json!(["firefox-companion@bobby-browser.local"]),
+    );
+    map.insert(
+        "description".to_owned(),
+        serde_json::json!("Bobby Browser Firefox companion native host"),
+    );
+    map.insert(
+        "name".to_owned(),
+        serde_json::json!("com.bobby_browser.companion"),
+    );
+    map.insert(
+        "path".to_owned(),
+        serde_json::Value::String(wrapper_path.display().to_string()),
+    );
+    map.insert("type".to_owned(), serde_json::json!("stdio"));
+    Ok(serde_json::to_vec_pretty(&serde_json::Value::Object(map))?)
+}
+
+#[derive(Clone, Copy)]
+enum NativeHostFileKind {
+    Wrapper,
+    Manifest,
+}
+
+impl NativeHostFileKind {
+    fn is_managed(self, contents: &[u8]) -> bool {
+        match self {
+            Self::Wrapper => is_bobby_managed_wrapper(contents),
+            Self::Manifest => is_bobby_managed_manifest(contents),
+        }
+    }
+}
+
+fn is_bobby_managed_wrapper(contents: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return false;
+    };
+    text.starts_with("#!/bin/sh\n") && text.contains(" firefox-native-host --descriptor ")
+}
+
+fn is_bobby_managed_manifest(contents: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(contents) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("name").and_then(|value| value.as_str()) == Some("com.bobby_browser.companion")
+        && object.get("type").and_then(|value| value.as_str()) == Some("stdio")
+        && object
+            .get("allowed_extensions")
+            .and_then(|value| value.as_array())
+            .is_some_and(|extensions| {
+                extensions.iter().any(|extension| {
+                    extension.as_str() == Some("firefox-companion@bobby-browser.local")
+                })
+            })
 }
 
 struct NativeHostInstallLock {
@@ -1541,11 +1619,34 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
-fn preflight_exact_file(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+fn destination_already_exists() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "native-host installation destination already exists",
+    )
+}
+
+fn preflight_install_destination(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    kind: NativeHostFileKind,
+) -> std::io::Result<()> {
     match path.symlink_metadata() {
-        Ok(_) => verify_exact_file(path, contents, mode),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+        Ok(_) => match verify_exact_file(path, contents, mode) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = std::fs::read(path)?;
+                if kind.is_managed(&existing) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        },
     }
 }
 
@@ -1564,10 +1665,25 @@ fn verify_exact_file(path: &Path, contents: &[u8], mode: u32) -> std::io::Result
     if metadata.file_type().is_file() && std::fs::read(path)? == contents && mode_matches {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "native-host installation destination already exists",
-        ))
+        Err(destination_already_exists())
+    }
+}
+
+enum InstallFileOutcome {
+    Unchanged,
+    Created(CreatedInstallFile),
+    Replaced { previous: Vec<u8>, mode: u32 },
+}
+
+impl InstallFileOutcome {
+    fn rollback(self, path: &Path) {
+        match self {
+            Self::Unchanged => {}
+            Self::Created(created) => created.rollback(path),
+            Self::Replaced { previous, mode } => {
+                let _ = write_exact_file_atomic(path, &previous, mode);
+            }
+        }
     }
 }
 
@@ -1614,17 +1730,55 @@ impl CreatedInstallFile {
     }
 }
 
+fn write_exact_file_atomic(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let pending = path.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        let mut file = options.open(&pending)?;
+        file.write_all(contents)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&pending, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    result
+}
+
 fn install_exact_file(
     path: &Path,
     contents: &[u8],
     mode: u32,
-) -> std::io::Result<Option<CreatedInstallFile>> {
+    kind: NativeHostFileKind,
+) -> std::io::Result<InstallFileOutcome> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if path.symlink_metadata().is_ok() {
-        verify_exact_file(path, contents, mode)?;
-        return Ok(None);
+        if verify_exact_file(path, contents, mode).is_ok() {
+            return Ok(InstallFileOutcome::Unchanged);
+        }
+        let previous = std::fs::read(path)?;
+        if !kind.is_managed(&previous) {
+            return Err(destination_already_exists());
+        }
+        write_exact_file_atomic(path, contents, mode)?;
+        return Ok(InstallFileOutcome::Replaced { previous, mode });
     }
     let pending = path.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
@@ -1644,9 +1798,16 @@ fn install_exact_file(
         match std::fs::hard_link(&pending, path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                verify_exact_file(path, contents, mode)?;
-                std::fs::remove_file(&pending)?;
-                return Ok(None);
+                if verify_exact_file(path, contents, mode).is_ok() {
+                    std::fs::remove_file(&pending)?;
+                    return Ok(InstallFileOutcome::Unchanged);
+                }
+                let previous = std::fs::read(path)?;
+                if !kind.is_managed(&previous) {
+                    return Err(destination_already_exists());
+                }
+                std::fs::rename(&pending, path)?;
+                return Ok(InstallFileOutcome::Replaced { previous, mode });
             }
             Err(error) => return Err(error),
         }
@@ -1654,7 +1815,7 @@ fn install_exact_file(
             created.rollback(path);
             return Err(error);
         }
-        Ok(Some(created))
+        Ok(InstallFileOutcome::Created(created))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(pending);
@@ -2115,6 +2276,82 @@ mod tests {
         assert_eq!(std::fs::read(&wrapper).unwrap(), original);
         assert!(!manifest.exists());
         std::fs::remove_file(wrapper).unwrap();
+        std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_host_installation_upgrades_bobby_managed_files() {
+        let root = std::env::temp_dir().join(format!(
+            "bobby-native-host-upgrade-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let wrapper = root.join("firefox-native-host");
+        let manifest = root.join("com.bobby_browser.companion.json");
+        let descriptor = root.join("dynamic-descriptor.json");
+        let first = NativeHostInstallConfig {
+            wrapper_path: wrapper.clone(),
+            manifest_path: manifest.clone(),
+            cli_path: PathBuf::from("/bin/echo"),
+            descriptor_path: descriptor.clone(),
+        };
+        install_native_host(first).unwrap();
+
+        // Stale key order + different bobby path (common upgrade / make firefox case).
+        let stale_manifest = br#"{
+  "name": "com.bobby_browser.companion",
+  "description": "Bobby Browser Firefox companion native host",
+  "path": "/tmp/old-wrapper",
+  "type": "stdio",
+  "allowed_extensions": [
+    "firefox-companion@bobby-browser.local"
+  ]
+}"#;
+        std::fs::write(&manifest, stale_manifest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&manifest).unwrap().permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&manifest, perms).unwrap();
+        }
+        std::fs::write(
+            &wrapper,
+            b"#!/bin/sh\nexec '/old/bobby' firefox-native-host --descriptor '/old/descriptor.json'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&wrapper).unwrap().permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(&wrapper, perms).unwrap();
+        }
+
+        let upgraded = NativeHostInstallConfig {
+            wrapper_path: wrapper.clone(),
+            manifest_path: manifest.clone(),
+            cli_path: PathBuf::from("/usr/bin/true"),
+            descriptor_path: descriptor.clone(),
+        };
+        install_native_host(upgraded.clone()).unwrap();
+        install_native_host(upgraded).unwrap();
+
+        let wrapper_text = String::from_utf8(std::fs::read(&wrapper).unwrap()).unwrap();
+        assert!(wrapper_text.contains("/usr/bin/true"));
+        assert!(!wrapper_text.contains("/old/bobby"));
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(installed["path"], wrapper.to_string_lossy().as_ref());
+        assert_eq!(
+            installed["allowed_extensions"][0],
+            "firefox-companion@bobby-browser.local"
+        );
+
+        std::fs::remove_file(wrapper).unwrap();
+        std::fs::remove_file(manifest).unwrap();
         std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
