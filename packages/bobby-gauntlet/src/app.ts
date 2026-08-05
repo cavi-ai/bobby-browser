@@ -15,6 +15,10 @@ import { NorthstarApi } from "./api.js";
 import { element } from "./components.js";
 import { dashboardPage } from "./pages/dashboard.js";
 import { customerDetailPage, customersPage } from "./pages/customers.js";
+import { integrationsPage } from "./pages/integrations.js";
+import { onboardingPage } from "./pages/onboarding.js";
+import { documentsPage } from "./pages/documents.js";
+import { reportsPage } from "./pages/reports.js";
 import { createRouter, type AppRouter, type Route } from "./router.js";
 
 export interface FoundationStates {
@@ -343,10 +347,16 @@ export function mountNorthstar(root: HTMLElement, api: NorthstarApi): NorthstarA
 }
 
 async function northstarPage(document: Document, route: Route, api: NorthstarApi, router: AppRouter): Promise<HTMLElement> {
+  if (route.segments[0] === "customers" && route.segments[1] !== undefined && route.segments[2] === "documents") {
+    return documentsPage(document, route.segments[1], api);
+  }
   if (route.segments[0] === "customers" && route.segments[1] !== undefined) {
     return customerDetailPage(document, route.segments[1], api);
   }
   if (route.segments[0] === "customers") return customersPage(document, api, router);
+  if (route.segments[0] === "onboarding") return onboardingPage(document, api);
+  if (route.segments[0] === "integrations") return integrationsPage(document, api);
+  if (route.segments[0] === "reports") return reportsPage(document, api);
   return dashboardPage(document, api);
 }
 
