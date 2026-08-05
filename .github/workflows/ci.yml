@@ -44,9 +44,21 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
+      - uses: pnpm/action-setup@v6.0.9
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+
+      - name: Build the Northstar browser app for workspace tests
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @cavi-ai/bobby-gauntlet build
+
       - name: Test
-        # Logic/contract tests. Chromium-dependent tests are #[ignore]d here and
-        # run live in the `chromium` job below.
+        # Workspace tests include the mandatory Northstar browser journeys.
+        # The chromium job below runs them again against the pinned release browser.
         run: cargo test --workspace --locked
 
       - name: Version and naming agreement
