@@ -529,6 +529,7 @@ dependencies = [
  "companion-core",
  "companion-protocol",
  "config",
+ "context-store",
  "dialoguer",
  "dirs",
  "firefox-companion",

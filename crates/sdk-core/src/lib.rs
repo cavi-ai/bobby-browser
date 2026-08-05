@@ -144,6 +144,18 @@ impl RuntimeService {
                             "context.store_opened_with_skipped_sites"
                         );
                     }
+                    // TTL sweep on open: expired records never serve an
+                    // answer, and their bytes leave with the next flush.
+                    let today = context_store::day_since_epoch(chrono::Utc::now());
+                    match store.sweep(config.context.ttl_days, today).await {
+                        Ok(dropped) if dropped > 0 => {
+                            tracing::info!(dropped, "context.swept_expired_records");
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "context.sweep_failed");
+                        }
+                    }
                     Some(Arc::new(page_runtime::ContextPromotion::new(store)))
                 }
                 Err(error) => {
