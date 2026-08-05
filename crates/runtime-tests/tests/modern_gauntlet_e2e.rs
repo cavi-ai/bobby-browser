@@ -86,6 +86,7 @@ async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
     assert_eq!(snapshot.atlas_priority, "high");
     assert_effect_count("priority update", snapshot.priority_updates, 1)?;
     assert_journal_terminal_once(runtime.journal_path())?;
+    runtime.mark_completed("customer-update")?;
     Ok(())
 }
 
@@ -148,6 +149,7 @@ async fn validated_onboarding_preserves_accepted_values() -> TestResult<()> {
             billing_cycle: "annual".into(),
         })
     );
+    runtime.mark_completed("onboarding")?;
     Ok(())
 }
 
@@ -190,6 +192,7 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
     );
     assert_eq!(snapshot.uploaded_media_type.as_deref(), Some("text/plain"));
     assert_effect_count("preview confirmation", snapshot.preview_confirmations, 1)?;
+    runtime.mark_completed("documents")?;
     Ok(())
 }
 
@@ -215,6 +218,7 @@ async fn popup_authorization_survives_obstruction() -> TestResult<()> {
     let snapshot = server.snapshot().await;
     persist_evidence("authorization", &server, &runtime).await?;
     assert_effect_count("authorization grant", snapshot.authorization_grants, 1)?;
+    runtime.mark_completed("authorization")?;
     Ok(())
 }
 
@@ -265,6 +269,7 @@ async fn interrupted_report_recovers_once_and_downloads() -> TestResult<()> {
     let snapshot = server.snapshot().await;
     assert_effect_count("report generation", snapshot.report_generations, 1)?;
     assert_journal_terminal_once(runtime.journal_path())?;
+    runtime.mark_completed("report-recovery")?;
     Ok(())
 }
 

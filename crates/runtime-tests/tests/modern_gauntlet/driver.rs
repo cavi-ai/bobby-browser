@@ -602,17 +602,30 @@ impl ModernRuntime {
     }
 
     pub async fn capture_diagnostics(&self, journey: &str) -> TestResult<()> {
-        let evidence = self
-            .submit(PrimitiveCommand::CaptureScreenshot(
-                CaptureScreenshotCommand {
-                    mode: ScreenshotMode::Viewport,
-                },
-            ))
-            .await?;
+        let mut evidence = Vec::new();
+        for command in [
+            PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            }),
+            PrimitiveCommand::AccessibilitySnapshot(AccessibilitySnapshotCommand {
+                max_nodes: Some(512),
+            }),
+            PrimitiveCommand::Inspect(InspectCommand {
+                selector: Some("body".into()),
+                target: None,
+                include_html: true,
+            }),
+        ] {
+            evidence.extend(self.submit(command).await?);
+        }
         std::fs::write(
             self.root.join("final-evidence.json"),
             serde_json::to_vec_pretty(&evidence)?,
         )?;
+        self.write_run_manifest(journey, "evidence-captured", None)
+    }
+
+    pub fn mark_completed(&self, journey: &str) -> TestResult<()> {
         self.write_run_manifest(journey, "completed", None)
     }
 
