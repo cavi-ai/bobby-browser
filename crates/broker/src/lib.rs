@@ -50,14 +50,22 @@ type RuntimeBinder = dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Sen
 ///
 /// Bounded by `max_principals` in the steady state. Entries are not evicted on revoke,
 /// so heavy principal-id churn grows this map without bound.
+type RuntimeBindingEntry = (
+    CapabilityHandle,
+    Arc<AuthenticatedRuntime>,
+    std::time::Instant,
+);
+
 struct RuntimeBindingCache {
-    entries: Mutex<HashMap<PrincipalId, (CapabilityHandle, Arc<AuthenticatedRuntime>)>>,
+    entries: Mutex<HashMap<PrincipalId, RuntimeBindingEntry>>,
+    capacity: usize,
 }
 
 impl RuntimeBindingCache {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
+            capacity: capacity.max(1),
         }
     }
 
@@ -72,15 +80,30 @@ impl RuntimeBindingCache {
         let principal = handle.principal_id().clone();
         let mut entries =
             observability::locks::lock_recovering(&self.entries, "broker.runtime_binding_cache");
-        if let Some((cached_handle, runtime)) = entries.get(&principal) {
+        if let Some((cached_handle, runtime, last_used)) = entries.get_mut(&principal) {
             if cached_handle.capabilities() == handle.capabilities()
                 && cached_handle.is_valid_at(chrono::Utc::now())
             {
+                *last_used = std::time::Instant::now();
                 return runtime.clone();
             }
         }
+        // Bound churn: dead entries (expired or revoked handles) are swept
+        // first; a still-full map evicts the least-recently-used entry. The
+        // steady-state bound is max_principals; this keeps it under churn.
+        let now = std::time::Instant::now();
+        entries.retain(|_, (cached_handle, _, _)| cached_handle.is_valid_at(chrono::Utc::now()));
+        if entries.len() >= self.capacity {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, (_, _, last_used))| *last_used)
+                .map(|(principal, _)| principal.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
         let runtime = Arc::new(build(handle.clone()));
-        entries.insert(principal, (handle, runtime.clone()));
+        entries.insert(principal, (handle, runtime.clone(), now));
         runtime
     }
 }
@@ -648,7 +671,7 @@ where
     )
     .map_err(anyhow::Error::new)?;
     let events = EventStore::new(config.interface.max_event_retention);
-    let bindings = RuntimeBindingCache::new();
+    let bindings = RuntimeBindingCache::new(config.interface.max_principals);
     let scheduler = Arc::new(
         jobs::journal_scheduler(&config)
             .await
@@ -871,7 +894,7 @@ pub mod testing {
         // `AuthenticatedRuntime` (and thus one `IdempotencyStore`) per principal for the
         // life of this router. The observation hook fires on every bind *request*, cache
         // hit or not, so `last_bound_principal` tracks the most recent caller.
-        let bindings = crate::RuntimeBindingCache::new();
+        let bindings = crate::RuntimeBindingCache::new(max_principals);
         let state = AppState::new(
             persistent_authority as Arc<dyn Authority>,
             move |handle| {
@@ -1064,7 +1087,7 @@ mod tests {
             issued_handle(&store, principal.clone(), vec![Capability::SessionRead]).await;
         let handle_two = issued_handle(&store, principal, vec![Capability::SessionRead]).await;
 
-        let cache = RuntimeBindingCache::new();
+        let cache = RuntimeBindingCache::new(64);
         let build_calls = Arc::new(AtomicUsize::new(0));
         let counted_build = |calls: Arc<AtomicUsize>| {
             move |handle: CapabilityHandle| {
@@ -1099,7 +1122,7 @@ mod tests {
         )
         .await;
 
-        let cache = RuntimeBindingCache::new();
+        let cache = RuntimeBindingCache::new(64);
         let build_calls = Arc::new(AtomicUsize::new(0));
         let counted_build = |calls: Arc<AtomicUsize>| {
             move |handle: CapabilityHandle| {
@@ -1137,7 +1160,7 @@ mod tests {
             .await
             .expect("issued token verifies before it expires");
 
-        let cache = RuntimeBindingCache::new();
+        let cache = RuntimeBindingCache::new(64);
         let build_calls = Arc::new(AtomicUsize::new(0));
         let counted_build = |calls: Arc<AtomicUsize>| {
             move |handle: CapabilityHandle| {
