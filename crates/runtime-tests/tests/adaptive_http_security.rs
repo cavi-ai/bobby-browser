@@ -57,6 +57,7 @@ fn config(root: &tempfile::TempDir, max_download_bytes: usize) -> AppConfig {
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
+        context: Default::default(),
         nodes: Default::default(),
     }
 }

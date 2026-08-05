@@ -117,7 +117,11 @@ async fn failure_increments_against_the_best_candidate_without_verification() {
     }];
     promotion.record_outcome(Some(URL), &evidence, false).await;
 
-    let site = promotion.store().site("https://example.test").await.unwrap();
+    let site = promotion
+        .store()
+        .site("https://example.test")
+        .await
+        .unwrap();
     let control = &site.pages["/login"].forms["page"].controls[0];
     assert_eq!(control.accessible_name, "Email address");
     let stats = control.intents.get("fill").unwrap();
@@ -138,10 +142,12 @@ async fn vision_fallback_resolution_is_marked_vision_promoted() {
     ];
     promotion.record_outcome(Some(URL), &evidence, true).await;
 
-    let site = promotion.store().site("https://example.test").await.unwrap();
-    let stats = site.pages["/login"].forms["page"].controls[0]
-        .intents["fill"]
-        .clone();
+    let site = promotion
+        .store()
+        .site("https://example.test")
+        .await
+        .unwrap();
+    let stats = site.pages["/login"].forms["page"].controls[0].intents["fill"].clone();
     assert_eq!(stats.source, Some(RecordSource::VisionPromoted));
 }
 
@@ -225,7 +231,11 @@ async fn per_entity_urls_share_one_page_pattern() {
         ];
         promotion.record_outcome(Some(&url), &evidence, true).await;
     }
-    let site = promotion.store().site("https://example.test").await.unwrap();
+    let site = promotion
+        .store()
+        .site("https://example.test")
+        .await
+        .unwrap();
     assert_eq!(site.pages.len(), 1);
     let page = site.pages.get("/customers/{}").unwrap();
     let stats = page.forms["page"].controls[0].intents["locate"].clone();

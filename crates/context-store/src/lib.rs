@@ -158,10 +158,7 @@ impl ContextStore {
                 }
                 Err(reason) => {
                     tracing::warn!(file = %path.display(), %reason, "context.site_skipped");
-                    report.skipped.push(SkippedSite {
-                        file: path,
-                        reason,
-                    });
+                    report.skipped.push(SkippedSite { file: path, reason });
                 }
             }
         }
@@ -189,10 +186,7 @@ impl ContextStore {
     /// `flush`. Never fails the caller's workflow: persistence happens on
     /// flush, and flush errors degrade to session-only.
     pub async fn upsert_site(&self, site_key: &str, site: SiteContext) {
-        self.sites
-            .lock()
-            .await
-            .insert(site_key.to_string(), site);
+        self.sites.lock().await.insert(site_key.to_string(), site);
         self.dirty.lock().await.insert(site_key.to_string(), true);
     }
 
@@ -250,9 +244,7 @@ impl ContextStore {
                     for form in page.forms.values_mut() {
                         for control in &mut form.controls {
                             control.intents.retain(|_, stats| {
-                                let keep = stats
-                                    .last_verified_day
-                                    .is_some_and(|day| day >= cutoff);
+                                let keep = stats.last_verified_day.is_some_and(|day| day >= cutoff);
                                 if !keep {
                                     dropped += 1;
                                 }
@@ -292,7 +284,8 @@ impl ContextStore {
     }
 
     fn path(&self, site_key: &str) -> PathBuf {
-        self.root.join(format!("{}.json", sanitize_component(site_key)))
+        self.root
+            .join(format!("{}.json", sanitize_component(site_key)))
     }
 
     async fn write_site(&self, key: &str, site: &SiteContext) -> Result<(), ContextStoreError> {
@@ -302,9 +295,11 @@ impl ContextStore {
             site: site.clone(),
         };
         let destination = self.path(key);
-        let temporary = self
-            .root
-            .join(format!(".{}.{}.tmp", sanitize_component(key), uuid::Uuid::new_v4()));
+        let temporary = self.root.join(format!(
+            ".{}.{}.tmp",
+            sanitize_component(key),
+            uuid::Uuid::new_v4()
+        ));
         let result = async {
             let mut options = OpenOptions::new();
             options.create_new(true).write(true);

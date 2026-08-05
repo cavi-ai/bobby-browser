@@ -86,6 +86,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
+        context: Default::default(),
         nodes: Default::default(),
     };
     let runtime = RuntimeService::build(&config).await.unwrap();
