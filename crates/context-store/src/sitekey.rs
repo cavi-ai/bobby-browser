@@ -54,7 +54,10 @@ mod tests {
             ("https://example.co.uk/", Some("https://example.co.uk")),
             ("https://shop.example.co.uk/", Some("https://example.co.uk")),
             ("https://example.com.au/x", Some("https://example.com.au")),
-            ("https://alice.github.io/app", Some("https://alice.github.io")),
+            (
+                "https://alice.github.io/app",
+                Some("https://alice.github.io"),
+            ),
             ("https://bob.github.io/app", Some("https://bob.github.io")),
             ("https://one.pages.dev/", Some("https://one.pages.dev")),
             ("https://two.pages.dev/", Some("https://two.pages.dev")),

@@ -1507,7 +1507,11 @@ pub fn install_native_host(config: NativeHostInstallConfig) -> Result<()> {
         0o600,
         NativeHostFileKind::Manifest,
     ) {
-        wrapper_install.rollback(&config.wrapper_path);
+        if let Err(rollback_error) = wrapper_install.rollback(&config.wrapper_path) {
+            return Err(anyhow::Error::new(error).context(format!(
+                "native-host manifest installation failed and wrapper rollback also failed: {rollback_error}"
+            )));
+        }
         return Err(error.into());
     }
     Ok(())
@@ -1734,13 +1738,11 @@ enum InstallFileOutcome {
 }
 
 impl InstallFileOutcome {
-    fn rollback(self, path: &Path) {
+    fn rollback(self, path: &Path) -> std::io::Result<()> {
         match self {
-            Self::Unchanged => {}
+            Self::Unchanged => Ok(()),
             Self::Created(created) => created.rollback(path),
-            Self::Replaced { previous, mode } => {
-                let _ = write_exact_file_atomic(path, &previous, mode);
-            }
+            Self::Replaced { previous, mode } => write_exact_file_atomic(path, &previous, mode),
         }
     }
 }
@@ -1769,22 +1771,30 @@ impl CreatedInstallFile {
         }
     }
 
-    fn rollback(self, path: &Path) {
-        self.rollback_ref(path);
+    fn rollback(self, path: &Path) -> std::io::Result<()> {
+        self.rollback_ref(path)
     }
 
-    fn rollback_ref(&self, path: &Path) {
+    fn rollback_ref(&self, path: &Path) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                if metadata.dev() == self.device && metadata.ino() == self.inode {
-                    let _ = std::fs::remove_file(path);
-                }
+            let metadata = match std::fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if metadata.dev() == self.device && metadata.ino() == self.inode {
+                std::fs::remove_file(path)?;
             }
+            Ok(())
         }
         #[cfg(not(unix))]
-        let _ = std::fs::remove_file(path);
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -1832,11 +1842,15 @@ fn install_exact_file(
             return Ok(InstallFileOutcome::Unchanged);
         }
         let previous = std::fs::read(path)?;
+        let previous_mode = installed_file_mode(path, mode)?;
         if !kind.is_managed(&previous) {
             return Err(destination_already_exists());
         }
         write_exact_file_atomic(path, contents, mode)?;
-        return Ok(InstallFileOutcome::Replaced { previous, mode });
+        return Ok(InstallFileOutcome::Replaced {
+            previous,
+            mode: previous_mode,
+        });
     }
     let pending = path.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
@@ -1861,16 +1875,27 @@ fn install_exact_file(
                     return Ok(InstallFileOutcome::Unchanged);
                 }
                 let previous = std::fs::read(path)?;
+                let previous_mode = installed_file_mode(path, mode)?;
                 if !kind.is_managed(&previous) {
                     return Err(destination_already_exists());
                 }
                 std::fs::rename(&pending, path)?;
-                return Ok(InstallFileOutcome::Replaced { previous, mode });
+                return Ok(InstallFileOutcome::Replaced {
+                    previous,
+                    mode: previous_mode,
+                });
             }
             Err(error) => return Err(error),
         }
         if let Err(error) = std::fs::remove_file(&pending) {
-            created.rollback(path);
+            if let Err(rollback_error) = created.rollback(path) {
+                return Err(std::io::Error::new(
+                    rollback_error.kind(),
+                    format!(
+                        "failed to remove pending native-host file ({error}); rollback also failed: {rollback_error}"
+                    ),
+                ));
+            }
             return Err(error);
         }
         Ok(InstallFileOutcome::Created(created))
@@ -1879,6 +1904,19 @@ fn install_exact_file(
         let _ = std::fs::remove_file(pending);
     }
     result
+}
+
+fn installed_file_mode(path: &Path, _fallback: u32) -> std::io::Result<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(std::fs::symlink_metadata(path)?.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(_fallback)
+    }
 }
 
 async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
@@ -2471,6 +2509,72 @@ mod tests {
         assert_eq!(std::fs::read(&manifest).unwrap(), original);
         std::fs::remove_file(manifest).unwrap();
         std::fs::remove_file(root.join("com.bobby_browser.companion.install.lock")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_host_replacement_rollback_restores_original_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "bobby-native-host-rollback-mode-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let wrapper = root.join("firefox-native-host");
+        let original =
+            b"#!/bin/sh\nexec '/old/bobby' firefox-native-host --descriptor '/old/descriptor.json'\n";
+        std::fs::write(&wrapper, original).unwrap();
+        let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+        permissions.set_mode(0o750);
+        std::fs::set_permissions(&wrapper, permissions).unwrap();
+
+        let outcome = install_exact_file(
+            &wrapper,
+            b"#!/bin/sh\nexec '/new/bobby' firefox-native-host --descriptor '/new/descriptor.json'\n",
+            0o700,
+            NativeHostFileKind::Wrapper,
+        )
+        .unwrap();
+        outcome.rollback(&wrapper).unwrap();
+
+        assert_eq!(std::fs::read(&wrapper).unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        std::fs::remove_file(wrapper).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn native_host_replacement_rollback_reports_restore_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "bobby-native-host-rollback-failure-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let wrapper = root.join("firefox-native-host");
+        std::fs::write(
+            &wrapper,
+            b"#!/bin/sh\nexec '/old/bobby' firefox-native-host --descriptor '/old/descriptor.json'\n",
+        )
+        .unwrap();
+        let outcome = install_exact_file(
+            &wrapper,
+            b"#!/bin/sh\nexec '/new/bobby' firefox-native-host --descriptor '/new/descriptor.json'\n",
+            0o700,
+            NativeHostFileKind::Wrapper,
+        )
+        .unwrap();
+        std::fs::remove_file(&wrapper).unwrap();
+        std::fs::create_dir(&wrapper).unwrap();
+
+        let error = outcome.rollback(&wrapper).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+
+        std::fs::remove_dir(wrapper).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 
