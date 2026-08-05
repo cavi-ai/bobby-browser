@@ -981,3 +981,117 @@ async fn multi_thread_smoke() {
     scheduler.request_shutdown();
     runner.await.unwrap().unwrap();
 }
+
+#[test]
+fn terminal_jobs_are_pruned_beyond_the_retention_bound() {
+    let rt = runtime();
+    rt.block_on(async {
+        let mut config = SchedulerConfig::default().with_backoff_range(1, 5);
+        config.retained_terminal_jobs = 2;
+        let mut scheduler = JobScheduler::from_config(config).await.unwrap();
+        scheduler.register_handler("echo".to_string(), Arc::new(OkHandler));
+        let scheduler = Arc::new(scheduler);
+        let run = {
+            let scheduler = scheduler.clone();
+            tokio::spawn(async move { scheduler.run().await })
+        };
+
+        let mut ids = Vec::new();
+        for index in 0..5 {
+            ids.push(
+                scheduler
+                    .submit(JobConfig::new(
+                        "echo".to_string(),
+                        serde_json::json!({"index": index}),
+                    ))
+                    .await
+                    .unwrap(),
+            );
+        }
+        // Wait only for the last job: earlier completions may already be
+        // pruned by the retention bound being exercised here.
+        wait_status(&scheduler, ids.last().unwrap(), JobStatus::Completed, 50).await;
+        let mut completed_visible = 0;
+        for id in &ids {
+            if let Some(job) = scheduler.get_job(id).await {
+                if job.status == JobStatus::Completed {
+                    completed_visible += 1;
+                }
+            }
+        }
+        if completed_visible > 2 {
+            for id in &ids {
+                if let Some(job) = scheduler.get_job(id).await {
+                    eprintln!("visible: {:?} {:?}", id, job.status);
+                } else {
+                    eprintln!("missing: {:?}", id);
+                }
+            }
+            panic!("registry retained {completed_visible} terminal jobs over the bound of 2");
+        }
+
+        scheduler.request_shutdown();
+        let _ = run.await;
+    });
+}
+
+#[test]
+fn oversized_journal_compacts_on_open_and_stays_loadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jobs.jsonl");
+    let rt = runtime();
+    rt.block_on(async {
+        // Bulk-write more records than the compaction threshold without
+        // paying the per-record fsync of real submits.
+        let mut text = String::new();
+        for index in 0..4_200_u64 {
+            let job = serde_json::json!({
+                "id": format!("job-{index}"),
+                "name": "echo",
+                "priority": "Normal",
+                "status": if index % 21 == 0 { "Pending" } else { "Completed" },
+                "payload": {},
+                "createdAt": "2026-08-05T00:00:00Z",
+                "startedAt": null,
+                "completedAt": null,
+                "retryCount": 0,
+                "maxRetries": 3,
+                "result": null,
+                "error": null
+            });
+            let record = serde_json::json!({
+                "schemaVersion": 1,
+                "sequence": index,
+                "recordedAt": "2026-08-05T00:00:00Z",
+                "event": "submitted",
+                "job": job,
+            });
+            text.push_str(&serde_json::to_string(&record).unwrap());
+            text.push('\n');
+        }
+        tokio::fs::write(&path, text).await.unwrap();
+        let before = tokio::fs::metadata(&path).await.unwrap().len();
+
+        let _first = JournalJobStore::open(&path).await.unwrap();
+        let after = tokio::fs::metadata(&path).await.unwrap().len();
+        assert!(
+            after < before / 2,
+            "journal was not compacted: {before} -> {after}"
+        );
+        // The first open's in-memory index holds everything it scanned;
+        // compaction bounds the FILE. Re-open to read the compacted file.
+        let store = JournalJobStore::open(&path).await.unwrap();
+        let jobs = store.load_all().await.unwrap();
+        assert!(
+            jobs.iter().any(|job| job.status == JobStatus::Pending),
+            "pending jobs must survive compaction"
+        );
+        assert!(
+            jobs.iter()
+                .filter(|job| job.status == JobStatus::Completed)
+                .count()
+                <= 1024,
+            "terminal history must be bounded by compaction"
+        );
+    });
+}

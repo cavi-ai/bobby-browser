@@ -394,6 +394,43 @@ impl JobScheduler {
         }
     }
 
+    /// Drop the oldest terminal jobs once the registry holds more than
+    /// `retained_terminal_jobs` of them; the registry is the in-memory index
+    /// `get_job` answers from, so without a bound it grew for the life of
+    /// the process. Pending/Running jobs are never pruned.
+    async fn prune_terminal(&self, registry: &mut HashMap<JobId, Job>) {
+        let mut terminal: Vec<(JobId, Option<chrono::DateTime<chrono::Utc>>)> = registry
+            .iter()
+            .filter(|(_, job)| {
+                matches!(
+                    job.status,
+                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                )
+            })
+            .map(|(id, job)| (id.clone(), job.completed_at))
+            .collect();
+        let excess = terminal
+            .len()
+            .saturating_sub(self.config.retained_terminal_jobs);
+        if excess == 0 {
+            return;
+        }
+        terminal.sort_by_key(|(_, completed_at)| *completed_at);
+        for (id, _) in terminal.into_iter().take(excess) {
+            registry.remove(&id);
+        }
+    }
+
+    /// Store-side prune, called AFTER a terminal state is recorded in the
+    /// store: pruning before the update lets the freshest terminal entry
+    /// escape every bound (and get_job falls through to this index).
+    async fn prune_store_terminal(&self) {
+        let _ = self
+            .store
+            .prune_terminal(self.config.retained_terminal_jobs)
+            .await;
+    }
+
     /// Returns `Some((backoff, job))` when a retry should be scheduled after releasing the permit.
     async fn finish_job(&self, job_id: JobId, result: JobResult) -> Option<(Duration, Job)> {
         self.abort_handles
@@ -414,8 +451,10 @@ impl JobScheduler {
         if result.success {
             job.complete(result);
             let snapshot = job.clone();
+            self.prune_terminal(&mut registry).await;
             drop(registry);
             let _ = self.store.update(&snapshot, JobEvent::Completed).await;
+            self.prune_store_terminal().await;
             self.total_completed.fetch_add(1, Ordering::Relaxed);
             info!(
                 job_id = %snapshot.id,
@@ -436,8 +475,10 @@ impl JobScheduler {
 
         if !job.can_retry() {
             let snapshot = job.clone();
+            self.prune_terminal(&mut registry).await;
             drop(registry);
             let _ = self.store.update(&snapshot, JobEvent::Failed).await;
+            self.prune_store_terminal().await;
             self.total_failed.fetch_add(1, Ordering::Relaxed);
             info!(
                 job_id = %snapshot.id,
@@ -493,6 +534,7 @@ impl JobScheduler {
             drop(registry);
             drop(queue);
             let _ = self.store.update(&snapshot, JobEvent::Failed).await;
+            self.prune_store_terminal().await;
             self.total_failed.fetch_add(1, Ordering::Relaxed);
         } else {
             drop(registry);
@@ -580,12 +622,14 @@ impl JobScheduler {
                 let _ = queue.cancel_job(job_id);
                 job.cancel();
                 let snapshot = job.clone();
+                self.prune_terminal(&mut registry).await;
                 drop(registry);
                 drop(queue);
                 self.store
                     .update(&snapshot, JobEvent::Cancelled)
                     .await
                     .map_err(store_err)?;
+                self.prune_store_terminal().await;
                 info!(
                     job_id = %snapshot.id,
                     job_name = %snapshot.name,
@@ -598,6 +642,7 @@ impl JobScheduler {
             JobStatus::Running => {
                 job.cancel();
                 let snapshot = job.clone();
+                self.prune_terminal(&mut registry).await;
                 drop(registry);
                 drop(queue);
                 if let Some(handle) = self
@@ -612,6 +657,7 @@ impl JobScheduler {
                     .update(&snapshot, JobEvent::Cancelled)
                     .await
                     .map_err(store_err)?;
+                self.prune_store_terminal().await;
                 info!(
                     job_id = %snapshot.id,
                     job_name = %snapshot.name,

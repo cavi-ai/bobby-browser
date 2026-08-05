@@ -583,12 +583,34 @@ impl AcpServer {
                 "no target page; include a url in the prompt or navigate first",
             ));
         };
-        let outcome = match prompt_turn
-            .wait(self.submit_intent(&runtime_session, &page, structured.intent.clone()))
-            .await
-        {
-            Ok(result) => result?,
-            Err(TurnCancelled) => return Ok(PromptResponse::new(StopReason::Cancelled)),
+        // Spawn + drain like open_page above: the intent may already be
+        // dispatched and mutating the page, so a cancelled prompt must not
+        // drop the submission mid-call and orphan its outcome.
+        let runtime = Arc::clone(&self.runtime);
+        let ctx = self.ctx();
+        let submit_session = runtime_session.clone();
+        let submit_page = page.clone();
+        let intent = structured.intent.clone();
+        let mut submitted = tokio::spawn(async move {
+            runtime
+                .submit(
+                    ctx,
+                    envelope(
+                        &submit_session,
+                        &submit_page,
+                        RuntimeCommand::Intent(intent),
+                    ),
+                )
+                .await
+        });
+        let outcome = match prompt_turn.wait(&mut submitted).await {
+            Ok(result) => result
+                .map_err(internal_error)
+                .and_then(|result| result.map_err(internal_error))?,
+            Err(TurnCancelled) => {
+                let _ = submitted.await;
+                return Ok(PromptResponse::new(StopReason::Cancelled));
+            }
         };
         report_outcome(connection, &acp_session_id, &outcome);
         match &outcome {
@@ -814,7 +836,9 @@ impl AcpServer {
         );
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), close).await;
     }
-
+    // Used by the one-shot consent tests; the production prompt path spawns
+    // its submission inline (cancel-drain) instead.
+    #[allow(dead_code)]
     async fn submit_intent(
         &self,
         runtime_session: &SessionId,

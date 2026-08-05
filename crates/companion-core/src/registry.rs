@@ -162,15 +162,24 @@ pub struct CompanionRegistry {
     pairing_code_ttl: Duration,
     attachment_ttl: Duration,
     state: RwLock<RegistryState>,
+    revocations: tokio::sync::watch::Sender<CompanionId>,
 }
 
 impl CompanionRegistry {
     pub fn new(pairing_code_ttl: Duration, attachment_ttl: Duration) -> Self {
+        let (revocations, _) = tokio::sync::watch::channel(CompanionId::new());
         Self {
             pairing_code_ttl,
             attachment_ttl,
             state: RwLock::new(RegistryState::default()),
+            revocations,
         }
+    }
+
+    /// Live-companion teardown signal: a revoked companion's sockets close
+    /// instead of serving reads until disconnect.
+    pub fn subscribe_revocations(&self) -> tokio::sync::watch::Receiver<CompanionId> {
+        self.revocations.subscribe()
     }
 
     pub async fn issue_pairing_code(&self) -> String {
@@ -407,6 +416,7 @@ impl CompanionRegistry {
             .get_mut(companion_id)
             .ok_or(RegistryError::ProfileNotFound)?;
         record.revoked = true;
+        let _ = self.revocations.send(companion_id.clone());
         Ok(())
     }
 
