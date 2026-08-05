@@ -111,6 +111,19 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - uses: pnpm/action-setup@v6.0.9
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+
+      - name: Build and test the Northstar browser app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @cavi-ai/bobby-gauntlet test
+          pnpm --filter @cavi-ai/bobby-gauntlet build
+
       - name: Install Chrome
         uses: browser-actions/setup-chrome@latest
         with:
@@ -133,6 +146,17 @@ jobs:
 
       - name: Worker live tests
         run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
+
+      - name: Northstar end-to-end release gate
+        run: cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
+
+      - name: Upload Northstar failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: modern-gauntlet-evidence
+          path: target/modern-gauntlet-artifacts
+          if-no-files-found: warn
 
       - name: Runtime live tests
         run: >-

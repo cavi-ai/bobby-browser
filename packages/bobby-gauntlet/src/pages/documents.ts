@@ -28,6 +28,7 @@ export async function documentsPage(document: Document, customerId: string, api:
     result.replaceChildren(status(document, "Uploading document"));
     void api.uploadDocument(customerId, file).then((receipt) => {
       const frame = element(document, "iframe");
+      frame.id = "document-preview";
       frame.title = `Preview of ${receipt.filename}`;
       frame.src = receipt.previewUrl;
       result.replaceChildren(status(document, "Upload complete"), frame);

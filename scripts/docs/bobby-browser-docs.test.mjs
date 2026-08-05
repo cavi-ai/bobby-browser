@@ -189,8 +189,9 @@ test("generated docs publish the Bobby skill and gauntlet operator guides", asyn
       "utf8",
     );
     assert.match(gauntlet, /@cavi-ai\/bobby-gauntlet/);
-    assert.match(gauntlet, /BOBBY_CHAMPIONSHIP_ENGINE/);
-    assert.match(gauntlet, /target\/bobby-championship/);
+    assert.match(gauntlet, /--test modern_gauntlet_e2e/);
+    assert.match(gauntlet, /target\/modern-gauntlet-artifacts/);
+    assert.doesNotMatch(gauntlet, /--ignored|BOBBY_CHAMPIONSHIP_ENGINE/);
   });
 });
 

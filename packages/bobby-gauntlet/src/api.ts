@@ -97,7 +97,8 @@ export class NorthstarApi {
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("x-northstar-run", this.runId);
-    const response = await this.fetcher(new URL(path, "https://northstar.test"), { ...init, headers });
+    const fetcher = this.fetcher;
+    const response = await fetcher(new URL(path, currentOrigin()), { ...init, headers });
     const isJson = response.headers.get("content-type")?.includes("application/json") === true;
     const payload: unknown = isJson ? await response.json() : undefined;
     if (!response.ok) throw toApiError(response.status, payload);
@@ -120,4 +121,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function currentOrigin(): string {
+  return typeof location === "undefined" ? "https://northstar.test" : location.origin;
 }
