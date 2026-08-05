@@ -125,6 +125,49 @@ impl RuntimeService {
         Self::build_inner(config, factory, None, None, None).await
     }
 
+    /// Build with a durable profile identity (Firefox-companion runtimes):
+    /// attaches context promotion so verified intent outcomes persist
+    /// structural control memory under `<context.dir>/<profile-id>/`.
+    /// Promotion is absent when `config.context.dir` is unset or the store
+    /// cannot be opened — never a startup failure.
+    pub async fn build_with_context_promotion(
+        config: &AppConfig,
+        factory: Arc<dyn WorkerFactory>,
+        profile_id: &str,
+    ) -> Result<Self, RuntimeError> {
+        let promotion = match &config.context.dir {
+            Some(dir) => match context_store::ContextStore::open(dir, profile_id).await {
+                Ok((store, report)) => {
+                    if !report.skipped.is_empty() {
+                        tracing::warn!(
+                            skipped = report.skipped.len(),
+                            "context.store_opened_with_skipped_sites"
+                        );
+                    }
+                    Some(Arc::new(page_runtime::ContextPromotion::new(store)))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "context.store_unavailable");
+                    None
+                }
+            },
+            None => None,
+        };
+        Self::build_inner(config, factory, None, None, None)
+            .await
+            .map(|runtime| runtime.with_promotion(promotion))
+    }
+
+    fn with_promotion(
+        mut self,
+        promotion: Option<Arc<page_runtime::ContextPromotion>>,
+    ) -> Self {
+        if let Some(promotion) = promotion {
+            self.pages = self.pages.with_context_promotion(promotion);
+        }
+        self
+    }
+
     #[doc(hidden)]
     pub async fn build_with_execution_phase_observer(
         config: &AppConfig,

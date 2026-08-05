@@ -314,6 +314,11 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .await
             .map_err(|error| map_runtime_error(&ctx, error))?;
         self.inner.pages.context().forget_all(&pages);
+        // Session close is the flush point for durable context promotion;
+        // flush failures stay session-only and never fail the close.
+        if let Some(promotion) = self.inner.pages.context_promotion() {
+            promotion.flush().await;
+        }
         if let Some(ownership) = &self.session_ownership {
             ownership.release_authenticated_session(&ctx.principal_id, &session);
         }

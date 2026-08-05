@@ -406,6 +406,7 @@ impl PageRuntime {
         self.observe_durable_phase(CommandPhase::Verifying).await;
         match self.verify(&envelope, &lease, evidence).await {
             Ok(evidence) => {
+                self.promote_outcome(&envelope, &evidence, true).await;
                 if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_)) = &envelope.command
                 {
                     if let Some(Evidence::Navigation { url, .. }) = evidence.first() {
@@ -850,6 +851,13 @@ impl PageRuntime {
         if let Some(page_id) = envelope.page_id.as_ref() {
             self.context().invalidate_for(page_id, &envelope.command);
         }
+        let failure_evidence = match &outcome {
+            CommandOutcome::Failed { evidence, .. }
+            | CommandOutcome::NeedsReconciliation { evidence, .. } => evidence.clone(),
+            _ => Vec::new(),
+        };
+        self.promote_outcome(envelope, &failure_evidence, false)
+            .await;
         let Some(journal) = &self.journal else {
             return outcome;
         };
@@ -865,6 +873,27 @@ impl PageRuntime {
             Ok(()) => outcome,
             Err(error) => journal_failure(envelope, error, true),
         }
+    }
+
+    /// Promotes a command's outcome into the durable context graph. No-op
+    /// unless this runtime has a durable profile identity; never fails the
+    /// command — promotion is write-behind and degrades to session-only.
+    async fn promote_outcome(
+        &self,
+        envelope: &CommandEnvelope,
+        evidence: &[Evidence],
+        success: bool,
+    ) {
+        let Some(promotion) = &self.promotion else {
+            return;
+        };
+        let Some(page_id) = envelope.page_id.as_ref() else {
+            return;
+        };
+        let url = self.get(page_id).await.ok().and_then(|page| page.url);
+        promotion
+            .record_outcome(url.as_deref(), evidence, success)
+            .await;
     }
 }
 
