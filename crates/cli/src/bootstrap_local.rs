@@ -301,14 +301,17 @@ fn read_bootstrap_env_fields(path: &Path) -> Result<BootstrapEnvFields> {
         capabilities: None,
         expires_at: None,
     };
-    for line in contents.lines() {
+    for (line_number, line) in contents.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
+            // Report the line number, never the content: a malformed
+            // credential line still carries the bearer.
             return Err(anyhow!(
-                "invalid bootstrap env line in {}: {line}",
+                "invalid bootstrap env line {} in {}",
+                line_number + 1,
                 path.display()
             ));
         };

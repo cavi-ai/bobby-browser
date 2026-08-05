@@ -199,10 +199,17 @@ pub(crate) async fn get_mcp(State(state): State<AppState>, headers: HeaderMap) -
         },
         |mut stream| async move {
             // Must be re-checked every poll, not just at connect: the stream
-            // carries event data and cannot outlive the credential that opened it.
+            // carries event data and cannot outlive the credential that
+            // opened it. Capability rotation is re-evaluated per poll too:
+            // a stream whose principal loses SubscribeEvents keeps its
+            // channel (clients require it before they will POST) but stops
+            // receiving event data until the grant returns.
             if !stream.handle.is_valid_at(Utc::now()) {
                 return None;
             }
+            stream
+                .notifications
+                .set_events_open(authorized_for_events(&stream.handle));
             match tokio::time::timeout(MCP_STREAM_KEEPALIVE, stream.notifications.recv()).await {
                 Ok(Some(frame)) => {
                     let event = axum::response::sse::Event::default()

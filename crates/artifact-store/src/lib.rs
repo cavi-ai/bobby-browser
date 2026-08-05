@@ -84,8 +84,10 @@ pub enum ArtifactError {
 
 impl ArtifactStore {
     pub fn new(root: impl Into<PathBuf>, max_bytes: usize, max_dimension: u32) -> Self {
+        let root = root.into();
+        sweep_orphaned_staging(&root);
         Self {
-            root: root.into(),
+            root,
             max_bytes,
             max_dimension,
         }
@@ -396,6 +398,28 @@ struct ArtifactManifest {
     page_id: PageId,
     bytes: u64,
     sha256: String,
+}
+
+/// Crash-orphaned staging dirs (`.{artifact}.{staging}.tmp`) are safe to
+/// remove at construction: a live publish holds its StagingGuard only inside
+/// a running process, and construction happens before any publish. Without a
+/// sweep, every crash mid-capture leaks up to max_bytes of disk forever.
+fn sweep_orphaned_staging(root: &Path) {
+    let Ok(sessions) = std::fs::read_dir(root) else {
+        return;
+    };
+    for session in sessions.flatten() {
+        let Ok(children) = std::fs::read_dir(session.path()) else {
+            continue;
+        };
+        for child in children.flatten() {
+            let name = child.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') && name.ends_with(".tmp") {
+                let _ = std::fs::remove_dir_all(child.path());
+            }
+        }
+    }
 }
 
 fn valid_artifact_id(artifact_id: &str) -> bool {
