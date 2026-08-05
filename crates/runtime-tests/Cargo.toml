@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 artifact-store = { path = "../artifact-store" }
 async-trait.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 broker = { path = "../broker" }
 checkpoint-store = { path = "../checkpoint-store" }
 companion-protocol = { path = "../companion-protocol" }
