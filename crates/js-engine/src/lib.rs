@@ -1,7 +1,7 @@
-//! Bounded, synchronous shaping of JavaScript evaluation results.
+//! Bounded shaping of JavaScript evaluation results for worker evidence payloads.
 //!
-//! No I/O and no async surface. Result-size policy for `JavaScriptResult`
-//! evidence payloads lives here, not in the workers producing the raw value.
+//! This crate is **not** a JavaScript runtime. Chromium evaluates scripts;
+//! [`bound_result`] enforces a serialized size budget before results leave the worker.
 
 /// Serialize `value` and, if it fits within `max_bytes`, return it unchanged
 /// with `truncated = false`.
