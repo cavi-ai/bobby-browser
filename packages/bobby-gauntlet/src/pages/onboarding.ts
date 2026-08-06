@@ -1,8 +1,8 @@
 import { ApiError, type NorthstarApi } from "../api.js";
 import { element, pageHeader, status } from "../components.js";
-import type { BillingCycle, OnboardingInput, Plan } from "../models.js";
+import type { BillingCycle, OnboardingInput, Plan, RunConfig } from "../models.js";
 
-export async function onboardingPage(document: Document, api: NorthstarApi): Promise<HTMLElement> {
+export async function onboardingPage(document: Document, api: NorthstarApi, config: RunConfig): Promise<HTMLElement> {
   const page = element(document, "section", { className: "page" });
   page.append(pageHeader(document, "New relationship", "Onboard a customer", "Capture the essentials once, review them clearly, and create a durable customer record."));
   const form = element(document, "form", { className: "workflow-card", ariaLabel: "Customer onboarding" });
@@ -17,10 +17,31 @@ export async function onboardingPage(document: Document, api: NorthstarApi): Pro
   const errors = element(document, "div", { className: "error-summary" });
   errors.setAttribute("role", "alert");
   errors.tabIndex = -1;
-  fields.append(fullName.label, email.label, companyName.label, postalCode.label, plan.label, billingSlot);
+  const identityFields = config.level === 2 && config.traps.reversedIdentityFields
+    ? [email.label, fullName.label]
+    : [fullName.label, email.label];
+  fields.append(...identityFields, companyName.label, postalCode.label, plan.label, billingSlot);
+  let confirmEmail: HTMLInputElement | undefined;
+  if (config.level === 2) {
+    const delayedSlot = element(document, "div", { className: "field-slot delayed-control" });
+    fields.append(delayedSlot);
+    document.defaultView?.setTimeout(() => {
+      const confirmation = inputField(document, "Confirm work email", "email", "email");
+      confirmEmail = confirmation.input;
+      delayedSlot.replaceChildren(confirmation.label);
+    }, config.traps.delayedControlMs);
+  }
   const submit = element(document, "button", { text: "Create customer" });
   submit.type = "submit";
-  form.append(errors, fields, submit);
+  let recaptcha: HTMLElement | undefined;
+  if (config.level === 2 && config.recaptchaSiteKey) {
+    recaptcha = element(document, "div", { className: "g-recaptcha" });
+    recaptcha.dataset.sitekey = config.recaptchaSiteKey;
+    ensureRecaptchaScript(document);
+  }
+  form.append(errors, fields);
+  if (recaptcha !== undefined) form.append(recaptcha);
+  form.append(submit);
   page.append(form);
 
   const renderBilling = () => {
@@ -36,6 +57,18 @@ export async function onboardingPage(document: Document, api: NorthstarApi): Pro
     errors.replaceChildren();
     for (const field of form.querySelectorAll("[aria-invalid='true']")) field.removeAttribute("aria-invalid");
     const billing = form.querySelector<HTMLSelectElement>("select[aria-label='Billing cycle']")?.value ?? "monthly";
+    if (confirmEmail !== undefined && confirmEmail.value !== email.input.value) {
+      confirmEmail.setAttribute("aria-invalid", "true");
+      errors.append(element(document, "p", { text: "The confirmation email must match the work email." }));
+      confirmEmail.focus();
+      return;
+    }
+    const recaptchaResponse = recaptcha?.querySelector<HTMLTextAreaElement>("[name='g-recaptcha-response']")?.value;
+    if (config.level === 2 && !recaptchaResponse) {
+      errors.append(element(document, "p", { text: "Complete the reCAPTCHA challenge before creating the customer." }));
+      errors.focus();
+      return;
+    }
     const input: OnboardingInput = {
       fullName: fullName.input.value,
       email: email.input.value,
@@ -45,7 +78,7 @@ export async function onboardingPage(document: Document, api: NorthstarApi): Pro
       billingCycle: billing as BillingCycle,
     };
     submit.disabled = true;
-    void api.onboard(input).then((receipt) => {
+    void api.onboard(input, recaptchaResponse).then((receipt) => {
       form.replaceChildren(status(document, `Customer created · ${receipt.id}`));
     }).catch((error: unknown) => {
       if (error instanceof ApiError) {
@@ -63,6 +96,16 @@ export async function onboardingPage(document: Document, api: NorthstarApi): Pro
     }).finally(() => { submit.disabled = false; });
   });
   return page;
+}
+
+function ensureRecaptchaScript(document: Document): void {
+  const source = "https://www.google.com/recaptcha/api.js";
+  if (document.querySelector(`script[src='${source}']`) !== null) return;
+  const script = document.createElement("script");
+  script.src = source;
+  script.async = true;
+  script.defer = true;
+  document.head.append(script);
 }
 
 function inputField(document: Document, labelText: string, type: string, autocomplete: string): { label: HTMLLabelElement; input: HTMLInputElement } {
