@@ -5,7 +5,7 @@ import { JSDOM } from "jsdom";
 
 import { NorthstarApi } from "../src/api.js";
 import { mountNorthstar } from "../src/app.js";
-import type { DocumentReceipt, ReportInput, ReportState } from "../src/models.js";
+import type { DocumentReceipt, ReportInput, ReportState, RunConfig } from "../src/models.js";
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, { status });
@@ -105,6 +105,94 @@ test("server validation preserves accepted onboarding values and focuses the rej
   assert.equal(postal.value, "02110");
   assert.equal(window.document.querySelector<HTMLInputElement>("input[aria-label='Company name']")?.value, "Atlas Labs");
   assert.match(root.textContent ?? "", /Use 10001 for this account/);
+});
+
+test("Level 2 renders an irregular form and submits the real reCAPTCHA widget response", async () => {
+  let body: unknown;
+  const fetcher: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    body = await request.json();
+    return response({ id: "onb_level_two", status: "complete" });
+  };
+  const config: RunConfig = {
+    level: 2,
+    seed: "level-two-browser",
+    traps: {
+      extraModal: true,
+      extraPopup: true,
+      reversedIdentityFields: true,
+      delayedControlMs: 1,
+    },
+    recaptchaSiteKey: "public-site-key",
+  };
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/onboarding" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  let renderedSiteKey = "";
+  Object.defineProperty(window, "grecaptcha", {
+    configurable: true,
+    value: {
+      render(container: HTMLElement, options: { sitekey: string; callback: (token: string) => void }): number {
+        renderedSiteKey = options.sitekey;
+        const response = window.document.createElement("textarea");
+        response.name = "g-recaptcha-response";
+        response.value = "verified-widget-token";
+        container.append(response);
+        options.callback(response.value);
+        return 7;
+      },
+      getResponse(widgetId: number): string {
+        assert.equal(widgetId, 7);
+        return "verified-widget-token";
+      },
+    },
+  });
+  let checkpoint = "";
+  window.open = ((url?: string | URL) => { checkpoint = String(url); return null; }) as typeof window.open;
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, new NorthstarApi("run-level-two", fetcher), config);
+  await app.navigate("/onboarding");
+
+  const interruption = window.document.querySelector<HTMLElement>("[role='dialog'][aria-label='Workflow interruption']");
+  assert.ok(interruption);
+  interruption.querySelector<HTMLButtonElement>("button")?.click();
+  assert.match(checkpoint, /\/level-two-checkpoint\?seed=level-two-browser/);
+  assert.equal(window.document.querySelector("[role='dialog'][aria-label='Workflow interruption']"), null);
+  const widget = window.document.querySelector<HTMLElement>(".g-recaptcha");
+  assert.equal(widget?.dataset.sitekey, "public-site-key");
+  await eventually(window.document, "textarea[name='g-recaptcha-response']");
+  assert.equal(renderedSiteKey, "public-site-key");
+  assert.ok(window.document.querySelector("script[src='https://www.google.com/recaptcha/api.js?render=explicit']"));
+  const identityLabels = [...window.document.querySelectorAll(".form-grid > label")]
+    .map((label) => label.firstChild?.textContent);
+  assert.deepEqual(identityLabels.slice(0, 2), ["Work email", "Full name"]);
+  await eventually(window.document, "input[aria-label='Confirm work email']");
+
+  const values: Record<string, string> = {
+    "Full name": "Maya Chen",
+    "Work email": "maya@atlas.example",
+    "Confirm work email": "maya@atlas.example",
+    "Company name": "Atlas Labs",
+    "Postal code": "02110",
+  };
+  for (const [label, value] of Object.entries(values)) {
+    const input = window.document.querySelector<HTMLInputElement>(`input[aria-label='${label}']`);
+    assert.ok(input, `${label} input`);
+    input.value = value;
+  }
+  window.document.querySelector<HTMLFormElement>("form[aria-label='Customer onboarding']")?.requestSubmit();
+
+  await eventually(window.document, "[role='status']");
+  assert.deepEqual(body, {
+    fullName: "Maya Chen",
+    email: "maya@atlas.example",
+    companyName: "Atlas Labs",
+    postalCode: "02110",
+    plan: "starter",
+    billingCycle: "monthly",
+    recaptchaResponse: "verified-widget-token",
+  });
 });
 
 test("popup authorization refreshes the connected identity after a trusted completion message", async () => {

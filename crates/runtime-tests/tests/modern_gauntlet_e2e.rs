@@ -50,6 +50,35 @@ fn release_suite_names_are_stable() {
     }
 }
 
+#[test]
+fn level_two_recaptcha_training_ground() -> TestResult<()> {
+    if std::env::var("BOBBY_GAUNTLET_LEVEL").as_deref() != Ok("2") {
+        return Ok(());
+    }
+    let site_key = std::env::var("BOBBY_GAUNTLET_RECAPTCHA_SITE_KEY")
+        .map_err(|_| "BOBBY_GAUNTLET_RECAPTCHA_SITE_KEY is required for Level 2")?;
+    let secret = std::env::var("BOBBY_GAUNTLET_RECAPTCHA_SECRET")
+        .map_err(|_| "BOBBY_GAUNTLET_RECAPTCHA_SECRET is required for Level 2")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let server = ScenarioServer::start(ScenarioConfig::level_two(
+            "live-training-ground",
+            site_key,
+            secret,
+        )?)
+        .await?;
+        println!(
+            "Level 2 training ground: {}",
+            server.application_url("onboarding")
+        );
+        println!("Press Ctrl-C to stop the scenario server.");
+        tokio::signal::ctrl_c().await?;
+        Ok(())
+    })
+}
+
 #[tokio::test]
 async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("customer-update")).await?;

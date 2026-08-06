@@ -45,6 +45,21 @@ test("every API request carries the isolated run identity", async () => {
   assert.equal(new URL(requests[0]?.url ?? "https://invalid.test").pathname, "/api/onboarding");
 });
 
+test("Level 2 onboarding sends the reCAPTCHA response without changing the customer record", async () => {
+  const requests: Request[] = [];
+  const api = new NorthstarApi("run-level-two", async (input, init) => {
+    requests.push(new Request(input, init));
+    return Response.json({ id: "onb_level_two", status: "complete" });
+  });
+
+  await api.onboard(onboarding, "verified-widget-token");
+
+  assert.deepEqual(await requests[0]?.json(), {
+    ...onboarding,
+    recaptchaResponse: "verified-widget-token",
+  });
+});
+
 test("a non-JSON failure remains a structured API error", async () => {
   const api = new NorthstarApi("run-17", async () => new Response("gateway unavailable", {
     status: 502,
