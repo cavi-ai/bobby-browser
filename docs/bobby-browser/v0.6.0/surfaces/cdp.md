@@ -6,8 +6,22 @@ documentedVersion: 0.6.0
 
 The CDP gateway (`cdp-gateway`) exposes Chromium DevTools discovery and
 WebSockets with bearer auth. It is a **separate** control surface from
-`bobby serve` HTTP `/v1/*`. Production embeddings wire the gateway alongside
-the runtime; conformance boots a gateway example in-repo.
+`bobby serve` HTTP `/v1/*` — discovery and sockets bind on a dedicated TCP
+listener, not the HTTP router.
+
+`bobby cdp` starts the runtime like `bobby serve` and binds authenticated CDP
+on `[cdp].host`:`[cdp].port` (default `127.0.0.1:9222`). Plain `bobby serve`
+leaves CDP off unless `[cdp].enabled = true`.
+
+```toml
+[cdp]
+enabled = true   # default false
+host = "127.0.0.1"
+port = 9222
+```
+
+Both commands share the same broker, sessions, and bearer credentials. Override
+the CDP port at the CLI with `bobby cdp --cdp-port 9333`.
 
 ## Discovery and sockets
 
@@ -33,6 +47,8 @@ installs.)
 ```ts
 import { chromium } from "playwright-core";
 
+const endpoint = "http://127.0.0.1:9222";
+
 const browser = await chromium.connectOverCDP(endpoint, {
   headers: { Authorization: `Bearer ${process.env.AUTOMATION_RUNTIME_TOKEN!}` },
 });
@@ -41,6 +57,7 @@ const browser = await chromium.connectOverCDP(endpoint, {
 ```ts
 import puppeteer from "puppeteer-core";
 
+// Fetch webSocketDebuggerUrl from GET http://127.0.0.1:9222/json/version
 const browser = await puppeteer.connect({
   browserWSEndpoint: wsEndpoint,
   headers: { Authorization: `Bearer ${process.env.AUTOMATION_RUNTIME_TOKEN!}` },
