@@ -4493,10 +4493,13 @@ version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.0",
+ "chrono",
  "intent-engine",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "thiserror",
  "tokio",

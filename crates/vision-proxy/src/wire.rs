@@ -24,7 +24,7 @@ pub struct ProposeContext {
     pub recent_command_kinds: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProposeContextCandidate {
     pub role: String,

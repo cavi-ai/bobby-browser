@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::data_collector::VisionDataCollector;
 use crate::upstream::{ExtractInput, ProposeInput, Upstream, UpstreamError};
 use crate::validate::{validate_extract, validate_proposal};
 use crate::wire::{ExtractResponse, ProposeResponse};
@@ -23,6 +26,7 @@ pub struct OllamaUpstream {
     client: reqwest::Client,
     model: String,
     base_url: String,
+    data_collector: Option<Arc<VisionDataCollector>>,
 }
 
 impl OllamaUpstream {
@@ -31,7 +35,13 @@ impl OllamaUpstream {
             client: reqwest::Client::new(),
             model,
             base_url,
+            data_collector: None,
         }
+    }
+
+    pub fn with_data_collector(mut self, collector: Arc<VisionDataCollector>) -> Self {
+        self.data_collector = Some(collector);
+        self
     }
 
     fn completions_url(&self) -> String {
@@ -109,6 +119,62 @@ impl OllamaUpstream {
 #[async_trait]
 impl Upstream for OllamaUpstream {
     async fn propose(&self, input: ProposeInput) -> Result<ProposeResponse, UpstreamError> {
+        let result = self.do_propose(&input).await;
+
+        // Log for training data collection
+        if let Some(collector) = &self.data_collector {
+            match &result {
+                Ok(response) => {
+                    collector.log_proposal(
+                        input.screenshot_png_b64.clone(),
+                        &input,
+                        Some(response.clone()),
+                        None, // journey — set by runtime
+                        None, // step — set by runtime
+                        None, // success — set by runtime
+                        None, // error_message — set by runtime
+                        None, // run_id — set by runtime
+                        Some(self.model.clone()),
+                    );
+                }
+                Err(_) => {
+                    collector.log_proposal(
+                        input.screenshot_png_b64.clone(),
+                        &input,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some("upstream error".into()),
+                        None,
+                        Some(self.model.clone()),
+                    );
+                }
+            }
+        }
+
+        result
+    }
+
+    async fn extract(&self, input: ExtractInput) -> Result<ExtractResponse, UpstreamError> {
+        let schema = serde_json::to_string(&input.schema)
+            .map_err(|e| UpstreamError::Invalid(format!("schema serialization failed: {e}")))?;
+        let purpose = input.purpose.as_deref().unwrap_or("");
+        let user_text = format!(
+            "extract structured value from page content.\npurpose: {purpose}\nschema: {schema}\ncontent:\n{}",
+            input.content
+        );
+        let value = self.chat_json(EXTRACT_SYSTEM, &user_text, None).await?;
+        let response: ExtractResponse = serde_json::from_value(value).map_err(|e| {
+            UpstreamError::Invalid(format!("extract JSON does not match wire shape: {e}"))
+        })?;
+        validate_extract(&response).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
+        Ok(response)
+    }
+}
+
+impl OllamaUpstream {
+    async fn do_propose(&self, input: &ProposeInput) -> Result<ProposeResponse, UpstreamError> {
         let mut user_text = format!(
             "purpose: {}\nintentKind: {}\nstuck: {}",
             input.purpose, input.intent_kind, input.stuck
@@ -146,22 +212,6 @@ impl Upstream for OllamaUpstream {
         })?;
         validate_proposal(&proposal).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
         Ok(proposal)
-    }
-
-    async fn extract(&self, input: ExtractInput) -> Result<ExtractResponse, UpstreamError> {
-        let schema = serde_json::to_string(&input.schema)
-            .map_err(|e| UpstreamError::Invalid(format!("schema serialization failed: {e}")))?;
-        let purpose = input.purpose.as_deref().unwrap_or("");
-        let user_text = format!(
-            "extract structured value from page content.\npurpose: {purpose}\nschema: {schema}\ncontent:\n{}",
-            input.content
-        );
-        let value = self.chat_json(EXTRACT_SYSTEM, &user_text, None).await?;
-        let response: ExtractResponse = serde_json::from_value(value).map_err(|e| {
-            UpstreamError::Invalid(format!("extract JSON does not match wire shape: {e}"))
-        })?;
-        validate_extract(&response).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
-        Ok(response)
     }
 }
 

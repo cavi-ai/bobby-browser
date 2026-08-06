@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod data_collector;
 pub mod openai;
 pub mod ollama;
 pub mod server;
@@ -6,6 +7,7 @@ pub mod upstream;
 pub mod validate;
 pub mod wire;
 
+pub use data_collector::{DataCollectorConfig, VisionDataCollector};
 pub use openai::{
     openai_upstream_from_env, OpenAiConfigError, OpenAiUpstream, DEFAULT_BASE_URL as OPENAI_DEFAULT_BASE_URL, DEFAULT_MODEL as OPENAI_DEFAULT_MODEL,
 };
