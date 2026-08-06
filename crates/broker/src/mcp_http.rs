@@ -57,14 +57,19 @@ impl McpServers {
         // build a fresh `Server`. This resets the principal's MCP lifecycle, so a
         // rotated bearer must `initialize` again on its next `/v1/mcp` call.
         let runtime = (state.bind_runtime)(handle.clone());
-        let server = Arc::new(Server::for_interface(
+        let mut server = Server::for_interface(
             runtime,
             handle.clone(),
             // Must be the same EventStore AppState hands to HTTP `/v1/events`, so
             // pollers and the `events_read` MCP tool observe one stream.
             state.events.clone(),
             state.mcp_resources.clone(),
-        ));
+        );
+        // Same in-process scheduler as POST /v1/jobs (handlers already registered).
+        server = server.with_jobs(Arc::new(mcp_gateway::InProcessJobPort::new(
+            Arc::clone(&state.scheduler),
+        )));
+        let server = Arc::new(server);
         let replaced = entries.insert(principal, (handle, server.clone()));
         if let Some((_, replaced)) = replaced {
             // Honours the `tools.listChanged: true` advertised at `initialize`: the

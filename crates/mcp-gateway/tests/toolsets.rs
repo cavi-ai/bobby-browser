@@ -37,7 +37,12 @@ async fn server() -> Server {
     let server = Server::new(Arc::new(AuthenticatedRuntime::new(
         RuntimeService::default(),
         handle,
-    )));
+    )))
+    .with_startup_toolset(Toolset::Full)
+    .with_jobs({
+        let (port, _scheduler) = mcp_gateway::InProcessJobPort::memory();
+        Arc::new(port)
+    });
     server
         .handle_message(json!({
             "jsonrpc":"2.0","id":1,"method":"initialize",
@@ -78,14 +83,56 @@ fn bytes(tools: &[Value]) -> usize {
 }
 
 #[tokio::test]
-async fn the_default_is_the_full_surface() {
+async fn the_default_is_explore() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000045")),
+            all_capabilities(),
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .expect("authority issues");
+    let handle = authority
+        .verify(&token.expose_once())
+        .await
+        .expect("bearer verifies");
+    let server = Server::new(Arc::new(AuthenticatedRuntime::new(
+        RuntimeService::default(),
+        handle,
+    )));
+    server
+        .handle_message(json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-11-25","capabilities":{},
+                      "clientInfo":{"name":"toolsets-default","version":"1"}}
+        }))
+        .await
+        .expect("initialize answers");
+    server
+        .handle_message(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
+        .await;
+    let names: Vec<String> = list_tools(&server)
+        .await
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        !names.contains(&"click".to_owned()) && names.contains(&"a11y_snapshot".to_owned()),
+        "unset startup must advertise explore, not the full surface: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn selecting_full_restores_the_full_surface() {
     let server = server().await;
     let full = list_tools(&server).await;
+    select(&server, Toolset::Explore).await;
     select(&server, Toolset::Full).await;
     assert_eq!(
         bytes(&full),
         bytes(&list_tools(&server).await),
-        "selecting `full` changed a surface that was already full"
+        "selecting `full` after explore must restore the full surface"
     );
 }
 

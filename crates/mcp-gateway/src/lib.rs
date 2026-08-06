@@ -20,6 +20,7 @@ mod resources;
 mod schema;
 mod server;
 mod toolset;
+mod jobs;
 
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
@@ -65,3 +66,4 @@ pub use notify::{NotificationSink, NotificationStream};
 pub use resources::{ArtifactCatalogFull, ArtifactResources};
 pub use server::Server;
 pub use toolset::Toolset;
+pub use jobs::{InProcessJobPort, JobPort, JobPortError, JobPriorityWire};

@@ -25,6 +25,7 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "intent_locate"
             | "intent_wait_for_state"
             | "intent_extract"
+            | "job_status"
     );
     let destructive = matches!(
         name,
@@ -33,6 +34,7 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "cookie_delete"
             | "intent_submit_and_verify"
             | "intent_follow"
+            | "job_cancel"
     );
     // `idempotentHint` per MCP is unconditional: "calling the tool repeatedly
     // with the same arguments will have no additional effect." An optional
@@ -101,6 +103,9 @@ pub(crate) fn tool_title(name: &str) -> &'static str {
         "intent_locate" => "Locate element",
         "intent_submit_and_verify" => "Submit and verify",
         "intent_wait_for_state" => "Wait for state",
+        "job_cancel" => "Cancel job",
+        "job_status" => "Job status",
+        "job_submit" => "Submit job",
         "navigate" => "Navigate",
         "network_log" => "Read network log",
         "page_activate" => "Activate page",

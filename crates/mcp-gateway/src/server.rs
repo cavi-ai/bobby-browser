@@ -77,6 +77,8 @@ pub struct Server {
     /// `std::sync::Mutex` because `list_tools` is sync and the critical section
     /// is a single enum copy.
     toolset: std::sync::Mutex<crate::toolset::Toolset>,
+    /// Optional job scheduler. When absent, job_* tools are not advertised.
+    jobs: Option<Arc<dyn crate::jobs::JobPort>>,
 }
 
 impl Server {
@@ -119,7 +121,14 @@ impl Server {
             pending_cancellations: Mutex::new(BTreeSet::new()),
             shutting_down: AtomicBool::new(false),
             toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
+            jobs: None,
         }
+    }
+
+    /// Attach a job port so `job_submit` / `job_status` / `job_cancel` advertise.
+    pub fn with_jobs(mut self, jobs: Arc<dyn crate::jobs::JobPort>) -> Self {
+        self.jobs = Some(jobs);
+        self
     }
 
     /// Start on `toolset` unless `BOBBY_MCP_TOOLSET` already chose one, so
@@ -534,6 +543,9 @@ impl Server {
             "evaluate_javascript",
             "events_read",
             "inspect",
+            "job_cancel",
+            "job_status",
+            "job_submit",
             "navigate",
             "network_log",
             "a11y_snapshot",
@@ -556,6 +568,9 @@ impl Server {
             "wait_for",
             "workflow_recover",
         ] {
+            if crate::jobs::is_job_tool(name) && self.jobs.is_none() {
+                continue;
+            }
             let required = required_capabilities(name).expect("registered tool");
             if !self.current_toolset().advertises(name) {
                 continue;
@@ -991,7 +1006,12 @@ impl Server {
                     }),
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                if input.boundary.unwrap_or(false) && input.auto_checkpoint.unwrap_or(false) {
+                    self.submit_envelope_with_auto_checkpoint(context, envelope)
+                        .await
+                } else {
+                    self.submit_envelope(context, envelope).await
+                }
             }
             "type_text" => {
                 let input: TypeTextArgs = match bounded_parse(call.arguments) {
@@ -1623,6 +1643,63 @@ impl Server {
                     .await
                     .and_then(to_json)
             }
+            "job_submit" => {
+                let Some(jobs) = self.jobs.as_ref() else {
+                    return error(id, METHOD_NOT_FOUND, "Method not found", None);
+                };
+                let input: JobSubmitArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let priority = match input.priority.as_deref() {
+                    None => crate::jobs::JobPriorityWire::Normal,
+                    Some(raw) => match crate::jobs::JobPriorityWire::parse(raw) {
+                        Some(priority) => priority,
+                        None => return invalid_params_reason(id, "malformedArguments"),
+                    },
+                };
+                match jobs
+                    .submit(
+                        &context.principal_id,
+                        input.name,
+                        input.payload.unwrap_or(Value::Null),
+                        priority,
+                        input.max_retries.unwrap_or(3),
+                        input.timeout_ms,
+                        Some(context.correlation_id.as_uuid().to_string()),
+                    )
+                    .await
+                {
+                    Ok(outcome) => Ok(outcome.to_value()),
+                    Err(error) => return job_port_error_response(id, error),
+                }
+            }
+            "job_status" => {
+                let Some(jobs) = self.jobs.as_ref() else {
+                    return error(id, METHOD_NOT_FOUND, "Method not found", None);
+                };
+                let input: JobIdArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                match jobs.status(&context.principal_id, &input.job_id).await {
+                    Ok(status) => Ok(status.to_value()),
+                    Err(error) => return job_port_error_response(id, error),
+                }
+            }
+            "job_cancel" => {
+                let Some(jobs) = self.jobs.as_ref() else {
+                    return error(id, METHOD_NOT_FOUND, "Method not found", None);
+                };
+                let input: JobIdArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                match jobs.cancel(&context.principal_id, &input.job_id).await {
+                    Ok(()) => Ok(json!({ "cancelled": true, "jobId": input.job_id })),
+                    Err(error) => return job_port_error_response(id, error),
+                }
+            }
             "recovery_status" => {
                 let input: RecoveryStatusArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
@@ -1858,6 +1935,9 @@ impl Server {
     }
 
     fn tool_available(&self, name: &str) -> bool {
+        if crate::jobs::is_job_tool(name) && self.jobs.is_none() {
+            return false;
+        }
         let capabilities = self
             .handle
             .context(Utc::now() + Duration::minutes(1), None)
@@ -2199,6 +2279,26 @@ struct ToolsetSelectArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JobSubmitArgs {
+    name: String,
+    #[serde(default)]
+    payload: Option<Value>,
+    #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
+    max_retries: Option<u32>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JobIdArgs {
+    job_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkflowRecoverArgs {
     workflow_id: types::WorkflowId,
 }
@@ -2312,7 +2412,8 @@ page_scoped_args!(NavigateArgs {
 
 /// Click is the one flat primitive that can be Boundary class, so — like the
 /// intent tools — it accepts caller-pinned `commandId`/`attemptId` for the
-/// pre-action checkpoint gate (see `pin_envelope_ids`).
+/// pre-action checkpoint gate (see `pin_envelope_ids`). When `boundary` is
+/// true, `autoCheckpoint` mints that checkpoint in the same call.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClickArgs {
@@ -2327,6 +2428,8 @@ struct ClickArgs {
     selector: Option<String>,
     target: Option<types::TargetSpec>,
     boundary: Option<bool>,
+    #[serde(default)]
+    auto_checkpoint: Option<bool>,
     expected_url: Option<String>,
 }
 
@@ -2631,6 +2734,32 @@ fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
     )
 }
 
+fn job_port_error_response(id: Value, port_error: crate::jobs::JobPortError) -> Value {
+    match port_error {
+        crate::jobs::JobPortError::InvalidName | crate::jobs::JobPortError::InvalidPriority => {
+            invalid_params_reason(id, "malformedArguments")
+        }
+        crate::jobs::JobPortError::NotFound => error(
+            id,
+            INTERFACE_ERROR,
+            "Runtime interface error",
+            Some(json!({
+                "code":"notFound",
+                "message": port_error.message(),
+            })),
+        ),
+        crate::jobs::JobPortError::Unavailable(detail) => error(
+            id,
+            INTERFACE_ERROR,
+            "Runtime interface error",
+            Some(json!({
+                "code":"internal",
+                "message": detail,
+            })),
+        ),
+    }
+}
+
 fn interface_error_response(id: Value, mut interface_error: types::InterfaceError) -> Value {
     let code = serde_json::to_value(interface_error.code)
         .ok()
@@ -2816,6 +2945,9 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         "form_snapshot" => Some(&[types::Capability::PageRead]),
         "page_open" => Some(&[types::Capability::PageWrite]),
         "session_close" | "session_create" => Some(&[types::Capability::SessionWrite]),
+        "job_submit" => Some(&[types::Capability::JobSubmit]),
+        "job_status" => Some(&[types::Capability::JobRead]),
+        "job_cancel" => Some(&[types::Capability::JobCancel]),
         _ => None,
     }
 }
@@ -2865,6 +2997,9 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         "session_create" => Some(types::InterfaceOperation::CreateSession),
         "session_list" => Some(types::InterfaceOperation::ReadSession),
         "workflow_recover" => Some(types::InterfaceOperation::RecoverWorkflow),
+        "job_submit" => Some(types::InterfaceOperation::SubmitJob),
+        "job_status" => Some(types::InterfaceOperation::ReadJob),
+        "job_cancel" => Some(types::InterfaceOperation::CancelJob),
         _ => None,
     }
 }
@@ -2873,7 +3008,7 @@ fn tool_description(name: &str) -> &'static str {
     match name {
         "context_ask" => "Ask the retained page context where a described control is, instead of pulling a whole accessibility tree into your context. Requires page:read. Returns a bound target and a confidence score, or nothing. On no answer, take an a11y_snapshot -- the context is invalidated by every command that may have changed the page.",
         "context_neighbors" => "Show the remembered form structure around a described control: its form, sibling controls, and per-intent success counters, marked as remembered rather than live-observed. Requires context:read. Returns nothing for an unknown site or control.",
-        "toolset_select" => "Narrow tools/list to one phase: explore, act, intent, verify, or full. Requires no capability. Emits notifications/tools/list_changed, so re-read tools/list after calling it. Hidden tools stay callable; this changes what is advertised, not what is permitted.",
+        "toolset_select" => "Narrow tools/list to one phase: explore (default), act, intent, verify, or full. Requires no capability. Emits notifications/tools/list_changed, so re-read tools/list after calling it. Hidden tools stay callable; this changes what is advertised, not what is permitted.",
         "runtime_info" => "Runtime version, granted capabilities, active session count, uptime, and credential expiry. Requires session:read.",
         "session_list" => "List browser sessions visible to this principal, each with its profile and open-page count. Requires session:read.",
         "page_list" => "List open pages in an owned session, each with its id, URL, and title. Requires browser:mutate.",
@@ -2892,7 +3027,7 @@ fn tool_description(name: &str) -> &'static str {
         "page_close" => "Close a page in an owned session. Requires browser:mutate. Destructive: the page and its in-flight commands are gone immediately. On failure with notFound, the page id is stale -- call page_list for current ids.",
         "page_activate" => "Bring a page to the front in an owned session. Requires browser:mutate. Produces the activated page's URL and title. On failure with notFound, the page id is stale -- call page_list for current ids.",
         "navigate" => "Navigate a page to a URL and wait for the requested load state. Requires browser:mutate. Produces navigation evidence with the settled URL and title. On failure with invalidRequest, the URL scheme isn't http(s) or data -- use one of those; on deadlineExceeded, retry with a longer timeout_ms.",
-        "click" => "Click an element identified by a selector or a resolved target. Requires browser:mutate. Produces execution-path evidence for the click. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
+        "click" => "Click an element identified by a selector or a resolved target. Requires browser:mutate. Produces execution-path evidence for the click. When boundary is true, autoCheckpoint true mints the required checkpoint in the same call; else pin commandId/attemptId and checkpoint_save them first. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
         "type_text" => "Type text into an element identified by a selector or a resolved target, optionally clearing it first. Requires browser:mutate. Produces execution-path evidence for the input. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
         "wait_for" => "Wait for a page condition with a bounded timeout. Requires browser:mutate. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
         "control_action" => "Perform one typed native form-control action and return the reread control state. Requires browser:mutate, and file:upload too if the action is setFiles. Produces control-action evidence with the post-action value. On failure with targetNotFound, take a fresh form_snapshot and pass the new target.",
@@ -2915,6 +3050,9 @@ fn tool_description(name: &str) -> &'static str {
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
         "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure: verificationFailed (no HAR captured), browserCommandFailed (engine could not persist it), or internal (write failed) -- none caller-fixable; retry, and report if it persists.",
+        "job_submit" => "Submit a named job (echo/sleep builtins). Requires job:submit. Same as POST /v1/jobs. On failure with notFound, retry submit.",
+        "job_status" => "Read one owned job by id. Requires job:read. Same as GET /v1/jobs/{job}. On failure with notFound, the id is unknown or not owned.",
+        "job_cancel" => "Cancel one owned job by id. Requires job:cancel. Same as DELETE /v1/jobs/{job}. On failure with notFound, the id is unknown or not owned.",
         _ => "Runtime operation.",
     }
 }

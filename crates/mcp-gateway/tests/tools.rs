@@ -36,7 +36,12 @@ async fn fixture_server(capabilities: Vec<Capability>) -> Server {
         RuntimeService::default(),
         handle.clone(),
     ));
-    let server = Server::new(runtime);
+    let server = Server::new(runtime)
+        .with_startup_toolset(mcp_gateway::Toolset::Full)
+        .with_jobs({
+            let (port, _scheduler) = mcp_gateway::InProcessJobPort::memory();
+            Arc::new(port)
+        });
     initialize(&server).await;
     server
 }
@@ -2096,7 +2101,8 @@ const INTENT_TOOLS: [&str; 8] = [
 #[tokio::test]
 async fn intent_tools_require_intent_execute_alongside_browser_mutate() {
     // `browser:mutate` alone reaches the primitives but not the semantic layer.
-    let server = Server::new(Arc::new(authenticated_with_browser_mutate().await));
+    let server = Server::new(Arc::new(authenticated_with_browser_mutate().await))
+        .with_startup_toolset(mcp_gateway::Toolset::Full);
     initialize(&server).await;
     let listed = server
         .handle_message(request(70, "tools/list", json!({})))
@@ -2137,7 +2143,8 @@ async fn intent_tools_require_intent_execute_alongside_browser_mutate() {
     assert_eq!(denied["error"]["code"], -32601, "{denied}");
     assert_eq!(runtime.submit_dispatch_count(), 0);
 
-    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    let server = Server::new(Arc::new(authenticated_with_intents().await))
+        .with_startup_toolset(mcp_gateway::Toolset::Full);
     initialize(&server).await;
     let listed = server
         .handle_message(request(72, "tools/list", json!({})))

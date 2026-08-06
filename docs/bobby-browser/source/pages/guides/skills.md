@@ -2,24 +2,32 @@
 documentedVersion: {{PRODUCT_VERSION}}
 ---
 
-# Bobby skills
+# Internal skill runtime (Ghost / ZigZagZig)
 
-Bobby skills (SkillGhost, SkillZigZagZig, and related recovery tactics) shape
-browser preparation and recovery **inside** the skill runtime and live
-championship / gauntlet paths. They do **not** bypass the normal command
-lifecycle, policy checks, deadlines, or evidence rules.
+> **Not the agent skill.** Agents install and follow the public skill via
+> `bobby install --skill` (`bobby-browser` under `~/.agents/skills/`, sourced
+> from `skill/SKILL.md` in the repo). That skill drives MCP tools.
+> **SkillGhost** and **SkillZigZagZig** below are an in-process recovery
+> router used by runtime tests — they are **not** MCP tools and are not part of
+> the public HTTP/SDK surface.
+
+SkillGhost, SkillZigZagZig, and related recovery tactics shape browser
+preparation and recovery **inside** `crates/skill-runtime`. They do **not**
+bypass the normal command lifecycle, policy checks, deadlines, or evidence
+rules.
 
 ## Not a public API today
 
-Skills are **not** exposed on:
+Internal skills are **not** exposed on:
 
 - HTTP (`/v1/*`)
 - MCP tools (`command_execute` and friends)
 - `@cavi-ai/bobby-browser`
 
-Do not treat skill router aliases as public user commands for application
-integrations. Those aliases exist in the in-process skill router
-(`crates/skill-runtime`) for runtime / gauntlet tests, not as broker routes.
+Do not treat skill router aliases (`/ghost`, `/zigzagzig`) as public user
+commands for application integrations. Those aliases exist in the in-process
+skill router for runtime tests (for example `bobby_skill_recovery`), not as
+broker routes.
 
 Public clients automate with primitives and intents via
 [HTTP](../surfaces/http-api.md), [MCP tools](../surfaces/mcp-tools.md), or the
@@ -28,10 +36,9 @@ inspect (`recovery_status` / `GET /v1/recovery/{id}` / `recoveryStatus`) plus
 mutate (`checkpoint` + `recover`) — see
 [Events and recovery](events-recovery.md).
 
-## Internal skill router (contributor / gauntlet)
+## Internal skill router (contributor / runtime tests)
 
-When exercising the skill runtime or [browser gauntlet](gauntlet.md), the
-in-process router recognizes:
+When exercising the skill runtime, the in-process router recognizes:
 
 ### SkillGhost
 

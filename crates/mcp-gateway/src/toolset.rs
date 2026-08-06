@@ -1,10 +1,10 @@
 //! Phase-scoped toolsets: `tools/list` advertises only the tools a phase needs,
 //! keeping the response inside the 131,072-byte budget.
 //!
-//! [`Toolset::Full`] is the default and lists everything the principal's
-//! capabilities allow. An agent opts into a narrower phase with
-//! `toolset_select`, which also emits `notifications/tools/list_changed` so the
-//! client re-reads.
+//! [`Toolset::Explore`] is the default so the first `tools/list` stays small
+//! (~42 KiB). An agent widens with `toolset_select` (or starts on `full` via
+//! `BOBBY_MCP_TOOLSET` / `[mcp] startup_toolset`), which also emits
+//! `notifications/tools/list_changed` so the client re-reads.
 //!
 //! Phases follow the runtime's working loop:
 //!
@@ -12,6 +12,7 @@
 //! - [`Toolset::Act`]: the primitives that change the page.
 //! - [`Toolset::Intent`]: the `intent_*` family.
 //! - [`Toolset::Verify`]: evidence, checkpoints, recovery.
+//! - [`Toolset::Full`]: everything the principal's capabilities allow.
 //!
 //! `Act` and `Intent` stay separate because the `intent_*` schemas are the
 //! largest on the surface (5-6 KB apiece); merging them advertises most of the
@@ -26,8 +27,9 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Toolset {
     /// Everything the principal's capabilities allow.
-    #[default]
     Full,
+    /// Default: read/snapshot/navigate lifecycle without mutation tools.
+    #[default]
     Explore,
     Act,
     Intent,
@@ -50,7 +52,7 @@ impl Toolset {
     /// configured value can supply the fallback. An unparseable value is
     /// ignored rather than fatal: this only selects what `tools/list`
     /// advertises, and failing a connection over a display preference would
-    /// be worse than starting on the full surface.
+    /// be worse than starting on the default explore surface.
     pub fn from_env() -> Option<Self> {
         let raw = std::env::var("BOBBY_MCP_TOOLSET").ok()?;
         let parsed = Self::parse(raw.trim());
@@ -88,7 +90,14 @@ impl Toolset {
     ///
     /// A phase narrows what is shown, never what is allowed: a hidden tool is
     /// still callable, and capability gates stay the only enforcement boundary.
+    ///
+    /// Job tools are verify-only in `tools/list` so the default/full connect
+    /// catalog stays inside the byte budget; they remain callable from any
+    /// phase when a [`crate::jobs::JobPort`] is attached.
     pub fn advertises(self, tool: &str) -> bool {
+        if crate::jobs::is_job_tool(tool) {
+            return self == Self::Verify;
+        }
         if self == Self::Full || ALWAYS.contains(&tool) {
             return true;
         }
@@ -186,6 +195,9 @@ const VERIFY: &[&str] = &[
     "context_ask",
     "context_neighbors",
     "pdf",
+    "job_submit",
+    "job_status",
+    "job_cancel",
 ];
 
 #[cfg(test)]
@@ -221,6 +233,9 @@ mod tests {
         "intent_locate",
         "intent_submit_and_verify",
         "intent_wait_for_state",
+        "job_cancel",
+        "job_status",
+        "job_submit",
         "navigate",
         "network_log",
         "page_activate",
@@ -242,11 +257,22 @@ mod tests {
     ];
 
     #[test]
-    fn full_advertises_everything() {
+    fn full_advertises_everything_except_verify_only_jobs() {
         for tool in EVERY_TOOL {
+            if matches!(*tool, "job_submit" | "job_status" | "job_cancel") {
+                assert!(
+                    !Toolset::Full.advertises(tool),
+                    "{tool} must stay verify-only so full stays under budget"
+                );
+                assert!(
+                    Toolset::Verify.advertises(tool),
+                    "{tool} must advertise in verify"
+                );
+                continue;
+            }
             assert!(
                 Toolset::Full.advertises(tool),
-                "{tool} is missing from the default toolset"
+                "{tool} is missing from the full toolset"
             );
         }
     }

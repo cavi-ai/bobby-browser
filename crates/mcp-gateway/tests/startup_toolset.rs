@@ -1,5 +1,5 @@
 //! Startup phase resolution: `BOBBY_MCP_TOOLSET`, then `[mcp]
-//! startup_toolset`, then the full surface.
+//! startup_toolset`, then explore (the default).
 //!
 //! The point of the setting is the handshake: an agent downloads the whole
 //! `tools/list` before it can call `toolset_select`, so a phase chosen after
@@ -70,36 +70,51 @@ fn payload_bytes(names: &[String]) -> usize {
 
 /// One test, because each arm mutates the same process-wide variable.
 #[tokio::test]
-async fn startup_phase_resolves_env_then_config_then_full() {
-    // Unset: the full surface, unchanged for every client that sets nothing.
+async fn startup_phase_resolves_env_then_config_then_explore() {
+    // Unset: explore — small first tools/list; widen with toolset_select.
     unsafe { std::env::remove_var("BOBBY_MCP_TOOLSET") };
-    let full = tool_names(&initialized_server(|server| server).await).await;
+    let default_names = tool_names(&initialized_server(|server| server).await).await;
     assert!(
-        full.contains(&"intent_fill".to_owned()) && full.contains(&"click".to_owned()),
-        "the default surface should carry both intent and act tools"
+        !default_names.contains(&"click".to_owned())
+            && !default_names.contains(&"intent_fill".to_owned()),
+        "the default surface should hide act and intent tools"
+    );
+    assert!(
+        default_names.contains(&"a11y_snapshot".to_owned())
+            && default_names.contains(&"toolset_select".to_owned()),
+        "explore keeps read tools and toolset_select"
     );
 
     // Config only: the configured phase applies at connect, before the agent
     // has spent a round trip on `toolset_select`.
     let configured = tool_names(
-        &initialized_server(|server| server.with_startup_toolset(Toolset::Explore)).await,
+        &initialized_server(|server| server.with_startup_toolset(Toolset::Act)).await,
     )
     .await;
     assert!(
-        !configured.contains(&"click".to_owned()),
-        "explore advertises no mutating tools"
+        configured.contains(&"click".to_owned()),
+        "act advertises mutating primitives"
     );
     assert!(
-        configured.contains(&"a11y_snapshot".to_owned()),
-        "explore keeps the read tools"
+        !configured.contains(&"intent_fill".to_owned()),
+        "act keeps intents hidden"
     );
     assert!(
         configured.contains(&"toolset_select".to_owned()),
         "a narrowed agent must always be able to widen again"
     );
     assert!(
-        payload_bytes(&configured) < payload_bytes(&full),
-        "a narrow phase that is not smaller buys nothing"
+        payload_bytes(&configured) > payload_bytes(&default_names),
+        "act should advertise more than the explore default"
+    );
+
+    let full = tool_names(
+        &initialized_server(|server| server.with_startup_toolset(Toolset::Full)).await,
+    )
+    .await;
+    assert!(
+        full.contains(&"intent_fill".to_owned()) && full.contains(&"click".to_owned()),
+        "full carries both intent and act tools"
     );
 
     // Env only.
@@ -118,12 +133,12 @@ async fn startup_phase_resolves_env_then_config_then_full() {
     .await;
     assert_eq!(both, from_env, "config must not override BOBBY_MCP_TOOLSET");
 
-    // An unparseable value falls back to full rather than failing the
-    // connection -- this selects a view, not a permission.
+    // An unparseable value falls back to the default explore surface rather
+    // than failing the connection -- this selects a view, not a permission.
     unsafe { std::env::set_var("BOBBY_MCP_TOOLSET", "not-a-phase") };
     assert_eq!(
         tool_names(&initialized_server(|server| server).await).await,
-        full,
+        default_names,
         "an invalid BOBBY_MCP_TOOLSET should be ignored, not fatal"
     );
 

@@ -81,8 +81,8 @@ durable recovery receipts bound to the checkpoint.
 Any loss at accepted, prepared, executing, verifying, or result-prepared
 boundaries that cannot prove the outcome remains `NeedsReconciliation`.
 
-Skill-assisted recovery (internal skill runtime / gauntlet) follows the same
-authority rules — see [Bobby skills](skills.md).
+Skill-assisted recovery (internal skill runtime) follows the same authority
+rules — see [Internal skill runtime](skills.md). Not the public agent skill.
 
 ## Next
 

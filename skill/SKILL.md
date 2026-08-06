@@ -10,6 +10,13 @@ description: >
 
 # bobby-browser
 
+This is the **public agent skill** (`bobby install --skill`). It is not
+SkillGhost / SkillZigZagZig — those are internal in-process recovery strategies
+and are not MCP tools.
+
+Jobs: `job_submit` / `job_status` / `job_cancel` (needs `job:*` caps). They
+advertise after `toolset_select` → `verify`. Same contract as HTTP `/v1/jobs`.
+
 bobby-browser is a browser automation runtime, not an agent. You drive it
 through MCP tools; the runtime verifies every effect and returns evidence.
 Never claim an action worked without its evidence.

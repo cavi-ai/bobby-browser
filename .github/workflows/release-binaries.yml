@@ -68,6 +68,8 @@ jobs:
             tar -a -cf "${STAGE}.zip" "$STAGE"
             echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
           else
+            # Drop debug symbols from the released binary; local cargo builds stay unstripped.
+            strip "target/${{ matrix.target }}/release/bobby"
             cp "target/${{ matrix.target }}/release/bobby" "$STAGE/bobby"
             tar -czf "${STAGE}.tar.gz" "$STAGE"
             echo "ASSET=${STAGE}.tar.gz" >> "$GITHUB_ENV"
