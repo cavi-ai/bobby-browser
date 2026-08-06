@@ -7,14 +7,13 @@ documentedVersion: 0.6.0
 > **Not the agent skill.** Agents install and follow the public skill via
 > `bobby install --skill` (`bobby-browser` under `~/.agents/skills/`, sourced
 > from `skill/SKILL.md` in the repo). That skill drives MCP tools.
-> **SkillGhost** and **SkillZigZagZig** below are an in-process recovery
-> router used by runtime tests — they are **not** MCP tools and are not part of
-> the public HTTP/SDK surface.
+> **Ghost** and **ZigZagZig** (Rust: `SkillGhost` / `SkillZigZagZig`) below are
+> an in-process recovery router used by runtime tests — they are **not** MCP
+> tools and are not part of the public HTTP/SDK surface.
 
-SkillGhost, SkillZigZagZig, and related recovery tactics shape browser
-preparation and recovery **inside** `crates/skill-runtime`. They do **not**
-bypass the normal command lifecycle, policy checks, deadlines, or evidence
-rules.
+Ghost, ZigZagZig, and related recovery tactics shape browser preparation and
+recovery **inside** `crates/skill-runtime`. They do **not** bypass the normal
+command lifecycle, policy checks, deadlines, or evidence rules.
 
 ## Not a public API today
 
@@ -40,9 +39,9 @@ mutate (`checkpoint` + `recover`) — see
 
 When exercising the skill runtime, the in-process router recognizes:
 
-### SkillGhost
+### Ghost
 
-Use `/ghost on|off|status` (`/ghost` is equivalent to `on`). SkillGhost
+Use `/ghost on|off|status` (`/ghost` is equivalent to `on`). Ghost
 negotiates a coherent browser profile before launch, reports the effective
 engine and supported capabilities, and freezes that profile for the session.
 Required capabilities fail closed; explicitly optional capabilities may degrade
@@ -50,10 +49,10 @@ and remain visible in status. Turning Ghost off stops applying it to new work,
 but a live browser may report `restartRequired` until the next safe launch
 boundary.
 
-SkillGhost reports what the selected browser actually supports. It does not
+Ghost reports what the selected browser actually supports. It does not
 disguise one engine as another or inject contradictory page-visible values.
 
-### SkillZigZagZig
+### ZigZagZig
 
 Use `/zigzagzig run|status|stop` (`/zigzagzig` is equivalent to `run`).
 ZigZagZig applies a bounded recovery ladder to the original postcondition:

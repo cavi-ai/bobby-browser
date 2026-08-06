@@ -14,7 +14,7 @@ pub(crate) fn list_prompts() -> Value {
             {
                 "name": "fill_and_submit_form",
                 "title": "Fill and submit a form",
-                "description": "Snapshot a page's form, fill it, submit and verify, then checkpoint the verified result.",
+                "description": "Snapshot a page's form, fill it, submit and verify, then checkpoint the verified result. On needsReconciliation call recovery_status — do not blind-retry the Boundary submit.",
                 "arguments": [
                     {
                         "name": "sessionId",
@@ -31,7 +31,7 @@ pub(crate) fn list_prompts() -> Value {
             {
                 "name": "extract_from_page",
                 "title": "Extract data from a page",
-                "description": "Snapshot a page and read named fields off it without mutating it.",
+                "description": "Snapshot a page and read named fields off it without mutating it. Per-field extract failures are not a tools/call failure — read structuredContent.",
                 "arguments": [
                     {
                         "name": "sessionId",
@@ -48,7 +48,7 @@ pub(crate) fn list_prompts() -> Value {
             {
                 "name": "recover_workflow",
                 "title": "Recover an interrupted workflow",
-                "description": "Read a workflow's checkpoint, attempt recovery, then resume, restart, or reconcile based on the decision.",
+                "description": "Read a workflow's checkpoint, attempt recovery, then resume, restart, or reconcile based on the decision. Never replay a Boundary command after needsReconciliation.",
                 "arguments": [
                     {
                         "name": "sessionId",

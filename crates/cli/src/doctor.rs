@@ -232,6 +232,18 @@ fn check_vision_session_gate(holds_vision_assist: bool) -> Option<DoctorCheck> {
     })
 }
 
+/// Remind that `javascript:evaluate` still needs session `executionPolicy.javascriptEvaluation`.
+fn check_javascript_session_gate(holds_javascript_evaluate: bool) -> Option<DoctorCheck> {
+    if !holds_javascript_evaluate {
+        return None;
+    }
+    Some(DoctorCheck {
+        status: DoctorStatus::Ok,
+        name: "javascript-session-gate".to_string(),
+        detail: "javascript:evaluate is held; sessions still need executionPolicy.javascriptEvaluation=true (cap alone is not enough)".to_string(),
+    })
+}
+
 fn check_bootstrap_preset(path: Option<&Path>, caps_csv: Option<&str>) -> DoctorCheck {
     let preset = bootstrap_local::read_bootstrap_preset(path);
     let holds_admin = caps_csv.is_some_and(|caps| bootstrap_csv_holds(caps, "authority:admin"));
@@ -801,12 +813,25 @@ pub(crate) fn run_doctor(
             .or(from_env)
             .is_some_and(|caps| bootstrap_csv_holds(&caps, "vision:assist"))
     };
+    let holds_javascript_evaluate = {
+        let from_file = bootstrap_path_for_heal
+            .as_ref()
+            .filter(|path| path.exists())
+            .and_then(|path| bootstrap_local::load_bootstrap_capabilities_csv(path).ok());
+        let from_env = std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES").ok();
+        from_file
+            .or(from_env)
+            .is_some_and(|caps| bootstrap_csv_holds(&caps, "javascript:evaluate"))
+    };
     if let Some(config) = &config {
         if let Some(check) = check_vision_route_for_assist(config, holds_vision_assist) {
             push_doctor_check(&mut report, check);
         }
     }
     if let Some(check) = check_vision_session_gate(holds_vision_assist) {
+        push_doctor_check(&mut report, check);
+    }
+    if let Some(check) = check_javascript_session_gate(holds_javascript_evaluate) {
         push_doctor_check(&mut report, check);
     }
 

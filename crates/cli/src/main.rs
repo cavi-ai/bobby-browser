@@ -2777,6 +2777,11 @@ endpoint_url = "http://127.0.0.1:9100/vision"
             .expect("vision-session-gate check");
         assert_eq!(gate.status, DoctorStatus::Ok);
         assert!(gate.detail.contains("executionPolicy.visionAssist"));
+        let js_gate = report
+            .check("javascript-session-gate")
+            .expect("javascript-session-gate check");
+        assert_eq!(js_gate.status, DoctorStatus::Ok);
+        assert!(js_gate.detail.contains("executionPolicy.javascriptEvaluation"));
     }
 
     #[test]

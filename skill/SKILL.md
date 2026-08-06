@@ -11,8 +11,8 @@ description: >
 # bobby-browser
 
 This is the **public agent skill** (`bobby install --skill`). It is not
-SkillGhost / SkillZigZagZig — those are internal in-process recovery strategies
-and are not MCP tools.
+Ghost / ZigZagZig recovery (Rust: `SkillGhost` / `SkillZigZagZig`) — those are
+in-process recovery strategies and are not MCP tools.
 
 Jobs: `job_submit` / `job_status` / `job_cancel` (needs `job:*` caps). They
 advertise after `toolset_select` → `verify`. Same contract as HTTP `/v1/jobs`.
@@ -40,6 +40,7 @@ Never claim an action worked without its evidence.
    (`initialize` + `tools/list`) against the gateway. When `vision:assist` is
    held, doctor also reminds that sessions need
    `executionPolicy.visionAssist=true` — the cap alone does not enable vision.
+   Same for `javascript:evaluate` and `executionPolicy.javascriptEvaluation`.
 
 Your host should spawn `bobby mcp-stdio` (loads the credential itself). Prefer
 that over raw `mcp-gateway` + env placeholders. ACP hosts use `bobby acp-stdio`

@@ -20,6 +20,8 @@ pub mod protocol;
 mod resources;
 mod schema;
 mod server;
+mod tool_args;
+mod tool_meta;
 pub mod toolset;
 
 #[doc(hidden)]
