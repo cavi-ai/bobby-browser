@@ -914,6 +914,70 @@ fn vision_endpoint_unreachable_detail(endpoint: &str) -> String {
     }
 }
 
+/// 1x1 transparent PNG for the doctor propose probe.
+const DOCTOR_PROBE_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+/// One propose round-trip against the resolved vision provider, timed.
+/// Runs on its own thread+runtime because `run_doctor` is sync inside an
+/// async process.
+fn check_vision_propose_probe(vision: &VisionConfig) -> Option<DoctorCheck> {
+    if matches!(vision.backend, Some(config::VisionBackendKind::Acp)) {
+        return None;
+    }
+    let endpoint = vision.endpoint_url.clone()?;
+    let bearer = vision
+        .token_env
+        .as_ref()
+        .and_then(|name| std::env::var(name).ok());
+    let timeout = std::time::Duration::from_millis(vision.timeout_ms.max(1_000));
+    let probe = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        runtime.block_on(async move {
+            let assist = intent_engine::HttpVisionAssist::new(endpoint, bearer, timeout).ok()?;
+            let started = std::time::Instant::now();
+            intent_engine::VisionAssist::propose(
+                &assist,
+                intent_engine::VisionProposeRequest {
+                    purpose: "doctor probe".to_string(),
+                    intent_kind: "locate".to_string(),
+                    screenshot_png: DOCTOR_PROBE_PNG.to_vec(),
+                    stuck: intent_engine::StuckKind::TargetMissing,
+                    context: None,
+                },
+            )
+            .await
+            .ok()?;
+            Some(started.elapsed())
+        })
+    })
+    .join()
+    .ok()
+    .flatten();
+    Some(match probe {
+        Some(elapsed) => DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-probe".to_string(),
+            detail: format!("propose round-trip ok in {}ms", elapsed.as_millis()),
+        },
+        None => DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "vision-probe".to_string(),
+            detail:
+                "propose round-trip failed (endpoint unreachable, auth rejected, or invalid reply)"
+                    .to_string(),
+        },
+    })
+}
+
 fn check_vision_provider(vision: &VisionConfig) -> Option<DoctorCheck> {
     let name = vision.provider.as_deref()?.trim();
     if name.is_empty() {
@@ -1044,6 +1108,9 @@ fn run_doctor(
             push_doctor_check(&mut report, check);
         }
         if let Some(check) = check_vision_upstream_key(&config.vision) {
+            push_doctor_check(&mut report, check);
+        }
+        if let Some(check) = check_vision_propose_probe(&config.vision) {
             push_doctor_check(&mut report, check);
         }
 

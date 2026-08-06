@@ -331,7 +331,10 @@ async fn batch_prefill(
         }
     }
     if !batch.is_empty() {
+        tracing::info!(recorded = batch.len(), "vision.prefill_batch");
         proposals.record_proposals(page_id, batch);
+    } else {
+        tracing::info!("vision.prefill_batch_empty");
     }
 }
 
@@ -1721,6 +1724,7 @@ async fn stuck_outcome_with_prior_evidence(
             .await
             {
                 Ok(mut act_evidence) => {
+                    tracing::info!(intent = intent_kind, "vision.prefill_hit");
                     let mut evidence = prior_evidence;
                     evidence.append(&mut act_evidence);
                     let artifact_ids = artifact_ids_from(&evidence);
@@ -1742,6 +1746,7 @@ async fn stuck_outcome_with_prior_evidence(
                 Err(_) => {
                     // A cached proposal that cannot be executed is dropped,
                     // never retried; live escalation proceeds unchanged.
+                    tracing::info!(intent = intent_kind, "vision.prefill_entry_dropped");
                     proposals.drop_proposal(page_id, &key);
                 }
             }
@@ -1809,6 +1814,7 @@ async fn escalate_with_vision(
         candidates,
         verification,
     } = report;
+    tracing::info!(intent = intent_kind, trigger = "stuck", "vision.escalation");
     // `stuck_evidence` is prefixed onto failure evidence only, never onto a Completed one.
     let mut base_evidence = prior_evidence.clone();
     base_evidence.push(stuck_evidence);
@@ -1851,6 +1857,7 @@ async fn escalate_with_vision(
             })
             .collect();
     }
+    let propose_started = std::time::Instant::now();
     let proposal = match assist
         .propose(VisionProposeRequest {
             purpose: purpose.clone().unwrap_or_default(),
@@ -1877,8 +1884,18 @@ async fn escalate_with_vision(
         }
     };
 
+    tracing::info!(
+        intent = intent_kind,
+        latency_ms = propose_started.elapsed().as_millis() as u64,
+        "vision.provider_round_trip"
+    );
     let proposal_hash = proposal_sha256(&proposal);
     if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+        tracing::info!(
+            intent = intent_kind,
+            confidence = proposal.confidence,
+            "vision.rejection_floor"
+        );
         let mut evidence = base_evidence;
         evidence.append(&mut screenshot_evidence);
         evidence.push(intent_evidence(execution_record_with_path(
