@@ -141,6 +141,11 @@ pub struct VisionConfig {
     pub acp_profiles: BTreeMap<String, VisionAcpProfile>,
     #[serde(default)]
     pub provider_profiles: BTreeMap<String, VisionDirectProfile>,
+    /// Lazy batch prefill: the first vision-eligible stuck field in a form
+    /// proposes for every remaining field purpose from one screenshot and
+    /// caches the results. Default off; the off path is byte-identical.
+    #[serde(default)]
+    pub prefill: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -544,6 +549,20 @@ mod tests {
         );
         let config: super::AppConfig = toml::from_str(&text).expect("vision node loads");
         assert_eq!(config.nodes.len(), 1);
+    }
+
+    #[test]
+    fn vision_prefill_defaults_off_and_round_trips() {
+        let config = super::VisionConfig::default();
+        assert!(!config.prefill, "prefill must default off");
+        let text = r#"
+[vision]
+prefill = true
+"#;
+        let parsed: super::AppConfig = toml::from_str(text).expect("parse prefill flag");
+        assert!(parsed.vision.prefill);
+        let absent: super::AppConfig = toml::from_str("[vision]\n").expect("parse empty vision");
+        assert!(!absent.vision.prefill);
     }
 
     #[test]

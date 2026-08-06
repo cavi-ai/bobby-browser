@@ -200,6 +200,25 @@ pub struct VisionProposal {
     pub action: VisionAction,
 }
 
+/// A cached click proposal for one field purpose. Coordinates and confidence
+/// only — a cached proposal can never carry a typed value, because
+/// `TypeText` and `ExtractValue` actions are not cacheable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedProposal {
+    pub x: f64,
+    pub y: f64,
+    pub confidence: f32,
+}
+
+/// Proposal cache lookup, implemented by the runtime's context graph. The
+/// engine asks before it escalates; a hit skips the screenshot round-trip.
+/// Sync like the graph it fronts: lookups are in-memory.
+pub trait ProposalLookup: Send + Sync {
+    fn proposal_for(&self, page: &types::PageId, purpose: &str) -> Option<CachedProposal>;
+    fn drop_proposal(&self, page: &types::PageId, purpose: &str);
+    fn record_proposals(&self, page: &types::PageId, proposals: Vec<(String, CachedProposal)>);
+}
+
 #[derive(Debug, Clone)]
 pub enum VisionAction {
     Click {

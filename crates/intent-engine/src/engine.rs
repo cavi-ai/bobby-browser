@@ -25,6 +25,9 @@ pub struct VisionContext {
     pub session_ok: bool,
     pub capability_ok: bool,
     pub assist: Option<Arc<dyn VisionAssist>>,
+    /// Prefill proposal cache. `None` unless `[vision].prefill` is on and
+    /// both gates are open, so the default path is byte-identical to before.
+    pub proposals: Option<Arc<dyn crate::ProposalLookup>>,
 }
 
 #[derive(Debug, Clone)]

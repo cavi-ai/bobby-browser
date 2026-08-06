@@ -249,6 +249,9 @@ impl RuntimeService {
         let nodes = Arc::new(NodeRegistry::from_config(config));
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
+        if config.vision.prefill {
+            pages = pages.with_vision_prefill_enabled();
+        }
         if let Some(observer) = observer {
             pages = pages.with_execution_phase_observer(observer);
         }
