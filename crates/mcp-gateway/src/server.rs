@@ -53,6 +53,11 @@ enum Lifecycle {
     Ready,
 }
 
+/// MCP JSON-RPC server for one authenticated principal.
+///
+/// Holds the runtime interface, capability guard, event store, and tool catalog.
+/// Construct with [`Self::new`] and drive I/O through [`Self::serve`] or
+/// [`Self::handle_message`].
 pub struct Server {
     runtime: Arc<dyn RuntimeInterface>,
     handle: CapabilityHandle,
@@ -73,6 +78,7 @@ pub struct Server {
 }
 
 impl Server {
+    /// Production wiring: default event store and artifact resources.
     pub fn new(runtime: Arc<AuthenticatedRuntime>) -> Self {
         Self::production(
             runtime,
@@ -328,6 +334,8 @@ impl Server {
         self.handle.context(Utc::now() + Duration::minutes(1), None)
     }
 
+    /// Read newline-delimited JSON-RPC from `input` and write responses to
+    /// `output` until the client disconnects or the server shuts down.
     pub async fn serve<R, W>(&self, input: R, output: W) -> io::Result<()>
     where
         R: AsyncRead + Unpin,
