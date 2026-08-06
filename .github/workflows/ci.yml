@@ -18,7 +18,7 @@ jobs:
   rust:
     name: rust · build · test · lint
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       BOBBY_CHROME_NO_SANDBOX: "1"
     steps:
@@ -95,7 +95,7 @@ jobs:
     # v0.4.0 tag and broke the Windows binary after the release was cut. Compile
     # the same crate the release ships so the break lands on the PR instead.
     if: ${{ !github.event.repository.private }}
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -118,7 +118,7 @@ jobs:
   chromium:
     name: chromium · live browser tests
     if: ${{ !github.event.repository.private }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       BOBBY_CHROME_NO_SANDBOX: "1"
     steps:
@@ -221,7 +221,7 @@ jobs:
   firefox:
     name: firefox · live companion tests
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -286,7 +286,7 @@ jobs:
   node:
     name: node · typescript · docs
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 

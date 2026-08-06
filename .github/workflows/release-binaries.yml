@@ -90,7 +90,7 @@ jobs:
   release:
     needs: build
     if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     # Uploading assets needs write here even though the workflow already
     # declares it, matching publish-docs.
     permissions:
