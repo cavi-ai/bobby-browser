@@ -53,6 +53,7 @@ KIRO.md
 CLAUDE.md
 .bobby-browser/
 opencode.jsonc
+.acp.json
 
 # Test-run artifacts: the scheduler journal a broker fixture opens on start.
 crates/interface-conformance/data/
