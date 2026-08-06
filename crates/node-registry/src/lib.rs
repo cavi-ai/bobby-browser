@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use auth_broker::AuthStrategy;
 use config::{AppConfig, NodeConfig, NodeKind, VisionAcpProfile, VisionAuthKind};
-use intent_engine::{HttpVisionAssist, VisionAssist};
+use intent_engine::{HttpVisionAssist, StructuredExtractor, VisionAssist};
 use types::{CommandError, ErrorCode, ErrorLayer};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -90,13 +90,13 @@ impl NodeRegistry {
     /// is ignored: merging two sources of truth for one endpoint is how a
     /// session ends up talking to a provider nobody chose.
     pub fn from_config(config: &AppConfig) -> Self {
+        if Self::has_dual_vision_config(config) {
+            tracing::warn!(
+                "both [nodes] and [vision] are configured; [vision] is ignored. \
+                 Move it into [nodes.<name>] with kind = \"vision\"."
+            );
+        }
         if !config.nodes.is_empty() {
-            if config.vision.endpoint_url.is_some() {
-                tracing::warn!(
-                    "both [nodes] and [vision] are configured; [vision] is ignored. \
-                     Move it into [nodes.<name>] with kind = \"vision\"."
-                );
-            }
             return Self {
                 nodes: config.nodes.clone(),
                 acp_profiles: config.vision.acp_profiles.clone(),
@@ -120,6 +120,12 @@ impl NodeRegistry {
         }
     }
 
+    /// True when both a legacy `[vision].endpoint_url` and a non-empty
+    /// `[nodes]` table are set — `[nodes]` wins and `[vision]` is ignored.
+    pub fn has_dual_vision_config(config: &AppConfig) -> bool {
+        !config.nodes.is_empty() && config.vision.endpoint_url.is_some()
+    }
+
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.nodes
             .keys()
@@ -129,6 +135,42 @@ impl NodeRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty() && self.acp_profiles.is_empty()
+    }
+
+    /// HTTP node config after `from_config` merge (no ACP profiles).
+    pub fn http_node(&self, name: &str) -> Option<&NodeConfig> {
+        self.nodes.get(name)
+    }
+
+    /// Prefer the legacy `vision` HTTP node, else the first HTTP vision node.
+    pub fn primary_http_vision_node(&self) -> Option<(&str, &NodeConfig)> {
+        if let Some(node) = self.nodes.get(LEGACY_VISION_NODE) {
+            if node.kind == NodeKind::Vision {
+                return Some((LEGACY_VISION_NODE, node));
+            }
+        }
+        self.nodes
+            .iter()
+            .find(|(_, node)| node.kind == NodeKind::Vision)
+            .map(|(name, node)| (name.as_str(), node))
+    }
+
+    /// Structured extractor for the primary HTTP vision node, if any.
+    ///
+    /// ACP-only registries return `None` — extractors speak HTTP.
+    pub fn http_structured_extractor(&self) -> Option<Arc<dyn StructuredExtractor>> {
+        let (_, node) = self.primary_http_vision_node()?;
+        let bearer = node
+            .token_env
+            .as_ref()
+            .and_then(|variable| std::env::var(variable).ok());
+        HttpVisionAssist::new(
+            node.endpoint_url.clone(),
+            bearer,
+            Duration::from_millis(node.timeout_ms),
+        )
+        .ok()
+        .map(|assist| Arc::new(assist) as Arc<dyn StructuredExtractor>)
     }
 
     /// Resolves `name` and checks it speaks `kind`.
@@ -249,6 +291,41 @@ mod tests {
                 .map(|(name, config)| ((*name).to_owned(), config.clone()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn dual_vision_config_is_detectable() {
+        let mut config = AppConfig {
+            vision: VisionConfig {
+                endpoint_url: Some("https://legacy.example/propose".to_owned()),
+                ..VisionConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        assert!(!NodeRegistry::has_dual_vision_config(&config));
+        config.nodes.insert(
+            "local".to_owned(),
+            node(NodeKind::Vision, "http://127.0.0.1:8080/propose"),
+        );
+        assert!(NodeRegistry::has_dual_vision_config(&config));
+    }
+
+    #[test]
+    fn primary_http_vision_prefers_legacy_name() {
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            "other".to_owned(),
+            node(NodeKind::Vision, "http://127.0.0.1:8081/p"),
+        );
+        nodes.insert(
+            LEGACY_VISION_NODE.to_owned(),
+            node(NodeKind::Vision, "http://127.0.0.1:8080/p"),
+        );
+        let registry = NodeRegistry::new(nodes);
+        let (name, node) = registry.primary_http_vision_node().expect("primary");
+        assert_eq!(name, LEGACY_VISION_NODE);
+        assert!(node.endpoint_url.contains("8080"));
+        assert!(registry.http_structured_extractor().is_some());
     }
 
     #[test]
