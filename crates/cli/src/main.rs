@@ -9,7 +9,10 @@ use companion_core::{
     run_native_host_with_enroll, EnrollFinalize, EnrollHostError, NativeConnectRequest,
     NativeHostConfig, NativeHostEnroll,
 };
-use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig};
+use config::{
+    ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionAuthKind,
+    VisionConfig,
+};
 use firefox_companion::read_bidi_url_from_profile_dir;
 #[cfg(test)]
 use firefox_companion::selection::write_enroll_defaults;
@@ -1008,6 +1011,34 @@ fn executable_available(command: &str) -> bool {
     })
 }
 
+fn vision_auth_kind_label(kind: VisionAuthKind) -> &'static str {
+    match kind {
+        VisionAuthKind::Advertised => "advertised",
+        VisionAuthKind::OAuthAuthorizationCode => "oauth-authorization-code",
+        VisionAuthKind::OAuthDeviceCode => "oauth-device-code",
+        VisionAuthKind::Environment => "environment",
+        VisionAuthKind::ExistingSession => "existing-session",
+        VisionAuthKind::None => "none",
+    }
+}
+
+fn vision_auth_path_detail(auth: VisionAuthKind) -> String {
+    let label = vision_auth_kind_label(auth);
+    let mut detail = format!(
+        "{label}: Bobby calls harness authenticate via auth-broker (no Keychain access); \
+         credentials remain in the harness; unmatched harness methods fail closed at runtime"
+    );
+    if matches!(
+        auth,
+        VisionAuthKind::OAuthAuthorizationCode | VisionAuthKind::OAuthDeviceCode
+    ) {
+        detail.push_str(
+            "; multi-step OAuth continue is not productized — establish the harness login first",
+        );
+    }
+    detail
+}
+
 fn check_vision_acp(vision: &VisionConfig) -> Vec<DoctorCheck> {
     let Some(config::VisionBackendSelection::Acp { name, profile }) = vision.selected_backend()
     else {
@@ -1038,10 +1069,7 @@ fn check_vision_acp(vision: &VisionConfig) -> Vec<DoctorCheck> {
         DoctorCheck {
             status: DoctorStatus::Ok,
             name: "vision-auth-path".into(),
-            detail: format!(
-                "{:?}; credentials remain owned by the harness",
-                profile.auth
-            ),
+            detail: vision_auth_path_detail(profile.auth),
         },
     ]
 }
@@ -3065,6 +3093,16 @@ auth = "oauth-device-code"
         assert_eq!(checks[0].name, "vision-routing");
         assert_eq!(checks[1].name, "vision-acp-reachability");
         assert_eq!(checks[2].name, "vision-auth-path");
+        assert!(checks[2].detail.contains("auth-broker"));
+        assert!(checks[2].detail.contains("multi-step OAuth continue is not productized"));
+    }
+
+    #[test]
+    fn vision_auth_path_detail_mentions_fail_closed_without_oauth_caveat() {
+        let detail = vision_auth_path_detail(VisionAuthKind::Advertised);
+        assert!(detail.contains("advertised"));
+        assert!(detail.contains("fail closed"));
+        assert!(!detail.contains("multi-step OAuth continue"));
     }
 
     #[test]

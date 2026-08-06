@@ -89,9 +89,13 @@ auth = "advertised"
 ```
 
 Supported auth paths are `advertised`, `oauth-authorization-code`,
-`oauth-device-code`, `environment`, `existing-session`, and `none`. For the
-three OAuth/advertised modes, Bobby invokes the authentication method the ACP
-harness advertised; the harness conducts the login and retains credentials.
+`oauth-device-code`, `environment`, `existing-session`, and `none`. Bobby maps
+each path to an `auth-broker` strategy and calls the matching harness
+`authenticate` method when vision assist runs. Bobby does not read IDE
+Keychains or OS credential stores. If the harness does not advertise a method
+id that matches the configured strategy, vision assist fails closed. Multi-step
+OAuth (`AuthRequired` challenges) is not fully productized — establish the
+harness login outside Bobby first.
 Each vision task gets a new ACP child session, bounded text and image content,
 a strict JSON result, evidence-digest validation, and an explicit close.
 
