@@ -884,7 +884,8 @@ fn parse_prompt(blocks: &[ContentBlock]) -> Result<StructuredPrompt, agent_clien
         .ok_or_else(|| invalid_request("prompt must contain a text block"))?;
     serde_json::from_str(&text).map_err(|error| {
         invalid_request(format!(
-            "prompt text must be a structured automation request JSON ({{\"url\"?: string, \"intent\": {{\"kind\": .., \"input\": ..}}}}): {error}"
+            "prompt text must be a structured automation request JSON \
+             (example: {{\"url\":\"https://example.com\",\"intent\":{{\"kind\":\"locate\",\"input\":{{\"purpose\":\"the submit button\"}}}}}}): {error}"
         ))
     })
 }
@@ -1162,7 +1163,19 @@ mod tests {
     fn freeform_text_is_rejected() {
         let error = parse_prompt(&[text_block("click the submit button for me")])
             .expect_err("freeform text must not decode");
-        assert!(error.message.contains("structured automation request") || error.data.is_some());
+        let detail = error
+            .data
+            .as_ref()
+            .and_then(|value| value.as_str())
+            .unwrap_or(error.message.as_str());
+        assert!(
+            detail.contains("structured automation request"),
+            "parse error should name the expected shape: {detail}"
+        );
+        assert!(
+            detail.contains("example:") || detail.contains("https://example.com"),
+            "parse error should include a concrete example: {detail}"
+        );
     }
 
     #[test]
