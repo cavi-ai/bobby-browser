@@ -1,18 +1,17 @@
 mod bootstrap_local;
+mod doctor;
 mod jobs_client;
 mod onboarding;
 mod vision_child;
 mod vision_connect;
 mod vision_login;
-mod doctor;
 
 use anyhow::{Context, Result};
-use auth_broker::{AuthCapabilities, AuthStrategy};
 use companion_core::{
     run_native_host_with_enroll, EnrollFinalize, EnrollHostError, NativeConnectRequest,
     NativeHostConfig, NativeHostEnroll,
 };
-use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig};
+use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig};
 use firefox_companion::read_bidi_url_from_profile_dir;
 #[cfg(test)]
 use firefox_companion::selection::write_enroll_defaults;
@@ -1706,15 +1705,16 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
 #[cfg(test)]
 mod tests {
     use super::doctor::{
-        check_bootstrap_expiry, check_vision_acp, check_vision_provider,
-        check_vision_upstream_key, handshake_error_status, run_doctor,
-        vision_auth_discovery_check, vision_endpoint_unreachable_detail, DoctorReport,
-        DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
+        check_bootstrap_expiry, check_vision_acp, check_vision_provider, check_vision_upstream_key,
+        handshake_error_status, run_doctor, vision_auth_discovery_check,
+        vision_endpoint_unreachable_detail, DoctorReport, DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
     };
     use super::*;
+    use auth_broker::{AuthCapabilities, AuthStrategy};
     use companion_protocol::{
         BrowserEngine, BrowserIdentity, CompanionCapabilities, PROTOCOL_VERSION,
     };
+    use config::VisionConfig;
     use config::VisionProviderConfig;
     use std::collections::BTreeMap;
     use types::{CompanionId, ProfileId};

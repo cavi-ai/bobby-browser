@@ -548,10 +548,7 @@ pub(crate) fn run_doctor(
                             })
                             .unwrap_or(false);
                         if reachable {
-                            report.ok(
-                                "vision-endpoint",
-                                format!("{name} → {endpoint}"),
-                            );
+                            report.ok("vision-endpoint", format!("{name} → {endpoint}"));
                         } else {
                             report.warn(
                                 "vision-endpoint",
@@ -570,10 +567,8 @@ pub(crate) fn run_doctor(
                             report.ok("vision-token-env", format!("{env_name} is set"));
                         }
                         _ => {
-                            report.warn(
-                                "vision-token-env",
-                                format!("{env_name} is unset or empty"),
-                            );
+                            report
+                                .warn("vision-token-env", format!("{env_name} is unset or empty"));
                         }
                     },
                     _ => {
@@ -1071,4 +1066,3 @@ fn is_executable(path: &Path) -> bool {
 fn is_executable(_path: &Path) -> bool {
     true
 }
-
