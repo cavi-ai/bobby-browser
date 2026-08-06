@@ -28,6 +28,10 @@ pub struct VisionContext {
     /// Prefill proposal cache. `None` unless `[vision].prefill` is on and
     /// both gates are open, so the default path is byte-identical to before.
     pub proposals: Option<Arc<dyn crate::ProposalLookup>>,
+    /// Set by `execute_complete_form` while driving fields: a stuck field
+    /// returns its plain stuck failure instead of escalating, so the form
+    /// can batch one screenshot for every remaining purpose.
+    pub defer_escalation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -179,17 +183,37 @@ async fn execute_complete_form(
     fields: Vec<CompleteFormFieldPlan>,
 ) -> IntentOutcome {
     let mut evidence = Vec::new();
-    for field in fields {
+    // Lazy batch prefill: with a cache threaded through open gates, fields
+    // defer their own escalation; the first stuck field triggers one
+    // screenshot and one propose per remaining purpose.
+    let batching = vision.proposals.is_some()
+        && vision.session_ok
+        && vision.capability_ok
+        && vision.assist.is_some();
+    let mut deferred = vision.clone();
+    deferred.defer_escalation = batching;
+    let mut batched = false;
+    for (index, field) in fields.iter().enumerate() {
         evidence.push(Evidence::Configuration {
             name: "completeFormField".into(),
             value: field.name.clone(),
         });
+        let field_vision = if batched { vision } else { &deferred };
         let intent = IntentCommand::Fill(types::FillIntent {
-            purpose: field.purpose,
+            purpose: field.purpose.clone(),
             hints: types::IntentHints::default(),
             value: field.value.clone(),
         });
-        match execute_fill(&intent, page_id, browser, vision, field.target, field.value).await {
+        match execute_fill(
+            &intent,
+            page_id,
+            browser,
+            field_vision,
+            field.target.clone(),
+            field.value.clone(),
+        )
+        .await
+        {
             IntentOutcome::Completed {
                 evidence: mut field_evidence,
             } => evidence.append(&mut field_evidence),
@@ -198,11 +222,112 @@ async fn execute_complete_form(
                 evidence: mut field_evidence,
             } => {
                 evidence.append(&mut field_evidence);
-                return IntentOutcome::Failed { error, evidence };
+                let eligible = batching
+                    && !batched
+                    && !never_escalates(error.code)
+                    && !matches!(
+                        error.code,
+                        ErrorCode::VisionAssistDenied | ErrorCode::VisionAssistFailed
+                    );
+                if !eligible {
+                    return IntentOutcome::Failed { error, evidence };
+                }
+                let purposes: Vec<String> = fields[index..]
+                    .iter()
+                    .map(|field| field.purpose.clone())
+                    .collect();
+                batch_prefill(page_id, browser, vision, purposes).await;
+                batched = true;
+                // Retry the stuck field once: the cache consult in the
+                // escalation path answers from the batch with no screenshot.
+                let intent = IntentCommand::Fill(types::FillIntent {
+                    purpose: field.purpose.clone(),
+                    hints: types::IntentHints::default(),
+                    value: field.value.clone(),
+                });
+                match execute_fill(
+                    &intent,
+                    page_id,
+                    browser,
+                    vision,
+                    field.target.clone(),
+                    field.value.clone(),
+                )
+                .await
+                {
+                    IntentOutcome::Completed {
+                        evidence: mut retry_evidence,
+                    } => evidence.append(&mut retry_evidence),
+                    IntentOutcome::Failed {
+                        error,
+                        evidence: mut retry_evidence,
+                    } => {
+                        evidence.append(&mut retry_evidence);
+                        return IntentOutcome::Failed { error, evidence };
+                    }
+                }
             }
         }
     }
     IntentOutcome::Completed { evidence }
+}
+
+/// One screenshot, one propose per remaining purpose, all cached. Every
+/// failure degrades silently: transport loss, an auth rejection, or a
+/// low-confidence proposal simply leaves that purpose uncached, and the
+/// deterministic path (or a live escalation) handles the field.
+async fn batch_prefill(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    purposes: Vec<String>,
+) {
+    let (Some(proposals), Some(assist)) = (&vision.proposals, &vision.assist) else {
+        return;
+    };
+    let Ok((png, _)) = browser
+        .capture_screenshot(
+            page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            },
+        )
+        .await
+    else {
+        return;
+    };
+    let mut batch = Vec::new();
+    for purpose in purposes {
+        let Ok(proposal) = assist
+            .propose(VisionProposeRequest {
+                purpose: purpose.clone(),
+                intent_kind: "fill".to_owned(),
+                screenshot_png: png.clone(),
+                stuck: StuckKind::TargetMissing,
+            })
+            .await
+        else {
+            continue;
+        };
+        if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+            continue;
+        }
+        // Only coordinate actions are cached; a TypeText or ExtractValue
+        // proposal carries what the user typed and is never stored.
+        if let VisionAction::Click { x, y } = proposal.action {
+            batch.push((
+                purpose,
+                crate::CachedProposal {
+                    x,
+                    y,
+                    confidence: proposal.confidence,
+                },
+            ));
+        }
+    }
+    if !batch.is_empty() {
+        proposals.record_proposals(page_id, batch);
+    }
 }
 
 async fn execute_locate(
@@ -1522,6 +1647,20 @@ async fn stuck_outcome_with_prior_evidence(
     ));
 
     if never_escalates(stuck_code) || !report.kind.may_escalate_to_vision() {
+        let mut evidence = prior_evidence;
+        evidence.push(stuck_evidence);
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: stuck_code,
+                message: verification.to_owned(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence,
+        };
+    }
+
+    if vision.defer_escalation {
         let mut evidence = prior_evidence;
         evidence.push(stuck_evidence);
         return IntentOutcome::Failed {

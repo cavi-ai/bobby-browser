@@ -537,6 +537,8 @@ async fn execute_intent(
         // The cache is only ever consulted behind both gates; a closed gate
         // gets `None` and the byte-identical pre-prefill path.
         proposals: proposals.filter(|_| gates_open),
+        // Escalation deferral is an engine-internal complete_form decision.
+        defer_escalation: false,
     };
     match IntentEngine::execute(intent, page_id, &browser, &vision).await {
         IntentOutcome::Completed { evidence } => Ok(AdaptiveExecution {

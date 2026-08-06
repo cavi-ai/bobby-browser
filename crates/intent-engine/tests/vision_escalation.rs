@@ -161,6 +161,7 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
             capability_ok: false,
             assist: Some(assist),
             proposals: None,
+            defer_escalation: false,
         },
     )
     .await;
@@ -205,6 +206,7 @@ async fn stuck_with_gates_uses_vision_propose_and_execute() {
             capability_ok: true,
             assist: Some(assist),
             proposals: None,
+            defer_escalation: false,
         },
     )
     .await;
@@ -248,6 +250,7 @@ async fn low_confidence_proposal_fails_closed() {
             capability_ok: true,
             assist: Some(assist),
             proposals: None,
+            defer_escalation: false,
         },
     )
     .await;
@@ -292,6 +295,7 @@ async fn policy_denied_never_calls_vision() {
             capability_ok: true,
             assist: Some(assist),
             proposals: None,
+            defer_escalation: false,
         },
     )
     .await;
@@ -338,6 +342,7 @@ async fn an_open_session_policy_does_not_substitute_for_the_capability() {
             capability_ok: false,
             assist: Some(assist),
             proposals: None,
+            defer_escalation: false,
         },
     )
     .await;
@@ -380,6 +385,7 @@ async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
             capability_ok: true,
             assist: Some(assist),
             proposals: None,
+            defer_escalation: false,
         },
     )
     .await;
@@ -458,6 +464,7 @@ async fn cache_hit_never_calls_the_provider() {
             capability_ok: true,
             assist: Some(assist),
             proposals: Some(proposals),
+            defer_escalation: false,
         },
     )
     .await;
@@ -504,6 +511,7 @@ async fn cache_miss_falls_through_to_live_escalation() {
             capability_ok: true,
             assist: Some(assist),
             proposals: Some(proposals),
+            defer_escalation: false,
         },
     )
     .await;
@@ -544,6 +552,7 @@ async fn closed_gates_never_consult_the_cache() {
                 capability_ok,
                 assist: None,
                 proposals: Some(proposals),
+                defer_escalation: false,
             },
         )
         .await;
@@ -600,6 +609,7 @@ async fn a_failed_cached_proposal_is_dropped_and_escalates_live() {
             capability_ok: true,
             assist: Some(assist),
             proposals: Some(proposals),
+            defer_escalation: false,
         },
     )
     .await;
@@ -683,4 +693,238 @@ impl IntentBrowser for FailingClickBrowser {
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
         self.inner.capture_screenshot(page_id, command).await
     }
+}
+
+struct CountingVision {
+    propose_calls: Arc<AtomicUsize>,
+    confidence: f32,
+}
+
+#[async_trait]
+impl VisionAssist for CountingVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        self.propose_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(VisionProposal {
+            confidence: self.confidence,
+            action: VisionAction::Click { x: 10.0, y: 20.0 },
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingProposals {
+    inner: std::sync::Mutex<std::collections::HashMap<String, intent_engine::CachedProposal>>,
+    record_calls: AtomicUsize,
+}
+
+impl intent_engine::ProposalLookup for RecordingProposals {
+    fn proposal_for(&self, _page: &PageId, purpose: &str) -> Option<intent_engine::CachedProposal> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(purpose.trim().to_lowercase().as_str())
+            .cloned()
+    }
+    fn drop_proposal(&self, _page: &PageId, purpose: &str) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(purpose.trim().to_lowercase().as_str());
+    }
+    fn record_proposals(
+        &self,
+        _page: &PageId,
+        proposals: Vec<(String, intent_engine::CachedProposal)>,
+    ) {
+        self.record_calls.fetch_add(1, Ordering::SeqCst);
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        for (purpose, cached) in proposals {
+            inner.insert(purpose.trim().to_lowercase(), cached);
+        }
+    }
+}
+
+fn text_field(name: &str, purpose: &str) -> types::CompleteFormField {
+    types::CompleteFormField {
+        name: name.into(),
+        purpose: purpose.into(),
+        hints: IntentHints::default(),
+        value: types::FillValue::Text {
+            text: format!("value-{name}"),
+            clear_first: true,
+        },
+    }
+}
+
+#[tokio::test]
+async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
+    let propose_calls = Arc::new(AtomicUsize::new(0));
+    let screenshot_calls = Arc::new(AtomicUsize::new(0));
+    let assist = Arc::new(CountingVision {
+        propose_calls: propose_calls.clone(),
+        confidence: 0.9,
+    });
+    let proposals = Arc::new(RecordingProposals::default());
+    // No candidates for any field: every fill gets stuck.
+    let browser = CountingScreenshotBrowser {
+        inner: FakeBrowser::default(),
+        screenshot_calls: screenshot_calls.clone(),
+    };
+    let page_id = PageId::new();
+    let intent = IntentCommand::CompleteForm(types::CompleteFormIntent {
+        purpose: "sign up".into(),
+        fields: vec![
+            text_field("first", "First name"),
+            text_field("last", "Last name"),
+            text_field("city", "City"),
+        ],
+    });
+
+    let outcome = IntentEngine::execute(
+        &intent,
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: Some(proposals.clone()),
+            defer_escalation: false,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert_eq!(
+        screenshot_calls.load(Ordering::SeqCst),
+        1,
+        "one screenshot for the whole form"
+    );
+    assert_eq!(
+        propose_calls.load(Ordering::SeqCst),
+        3,
+        "one propose per stuck purpose"
+    );
+    let prefill_records = evidence
+        .iter()
+        .filter(|item| matches!(item, Evidence::IntentExecution { record } if record.resolution_path == IntentResolutionPath::VisionPrefill))
+        .count();
+    assert_eq!(prefill_records, 3, "every field resolved from the batch");
+}
+
+struct CountingScreenshotBrowser {
+    inner: FakeBrowser,
+    screenshot_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl IntentBrowser for CountingScreenshotBrowser {
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        self.inner.collect_candidates(page_id, target).await
+    }
+    async fn click(
+        &self,
+        page_id: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.click(page_id, command).await
+    }
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.click_xy(page_id, x, y).await
+    }
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.type_text(page_id, command).await
+    }
+    async fn upload_files(
+        &self,
+        page_id: &PageId,
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.upload_files(page_id, command).await
+    }
+    async fn wait_for(
+        &self,
+        page_id: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.wait_for(page_id, command).await
+    }
+    async fn capture_screenshot(
+        &self,
+        page_id: &PageId,
+        command: &CaptureScreenshotCommand,
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        self.screenshot_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.capture_screenshot(page_id, command).await
+    }
+}
+
+#[tokio::test]
+async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
+    struct OfflineVision;
+    #[async_trait]
+    impl VisionAssist for OfflineVision {
+        async fn propose(
+            &self,
+            _request: VisionProposeRequest,
+        ) -> Result<VisionProposal, CommandError> {
+            Err(CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: "connection refused".into(),
+                layer: types::ErrorLayer::Page,
+                retryable: false,
+            })
+        }
+    }
+    let proposals = Arc::new(RecordingProposals::default());
+    let browser = FakeBrowser::default();
+    let page_id = PageId::new();
+    let intent = IntentCommand::CompleteForm(types::CompleteFormIntent {
+        purpose: "sign up".into(),
+        fields: vec![text_field("first", "First name")],
+    });
+
+    let outcome = IntentEngine::execute(
+        &intent,
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(OfflineVision)),
+            proposals: Some(proposals),
+            defer_escalation: false,
+        },
+    )
+    .await;
+
+    // The batch records nothing; the retry escalates live, the provider is
+    // offline, and the failure is the ordinary vision failure — the form
+    // never panics, never hangs, and the stuck evidence is preserved.
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+    assert!(
+        evidence.iter().any(|item| matches!(item, Evidence::IntentExecution { record } if record.verification == "targetNotFound")),
+        "stuck evidence lost during provider-loss degradation"
+    );
 }
