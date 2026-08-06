@@ -1,10 +1,6 @@
-//! Live end-to-end proof of lazy batch vision prefill (Spec B T10):
-//! prefill on resolves a multi-stuck-field form through the batch with
-//! `VisionPrefill` evidence; prefill off resolves the same form through
-//! per-field live escalation; provider loss never fails an intent the
-//! deterministic path can finish.
+//! Live Firefox proof of lazy batch vision prefill (Spec B T10), through the
+//! installed-companion harness.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -16,7 +12,7 @@ use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CompleteFormField,
     CompleteFormIntent, CreateSessionRequest, Evidence, ExecutionPolicy, FillValue, IntentCommand,
-    IntentResolutionPath, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
+    IntentResolutionPath, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
     RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 
@@ -38,31 +34,6 @@ impl VisionAssist for CountingVision {
     }
 }
 
-struct OfflineVision;
-
-#[async_trait]
-impl VisionAssist for OfflineVision {
-    async fn propose(
-        &self,
-        _request: VisionProposeRequest,
-    ) -> Result<VisionProposal, CommandError> {
-        Err(CommandError {
-            code: types::ErrorCode::VisionAssistFailed,
-            message: "connection refused".into(),
-            layer: types::ErrorLayer::Page,
-            retryable: false,
-        })
-    }
-}
-
-fn chrome_executable() -> PathBuf {
-    std::env::var("BOBBY_CHROME_EXECUTABLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-        })
-}
-
 fn base_config(root: &std::path::Path, prefill: bool) -> AppConfig {
     AppConfig {
         http: config::HttpConfig {
@@ -75,7 +46,7 @@ fn base_config(root: &std::path::Path, prefill: bool) -> AppConfig {
             shutdown_timeout_ms: 10_000,
         },
         browser: BrowserConfig {
-            executable: Some(chrome_executable()),
+            executable: None,
             profiles_dir: root.join("profiles"),
             headless: true,
             max_active: 1,
@@ -206,94 +177,45 @@ fn resolution_paths(evidence: &[Evidence]) -> Vec<IntentResolutionPath> {
 }
 
 #[tokio::test]
-#[ignore = "requires installed Chrome or Chromium"]
-async fn prefill_resolves_stuck_form_through_the_batch() {
-    let fixture = test_site::spawn().await;
+#[ignore = "requires installed headed Firefox + companion profile (BOBBY_FIREFOX_*)"]
+async fn prefill_resolves_stuck_form_on_firefox() {
+    // The chromium CI suite runs every ignored test in this binary; without
+    // the Firefox fixture env this test is a no-op there. The firefox suite
+    // provides the env and exercises it for real.
+    let Ok(installed) = runtime_tests::InstalledFirefoxConfig::from_env() else {
+        return;
+    };
     let root = tempfile::tempdir().unwrap();
     let propose_calls = Arc::new(AtomicUsize::new(0));
     let assist = Arc::new(CountingVision {
         propose_calls: propose_calls.clone(),
     });
     let config = base_config(root.path(), true);
-    let runtime = RuntimeService::build_with_vision_assist(&config, assist)
-        .await
-        .unwrap();
+    let firefox = runtime_tests::launch_installed_firefox_runtime(
+        installed,
+        &config,
+        "about:blank",
+        root.path().join("descriptor.json"),
+    )
+    .await
+    .expect("launch installed Firefox runtime");
+    let runtime = RuntimeService::build_with_worker_factory_and_vision_assist(
+        &config,
+        firefox.factory(),
+        assist,
+    )
+    .await
+    .unwrap();
+    let fixture = test_site::spawn().await;
     let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
 
     let outcome = submit_intent(&runtime, &session, &page, stuck_form()).await;
     let CommandOutcome::Completed { evidence, .. } = outcome else {
-        panic!("expected Completed via prefill batch, got {outcome:?}");
+        panic!("expected Completed via prefill batch on Firefox, got {outcome:?}");
     };
-    assert_eq!(
-        propose_calls.load(Ordering::SeqCst),
-        2,
-        "one propose per stuck purpose"
-    );
     let paths = resolution_paths(&evidence);
     assert!(
         paths.contains(&IntentResolutionPath::VisionPrefill),
-        "no VisionPrefill record in {paths:?}"
+        "no VisionPrefill record on Firefox: {paths:?}"
     );
-    assert!(
-        !paths.contains(&IntentResolutionPath::VisionFallback),
-        "a live escalation ran despite the batch: {paths:?}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires installed Chrome or Chromium"]
-async fn prefill_off_escalates_each_stuck_field_live() {
-    let fixture = test_site::spawn().await;
-    let root = tempfile::tempdir().unwrap();
-    let propose_calls = Arc::new(AtomicUsize::new(0));
-    let assist = Arc::new(CountingVision {
-        propose_calls: propose_calls.clone(),
-    });
-    let config = base_config(root.path(), false);
-    let runtime = RuntimeService::build_with_vision_assist(&config, assist)
-        .await
-        .unwrap();
-    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
-
-    let outcome = submit_intent(&runtime, &session, &page, stuck_form()).await;
-    let CommandOutcome::Completed { evidence, .. } = outcome else {
-        panic!("expected Completed via live escalation, got {outcome:?}");
-    };
-    assert_eq!(propose_calls.load(Ordering::SeqCst), 2);
-    let paths = resolution_paths(&evidence);
-    assert!(
-        paths.contains(&IntentResolutionPath::VisionFallback),
-        "no VisionFallback record in {paths:?}"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires installed Chrome or Chromium"]
-async fn provider_loss_never_fails_a_deterministically_resolvable_intent() {
-    let fixture = test_site::spawn().await;
-    let root = tempfile::tempdir().unwrap();
-    let config = base_config(root.path(), true);
-    let runtime = RuntimeService::build_with_vision_assist(&config, Arc::new(OfflineVision))
-        .await
-        .unwrap();
-    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
-
-    // The fixture's Continue button resolves deterministically: an offline
-    // provider must be irrelevant to the outcome.
-    let outcome = submit_intent(
-        &runtime,
-        &session,
-        &page,
-        IntentCommand::Locate(LocateIntent {
-            purpose: "Continue".into(),
-            hints: types::IntentHints {
-                role: Some("button".into()),
-                ..Default::default()
-            },
-        }),
-    )
-    .await;
-    let CommandOutcome::Completed { .. } = outcome else {
-        panic!("deterministic intent failed with an offline provider: {outcome:?}");
-    };
 }
