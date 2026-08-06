@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use broker::StartupCredential;
 use chrono::{DateTime, Duration, Utc};
+use clap::ValueEnum;
 use types::{Capability, PrincipalId};
 use uuid::Uuid;
 
@@ -14,7 +15,39 @@ const ENV_TOKEN: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN";
 const ENV_PRINCIPAL: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL";
 const ENV_CAPABILITIES: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES";
 const ENV_EXPIRES_AT: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT";
+/// Optional process-env override for heal targeting (`agent` | `unrestricted`).
+const ENV_PRESET: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_PRESET";
+const PRESET_MARKER: &str = "bobby-bootstrap-preset:";
 
+/// Which capability floor heal / init use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum BootstrapPreset {
+    /// Full local operator set, including `authority:admin` (default).
+    #[default]
+    Unrestricted,
+    /// Agent host set: no `authority:admin`. Heal never widens past this set.
+    Agent,
+}
+
+impl BootstrapPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unrestricted => "unrestricted",
+            Self::Agent => "agent",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "unrestricted" => Some(Self::Unrestricted),
+            "agent" => Some(Self::Agent),
+            _ => None,
+        }
+    }
+}
+
+/// Unrestricted local defaults. Heal appends any missing entry for the
+/// unrestricted preset.
 pub(crate) const DEFAULT_CAPABILITIES: &[Capability] = &[
     Capability::SessionRead,
     Capability::SessionWrite,
@@ -26,6 +59,7 @@ pub(crate) const DEFAULT_CAPABILITIES: &[Capability] = &[
     Capability::JavascriptEvaluate,
     Capability::IntentExecute,
     Capability::VisionAssist,
+    Capability::ContextRead,
     Capability::ArtifactRead,
     Capability::ArtifactCapture,
     Capability::RecoveryRead,
@@ -38,11 +72,44 @@ pub(crate) const DEFAULT_CAPABILITIES: &[Capability] = &[
     Capability::BrowserHumanize,
 ];
 
+/// Agent host defaults: everything in [`DEFAULT_CAPABILITIES`] except
+/// `authority:admin`. Heal for the agent preset only appends from this set.
+pub(crate) const AGENT_CAPABILITIES: &[Capability] = &[
+    Capability::SessionRead,
+    Capability::SessionWrite,
+    Capability::PageRead,
+    Capability::PageWrite,
+    Capability::BrowserMutate,
+    Capability::FileUpload,
+    Capability::FileDownload,
+    Capability::JavascriptEvaluate,
+    Capability::IntentExecute,
+    Capability::VisionAssist,
+    Capability::ContextRead,
+    Capability::ArtifactRead,
+    Capability::ArtifactCapture,
+    Capability::RecoveryRead,
+    Capability::RecoveryWrite,
+    Capability::JobSubmit,
+    Capability::JobRead,
+    Capability::JobCancel,
+    Capability::BrowserFingerprint,
+    Capability::BrowserHumanize,
+];
+
+pub fn capabilities_for_preset(preset: BootstrapPreset) -> &'static [Capability] {
+    match preset {
+        BootstrapPreset::Unrestricted => DEFAULT_CAPABILITIES,
+        BootstrapPreset::Agent => AGENT_CAPABILITIES,
+    }
+}
+
 pub struct BootstrapMaterial {
     bearer: String,
     principal_id: PrincipalId,
     capabilities_csv: String,
     expires_at: DateTime<Utc>,
+    preset: BootstrapPreset,
 }
 
 impl fmt::Debug for BootstrapMaterial {
@@ -53,6 +120,7 @@ impl fmt::Debug for BootstrapMaterial {
             .field("principal_id", &self.principal_id)
             .field("capabilities_csv", &self.capabilities_csv)
             .field("expires_at", &self.expires_at)
+            .field("preset", &self.preset)
             .finish()
     }
 }
@@ -73,6 +141,10 @@ impl BootstrapMaterial {
     pub fn expires_at(&self) -> DateTime<Utc> {
         self.expires_at
     }
+
+    pub fn preset(&self) -> BootstrapPreset {
+        self.preset
+    }
 }
 
 pub fn default_bootstrap_path() -> Result<PathBuf> {
@@ -83,11 +155,18 @@ pub fn default_bootstrap_path() -> Result<PathBuf> {
 }
 
 pub fn generate_bootstrap(ttl: Duration) -> Result<BootstrapMaterial> {
+    generate_bootstrap_for_preset(ttl, BootstrapPreset::Unrestricted)
+}
+
+pub fn generate_bootstrap_for_preset(
+    ttl: Duration,
+    preset: BootstrapPreset,
+) -> Result<BootstrapMaterial> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).context("failed to generate bootstrap bearer entropy")?;
     let bearer = hex::encode(bytes);
     let principal_id = PrincipalId::from_uuid(Uuid::new_v4());
-    let capabilities_csv = DEFAULT_CAPABILITIES
+    let capabilities_csv = capabilities_for_preset(preset)
         .iter()
         .map(|capability| capability.as_str())
         .collect::<Vec<_>>()
@@ -98,6 +177,7 @@ pub fn generate_bootstrap(ttl: Duration) -> Result<BootstrapMaterial> {
         principal_id,
         capabilities_csv,
         expires_at,
+        preset,
     })
 }
 
@@ -113,7 +193,8 @@ pub fn write_bootstrap_env(path: &Path, material: &BootstrapMaterial, force: boo
             .with_context(|| format!("failed to create parent dir for {}", parent.display()))?;
     }
     let contents = format!(
-        "{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={}\n{ENV_EXPIRES_AT}={}\n",
+        "# {PRESET_MARKER} {}\n{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={}\n{ENV_EXPIRES_AT}={}\n",
+        material.preset().as_str(),
         material.bearer(),
         material.principal_id().as_uuid(),
         material.capabilities_csv(),
@@ -121,6 +202,41 @@ pub fn write_bootstrap_env(path: &Path, material: &BootstrapMaterial, force: boo
     );
     write_private_file(path, contents.as_bytes())
         .with_context(|| format!("failed to write bootstrap env to {}", path.display()))
+}
+
+/// Read the bootstrap preset from a dotenv comment or process env.
+/// Missing marker defaults to [`BootstrapPreset::Unrestricted`] (back-compat).
+pub fn read_bootstrap_preset(path: Option<&Path>) -> BootstrapPreset {
+    if let Ok(raw) = std::env::var(ENV_PRESET) {
+        if let Some(preset) = BootstrapPreset::parse(&raw) {
+            return preset;
+        }
+    }
+    path.and_then(|path| read_preset_marker_from_file(path).ok().flatten())
+        .unwrap_or(BootstrapPreset::Unrestricted)
+}
+
+fn read_preset_marker_from_file(path: &Path) -> Result<Option<BootstrapPreset>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read bootstrap env from {}", path.display()))?;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .strip_prefix('#')
+            .map(str::trim)
+            .and_then(|body| body.strip_prefix(PRESET_MARKER))
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if let Some(preset) = BootstrapPreset::parse(rest) {
+            return Ok(Some(preset));
+        }
+    }
+    Ok(None)
 }
 
 pub fn load_startup_from_env_file(path: &Path) -> Result<StartupCredential> {
@@ -263,7 +379,7 @@ pub fn load_bootstrap_capabilities_csv(path: &Path) -> Result<String> {
     })
 }
 
-/// Outcome of an additive capability heal against [`DEFAULT_CAPABILITIES`].
+/// Outcome of an additive capability heal against the preset's floor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HealBootstrapReport {
     /// Wire strings appended from the current default set.
@@ -291,10 +407,18 @@ impl HealBootstrapReport {
 }
 
 /// Union an existing capabilities CSV with [`DEFAULT_CAPABILITIES`].
-///
-/// Preserves existing order and any non-default capabilities; appends only
-/// missing defaults. Returns the new CSV and the wire strings that were added.
 pub fn union_capabilities_csv(existing_csv: &str) -> Result<(String, Vec<&'static str>)> {
+    union_capabilities_csv_with(existing_csv, DEFAULT_CAPABILITIES)
+}
+
+/// Union an existing capabilities CSV with a target floor set.
+///
+/// Preserves existing order and any non-floor capabilities; appends only
+/// missing floor entries. Returns the new CSV and the wire strings that were added.
+pub fn union_capabilities_csv_with(
+    existing_csv: &str,
+    floor: &[Capability],
+) -> Result<(String, Vec<&'static str>)> {
     let mut present = BTreeSet::new();
     let mut ordered = Vec::new();
     for part in existing_csv.split(',') {
@@ -308,7 +432,7 @@ pub fn union_capabilities_csv(existing_csv: &str) -> Result<(String, Vec<&'stati
         }
     }
     let mut added = Vec::new();
-    for &capability in DEFAULT_CAPABILITIES {
+    for &capability in floor {
         if present.insert(capability) {
             ordered.push(capability);
             added.push(capability.as_str());
@@ -322,14 +446,15 @@ pub fn union_capabilities_csv(existing_csv: &str) -> Result<(String, Vec<&'stati
     Ok((csv, added))
 }
 
-/// Rewrite `bootstrap.env` capabilities when the file is missing any
-/// [`DEFAULT_CAPABILITIES`] entry. Preserves token, principal, and expiry.
-///
-/// No-op when the path does not exist.
+/// Rewrite `bootstrap.env` capabilities when the file is missing any entry
+/// from the preset's floor. Preserves token, principal, expiry, and the
+/// preset marker. No-op when the path does not exist.
 pub fn heal_bootstrap_env_file(path: &Path) -> Result<HealBootstrapReport> {
     if !path.exists() {
         return Ok(HealBootstrapReport::default());
     }
+    let preset = read_preset_marker_from_file(path)?.unwrap_or(BootstrapPreset::Unrestricted);
+    let floor = capabilities_for_preset(preset);
     let fields = read_bootstrap_env_fields(path)?;
     let token = fields.token.with_context(|| {
         format!(
@@ -355,7 +480,7 @@ pub fn heal_bootstrap_env_file(path: &Path) -> Result<HealBootstrapReport> {
             path.display()
         )
     })?;
-    let (healed_csv, added) = union_capabilities_csv(&capabilities)?;
+    let (healed_csv, added) = union_capabilities_csv_with(&capabilities, floor)?;
     if added.is_empty() {
         return Ok(HealBootstrapReport::default());
     }
@@ -365,7 +490,8 @@ pub fn heal_bootstrap_env_file(path: &Path) -> Result<HealBootstrapReport> {
         ""
     };
     let contents = format!(
-        "{export}{ENV_TOKEN}={token}\n{export}{ENV_PRINCIPAL}={principal}\n{export}{ENV_CAPABILITIES}={healed_csv}\n{export}{ENV_EXPIRES_AT}={expires_at}\n"
+        "# {PRESET_MARKER} {}\n{export}{ENV_TOKEN}={token}\n{export}{ENV_PRINCIPAL}={principal}\n{export}{ENV_CAPABILITIES}={healed_csv}\n{export}{ENV_EXPIRES_AT}={expires_at}\n",
+        preset.as_str(),
     );
     write_private_file(path, contents.as_bytes())
         .with_context(|| format!("failed to heal bootstrap env at {}", path.display()))?;
@@ -376,14 +502,19 @@ pub fn heal_bootstrap_env_file(path: &Path) -> Result<HealBootstrapReport> {
     })
 }
 
-/// Expand process-env bootstrap capabilities to include [`DEFAULT_CAPABILITIES`].
+/// Expand process-env bootstrap capabilities to include the preset's floor.
 ///
 /// No-op when `AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES` is unset.
+/// Preset comes from `AUTOMATION_RUNTIME_BOOTSTRAP_PRESET` (default unrestricted).
 pub fn heal_process_env_capabilities() -> Result<HealBootstrapReport> {
     let Ok(existing) = std::env::var(ENV_CAPABILITIES) else {
         return Ok(HealBootstrapReport::default());
     };
-    let (healed_csv, added) = union_capabilities_csv(&existing)?;
+    let preset = std::env::var(ENV_PRESET)
+        .ok()
+        .and_then(|raw| BootstrapPreset::parse(&raw))
+        .unwrap_or(BootstrapPreset::Unrestricted);
+    let (healed_csv, added) = union_capabilities_csv_with(&existing, capabilities_for_preset(preset))?;
     if added.is_empty() {
         return Ok(HealBootstrapReport::default());
     }
@@ -397,8 +528,8 @@ pub fn heal_process_env_capabilities() -> Result<HealBootstrapReport> {
 }
 
 /// Heal bootstrap.env (when present) and process env so local installs stay
-/// unrestricted as defaults grow. Call before credential load on serve,
-/// mcp-stdio, and doctor.
+/// current as defaults grow. Agent presets never gain `authority:admin`.
+/// Call before credential load on serve, mcp-stdio, and doctor.
 ///
 /// Also heals `~/.config/bobby-browser/bootstrap.env` when that file exists and
 /// differs from `path`. Launchd wrappers on macOS often `source` the XDG-style
@@ -532,9 +663,55 @@ mod tests {
         assert!(material.bearer().len() >= 32);
         assert!(material.capabilities_csv().contains("authority:admin"));
         assert!(material.capabilities_csv().contains("session:read"));
+        assert!(material.capabilities_csv().contains("context:read"));
         assert!(material.capabilities_csv().contains("job:submit"));
         assert!(material.capabilities_csv().contains("job:read"));
         assert!(material.capabilities_csv().contains("job:cancel"));
+        assert_eq!(material.preset(), BootstrapPreset::Unrestricted);
+    }
+
+    #[test]
+    fn agent_preset_omits_authority_admin() {
+        let material =
+            generate_bootstrap_for_preset(chrono::Duration::days(1), BootstrapPreset::Agent)
+                .unwrap();
+        assert!(!material.capabilities_csv().contains("authority:admin"));
+        assert!(material.capabilities_csv().contains("intent:execute"));
+        assert!(material.capabilities_csv().contains("context:read"));
+        assert_eq!(material.preset(), BootstrapPreset::Agent);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        write_bootstrap_env(&path, &material, false).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# bobby-bootstrap-preset: agent"));
+        assert_eq!(
+            read_preset_marker_from_file(&path).unwrap(),
+            Some(BootstrapPreset::Agent)
+        );
+    }
+
+    #[test]
+    fn agent_heal_never_adds_authority_admin() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bootstrap.env");
+        let material =
+            generate_bootstrap_for_preset(chrono::Duration::days(1), BootstrapPreset::Agent)
+                .unwrap();
+        // Stale agent set missing context:read and without authority:admin.
+        let stale = "session:read,session:write,page:read,page:write,browser:mutate,intent:execute,vision:assist,artifact:read,artifact:capture,recovery:read,recovery:write";
+        let contents = format!(
+            "# bobby-bootstrap-preset: agent\n{ENV_TOKEN}={}\n{ENV_PRINCIPAL}={}\n{ENV_CAPABILITIES}={stale}\n{ENV_EXPIRES_AT}={}\n",
+            material.bearer(),
+            material.principal_id().as_uuid(),
+            material.expires_at().to_rfc3339(),
+        );
+        write_private_file(&path, contents.as_bytes()).unwrap();
+        let report = ensure_unrestricted_bootstrap(&path).unwrap();
+        assert!(report.file_rewritten);
+        assert!(report.added.contains(&"context:read"));
+        let caps = load_bootstrap_capabilities_csv(&path).unwrap();
+        assert!(caps.contains("context:read"));
+        assert!(!caps.split(',').any(|c| c.trim() == "authority:admin"));
     }
 
     #[test]
@@ -708,6 +885,7 @@ mod tests {
         assert!(added.contains(&"javascript:evaluate"));
         assert!(added.contains(&"intent:execute"));
         assert!(added.contains(&"vision:assist"));
+        assert!(added.contains(&"context:read"));
         assert!(added.contains(&"job:submit"));
         assert!(healed.contains("browser:fingerprint"));
         assert!(healed.starts_with("authority:admin,session:read"));

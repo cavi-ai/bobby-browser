@@ -72,6 +72,9 @@ enum CliCommand {
         /// Days until the bootstrap credential expires
         #[arg(long, default_value_t = bootstrap_local::DEFAULT_TTL_DAYS as u32)]
         ttl_days: u32,
+        /// Capability floor: unrestricted (default) or agent (no authority:admin)
+        #[arg(long, value_enum, default_value_t = bootstrap_local::BootstrapPreset::Unrestricted)]
+        preset: bootstrap_local::BootstrapPreset,
         /// Bootstrap env file path
         #[arg(long)]
         path: Option<PathBuf>,
@@ -423,9 +426,10 @@ pub async fn run() -> Result<()> {
         CliCommand::Init {
             force,
             ttl_days,
+            preset,
             path,
             emit,
-        } => run_init(force, ttl_days, path, emit)?,
+        } => run_init(force, ttl_days, preset, path, emit)?,
         CliCommand::McpStdio {
             bootstrap_env,
             config,
@@ -1161,6 +1165,44 @@ fn check_vision_route_for_assist(
     }
 }
 
+/// Remind that `vision:assist` still needs session `executionPolicy.visionAssist`.
+fn check_vision_session_gate(holds_vision_assist: bool) -> Option<DoctorCheck> {
+    if !holds_vision_assist {
+        return None;
+    }
+    Some(DoctorCheck {
+        status: DoctorStatus::Ok,
+        name: "vision-session-gate".to_string(),
+        detail: "vision:assist is held; sessions still need executionPolicy.visionAssist=true (cap alone is not enough)".to_string(),
+    })
+}
+
+fn check_bootstrap_preset(path: Option<&Path>, caps_csv: Option<&str>) -> DoctorCheck {
+    let preset = bootstrap_local::read_bootstrap_preset(path);
+    let holds_admin = caps_csv.is_some_and(|caps| bootstrap_csv_holds(caps, "authority:admin"));
+    match preset {
+        bootstrap_local::BootstrapPreset::Agent if holds_admin => DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "bootstrap-preset".to_string(),
+            detail: "preset is agent but capability list still includes authority:admin; re-run `bobby init --preset agent --force`".to_string(),
+        },
+        bootstrap_local::BootstrapPreset::Agent => DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "bootstrap-preset".to_string(),
+            detail: "agent (no authority:admin)".to_string(),
+        },
+        bootstrap_local::BootstrapPreset::Unrestricted => DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "bootstrap-preset".to_string(),
+            detail: if holds_admin {
+                "unrestricted (includes authority:admin)".to_string()
+            } else {
+                "unrestricted (authority:admin not present; heal will add it)".to_string()
+            },
+        },
+    }
+}
+
 /// 1x1 transparent PNG for the doctor propose probe.
 const DOCTOR_PROBE_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -1701,6 +1743,28 @@ fn run_doctor(
             push_doctor_check(&mut report, check);
         }
     }
+    if let Some(check) = check_vision_session_gate(holds_vision_assist) {
+        push_doctor_check(&mut report, check);
+    }
+
+    let caps_for_preset = bootstrap_path_for_heal
+        .as_ref()
+        .filter(|path| path.exists())
+        .and_then(|path| bootstrap_local::load_bootstrap_capabilities_csv(path).ok())
+        .or_else(|| std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES").ok());
+    if bootstrap_path_for_heal
+        .as_ref()
+        .is_some_and(|path| path.exists())
+        || caps_for_preset.is_some()
+    {
+        push_doctor_check(
+            &mut report,
+            check_bootstrap_preset(
+                bootstrap_path_for_heal.as_deref(),
+                caps_for_preset.as_deref(),
+            ),
+        );
+    }
 
     if let Ok(credential) = broker::StartupCredential::from_env() {
         report.ok("bootstrap", "credential from environment".to_string());
@@ -1943,6 +2007,7 @@ fn is_executable(_path: &Path) -> bool {
 fn run_init(
     force: bool,
     ttl_days: u32,
+    preset: bootstrap_local::BootstrapPreset,
     path: Option<PathBuf>,
     emit: Option<onboarding::EmitFormat>,
 ) -> Result<()> {
@@ -1950,11 +2015,21 @@ fn run_init(
         Some(path) => path,
         None => bootstrap_local::default_bootstrap_path()?,
     };
-    let material =
-        bootstrap_local::generate_bootstrap(chrono::Duration::days(i64::from(ttl_days)))?;
+    let material = bootstrap_local::generate_bootstrap_for_preset(
+        chrono::Duration::days(i64::from(ttl_days)),
+        preset,
+    )?;
     bootstrap_local::write_bootstrap_env(&path, &material, force)?;
     println!("{}", material.bearer());
     eprintln!("Wrote bootstrap env to {}", path.display());
+    eprintln!(
+        "Preset: {} ({})",
+        preset.as_str(),
+        match preset {
+            bootstrap_local::BootstrapPreset::Agent => "no authority:admin",
+            bootstrap_local::BootstrapPreset::Unrestricted => "includes authority:admin",
+        }
+    );
     eprintln!("Map this bearer to AUTOMATION_RUNTIME_TOKEN / Authorization bearer for the SDK.");
     eprintln!(
         "Passing --force regenerates and invalidates the previous bearer for new enrollment."
@@ -3735,6 +3810,35 @@ endpoint_url = "http://127.0.0.1:9100/vision"
         let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
         let check = report.check("vision-route").expect("vision-route check");
         assert_eq!(check.status, DoctorStatus::Ok);
+        let gate = report
+            .check("vision-session-gate")
+            .expect("vision-session-gate check");
+        assert_eq!(gate.status, DoctorStatus::Ok);
+        assert!(gate.detail.contains("executionPolicy.visionAssist"));
+    }
+
+    #[test]
+    fn doctor_reports_agent_bootstrap_preset() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let bootstrap = root.path().join("bootstrap.env");
+        let material = bootstrap_local::generate_bootstrap_for_preset(
+            chrono::Duration::days(30),
+            bootstrap_local::BootstrapPreset::Agent,
+        )
+        .unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+
+        let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
+        let check = report
+            .check("bootstrap-preset")
+            .expect("bootstrap-preset check");
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.detail.contains("agent"));
+        assert!(check.detail.contains("no authority:admin"));
     }
 
     #[test]

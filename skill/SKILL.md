@@ -27,15 +27,19 @@ Never claim an action worked without its evidence.
    --skill --yes`). That writes the bootstrap credential, merges MCP config,
    and installs this skill into `~/.agents/skills/bobby-browser/` (project:
    `.agents/skills/` with `--project-skill`). Optional: `--skill-claude`,
-   `--skill-openclaw`.
+   `--skill-openclaw`. For agent hosts that should not mint tokens, prefer
+   `bobby init --preset agent` (no `authority:admin`; heal respects the
+   marker). Default `bobby init` remains unrestricted.
 2. For the Firefox companion (persistent logins): `bobby install --companion`
    or `make firefox`, start Firefox with `--remote-debugging-port` (`make
    firefox-start` if using the launchd agent), then **Pair** from the toolbar
    popup. That writes `browser-selection.json`. CLI
    `bobby enroll-firefox-profile` is for CI/scripting only.
 3. `bobby doctor` validates the setup, including sibling gateway presence
-   (`mcp-gateway` / `acp-gateway`) and an MCP handshake (`initialize` +
-   `tools/list`) against the gateway.
+   (`mcp-gateway` / `acp-gateway`), bootstrap preset, and an MCP handshake
+   (`initialize` + `tools/list`) against the gateway. When `vision:assist` is
+   held, doctor also reminds that sessions need
+   `executionPolicy.visionAssist=true` — the cap alone does not enable vision.
 
 Your host should spawn `bobby mcp-stdio` (loads the credential itself). Prefer
 that over raw `mcp-gateway` + env placeholders. ACP hosts use `bobby acp-stdio`
