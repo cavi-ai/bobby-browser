@@ -227,17 +227,28 @@ impl ManagedVisionProxy {
             .arg("--bind")
             .arg(decision.bind.to_string())
             .arg("--path")
-            .arg(&decision.path)
-            .arg("--model")
-            .arg(&profile.model)
-            .arg("--openai-base-url")
-            .arg(&profile.base_url);
-        match &profile.api_key_env {
-            Some(name) => {
-                cmd.arg("--api-key-env").arg(name);
-            }
-            None => {
-                cmd.arg("--api-key-env").arg("");
+            .arg(&decision.path);
+        // Detect provider type from base_url to select upstream.
+        let is_ollama = profile.base_url.contains("127.0.0.1:11434")
+            || profile.base_url.contains("localhost:11434");
+        if is_ollama {
+            cmd.arg("--ollama")
+                .arg("--model")
+                .arg(&profile.model)
+                .arg("--ollama-base-url")
+                .arg(&profile.base_url);
+        } else {
+            cmd.arg("--model")
+                .arg(&profile.model)
+                .arg("--openai-base-url")
+                .arg(&profile.base_url);
+            match &profile.api_key_env {
+                Some(name) => {
+                    cmd.arg("--api-key-env").arg(name);
+                }
+                None => {
+                    cmd.arg("--api-key-env").arg("");
+                }
             }
         }
         // Inherit stderr so the child cannot fill a pipe and deadlock; discard
