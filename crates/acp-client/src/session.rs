@@ -201,6 +201,7 @@ impl intent_engine::VisionAssist for AcpVisionAssist {
                 },
                 allowed_actions,
                 evidence_digest: digest,
+                context: request.context,
             },
             intent_engine::VisionContextBudget::default(),
         )
@@ -355,6 +356,15 @@ fn build_prompt(packet: &VisionTaskPacket) -> Vec<ContentBlock> {
         },
         "allowedActions": packet.allowed_actions,
         "evidenceDigest": packet.evidence_digest,
+        "context": packet.context.as_ref().map(|context| serde_json::json!({
+            "url": context.url,
+            "candidates": context.candidates.iter().map(|candidate| serde_json::json!({
+                "role": candidate.role,
+                "name": candidate.name,
+                "ordinal": candidate.ordinal,
+            })).collect::<Vec<_>>(),
+            "recentCommandKinds": context.recent_command_kinds,
+        })),
         "responseSchema": {
             "confidence": "number 0..1",
             "action": { "kind": "click|type_text|extract_value" },

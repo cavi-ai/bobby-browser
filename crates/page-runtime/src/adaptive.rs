@@ -229,6 +229,12 @@ pub struct AdaptivePageEngine {
     direct: Option<DirectComponents>,
     vision_assist: Option<Arc<dyn VisionAssist>>,
     structured_extractor: Option<Arc<dyn intent_engine::StructuredExtractor>>,
+    /// Prefill proposal cache handle. `None` unless `[vision].prefill` is
+    /// on; the executor attaches the session's context graph.
+    proposals: Option<Arc<dyn intent_engine::ProposalLookup>>,
+    /// The runtime's context graph, for the vision prompt's recent-commands
+    /// block. Attached always; independent of the prefill flag.
+    context_graph: Option<Arc<crate::ContextGraph>>,
 }
 
 #[derive(Clone)]
@@ -259,7 +265,26 @@ impl AdaptivePageEngine {
             }),
             vision_assist: None,
             structured_extractor: None,
+            proposals: None,
+            context_graph: None,
         }
+    }
+
+    /// Enables lazy batch prefill against this proposal cache (the
+    /// runtime's context graph). Off by default.
+    pub fn with_vision_prefill(
+        mut self,
+        proposals: Arc<dyn intent_engine::ProposalLookup>,
+    ) -> Self {
+        self.proposals = Some(proposals);
+        self
+    }
+
+    /// Attaches the runtime's context graph so escalation prompts carry the
+    /// recent-commands block.
+    pub fn with_context_graph(mut self, graph: Arc<crate::ContextGraph>) -> Self {
+        self.context_graph = Some(graph);
+        self
     }
 
     pub fn with_vision_assist(mut self, assist: Arc<dyn VisionAssist>) -> Self {
@@ -308,6 +333,9 @@ impl AdaptivePageEngine {
                 intent,
                 vision_gate,
                 gate.vision_node.provider(self.vision_assist.clone()),
+                self.proposals.clone(),
+                page.as_ref().and_then(|page| page.url.clone()),
+                self.context_graph.clone(),
             )
             .await;
         }
@@ -504,19 +532,43 @@ fn equivalence_unproven(reason: ExecutionReason) -> CommandError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_intent(
     envelope: &CommandEnvelope,
     lease: &WorkerLease,
     intent: &types::IntentCommand,
     vision_gate: VisionGate,
     assist: Option<Arc<dyn VisionAssist>>,
+    proposals: Option<Arc<dyn intent_engine::ProposalLookup>>,
+    page_url: Option<String>,
+    context_graph: Option<Arc<crate::ContextGraph>>,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
     let browser = WorkerIntentBrowser { lease };
+    let gates_open = vision_gate.session_ok && vision_gate.capability_ok;
+    let recent_command_kinds = context_graph
+        .as_ref()
+        .map(|graph| graph.recent_command_kinds(page_id))
+        .unwrap_or_default();
+    let prompt_context = if page_url.is_none() && recent_command_kinds.is_empty() {
+        None
+    } else {
+        Some(intent_engine::VisionPromptContext {
+            url: page_url,
+            candidates: Vec::new(),
+            recent_command_kinds,
+        })
+    };
     let vision = VisionContext {
         session_ok: vision_gate.session_ok,
         capability_ok: vision_gate.capability_ok,
         assist,
+        // The cache is only ever consulted behind both gates; a closed gate
+        // gets `None` and the byte-identical pre-prefill path.
+        proposals: proposals.filter(|_| gates_open),
+        // Escalation deferral is an engine-internal complete_form decision.
+        defer_escalation: false,
+        prompt_context,
     };
     match IntentEngine::execute(intent, page_id, &browser, &vision).await {
         IntentOutcome::Completed { evidence } => Ok(AdaptiveExecution {

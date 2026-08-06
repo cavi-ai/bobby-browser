@@ -5,6 +5,7 @@ use intent_engine::{
 
 fn input(purpose: String) -> VisionPacketInput {
     VisionPacketInput {
+        context: None,
         purpose,
         intent_kind: "click".into(),
         stuck: StuckKind::TargetMissing,
@@ -96,4 +97,75 @@ fn validator_rejects_mismatched_evidence() {
     )
     .unwrap_err();
     assert_eq!(error, VisionPacketError::EvidenceMismatch);
+}
+
+#[test]
+fn context_block_counts_toward_the_text_budget() {
+    let mut with_context = input("purpose".to_string());
+    with_context.context = Some(intent_engine::VisionPromptContext {
+        url: Some("https://example.test/form".into()),
+        candidates: vec![intent_engine::VisionPromptCandidate {
+            role: "textbox".into(),
+            name: "Email address".into(),
+            ordinal: Some(1),
+        }],
+        recent_command_kinds: vec!["navigate".into(), "fill".into()],
+    });
+    // Fits the default (raised) budget...
+    compile_vision_packet(with_context.clone(), VisionContextBudget::default()).unwrap();
+    // ...but an oversized block is refused like any other over-budget text.
+    let mut big = with_context.clone();
+    big.context.as_mut().unwrap().url = Some(format!("https://example.test/{}", "x".repeat(8_192)));
+    let error = compile_vision_packet(big, VisionContextBudget::default()).unwrap_err();
+    assert_eq!(error, VisionPacketError::TextBudgetExceeded);
+}
+
+#[test]
+fn context_block_carries_only_structural_fields() {
+    // The canary for the packet builder: the serialized block has exactly
+    // url/candidates/recentCommandKinds and candidates carry exactly
+    // role/name/ordinal — there is nowhere for a typed value to hide.
+    let context = intent_engine::VisionPromptContext {
+        url: Some("https://example.test".into()),
+        candidates: vec![intent_engine::VisionPromptCandidate {
+            role: "textbox".into(),
+            name: "Email address".into(),
+            ordinal: Some(2),
+        }],
+        recent_command_kinds: vec!["fill".into()],
+    };
+    let value = serde_json::to_value(&context).unwrap();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["candidates", "recentCommandKinds", "url"]);
+    let mut candidate_keys: Vec<&str> = value["candidates"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    candidate_keys.sort_unstable();
+    assert_eq!(candidate_keys, ["name", "ordinal", "role"]);
+}
+
+#[test]
+fn no_context_packet_is_identical_to_before() {
+    let packet = compile_vision_packet(
+        input("Continue".to_string()),
+        VisionContextBudget::default(),
+    )
+    .unwrap();
+    assert!(packet.context.is_none());
+    let with = compile_vision_packet(
+        input("Continue".to_string()),
+        VisionContextBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(packet.purpose, with.purpose);
+    assert_eq!(packet.evidence_digest, with.evidence_digest);
 }

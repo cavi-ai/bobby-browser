@@ -283,6 +283,23 @@ Empty frames are not sent. Both engines execute the returned coordinates
 natively — Chromium through CDP input, Firefox through BiDi pointer actions
 against the bounded accessibility snapshot's candidates.
 
+## Vision prefill
+
+With `[vision].prefill = true` (default off), the first vision-eligible stuck
+field in a `complete_form` does one screenshot and proposes for every
+remaining field purpose, caching the results under the page's generation
+discipline. Later stuck fields resolve from the cache with no extra
+screenshots — one screenshot per stuck form instead of one per stuck field.
+
+Evidence distinguishes the paths: `resolutionPath` is `visionPrefill` for a
+cache-resolved field, `visionFallback` for a live stuck-rescue escalation,
+`deterministic` when no vision ran. A cached proposal that fails to execute
+is dropped and escalated live, never retried. Provider loss during a batch
+records nothing and degrades to the ordinary path.
+
+Only coordinate proposals are cached — a proposal carrying typed text is
+never stored, in memory or otherwise.
+
 ## Vision backend
 
 Two backends, selected by `[vision].backend`:

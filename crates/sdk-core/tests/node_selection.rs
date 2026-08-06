@@ -245,6 +245,7 @@ async fn a_local_session_sends_page_material_only_to_its_loopback_node() {
             intent_kind: "locate".into(),
             screenshot_png: b"page-material".to_vec(),
             stuck: StuckKind::TargetMissing,
+            context: None,
         })
         .await
         .expect("the loopback node answers");

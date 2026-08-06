@@ -536,6 +536,7 @@ dependencies = [
  "firefox-companion",
  "getrandom 0.4.3",
  "hex",
+ "intent-engine",
  "libc",
  "mcp-gateway",
  "node-registry",

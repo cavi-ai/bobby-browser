@@ -13,6 +13,7 @@ pub struct ProposeInput {
     pub intent_kind: String,
     pub stuck: String,
     pub screenshot_png_b64: String,
+    pub context: Option<crate::wire::ProposeContext>,
 }
 
 pub struct ExtractInput {

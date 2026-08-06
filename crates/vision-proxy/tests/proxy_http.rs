@@ -301,6 +301,7 @@ async fn http_vision_assist_contract_over_bound_proxy() {
             intent_kind: "locate".into(),
             screenshot_png: b"png-bytes".to_vec(),
             stuck: StuckKind::TargetMissing,
+            context: None,
         })
         .await
         .unwrap();

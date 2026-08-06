@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use intent_engine::{CachedProposal, ProposalLookup};
 use types::{
     AccessibilityNode, AccessibilityTarget, CommandId, ContextAnswer, PageId, PrimitiveCommand,
     RuntimeCommand,
@@ -35,6 +36,30 @@ pub const MAX_RETAINED_PAGES: usize = 256;
 /// Command ids retained per page. Bounded because this grows with workflow
 /// length, not with anything self-limiting.
 pub const MAX_RETAINED_COMMANDS: usize = 64;
+
+/// Vision proposals retained per page. One lazy batch per form is the
+/// expected working set; the cap keeps a pathological form from growing the
+/// entry without bound.
+pub const MAX_RETAINED_PROPOSALS: usize = 32;
+
+/// A vision-proposed click target for a field purpose, cached under the
+/// page's generation discipline. Structurally incapable of carrying a typed
+/// value: only coordinate actions are cacheable — a `TypeText` or
+/// `ExtractValue` proposal holds what the user typed and is never cached.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateProposal {
+    /// Normalized purpose (trimmed, lowercased) the proposal answers.
+    pub purpose_key: String,
+    pub x: f64,
+    pub y: f64,
+    pub confidence: f32,
+    pub source: ProposalSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalSource {
+    Vision,
+}
 
 /// Page structure retained for a session, keyed by page.
 #[derive(Default)]
@@ -58,7 +83,15 @@ struct PageContext {
     /// Ids only, never the evidence: the journal stays the single authority on
     /// what happened, and a copy here could disagree with it.
     commands: Vec<CommandId>,
+    /// Kind names of those same commands, same order, same cap. Kinds are
+    /// static strings ("fill", "click"), never values.
+    command_kinds: Vec<&'static str>,
     nodes: Vec<AccessibilityNode>,
+    /// Vision proposals cached for this page, valid only while
+    /// `proposals_at == generation`.
+    proposals: Vec<CandidateProposal>,
+    /// The generation `proposals` was recorded under.
+    proposals_at: u64,
 }
 
 impl ContextGraph {
@@ -88,7 +121,10 @@ impl ContextGraph {
             observed_at: 0,
             recorded_seq: seq,
             commands: Vec::new(),
+            command_kinds: Vec::new(),
             nodes: Vec::new(),
+            proposals: Vec::new(),
+            proposals_at: 0,
         });
         entry.observed_at = entry.generation;
         entry.recorded_seq = seq;
@@ -100,7 +136,7 @@ impl ContextGraph {
     /// Unlike [`Self::record`], this does not require the page to have been
     /// observed, and it survives invalidation: what happened on a page stays
     /// true after the page changes.
-    pub fn record_command(&self, page: &PageId, command: CommandId) {
+    pub fn record_command(&self, page: &PageId, command: CommandId, kind: &'static str) {
         let seq = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -113,15 +149,91 @@ impl ContextGraph {
             observed_at: 0,
             recorded_seq: seq,
             commands: Vec::new(),
+            command_kinds: Vec::new(),
             nodes: Vec::new(),
+            proposals: Vec::new(),
+            proposals_at: 0,
         });
         if entry.commands.contains(&command) {
             return;
         }
         if entry.commands.len() >= MAX_RETAINED_COMMANDS {
             entry.commands.remove(0);
+            entry.command_kinds.remove(0);
         }
         entry.commands.push(command);
+        entry.command_kinds.push(kind);
+    }
+
+    /// Kind names of the most recent commands recorded against `page`,
+    /// newest last, capped at 8. For the vision prompt's recent-commands
+    /// block; kinds only, never values.
+    pub fn recent_command_kinds(&self, page: &PageId) -> Vec<String> {
+        self.lock()
+            .get(page)
+            .map(|entry| {
+                entry
+                    .command_kinds
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .rev()
+                    .map(|kind| (*kind).to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Caches vision proposals for `page`, stamped at the current
+    /// generation. Replaces any prior batch: a batch is one screenshot's
+    /// worth of answers, and a new batch supersedes it wholesale.
+    pub fn record_proposals(&self, page: &PageId, proposals: Vec<CandidateProposal>) {
+        let mut pages = self.lock();
+        let Some(entry) = pages.get_mut(page) else {
+            return;
+        };
+        let mut proposals = proposals;
+        proposals.truncate(MAX_RETAINED_PROPOSALS);
+        entry.proposals_at = entry.generation;
+        entry.proposals = proposals;
+    }
+
+    /// The cached proposal for `purpose`, or `None`.
+    ///
+    /// Mirrors [`Self::ask`]: `None` covers no batch recorded, a stale batch
+    /// (page changed since), a confidence under the floor, and duplicate
+    /// answers for the same purpose.
+    pub fn proposal_for(&self, page: &PageId, purpose: &str) -> Option<CandidateProposal> {
+        let pages = self.lock();
+        let entry = pages.get(page)?;
+        if entry.proposals_at != entry.generation {
+            return None;
+        }
+        let needle = purpose.trim().to_lowercase();
+        if needle.is_empty() {
+            return None;
+        }
+        let mut matches = entry
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.purpose_key == needle);
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        (first.confidence >= CONTEXT_CONFIDENCE_FLOOR).then(|| first.clone())
+    }
+
+    /// Drops the cached proposal for `purpose` (e.g. after it fails
+    /// verification, so a retry never replays the same bad proposal).
+    pub fn drop_proposal(&self, page: &PageId, purpose: &str) {
+        let needle = purpose.trim().to_lowercase();
+        let mut pages = self.lock();
+        if let Some(entry) = pages.get_mut(page) {
+            entry
+                .proposals
+                .retain(|proposal| proposal.purpose_key != needle);
+        }
     }
 
     /// Command ids whose evidence the runtime recorded against `page`, oldest
@@ -235,6 +347,33 @@ impl ContextGraph {
     }
 }
 
+/// Static kind name for a command ("fill", "click", …), for the vision
+/// prompt's recent-commands block. Never carries values.
+pub fn command_kind_name(command: &RuntimeCommand) -> &'static str {
+    match command {
+        RuntimeCommand::Intent(intent) => match intent {
+            types::IntentCommand::Locate(_) => "locate",
+            types::IntentCommand::Fill(_) => "fill",
+            types::IntentCommand::CompleteForm(_) => "complete_form",
+            types::IntentCommand::SubmitAndVerify(_) => "submit_and_verify",
+            types::IntentCommand::WaitForState(_) => "wait_for_state",
+            types::IntentCommand::Follow(_) => "follow",
+            types::IntentCommand::DismissObstruction(_) => "dismiss_obstruction",
+            types::IntentCommand::Extract(_) => "extract",
+        },
+        RuntimeCommand::Primitive(primitive) => match primitive {
+            PrimitiveCommand::Navigate(_) => "navigate",
+            PrimitiveCommand::Click(_) => "click",
+            PrimitiveCommand::TypeText(_) => "type_text",
+            PrimitiveCommand::Inspect(_) => "inspect",
+            PrimitiveCommand::WaitFor(_) => "wait_for",
+            PrimitiveCommand::AccessibilitySnapshot(_) => "a11y_snapshot",
+            PrimitiveCommand::CaptureScreenshot(_) => "screenshot",
+            _ => "primitive",
+        },
+    }
+}
+
 /// Whether `command` is known to leave the page's structure as it was.
 ///
 /// Read-only primitives only. Everything else invalidates, including every
@@ -254,6 +393,37 @@ fn preserves_page_structure(command: &RuntimeCommand) -> bool {
             | PrimitiveCommand::GetCookies(_)
             | PrimitiveCommand::CaptureScreenshot(_)
     )
+}
+
+impl ProposalLookup for ContextGraph {
+    fn proposal_for(&self, page: &PageId, purpose: &str) -> Option<CachedProposal> {
+        ContextGraph::proposal_for(self, page, purpose).map(|proposal| CachedProposal {
+            x: proposal.x,
+            y: proposal.y,
+            confidence: proposal.confidence,
+        })
+    }
+
+    fn drop_proposal(&self, page: &PageId, purpose: &str) {
+        ContextGraph::drop_proposal(self, page, purpose);
+    }
+
+    fn record_proposals(&self, page: &PageId, proposals: Vec<(String, CachedProposal)>) {
+        ContextGraph::record_proposals(
+            self,
+            page,
+            proposals
+                .into_iter()
+                .map(|(purpose, cached)| CandidateProposal {
+                    purpose_key: purpose.trim().to_lowercase(),
+                    x: cached.x,
+                    y: cached.y,
+                    confidence: cached.confidence,
+                    source: ProposalSource::Vision,
+                })
+                .collect(),
+        );
+    }
 }
 
 /// Scores how well a described control matches a node, or `None` if it does not
@@ -518,6 +688,113 @@ mod tests {
             graph.ask(&newest, "Newest").is_some(),
             "the graph stopped learning once it hit the bound"
         );
+    }
+
+    fn proposal(purpose: &str, confidence: f32) -> CandidateProposal {
+        CandidateProposal {
+            purpose_key: purpose.trim().to_lowercase(),
+            x: 120.0,
+            y: 240.0,
+            confidence,
+            source: ProposalSource::Vision,
+        }
+    }
+
+    #[test]
+    fn a_recorded_proposal_answers_its_purpose() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        graph.record_proposals(&page, vec![proposal("Email address", 0.9)]);
+        let answer = graph.proposal_for(&page, "email address").expect("a hit");
+        assert_eq!(answer.confidence, 0.9);
+        assert_eq!(answer.source, ProposalSource::Vision);
+    }
+
+    #[test]
+    fn a_navigation_stales_the_whole_batch() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        graph.record_proposals(&page, vec![proposal("Email address", 0.9)]);
+        graph.invalidate(&page);
+        assert_eq!(
+            graph.proposal_for(&page, "Email address"),
+            None,
+            "a stale batch answered after the page changed"
+        );
+    }
+
+    #[test]
+    fn every_intent_stales_the_batch() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        graph.record_proposals(&page, vec![proposal("Email address", 0.9)]);
+        graph.invalidate_for(
+            &page,
+            &RuntimeCommand::Intent(types::IntentCommand::Locate(types::LocateIntent {
+                purpose: "find the email field".to_owned(),
+                hints: types::IntentHints::default(),
+            })),
+        );
+        assert_eq!(graph.proposal_for(&page, "Email address"), None);
+    }
+
+    #[test]
+    fn proposals_under_the_floor_answer_nothing() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        graph.record_proposals(&page, vec![proposal("Email address", 0.5)]);
+        assert_eq!(graph.proposal_for(&page, "Email address"), None);
+    }
+
+    #[test]
+    fn duplicate_purposes_answer_nothing() {
+        let (graph, page) = graph_with(vec![node("textbox", "Address", Some(1))]);
+        graph.record_proposals(
+            &page,
+            vec![proposal("Address", 0.9), proposal("address", 0.8)],
+        );
+        assert_eq!(
+            graph.proposal_for(&page, "Address"),
+            None,
+            "two proposals for one purpose produced an answer"
+        );
+    }
+
+    #[test]
+    fn the_batch_is_bounded() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        let batch: Vec<CandidateProposal> = (0..MAX_RETAINED_PROPOSALS + 10)
+            .map(|index| proposal(&format!("field {index}"), 0.9))
+            .collect();
+        graph.record_proposals(&page, batch);
+        assert!(
+            graph
+                .proposal_for(&page, &format!("field {}", MAX_RETAINED_PROPOSALS + 9))
+                .is_none(),
+            "a proposal past the cap answered"
+        );
+        assert!(graph.proposal_for(&page, "field 0").is_some());
+    }
+
+    #[test]
+    fn forgetting_a_page_drops_its_proposals() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        graph.record_proposals(&page, vec![proposal("Email address", 0.9)]);
+        graph.forget(&page);
+        assert_eq!(graph.proposal_for(&page, "Email address"), None);
+    }
+
+    #[test]
+    fn dropped_proposals_never_answer_again() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        graph.record_proposals(&page, vec![proposal("Email address", 0.9)]);
+        graph.drop_proposal(&page, "email address");
+        assert_eq!(graph.proposal_for(&page, "Email address"), None);
+    }
+
+    #[test]
+    fn a_new_batch_supersedes_the_old_one() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        graph.record_proposals(&page, vec![proposal("Old field", 0.9)]);
+        graph.record_proposals(&page, vec![proposal("New field", 0.9)]);
+        assert_eq!(graph.proposal_for(&page, "Old field"), None);
+        assert!(graph.proposal_for(&page, "New field").is_some());
     }
 
     #[test]

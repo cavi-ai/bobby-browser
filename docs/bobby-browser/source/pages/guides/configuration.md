@@ -88,6 +88,10 @@ args = ["acp"]
 auth = "advertised"
 ```
 
+| Field | Default | Meaning |
+|---|---|---|
+| `prefill` | `false` | Lazy batch prefill: one screenshot proposes for every remaining stuck field in a form, cached for the page's generation |
+
 Supported auth paths are `advertised`, `oauth-authorization-code`,
 `oauth-device-code`, `environment`, `existing-session`, and `none`. Bobby maps
 each path to an `auth-broker` strategy and calls the matching harness

@@ -25,6 +25,17 @@ pub struct VisionContext {
     pub session_ok: bool,
     pub capability_ok: bool,
     pub assist: Option<Arc<dyn VisionAssist>>,
+    /// Prefill proposal cache. `None` unless `[vision].prefill` is on and
+    /// both gates are open, so the default path is byte-identical to before.
+    pub proposals: Option<Arc<dyn crate::ProposalLookup>>,
+    /// Set by `execute_complete_form` while driving fields: a stuck field
+    /// returns its plain stuck failure instead of escalating, so the form
+    /// can batch one screenshot for every remaining purpose.
+    pub defer_escalation: bool,
+    /// Base prompt context (page url, recent command kinds) supplied by the
+    /// runtime; the engine merges per-stuck candidates into it. `None`
+    /// keeps every request byte-identical to before.
+    pub prompt_context: Option<crate::VisionPromptContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,17 +187,37 @@ async fn execute_complete_form(
     fields: Vec<CompleteFormFieldPlan>,
 ) -> IntentOutcome {
     let mut evidence = Vec::new();
-    for field in fields {
+    // Lazy batch prefill: with a cache threaded through open gates, fields
+    // defer their own escalation; the first stuck field triggers one
+    // screenshot and one propose per remaining purpose.
+    let batching = vision.proposals.is_some()
+        && vision.session_ok
+        && vision.capability_ok
+        && vision.assist.is_some();
+    let mut deferred = vision.clone();
+    deferred.defer_escalation = batching;
+    let mut batched = false;
+    for (index, field) in fields.iter().enumerate() {
         evidence.push(Evidence::Configuration {
             name: "completeFormField".into(),
             value: field.name.clone(),
         });
+        let field_vision = if batched { vision } else { &deferred };
         let intent = IntentCommand::Fill(types::FillIntent {
-            purpose: field.purpose,
+            purpose: field.purpose.clone(),
             hints: types::IntentHints::default(),
             value: field.value.clone(),
         });
-        match execute_fill(&intent, page_id, browser, vision, field.target, field.value).await {
+        match execute_fill(
+            &intent,
+            page_id,
+            browser,
+            field_vision,
+            field.target.clone(),
+            field.value.clone(),
+        )
+        .await
+        {
             IntentOutcome::Completed {
                 evidence: mut field_evidence,
             } => evidence.append(&mut field_evidence),
@@ -195,11 +226,116 @@ async fn execute_complete_form(
                 evidence: mut field_evidence,
             } => {
                 evidence.append(&mut field_evidence);
-                return IntentOutcome::Failed { error, evidence };
+                let eligible = batching
+                    && !batched
+                    && !never_escalates(error.code)
+                    && !matches!(
+                        error.code,
+                        ErrorCode::VisionAssistDenied | ErrorCode::VisionAssistFailed
+                    );
+                if !eligible {
+                    return IntentOutcome::Failed { error, evidence };
+                }
+                let purposes: Vec<String> = fields[index..]
+                    .iter()
+                    .map(|field| field.purpose.clone())
+                    .collect();
+                batch_prefill(page_id, browser, vision, purposes).await;
+                batched = true;
+                // Retry the stuck field once: the cache consult in the
+                // escalation path answers from the batch with no screenshot.
+                let intent = IntentCommand::Fill(types::FillIntent {
+                    purpose: field.purpose.clone(),
+                    hints: types::IntentHints::default(),
+                    value: field.value.clone(),
+                });
+                match execute_fill(
+                    &intent,
+                    page_id,
+                    browser,
+                    vision,
+                    field.target.clone(),
+                    field.value.clone(),
+                )
+                .await
+                {
+                    IntentOutcome::Completed {
+                        evidence: mut retry_evidence,
+                    } => evidence.append(&mut retry_evidence),
+                    IntentOutcome::Failed {
+                        error,
+                        evidence: mut retry_evidence,
+                    } => {
+                        evidence.append(&mut retry_evidence);
+                        return IntentOutcome::Failed { error, evidence };
+                    }
+                }
             }
         }
     }
     IntentOutcome::Completed { evidence }
+}
+
+/// One screenshot, one propose per remaining purpose, all cached. Every
+/// failure degrades silently: transport loss, an auth rejection, or a
+/// low-confidence proposal simply leaves that purpose uncached, and the
+/// deterministic path (or a live escalation) handles the field.
+async fn batch_prefill(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    purposes: Vec<String>,
+) {
+    let (Some(proposals), Some(assist)) = (&vision.proposals, &vision.assist) else {
+        return;
+    };
+    let Ok((png, _)) = browser
+        .capture_screenshot(
+            page_id,
+            &CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            },
+        )
+        .await
+    else {
+        return;
+    };
+    let mut batch = Vec::new();
+    for purpose in purposes {
+        let Ok(proposal) = assist
+            .propose(VisionProposeRequest {
+                purpose: purpose.clone(),
+                intent_kind: "fill".to_owned(),
+                screenshot_png: png.clone(),
+                stuck: StuckKind::TargetMissing,
+                context: vision.prompt_context.clone(),
+            })
+            .await
+        else {
+            continue;
+        };
+        if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+            continue;
+        }
+        // Only coordinate actions are cached; a TypeText or ExtractValue
+        // proposal carries what the user typed and is never stored.
+        if let VisionAction::Click { x, y } = proposal.action {
+            batch.push((
+                purpose,
+                crate::CachedProposal {
+                    x,
+                    y,
+                    confidence: proposal.confidence,
+                },
+            ));
+        }
+    }
+    if !batch.is_empty() {
+        tracing::info!(recorded = batch.len(), "vision.prefill_batch");
+        proposals.record_proposals(page_id, batch);
+    } else {
+        tracing::info!("vision.prefill_batch_empty");
+    }
 }
 
 async fn execute_locate(
@@ -1361,6 +1497,7 @@ async fn escalate_extract_field_with_vision(
             intent_kind: "extract".to_owned(),
             screenshot_png: png,
             stuck,
+            context: vision.prompt_context.clone(),
         })
         .await
     {
@@ -1532,6 +1669,20 @@ async fn stuck_outcome_with_prior_evidence(
         };
     }
 
+    if vision.defer_escalation {
+        let mut evidence = prior_evidence;
+        evidence.push(stuck_evidence);
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: stuck_code,
+                message: verification.to_owned(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence,
+        };
+    }
+
     let gates_open = vision.session_ok && vision.capability_ok;
     let Some(assist) = vision.assist.as_ref() else {
         return vision_denied_or_unavailable(
@@ -1556,6 +1707,52 @@ async fn stuck_outcome_with_prior_evidence(
         };
     }
 
+    // Prefill cache consult, before any screenshot: a remembered proposal
+    // answers the stuck field for free. Only reachable when
+    // `[vision].prefill` threaded a cache through an open gate.
+    if let Some(proposals) = &vision.proposals {
+        let key = report.purpose.clone().unwrap_or_default();
+        if let Some(cached) = proposals.proposal_for(page_id, &key) {
+            match execute_vision_action(
+                page_id,
+                browser,
+                &VisionAction::Click {
+                    x: cached.x,
+                    y: cached.y,
+                },
+            )
+            .await
+            {
+                Ok(mut act_evidence) => {
+                    tracing::info!(intent = intent_kind, "vision.prefill_hit");
+                    let mut evidence = prior_evidence;
+                    evidence.append(&mut act_evidence);
+                    let artifact_ids = artifact_ids_from(&evidence);
+                    evidence.push(intent_evidence(execution_record_with_path(
+                        report.intent_kind,
+                        report.purpose.clone(),
+                        report.plan_summary.clone(),
+                        report.candidates.clone(),
+                        None,
+                        "visionPrefill",
+                        ResolutionDetails {
+                            path: IntentResolutionPath::VisionPrefill,
+                            vision_proposal_sha256: None,
+                            artifact_ids,
+                        },
+                    )));
+                    return IntentOutcome::Completed { evidence };
+                }
+                Err(_) => {
+                    // A cached proposal that cannot be executed is dropped,
+                    // never retried; live escalation proceeds unchanged.
+                    tracing::info!(intent = intent_kind, "vision.prefill_entry_dropped");
+                    proposals.drop_proposal(page_id, &key);
+                }
+            }
+        }
+    }
+
     escalate_with_vision(
         report,
         stuck_evidence,
@@ -1563,6 +1760,7 @@ async fn stuck_outcome_with_prior_evidence(
         page_id,
         browser,
         assist.as_ref(),
+        vision.prompt_context.clone(),
     )
     .await
 }
@@ -1606,6 +1804,7 @@ async fn escalate_with_vision(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     assist: &dyn VisionAssist,
+    prompt_context: Option<crate::VisionPromptContext>,
 ) -> IntentOutcome {
     let StuckReport {
         intent_kind,
@@ -1615,6 +1814,7 @@ async fn escalate_with_vision(
         candidates,
         verification,
     } = report;
+    tracing::info!(intent = intent_kind, trigger = "stuck", "vision.escalation");
     // `stuck_evidence` is prefixed onto failure evidence only, never onto a Completed one.
     let mut base_evidence = prior_evidence.clone();
     base_evidence.push(stuck_evidence);
@@ -1642,12 +1842,29 @@ async fn escalate_with_vision(
         }
     };
 
+    let mut context = prompt_context;
+    if !candidates.is_empty() {
+        let block = context.get_or_insert_with(crate::VisionPromptContext::default);
+        block.candidates = candidates
+            .iter()
+            .take(5)
+            .filter_map(|candidate| {
+                Some(crate::VisionPromptCandidate {
+                    role: candidate.role.clone()?,
+                    name: candidate.name.clone()?,
+                    ordinal: None,
+                })
+            })
+            .collect();
+    }
+    let propose_started = std::time::Instant::now();
     let proposal = match assist
         .propose(VisionProposeRequest {
             purpose: purpose.clone().unwrap_or_default(),
             intent_kind: intent_kind.to_owned(),
             screenshot_png: png,
             stuck: kind,
+            context,
         })
         .await
     {
@@ -1667,8 +1884,18 @@ async fn escalate_with_vision(
         }
     };
 
+    tracing::info!(
+        intent = intent_kind,
+        latency_ms = propose_started.elapsed().as_millis() as u64,
+        "vision.provider_round_trip"
+    );
     let proposal_hash = proposal_sha256(&proposal);
     if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+        tracing::info!(
+            intent = intent_kind,
+            confidence = proposal.confidence,
+            "vision.rejection_floor"
+        );
         let mut evidence = base_evidence;
         evidence.append(&mut screenshot_evidence);
         evidence.push(intent_evidence(execution_record_with_path(
