@@ -1069,11 +1069,8 @@ pub mod testing {
         let upload_root = data_root.join("uploads");
         std::fs::create_dir_all(&artifacts_dir).expect("artifact dir creates");
         std::fs::create_dir_all(&upload_root).expect("upload dir creates");
-        let artifact_store = artifact_store::ArtifactStore::new(
-            &artifacts_dir,
-            8 * 1024 * 1024,
-            16_384,
-        );
+        let artifact_store =
+            artifact_store::ArtifactStore::new(&artifacts_dir, 8 * 1024 * 1024, 16_384);
         let cdp_runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
             runtime,
             startup_handle,

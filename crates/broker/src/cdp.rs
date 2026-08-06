@@ -55,5 +55,8 @@ pub async fn spawn_cdp_listener_with_shutdown<A: Authority + 'static>(
             .await
             .map_err(anyhow::Error::new)
     });
-    Ok(CdpListen { addr: bound, handle })
+    Ok(CdpListen {
+        addr: bound,
+        handle,
+    })
 }

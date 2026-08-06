@@ -8,16 +8,12 @@ use tokio::{
 };
 
 async fn http_get(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, String) {
-    let mut stream = TcpStream::connect(addr)
-        .await
-        .expect("connect to listener");
+    let mut stream = TcpStream::connect(addr).await.expect("connect to listener");
     let host = format!("{addr}");
     let auth = bearer
         .map(|token| format!("authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nhost: {host}\r\n{auth}connection: close\r\n\r\n"
-    );
+    let request = format!("GET {path} HTTP/1.1\r\nhost: {host}\r\n{auth}connection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -63,5 +59,8 @@ async fn http_port_does_not_expose_json_version_when_cdp_disabled() {
     let server = tokio::spawn(broker::serve_listener(listener, app, 8));
     let (status, _body) = http_get(addr, "/json/version", Some(&bearer)).await;
     server.abort();
-    assert_eq!(status, 404, "HTTP router must not mount CDP discovery routes");
+    assert_eq!(
+        status, 404,
+        "HTTP router must not mount CDP discovery routes"
+    );
 }

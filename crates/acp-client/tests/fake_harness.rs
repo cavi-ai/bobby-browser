@@ -99,11 +99,11 @@ async fn oauth_device_code_does_not_silently_use_unrelated_advertised_method() {
         matches!(error, AcpClientError::Authentication(_)),
         "{error:?}"
     );
+    assert!(error.to_string().contains("OAuthDeviceCode"), "{error:?}");
     assert!(
-        error.to_string().contains("OAuthDeviceCode"),
-        "{error:?}"
+        !log.exists(),
+        "no harness lifecycle may run before auth selection"
     );
-    assert!(!log.exists(), "no harness lifecycle may run before auth selection");
 }
 
 #[tokio::test]

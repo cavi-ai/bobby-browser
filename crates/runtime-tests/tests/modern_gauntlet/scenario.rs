@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::{Multipart, Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, Request, Response, StatusCode};
@@ -15,10 +16,90 @@ use tokio::sync::{Mutex, Notify};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GauntletLevel {
+    One,
+    Two,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LevelTwoTrapPlan {
+    pub extra_modal: bool,
+    pub extra_popup: bool,
+    pub reversed_identity_fields: bool,
+    pub delayed_control_ms: u64,
+}
+
+impl LevelTwoTrapPlan {
+    fn seeded(seed: &str) -> Self {
+        let digest = Sha256::digest(seed.as_bytes());
+        Self {
+            extra_modal: true,
+            extra_popup: true,
+            reversed_identity_fields: digest[0] & 1 == 1,
+            delayed_control_ms: 150 + u64::from(digest[1]),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecaptchaConfig {
+    site_key: String,
+    secret: String,
+}
+
+#[async_trait]
+trait RecaptchaVerifier: Send + Sync {
+    async fn verify(&self, token: &str) -> Result<bool, String>;
+}
+
+struct GoogleRecaptchaVerifier {
+    client: reqwest::Client,
+    secret: String,
+}
+
+#[derive(Deserialize)]
+struct GoogleRecaptchaResponse {
+    success: bool,
+}
+
+#[async_trait]
+impl RecaptchaVerifier for GoogleRecaptchaVerifier {
+    async fn verify(&self, token: &str) -> Result<bool, String> {
+        let response = self
+            .client
+            .post("https://www.google.com/recaptcha/api/siteverify")
+            .form(&[("secret", self.secret.as_str()), ("response", token)])
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?
+            .json::<GoogleRecaptchaResponse>()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(response.success)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicRunConfig {
+    level: u8,
+    seed: String,
+    traps: LevelTwoTrapPlan,
+    recaptcha_site_key: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScenarioConfig {
     pub seed: String,
     pub reject_postal_once: bool,
+    pub level: GauntletLevel,
+    pub traps: LevelTwoTrapPlan,
+    pub recaptcha: Option<RecaptchaConfig>,
 }
 
 impl ScenarioConfig {
@@ -26,6 +107,44 @@ impl ScenarioConfig {
         Self {
             seed: seed.into(),
             reject_postal_once: true,
+            level: GauntletLevel::One,
+            traps: LevelTwoTrapPlan::default(),
+            recaptcha: None,
+        }
+    }
+
+    pub fn level_two(
+        seed: impl Into<String>,
+        site_key: impl Into<String>,
+        secret: impl Into<String>,
+    ) -> TestResult<Self> {
+        let seed = seed.into();
+        let site_key = site_key.into();
+        let secret = secret.into();
+        if site_key.trim().is_empty() || secret.trim().is_empty() {
+            return Err("Level 2 requires non-empty reCAPTCHA site key and secret".into());
+        }
+        Ok(Self {
+            traps: LevelTwoTrapPlan::seeded(&seed),
+            seed,
+            reject_postal_once: true,
+            level: GauntletLevel::Two,
+            recaptcha: Some(RecaptchaConfig { site_key, secret }),
+        })
+    }
+
+    pub fn public_config(&self) -> PublicRunConfig {
+        PublicRunConfig {
+            level: match self.level {
+                GauntletLevel::One => 1,
+                GauntletLevel::Two => 2,
+            },
+            seed: self.seed.clone(),
+            traps: self.traps.clone(),
+            recaptcha_site_key: self
+                .recaptcha
+                .as_ref()
+                .map(|config| config.site_key.clone()),
         }
     }
 }
@@ -74,9 +193,10 @@ struct RunState {
     requests: Vec<String>,
 }
 
-#[derive(Debug)]
 struct SharedState {
     run_id: String,
+    public_config: PublicRunConfig,
+    recaptcha_verifier: Option<Arc<dyn RecaptchaVerifier>>,
     dist: PathBuf,
     inner: Mutex<RunState>,
     report_generated: Notify,
@@ -91,6 +211,30 @@ pub struct ScenarioServer {
 
 impl ScenarioServer {
     pub async fn start(config: ScenarioConfig) -> TestResult<Self> {
+        let verifier = config.recaptcha.as_ref().map(|recaptcha| {
+            Arc::new(GoogleRecaptchaVerifier {
+                client: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(8))
+                    .build()
+                    .expect("reCAPTCHA HTTP client configuration is valid"),
+                secret: recaptcha.secret.clone(),
+            }) as Arc<dyn RecaptchaVerifier>
+        });
+        Self::start_inner(config, verifier).await
+    }
+
+    #[cfg(test)]
+    async fn start_with_verifier(
+        config: ScenarioConfig,
+        verifier: Arc<dyn RecaptchaVerifier>,
+    ) -> TestResult<Self> {
+        Self::start_inner(config, Some(verifier)).await
+    }
+
+    async fn start_inner(
+        config: ScenarioConfig,
+        recaptcha_verifier: Option<Arc<dyn RecaptchaVerifier>>,
+    ) -> TestResult<Self> {
         let dist = repository_root().join("packages/bobby-gauntlet/dist");
         if !dist.join("index.html").is_file() || !dist.join("app.js").is_file() {
             return Err("built Northstar application is missing; run pnpm --filter @cavi-ai/bobby-gauntlet build".into());
@@ -98,6 +242,8 @@ impl ScenarioServer {
         let run_id = format!("run-{}", sanitize(&config.seed));
         let state = Arc::new(SharedState {
             run_id,
+            public_config: config.public_config(),
+            recaptcha_verifier,
             dist,
             inner: Mutex::new(RunState {
                 atlas_priority: "normal".into(),
@@ -119,6 +265,7 @@ impl ScenarioServer {
             preview_confirmed: Notify::new(),
         });
         let app = Router::new()
+            .route("/api/run-config", get(run_config))
             .route("/api/dashboard", get(dashboard))
             .route("/api/customers", get(customers))
             .route("/api/customers/{id}", get(customer))
@@ -129,6 +276,7 @@ impl ScenarioServer {
             .route("/api/documents/{id}/confirm", post(confirm_preview))
             .route("/api/integrations/ledger-cloud", get(integration_state))
             .route("/authorize/ledger-cloud", get(authorize_page))
+            .route("/level-two-checkpoint", get(level_two_checkpoint))
             .route(
                 "/api/integrations/ledger-cloud/complete",
                 post(complete_authorization),
@@ -156,7 +304,13 @@ impl ScenarioServer {
     }
 
     pub fn application_url(&self, path: &str) -> String {
-        format!("{}{}?run={}", self.base_url(), path, self.run_id())
+        format!(
+            "{}{}?run={}&level={}",
+            self.base_url(),
+            path,
+            self.run_id(),
+            self.state.public_config.level
+        )
     }
 
     pub fn run_id(&self) -> &str {
@@ -208,6 +362,16 @@ impl ScenarioServer {
             .map_err(|_| "preview confirmation was not observed within 10 seconds")?;
         Ok(())
     }
+}
+
+async fn run_config(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    Json(state.public_config.clone()).into_response()
 }
 
 impl Drop for ScenarioServer {
@@ -357,7 +521,13 @@ fn customer_json(state: &RunState) -> Value {
     json!({ "id": "cus_atlas", "name": "Atlas Labs", "email": "ops@atlas.example", "company": "Atlas Labs", "joinedAt": "2026-01-15", "priority": state.atlas_priority, "status": "active" })
 }
 
-type OnboardingBody = OnboardingRecord;
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OnboardingBody {
+    #[serde(flatten)]
+    record: OnboardingRecord,
+    recaptcha_response: Option<String>,
+}
 
 async fn onboard(
     State(state): State<Arc<SharedState>>,
@@ -367,14 +537,44 @@ async fn onboard(
     if let Err(error) = require_run(&headers, &state) {
         return error.into_response();
     }
+    record(&state, "POST /api/onboarding").await;
+    if let Some(verifier) = &state.recaptcha_verifier {
+        let Some(token) = body
+            .recaptcha_response
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+        else {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "code": "recaptcha_required", "message": "Complete the reCAPTCHA challenge." })),
+            )
+                .into_response();
+        };
+        match verifier.verify(token).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "code": "recaptcha_failed", "message": "The reCAPTCHA response was rejected." })),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "code": "recaptcha_unavailable", "message": "reCAPTCHA verification is temporarily unavailable." })),
+                )
+                    .into_response();
+            }
+        }
+    }
     let mut inner = state.inner.lock().await;
-    inner.requests.push("POST /api/onboarding".into());
-    if inner.reject_postal_remaining && body.postal_code != "10001" {
+    if inner.reject_postal_remaining && body.record.postal_code != "10001" {
         inner.reject_postal_remaining = false;
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "code": "postal_rejected", "message": "Review the highlighted field.", "fields": { "postalCode": "Use 10001 for this account." } }))).into_response();
     }
     inner.onboarding_records += 1;
-    inner.onboarding = Some(body);
+    inner.onboarding = Some(body.record);
     Json(json!({ "id": "onb_atlas_01", "status": "complete" })).into_response()
 }
 
@@ -421,6 +621,12 @@ async fn document_preview(AxumPath(id): AxumPath<String>) -> Html<String> {
     Html(format!(
         r#"<!doctype html><title>Document preview</title><main><h1>Approved customer document</h1><p>Document {id}</p><form method="post" action="/api/documents/{id}/confirm"><button id="confirm-preview" type="submit" aria-label="Confirm document preview">Confirm document</button></form></main>"#
     ))
+}
+
+async fn level_two_checkpoint() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html><html><head><title>Level 2 checkpoint</title></head><body><main><h1>Account checkpoint</h1><p>Confirm the onboarding details in the original window.</p><button type="button" onclick="window.close()">Return to onboarding</button></main></body></html>"#,
+    )
 }
 
 async fn confirm_preview(
@@ -541,7 +747,7 @@ async fn static_file(
     let canonical_root = match tokio::fs::canonicalize(&state.dist).await {
         Ok(path) => path,
         Err(_) => {
-            return bytes_response(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", Vec::new())
+            return bytes_response(StatusCode::INTERNAL_SERVER_ERROR, "text/plain", Vec::new());
         }
     };
     let canonical = match tokio::fs::canonicalize(requested).await {
@@ -596,7 +802,48 @@ fn sanitize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScenarioConfig, ScenarioServer};
+    use super::{
+        GauntletLevel, LevelTwoTrapPlan, RecaptchaVerifier, ScenarioConfig, ScenarioServer,
+    };
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct TokenVerifier;
+
+    #[async_trait]
+    impl RecaptchaVerifier for TokenVerifier {
+        async fn verify(&self, token: &str) -> Result<bool, String> {
+            match token {
+                "accepted-token" => Ok(true),
+                "unavailable-token" => Err("verification service unavailable".into()),
+                _ => Ok(false),
+            }
+        }
+    }
+
+    #[test]
+    fn level_one_is_the_compatible_default() {
+        let config = ScenarioConfig::seeded("atlas");
+        assert_eq!(config.level, GauntletLevel::One);
+        assert!(config.recaptcha.is_none());
+    }
+
+    #[test]
+    fn level_two_traps_are_seeded_and_public_config_never_contains_the_secret() {
+        let first = ScenarioConfig::level_two("atlas", "site-test", "secret-canary").unwrap();
+        let second = ScenarioConfig::level_two("atlas", "site-test", "secret-canary").unwrap();
+        assert_eq!(first.traps, second.traps);
+        assert_ne!(first.traps, LevelTwoTrapPlan::default());
+        let public = serde_json::to_string(&first.public_config()).unwrap();
+        assert!(public.contains("site-test"));
+        assert!(!public.contains("secret-canary"));
+    }
+
+    #[test]
+    fn level_two_rejects_missing_recaptcha_configuration() {
+        assert!(ScenarioConfig::level_two("atlas", "", "secret").is_err());
+        assert!(ScenarioConfig::level_two("atlas", "site", "").is_err());
+    }
 
     #[tokio::test]
     async fn priority_mutation_is_run_scoped_and_counted_once() {
@@ -620,5 +867,72 @@ mod tests {
         let state = server.snapshot().await;
         assert_eq!(state.atlas_priority, "high");
         assert_eq!(state.priority_updates, 1);
+    }
+
+    #[tokio::test]
+    async fn level_two_verifies_recaptcha_before_mutating_onboarding_state() {
+        let mut config =
+            ScenarioConfig::level_two("recaptcha-boundary", "site-test", "secret-test").unwrap();
+        config.reject_postal_once = false;
+        let server = ScenarioServer::start_with_verifier(config, Arc::new(TokenVerifier))
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        let record = serde_json::json!({
+            "fullName": "Maya Chen",
+            "email": "maya@atlas.example",
+            "companyName": "Atlas Labs",
+            "postalCode": "10001",
+            "plan": "growth",
+            "billingCycle": "annual"
+        });
+
+        for (token, status, code) in [
+            (
+                None,
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "recaptcha_required",
+            ),
+            (
+                Some("rejected-token"),
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                "recaptcha_failed",
+            ),
+            (
+                Some("unavailable-token"),
+                reqwest::StatusCode::BAD_GATEWAY,
+                "recaptcha_unavailable",
+            ),
+        ] {
+            let mut body = record.clone();
+            if let Some(token) = token {
+                body["recaptchaResponse"] = serde_json::Value::String(token.into());
+            }
+            let response = client
+                .post(format!("{}/api/onboarding", server.base_url()))
+                .header("x-northstar-run", server.run_id())
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap()["code"],
+                code
+            );
+            assert_eq!(server.snapshot().await.onboarding_records, 0);
+        }
+
+        let mut accepted = record;
+        accepted["recaptchaResponse"] = serde_json::Value::String("accepted-token".into());
+        let response = client
+            .post(format!("{}/api/onboarding", server.base_url()))
+            .header("x-northstar-run", server.run_id())
+            .json(&accepted)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(server.snapshot().await.onboarding_records, 1);
     }
 }

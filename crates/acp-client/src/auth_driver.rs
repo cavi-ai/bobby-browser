@@ -1,9 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 
 use agent_client_protocol::{
     schema::{
@@ -74,9 +69,7 @@ impl AcpAuthDriver {
             AuthStrategy::OAuthAuthorizationCode => {
                 method_for_id(methods, OAUTH_AUTHORIZATION_CODE_ID).map(Some)
             }
-            AuthStrategy::OAuthDeviceCode => {
-                method_for_id(methods, OAUTH_DEVICE_CODE_ID).map(Some)
-            }
+            AuthStrategy::OAuthDeviceCode => method_for_id(methods, OAUTH_DEVICE_CODE_ID).map(Some),
             AuthStrategy::Environment => method_for_id(methods, ENVIRONMENT_ID).map(Some),
         }
     }
@@ -128,11 +121,13 @@ impl AcpAuthDriver {
                             .block_task()
                             .await
                         {
-                            Ok(_response) => Ok(AuthProgress::Authenticated(CredentialHandle::new(
-                                profile,
-                                strategy,
-                                Arc::new(method_id.0.to_string()),
-                            ))),
+                            Ok(_response) => {
+                                Ok(AuthProgress::Authenticated(CredentialHandle::new(
+                                    profile,
+                                    strategy,
+                                    Arc::new(method_id.0.to_string()),
+                                )))
+                            }
                             Err(error) if error.code == AcpErrorCode::AuthRequired => {
                                 Ok(AuthProgress::Pending(AuthChallenge {
                                     id: method_id_for_error,
@@ -141,9 +136,9 @@ impl AcpAuthDriver {
                                     user_code: None,
                                 }))
                             }
-                            Err(error) => Err(agent_client_protocol::util::internal_error(format!(
-                                "method {method_id_for_error}: {error}"
-                            ))),
+                            Err(error) => Err(agent_client_protocol::util::internal_error(
+                                format!("method {method_id_for_error}: {error}"),
+                            )),
                         }
                     }
                 })

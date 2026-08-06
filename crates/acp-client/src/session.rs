@@ -293,12 +293,9 @@ async fn run_task(
             if !capabilities.image {
                 return Ok(Err(AcpClientError::ImageUnsupported));
             }
-            if let Err(error) = authenticate_for_strategy(
-                &connection,
-                &initialized.auth_methods,
-                auth_strategy,
-            )
-            .await
+            if let Err(error) =
+                authenticate_for_strategy(&connection, &initialized.auth_methods, auth_strategy)
+                    .await
             {
                 return Ok(Err(error));
             }

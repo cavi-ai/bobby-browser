@@ -165,11 +165,9 @@ impl NodeRegistry {
     /// deny-by-default double gate turns into a declined escalation.
     pub fn vision(&self, name: &str) -> Result<Arc<dyn VisionAssist>, NodeError> {
         if let Some(profile) = self.acp_profiles.get(name) {
-            let assist = acp_client::AcpVisionAssist::new(
-                profile.command.clone(),
-                profile.args.clone(),
-            )
-            .with_auth_strategy(vision_auth_strategy(profile.auth));
+            let assist =
+                acp_client::AcpVisionAssist::new(profile.command.clone(), profile.args.clone())
+                    .with_auth_strategy(vision_auth_strategy(profile.auth));
             tracing::debug!(node = name, "node.vision.acp_resolved");
             return Ok(Arc::new(assist));
         }
@@ -346,10 +344,7 @@ mod tests {
     #[test]
     fn every_vision_auth_kind_maps_to_distinct_auth_strategy() {
         use auth_broker::AuthStrategy::*;
-        assert_eq!(
-            vision_auth_strategy(VisionAuthKind::Advertised),
-            Advertised
-        );
+        assert_eq!(vision_auth_strategy(VisionAuthKind::Advertised), Advertised);
         assert_eq!(
             vision_auth_strategy(VisionAuthKind::OAuthAuthorizationCode),
             OAuthAuthorizationCode
@@ -435,7 +430,11 @@ auth = "oauth-device-code"
             vision_auth_strategy(VisionAuthKind::OAuthDeviceCode)
         );
         assert_ne!(code_assist.auth_strategy(), device_assist.auth_strategy());
-        assert!(NodeRegistry::from_config(&oauth_code).vision("codex").is_ok());
-        assert!(NodeRegistry::from_config(&oauth_device).vision("codex").is_ok());
+        assert!(NodeRegistry::from_config(&oauth_code)
+            .vision("codex")
+            .is_ok());
+        assert!(NodeRegistry::from_config(&oauth_device)
+            .vision("codex")
+            .is_ok());
     }
 }

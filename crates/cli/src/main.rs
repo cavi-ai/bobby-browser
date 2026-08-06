@@ -519,8 +519,7 @@ async fn run_broker_serve(
     let config_existed = config_path.exists();
     let config = AppConfig::load(&config_path)
         .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-    let (mut config, decision, _vision_child) =
-        prepare_vision_child(&config_path, config, policy)?;
+    let (mut config, decision, _vision_child) = prepare_vision_child(&config_path, config, policy)?;
     if force_cdp {
         config.cdp.enabled = true;
         if let Some(port) = cdp_port {
@@ -538,6 +537,16 @@ async fn run_broker_serve(
         tracing::info!(reason = %decision.reason, "vision sidecar not spawned");
     }
     let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+    let heal = bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap_path)
+        .context("failed to heal bootstrap capabilities")?;
+    if heal.changed() {
+        tracing::info!(
+            added = ?heal.added,
+            file_rewritten = heal.file_rewritten,
+            env_updated = heal.env_updated,
+            "healed bootstrap capabilities to current defaults"
+        );
+    }
     let resolved = bootstrap_local::resolve_startup_credential_with(
         &config.server.host,
         &bootstrap_path,
@@ -1270,6 +1279,68 @@ fn run_doctor(
     // The bootstrap expiry is pinned into MCP client config and the stdio
     // gateway refuses to start once it passes, which a host reports only as a
     // dead server. Warn while there is still time to run `bobby init`.
+    // Heal stale capability lists first so doctor validates what serve/mcp will
+    // actually use after unrestricted-default heal.
+    let bootstrap_path_for_heal = resolve_bootstrap_path(bootstrap_cli.clone()).ok();
+    if let Some(path) = bootstrap_path_for_heal.as_ref() {
+        match bootstrap_local::ensure_unrestricted_bootstrap(path) {
+            Ok(heal) if heal.changed() => {
+                report.ok(
+                    "bootstrap-capabilities",
+                    format!(
+                        "healed {} missing default(s): {}",
+                        heal.added.len(),
+                        heal.added.join(", ")
+                    ),
+                );
+            }
+            Ok(_)
+                if path.exists()
+                    || std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES").is_ok() =>
+            {
+                report.ok(
+                    "bootstrap-capabilities",
+                    "current (matches defaults)".to_string(),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                report.warn(
+                    "bootstrap-capabilities",
+                    format!("could not heal bootstrap capabilities ({error:#})"),
+                );
+            }
+        }
+        if path.exists() {
+            match bootstrap_local::load_bootstrap_capabilities_csv(path) {
+                Ok(caps) if !caps.split(',').any(|c| c.trim() == "browser:fingerprint") => {
+                    report.warn(
+                        "bootstrap-capabilities",
+                        "bootstrap still lacks browser:fingerprint after heal".to_string(),
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    report.warn(
+                        "bootstrap-capabilities",
+                        format!("could not read capabilities ({error:#})"),
+                    );
+                }
+            }
+        }
+    } else if let Ok(heal) = bootstrap_local::heal_process_env_capabilities() {
+        if heal.changed() {
+            report.ok(
+                "bootstrap-capabilities",
+                format!(
+                    "healed process env with {} missing default(s): {}",
+                    heal.added.len(),
+                    heal.added.join(", ")
+                ),
+            );
+        }
+    }
+
     if let Ok(credential) = broker::StartupCredential::from_env() {
         report.ok("bootstrap", "credential from environment".to_string());
         let expiry = check_bootstrap_expiry(credential.expires_at());
@@ -1285,22 +1356,6 @@ fn run_doctor(
                     Ok(credential) => {
                         let expiry = check_bootstrap_expiry(credential.expires_at());
                         report.record(expiry.status, &expiry.name, expiry.detail);
-                        match bootstrap_local::load_bootstrap_capabilities_csv(&path) {
-                            Ok(caps) if !caps.split(',').any(|c| c.trim() == "job:submit") => {
-                                report.warn(
-                                    "bootstrap-job-caps",
-                                    "bootstrap lacks job:submit; run `bobby init --force` for job:* capabilities"
-                                        .to_string(),
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                report.warn(
-                                    "bootstrap-job-caps",
-                                    format!("could not read capabilities ({error:#})"),
-                                );
-                            }
-                        }
                     }
                     Err(error) => {
                         report.fail("bootstrap-expiry", format!("{error:#}"));
@@ -3094,7 +3149,9 @@ auth = "oauth-device-code"
         assert_eq!(checks[1].name, "vision-acp-reachability");
         assert_eq!(checks[2].name, "vision-auth-path");
         assert!(checks[2].detail.contains("auth-broker"));
-        assert!(checks[2].detail.contains("multi-step OAuth continue is not productized"));
+        assert!(checks[2]
+            .detail
+            .contains("multi-step OAuth continue is not productized"));
     }
 
     #[test]
