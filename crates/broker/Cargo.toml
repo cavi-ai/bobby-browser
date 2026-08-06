@@ -29,6 +29,7 @@ config = { path = "../config", version = "0.6.0" }
 interface-core = { path = "../interface-core", version = "0.6.0" }
 artifact-store = { path = "../artifact-store", version = "0.6.0" }
 mcp-gateway = { path = "../mcp-gateway", version = "0.6.0" }
+cdp-gateway = { path = "../cdp-gateway", version = "0.6.0" }
 worker-pool = { path = "../worker-pool", version = "0.6.0" }
 task-scheduler = { path = "../task-scheduler", version = "0.6.0" }
 observability = { path = "../observability", version = "0.6.0" }

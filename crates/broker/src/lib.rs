@@ -1,5 +1,6 @@
 mod auth;
 mod authority_persist;
+mod cdp;
 mod jobs;
 mod mcp_http;
 mod routes;
@@ -8,6 +9,7 @@ use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
+    path::PathBuf,
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -32,6 +34,7 @@ use tokio::{
 use types::{CommandEnvelope, CommandOutcome, Evidence, PrincipalId, SessionId};
 
 pub use auth::{EnrolledAuthority, StartupCredential, StartupCredentialError};
+pub use cdp::CdpListen;
 use jobs::JobSubmitOutcome;
 
 type RuntimeBinder = dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static;
@@ -598,6 +601,13 @@ struct StartupGate {
     handle: CapabilityHandle,
 }
 
+struct CdpBootstrap {
+    authority: Arc<authority_persist::PersistentAuthority>,
+    runtime: Arc<AuthenticatedRuntime>,
+    artifact_store: artifact_store::ArtifactStore,
+    upload_staging_root: PathBuf,
+}
+
 impl StartupGate {
     fn validate_at(&self, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
         if !self.handle.is_valid_at(now) {
@@ -626,7 +636,7 @@ async fn bootstrap_listener_with<T, Clock, Build, BuildFuture, Bind, BindFuture>
     now: Clock,
     build_runtime: Build,
     bind_listener: Bind,
-) -> anyhow::Result<(Router, T, Arc<JobScheduler>)>
+) -> anyhow::Result<(Router, T, Arc<JobScheduler>, CdpBootstrap)>
 where
     Clock: Fn() -> chrono::DateTime<chrono::Utc>,
     Build: FnOnce(AppConfig) -> BuildFuture,
@@ -637,6 +647,7 @@ where
     config.validate().map_err(anyhow::Error::msg)?;
     let authority =
         Arc::new(EnrolledAuthority::enroll(startup, config.interface.max_principals).await?);
+    let startup_handle = authority.startup_handle();
     // `PersistentAuthority` wraps a clone of the enrolled authority; the clone shares the
     // same `AuthorityStore` records via `Arc`, so `AppState` authenticates and issues
     // through the persisted path while `StartupGate` keeps its own handle on the
@@ -660,6 +671,23 @@ where
         config.browser.max_artifact_bytes,
         config.browser.max_screenshot_dimension,
     );
+    let upload_staging_root = config
+        .browser
+        .upload_roots
+        .first()
+        .cloned()
+        .unwrap_or_else(|| config.browser.downloads_dir.clone());
+    let cdp_runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
+        runtime.clone(),
+        startup_handle,
+        recorder.clone(),
+    ));
+    let cdp_bootstrap = CdpBootstrap {
+        authority: persistent_authority.clone(),
+        runtime: cdp_runtime,
+        artifact_store: artifact_store.clone(),
+        upload_staging_root,
+    };
     let artifact_reader = ArtifactReader::new(
         artifact_store.clone(),
         ownership,
@@ -711,14 +739,15 @@ where
     );
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
     let listener = gate.bind_if_valid_at(now(), || bind_listener(addr)).await?;
-    Ok((app, listener, scheduler))
+    Ok((app, listener, scheduler, cdp_bootstrap))
 }
 
 pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
     let max_connections = config.interface.max_connections;
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
-    let (app, listener, scheduler) = bootstrap_listener_with(
+    let cdp_config = config.cdp.clone();
+    let (app, listener, scheduler, cdp_bootstrap) = bootstrap_listener_with(
         config,
         startup,
         chrono::Utc::now,
@@ -734,6 +763,21 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         },
     )
     .await?;
+    let cdp_listen = if cdp_config.enabled {
+        Some(
+            cdp::spawn_cdp_listener_with_shutdown(
+                &cdp_config,
+                cdp_bootstrap.authority,
+                cdp_bootstrap.runtime,
+                cdp_bootstrap.artifact_store,
+                cdp_bootstrap.upload_staging_root,
+                shutdown_signal(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let run_handle = {
         let scheduler = Arc::clone(&scheduler);
         tokio::spawn(async move { scheduler.run().await })
@@ -749,6 +793,9 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     )
     .await;
     jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
+    if let Some(cdp) = cdp_listen {
+        let _ = tokio::time::timeout(shutdown_timeout, cdp.handle).await;
+    }
     serve_result?;
     Ok(())
 }
@@ -769,7 +816,7 @@ pub mod testing {
         http::{request::Builder, StatusCode},
     };
     use chrono::{Duration, SecondsFormat, Utc};
-    use config::InterfaceConfig;
+    use config::{CdpConfig, InterfaceConfig};
     use interface_core::{Authority, RuntimeInterface, SessionOwnershipRegistry};
     use sdk_core::{AuthenticatedRuntime, RuntimeService};
     use tower::ServiceExt;
@@ -777,8 +824,8 @@ pub mod testing {
     use uuid::Uuid;
 
     use crate::{
-        authority_persist::PersistentAuthority, router, AppState, EnrolledAuthority,
-        StartupCredential,
+        authority_persist::PersistentAuthority, cdp, router, AppState, CdpListen,
+        EnrolledAuthority, StartupCredential,
     };
 
     const ADMIN_BEARER: &str = "admin-bootstrap-bearer-0123456789abcdef01";
@@ -973,6 +1020,76 @@ pub mod testing {
             .expect("issuance response carries a bearer")
             .to_owned()
     }
+
+    fn unique_test_data_dir(label: &str) -> std::path::PathBuf {
+        let counter = AUTHORITY_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "bobby-broker-test-{label}-{}-{counter}",
+            std::process::id()
+        ))
+    }
+
+    /// Boots a dedicated CDP listener with the same startup bearer used by
+    /// [`app_with_admin`], for integration tests that exercise discovery over TCP.
+    pub async fn spawn_test_cdp_listener(cdp_config: CdpConfig) -> (CdpListen, String) {
+        let startup = StartupCredential::new(
+            ADMIN_BEARER.to_owned(),
+            PrincipalId::from_uuid(Uuid::nil()),
+            vec![
+                Capability::AuthorityAdmin,
+                Capability::SessionRead,
+                Capability::SessionWrite,
+                Capability::PageRead,
+                Capability::PageWrite,
+                Capability::BrowserMutate,
+                Capability::RecoveryRead,
+                Capability::RecoveryWrite,
+                Capability::JobSubmit,
+                Capability::JobRead,
+                Capability::JobCancel,
+            ],
+            Utc::now() + Duration::minutes(30),
+        )
+        .expect("fixed admin startup credential is valid");
+        let authority = Arc::new(
+            EnrolledAuthority::enroll(startup, 4)
+                .await
+                .expect("admin authority enrolls"),
+        );
+        let startup_handle = authority.startup_handle();
+        let persistent_authority = Arc::new(
+            PersistentAuthority::open((*authority).clone(), unique_authority_path())
+                .await
+                .expect("test authority persistence path opens"),
+        );
+        let (_ownership, recorder) = SessionOwnershipRegistry::bounded(64);
+        let runtime = RuntimeService::default();
+        let data_root = unique_test_data_dir("cdp");
+        let artifacts_dir = data_root.join("artifacts");
+        let upload_root = data_root.join("uploads");
+        std::fs::create_dir_all(&artifacts_dir).expect("artifact dir creates");
+        std::fs::create_dir_all(&upload_root).expect("upload dir creates");
+        let artifact_store = artifact_store::ArtifactStore::new(
+            &artifacts_dir,
+            8 * 1024 * 1024,
+            16_384,
+        );
+        let cdp_runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
+            runtime,
+            startup_handle,
+            recorder,
+        ));
+        let listen = cdp::spawn_cdp_listener(
+            &cdp_config,
+            persistent_authority,
+            cdp_runtime,
+            artifact_store,
+            upload_root,
+        )
+        .await
+        .expect("cdp listener binds");
+        (listen, ADMIN_BEARER.to_owned())
+    }
 }
 
 pub async fn serve_with_worker_factory(
@@ -1017,7 +1134,8 @@ where
     let max_connections = config.interface.max_connections;
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
-    let (app, listener, scheduler) = bootstrap_listener_with(
+    let cdp_config = config.cdp.clone();
+    let (app, listener, scheduler, cdp_bootstrap) = bootstrap_listener_with(
         config,
         startup,
         chrono::Utc::now,
@@ -1029,6 +1147,21 @@ where
         },
     )
     .await?;
+    let cdp_listen = if cdp_config.enabled {
+        Some(
+            cdp::spawn_cdp_listener_with_shutdown(
+                &cdp_config,
+                cdp_bootstrap.authority,
+                cdp_bootstrap.runtime,
+                cdp_bootstrap.artifact_store,
+                cdp_bootstrap.upload_staging_root,
+                shutdown_signal(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let run_handle = {
         let scheduler = Arc::clone(&scheduler);
         tokio::spawn(async move { scheduler.run().await })
@@ -1044,6 +1177,9 @@ where
     )
     .await;
     jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
+    if let Some(cdp) = cdp_listen {
+        let _ = tokio::time::timeout(shutdown_timeout, cdp.handle).await;
+    }
     serve_result?;
     Ok(())
 }
