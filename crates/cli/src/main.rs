@@ -93,6 +93,20 @@ enum CliCommand {
         #[arg(long, conflicts_with = "vision")]
         no_vision: bool,
     },
+    /// Run the ACP stdio gateway with the bootstrap credential loaded for you.
+    /// ACP hosts should point here: no env wiring needed in the host config.
+    AcpStdio {
+        /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+        #[arg(long)]
+        bootstrap_env: Option<PathBuf>,
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, conflicts_with = "no_vision")]
+        vision: bool,
+        #[arg(long, conflicts_with = "vision")]
+        no_vision: bool,
+    },
     /// One-command agent setup: credential, host MCP config, agent skill
     Install {
         /// Host to wire (repeatable; non-interactive when given)
@@ -432,6 +446,28 @@ pub async fn run() -> Result<()> {
                 onboarding::run_mcp_stdio_with_sidecar(&bootstrap_path, &config_path, child)?;
             } else {
                 onboarding::exec_mcp_stdio(&bootstrap_path, &config_path)?;
+            }
+        }
+        CliCommand::AcpStdio {
+            bootstrap_env,
+            config,
+            vision,
+            no_vision,
+        } => {
+            let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+            let config_path = resolve_config_path(config);
+            let policy = policy_from_flags(vision, no_vision);
+            let config = AppConfig::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let (_config, decision, vision_child) =
+                prepare_vision_child(&config_path, config, policy)?;
+            if decision.should_spawn {
+                let child = vision_child.ok_or_else(|| {
+                    anyhow::anyhow!("vision sidecar missing after spawn decision")
+                })?;
+                onboarding::run_acp_stdio_with_sidecar(&bootstrap_path, &config_path, child)?;
+            } else {
+                onboarding::exec_acp_stdio(&bootstrap_path, &config_path)?;
             }
         }
         CliCommand::Install {
@@ -1699,6 +1735,23 @@ fn run_doctor(
             Err(error) => {
                 report.fail("bootstrap", format!("{error:#}"));
             }
+        }
+    }
+
+    // Sidecar gateways must sit beside bobby (or on PATH) for mcp-stdio /
+    // acp-stdio. Missing binaries are a warning with an install hint.
+    for (name, command) in [
+        ("mcp-gateway", onboarding::mcp_gateway_command()),
+        ("acp-gateway", onboarding::acp_gateway_command()),
+    ] {
+        match onboarding::find_sidecar_binary(command) {
+            Some(path) => report.ok(name, path.display().to_string()),
+            None => report.warn(
+                name,
+                format!(
+                    "{command} not found next to bobby or on PATH; install with `bobby install --cli`, re-run scripts/install.sh, or `cargo build -p {command} --release`"
+                ),
+            ),
         }
     }
 
@@ -3756,6 +3809,48 @@ api_key_env = "OPENAI_API_KEY"
         use clap::Parser;
         assert!(Cli::try_parse_from(["bobby", "serve", "--vision", "--no-vision"]).is_err());
         assert!(Cli::try_parse_from(["bobby", "mcp-stdio", "--vision", "--no-vision"]).is_err());
+        assert!(Cli::try_parse_from(["bobby", "acp-stdio", "--vision", "--no-vision"]).is_err());
+    }
+
+    #[test]
+    fn acp_stdio_command_parses() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["bobby", "acp-stdio"]).unwrap();
+        assert!(matches!(cli.command, Some(CliCommand::AcpStdio { .. })));
+    }
+
+    #[test]
+    fn doctor_warns_when_sidecar_gateways_are_missing() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        // Clear PATH so siblings of the test harness are the only candidates;
+        // the cargo test binary has no mcp-gateway / acp-gateway next to it.
+        let previous = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", "") };
+        let root = tempfile::tempdir().unwrap();
+        let report = run_doctor(
+            Some(root.path().join("missing-config.toml")),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            report.check("mcp-gateway").unwrap().status,
+            DoctorStatus::Warn
+        );
+        assert_eq!(
+            report.check("acp-gateway").unwrap().status,
+            DoctorStatus::Warn
+        );
+        assert!(report
+            .check("mcp-gateway")
+            .unwrap()
+            .detail
+            .contains("bobby install --cli"));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 
     #[test]
