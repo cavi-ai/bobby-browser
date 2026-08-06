@@ -95,6 +95,26 @@ pub struct AppConfig {
     /// Named nodes, selected per session. Absent means no node is reachable.
     #[serde(default)]
     pub nodes: std::collections::BTreeMap<String, NodeConfig>,
+    #[serde(default)]
+    pub cdp: CdpConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CdpConfig {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for CdpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "127.0.0.1".to_string(),
+            port: 9222,
+        }
+    }
 }
 
 /// Durable shared-context-graph configuration (Spec C). The store only ever
@@ -812,6 +832,29 @@ scheduler_journal_path = "s"
             config.storage.scheduler_journal_path,
             std::path::PathBuf::from("./data/storage/scheduler-jobs.jsonl")
         );
+    }
+
+    #[test]
+    fn cdp_defaults_disabled_on_loopback_9222() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.cdp.enabled);
+        assert_eq!(cfg.cdp.host, "127.0.0.1");
+        assert_eq!(cfg.cdp.port, 9222);
+    }
+
+    #[test]
+    fn cdp_table_parses_from_toml() {
+        let cfg = AppConfig::from_toml_str(
+            r#"
+            [cdp]
+            enabled = true
+            host = "127.0.0.1"
+            port = 9333
+            "#,
+        )
+        .expect("parse");
+        assert!(cfg.cdp.enabled);
+        assert_eq!(cfg.cdp.port, 9333);
     }
 
     #[test]
