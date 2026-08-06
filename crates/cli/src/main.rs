@@ -3,8 +3,10 @@ mod jobs_client;
 mod onboarding;
 mod vision_child;
 mod vision_connect;
+mod vision_login;
 
 use anyhow::{Context, Result};
+use auth_broker::{AuthCapabilities, AuthDriver, AuthError, AuthProfileId, AuthStrategy};
 use companion_core::{
     run_native_host_with_enroll, EnrollFinalize, EnrollHostError, NativeConnectRequest,
     NativeHostConfig, NativeHostEnroll,
@@ -140,6 +142,22 @@ enum CliCommand {
         #[arg(long, conflicts_with = "vision")]
         no_vision: bool,
     },
+    /// Run the runtime with authenticated CDP enabled on the dedicated port
+    Cdp {
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+        #[arg(long)]
+        bootstrap_env: Option<PathBuf>,
+        /// CDP listen port override
+        #[arg(long)]
+        cdp_port: Option<u16>,
+        #[arg(long, conflicts_with = "no_vision")]
+        vision: bool,
+        #[arg(long, conflicts_with = "vision")]
+        no_vision: bool,
+    },
     /// Run the Firefox native-messaging host
     FirefoxNativeHost {
         /// Absolute path to the native-host descriptor JSON
@@ -258,6 +276,15 @@ struct VisionConnectArgs {
     yes: bool,
 }
 
+#[derive(clap::Args)]
+struct VisionLoginArgs {
+    /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Named ACP vision profile to authenticate
+    name: String,
+}
+
 impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
     fn from(args: VisionConnectArgs) -> Self {
         Self {
@@ -279,6 +306,8 @@ impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
 enum VisionCommands {
     /// Configure a vision provider profile in config.toml
     Connect(VisionConnectArgs),
+    /// Establish or verify the configured ACP harness login
+    Login(VisionLoginArgs),
 }
 
 #[derive(clap::Subcommand)]
@@ -415,88 +444,18 @@ pub async fn run() -> Result<()> {
             vision,
             no_vision,
         } => {
-            let config_path = resolve_config_path(config);
-            let config_existed = config_path.exists();
             let policy = policy_from_flags(vision, no_vision);
-            let config = AppConfig::load(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let (mut config, decision, _vision_child) =
-                prepare_vision_child(&config_path, config, policy)?;
-            if decision.should_spawn {
-                tracing::info!(
-                    bind = %decision.bind,
-                    path = %decision.path,
-                    reason = %decision.reason,
-                    "spawned loopback vision-proxy sidecar"
-                );
-            } else if matches!(policy, VisionSpawnPolicy::ForceOn) {
-                tracing::info!(reason = %decision.reason, "vision sidecar not spawned");
-            }
-            let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
-            let heal = bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap_path)
-                .context("failed to heal bootstrap capabilities")?;
-            if heal.changed() {
-                tracing::info!(
-                    added = ?heal.added,
-                    file_rewritten = heal.file_rewritten,
-                    env_updated = heal.env_updated,
-                    "healed bootstrap capabilities to current defaults"
-                );
-            }
-            let resolved = bootstrap_local::resolve_startup_credential_with(
-                &config.server.host,
-                &bootstrap_path,
-                broker::StartupCredential::from_env,
-            )?;
-            let startup = match resolved {
-                bootstrap_local::ResolveOutcome::FromEnv(c)
-                | bootstrap_local::ResolveOutcome::FromFile(c) => c,
-                bootstrap_local::ResolveOutcome::Generated {
-                    credential,
-                    material,
-                } => {
-                    eprintln!(
-                        "Generated loopback bootstrap at {}",
-                        bootstrap_path.display()
-                    );
-                    eprintln!("Bootstrap bearer (copy now; will not be shown again):");
-                    eprintln!("{}", material.bearer());
-                    credential
-                }
-            };
-            let _telemetry = observability::init(&config.observability)?;
-            if config_existed {
-                tracing::info!(path = %config_path.display(), "loaded config file");
-            } else {
-                tracing::info!(
-                    path = %config_path.display(),
-                    "config file not found, using built-in defaults"
-                );
-            }
-            let (selection, _source) = resolve_browser_selection()?;
-            let durable_profile_id = match &selection.preference {
-                config::EnginePreferenceConfig::Exact {
-                    engine: config::BrowserEngineConfig::Firefox,
-                    profile_id: Some(profile_id),
-                } => Some(profile_id.clone()),
-                _ => None,
-            };
-            if durable_profile_id.is_some() && config.context.dir.is_none() {
-                config.context.dir = Some(
-                    dirs::config_dir()
-                        .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
-                        .join("bobby-browser")
-                        .join("context"),
-                );
-            }
-            let factory = compose_worker_factory(&config, selection)?;
-            match durable_profile_id {
-                Some(profile_id) => {
-                    broker::serve_with_context_promotion(config, startup, factory, profile_id)
-                        .await?
-                }
-                None => broker::serve_with_worker_factory(config, startup, factory).await?,
-            }
+            run_broker_serve(config, bootstrap_env, policy, false, None).await?;
+        }
+        CliCommand::Cdp {
+            config,
+            bootstrap_env,
+            cdp_port,
+            vision,
+            no_vision,
+        } => {
+            let policy = policy_from_flags(vision, no_vision);
+            run_broker_serve(config, bootstrap_env, policy, true, cdp_port).await?;
         }
         CliCommand::FirefoxNativeHost { descriptor } => {
             let _telemetry = observability::init(&Default::default())?;
@@ -532,6 +491,7 @@ pub async fn run() -> Result<()> {
         CliCommand::Jobs { command } => run_jobs(command)?,
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
+            VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
         },
         CliCommand::VisionConnect(args) => vision_connect::connect(args.into())?,
         CliCommand::VisionProxy {
@@ -557,6 +517,101 @@ fn policy_from_flags(vision: bool, no_vision: bool) -> VisionSpawnPolicy {
     } else {
         VisionSpawnPolicy::Auto
     }
+}
+
+async fn run_broker_serve(
+    config_cli: Option<PathBuf>,
+    bootstrap_env: Option<PathBuf>,
+    policy: VisionSpawnPolicy,
+    force_cdp: bool,
+    cdp_port: Option<u16>,
+) -> Result<()> {
+    let config_path = resolve_config_path(config_cli);
+    let config_existed = config_path.exists();
+    let config = AppConfig::load(&config_path)
+        .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+    let (mut config, decision, _vision_child) = prepare_vision_child(&config_path, config, policy)?;
+    if force_cdp {
+        config.cdp.enabled = true;
+        if let Some(port) = cdp_port {
+            config.cdp.port = port;
+        }
+    }
+    if decision.should_spawn {
+        tracing::info!(
+            bind = %decision.bind,
+            path = %decision.path,
+            reason = %decision.reason,
+            "spawned loopback vision-proxy sidecar"
+        );
+    } else if matches!(policy, VisionSpawnPolicy::ForceOn) {
+        tracing::info!(reason = %decision.reason, "vision sidecar not spawned");
+    }
+    let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+    let heal = bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap_path)
+        .context("failed to heal bootstrap capabilities")?;
+    if heal.changed() {
+        tracing::info!(
+            added = ?heal.added,
+            file_rewritten = heal.file_rewritten,
+            env_updated = heal.env_updated,
+            "healed bootstrap capabilities to current defaults"
+        );
+    }
+    let resolved = bootstrap_local::resolve_startup_credential_with(
+        &config.server.host,
+        &bootstrap_path,
+        broker::StartupCredential::from_env,
+    )?;
+    let startup = match resolved {
+        bootstrap_local::ResolveOutcome::FromEnv(c)
+        | bootstrap_local::ResolveOutcome::FromFile(c) => c,
+        bootstrap_local::ResolveOutcome::Generated {
+            credential,
+            material,
+        } => {
+            eprintln!(
+                "Generated loopback bootstrap at {}",
+                bootstrap_path.display()
+            );
+            eprintln!("Bootstrap bearer (copy now; will not be shown again):");
+            eprintln!("{}", material.bearer());
+            credential
+        }
+    };
+    let _telemetry = observability::init(&config.observability)?;
+    if config_existed {
+        tracing::info!(path = %config_path.display(), "loaded config file");
+    } else {
+        tracing::info!(
+            path = %config_path.display(),
+            "config file not found, using built-in defaults"
+        );
+    }
+    let (selection, _source) = resolve_browser_selection()?;
+    let durable_profile_id = match &selection.preference {
+        config::EnginePreferenceConfig::Exact {
+            engine: config::BrowserEngineConfig::Firefox,
+            profile_id: Some(profile_id),
+        } => Some(profile_id.clone()),
+        _ => None,
+    };
+    if durable_profile_id.is_some() && config.context.dir.is_none() {
+        config.context.dir = Some(
+            dirs::config_dir()
+                .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
+                .join("bobby-browser")
+                .join("context"),
+        );
+    }
+    let factory = compose_worker_factory(&config, selection)?;
+    match durable_profile_id {
+        Some(profile_id) => {
+            broker::serve_with_context_promotion(config, startup, factory, profile_id).await?
+        }
+        None => broker::serve_with_worker_factory(config, startup, factory).await?,
+    }
+    Ok(())
 }
 
 fn prepare_vision_child(
@@ -1030,20 +1085,89 @@ fn check_vision_upstream_key(vision: &VisionConfig) -> Option<DoctorCheck> {
     }
 }
 
-fn executable_available(command: &str) -> bool {
-    let path = Path::new(command);
-    if path.components().count() > 1 {
-        return path.is_file();
+fn vision_auth_discovery_check(
+    configured: AuthStrategy,
+    discovered: Result<AuthCapabilities, AuthError>,
+) -> DoctorCheck {
+    match discovered {
+        Ok(capabilities) => {
+            let advertised = capabilities
+                .strategies()
+                .map(|strategy| format!("{strategy:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            DoctorCheck {
+                status: if capabilities.supports(configured) {
+                    DoctorStatus::Ok
+                } else {
+                    DoctorStatus::Warn
+                },
+                name: "vision-auth-path".into(),
+                detail: format!(
+                    "configured {configured:?}; harness advertises: {advertised}; {}",
+                    if capabilities.supports(configured) {
+                        "authentication path is supported"
+                    } else {
+                        "authentication is misconfigured"
+                    }
+                ),
+            }
+        }
+        Err(error) => DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "vision-auth-path".into(),
+            detail: format!("could not discover harness authentication methods: {error}"),
+        },
     }
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|directory| directory.join(command).is_file())
-    })
 }
 
-fn check_vision_acp(vision: &VisionConfig) -> Vec<DoctorCheck> {
-    let Some(config::VisionBackendSelection::Acp { name, profile }) = vision.selected_backend()
+fn check_vision_acp(config: &AppConfig) -> Vec<DoctorCheck> {
+    let Some(config::VisionBackendSelection::Acp { name, profile }) =
+        config.vision.selected_backend()
     else {
         return Vec::new();
+    };
+    let registry = node_registry::NodeRegistry::from_config(config);
+    let configured = registry
+        .auth_strategy(name)
+        .unwrap_or_else(|_| node_registry::vision_auth_strategy(profile.auth));
+    let discovered = registry.auth_driver(name).and_then(|driver| {
+        let profile = AuthProfileId::new(name.to_owned()).map_err(|error| {
+            node_registry::NodeError::Unreachable {
+                name: name.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("doctor auth runtime builds")
+                        .block_on(
+                            driver
+                                .with_timeout(Duration::from_secs(5))
+                                .discover(&profile),
+                        )
+                })
+                .join()
+                .unwrap_or_else(|_| Err(AuthError::Transport("discovery thread panicked".into())))
+        })
+        .map_err(|error| node_registry::NodeError::Unreachable {
+            name: name.to_owned(),
+            reason: error.to_string(),
+        })
+    });
+    let (reachable, auth_check) = match discovered {
+        Ok(capabilities) => (
+            true,
+            vision_auth_discovery_check(configured, Ok(capabilities)),
+        ),
+        Err(error) => (
+            false,
+            vision_auth_discovery_check(configured, Err(AuthError::Transport(error.to_string()))),
+        ),
     };
     vec![
         DoctorCheck {
@@ -1052,29 +1176,19 @@ fn check_vision_acp(vision: &VisionConfig) -> Vec<DoctorCheck> {
             detail: format!("ACP profile {name:?} selected"),
         },
         DoctorCheck {
-            status: if executable_available(&profile.command) {
+            status: if reachable {
                 DoctorStatus::Ok
             } else {
                 DoctorStatus::Warn
             },
             name: "vision-acp-reachability".into(),
-            detail: if executable_available(&profile.command) {
-                format!("ACP harness executable {:?} is available", profile.command)
+            detail: if reachable {
+                format!("ACP harness {:?} initialized successfully", profile.command)
             } else {
-                format!(
-                    "ACP harness executable {:?} was not found on PATH",
-                    profile.command
-                )
+                format!("ACP harness {:?} was not launchable", profile.command)
             },
         },
-        DoctorCheck {
-            status: DoctorStatus::Ok,
-            name: "vision-auth-path".into(),
-            detail: format!(
-                "{:?}; credentials remain owned by the harness",
-                profile.auth
-            ),
-        },
+        auth_check,
     ]
 }
 
@@ -1111,7 +1225,7 @@ fn run_doctor(
     };
 
     if let Some(config) = &config {
-        for check in check_vision_acp(&config.vision) {
+        for check in check_vision_acp(config) {
             push_doctor_check(&mut report, check);
         }
         if let Some(check) = check_vision_provider(&config.vision) {
@@ -1122,6 +1236,13 @@ fn run_doctor(
         }
         if let Some(check) = check_vision_propose_probe(&config.vision) {
             push_doctor_check(&mut report, check);
+        }
+
+        if config.cdp.enabled {
+            report.ok(
+                "cdp-listen",
+                format!("{}:{}", config.cdp.host, config.cdp.port),
+            );
         }
 
         if !matches!(config.vision.backend, Some(config::VisionBackendKind::Acp)) {
@@ -3092,6 +3213,29 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
     }
 
     #[test]
+    fn vision_login_clap_parses_named_profile() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "bobby",
+            "vision",
+            "login",
+            "codex",
+            "--config",
+            "/tmp/config.toml",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::Vision {
+                command: VisionCommands::Login(VisionLoginArgs { name, config }),
+            }) => {
+                assert_eq!(name, "codex");
+                assert_eq!(config.as_deref(), Some(Path::new("/tmp/config.toml")));
+            }
+            _ => panic!("unexpected vision login parse"),
+        }
+    }
+
+    #[test]
     fn vision_provider_check_warns_when_profile_missing() {
         let vision = VisionConfig {
             provider: Some("ghost".into()),
@@ -3122,7 +3266,7 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
 
     #[test]
     fn doctor_acp_checks_are_separate_and_do_not_call_a_model() {
-        let vision = AppConfig::from_toml_str(
+        let config = AppConfig::from_toml_str(
             r#"
 [vision]
 backend = "acp"
@@ -3132,13 +3276,25 @@ command = "definitely-not-a-real-acp-harness"
 auth = "oauth-device-code"
 "#,
         )
-        .unwrap()
-        .vision;
-        let checks = check_vision_acp(&vision);
+        .unwrap();
+        let checks = check_vision_acp(&config);
         assert_eq!(checks.len(), 3);
         assert_eq!(checks[0].name, "vision-routing");
         assert_eq!(checks[1].name, "vision-acp-reachability");
         assert_eq!(checks[2].name, "vision-auth-path");
+        assert!(checks[2].detail.contains("could not discover"));
+    }
+
+    #[test]
+    fn doctor_auth_path_warns_when_configured_strategy_is_not_advertised() {
+        let check = vision_auth_discovery_check(
+            AuthStrategy::OAuthDeviceCode,
+            Ok(AuthCapabilities::new([AuthStrategy::Advertised])),
+        );
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("OAuthDeviceCode"));
+        assert!(check.detail.contains("Advertised"));
+        assert!(check.detail.contains("misconfigured"));
     }
 
     #[test]
@@ -3224,5 +3380,57 @@ api_key_env = "OPENAI_API_KEY"
         use clap::Parser;
         assert!(Cli::try_parse_from(["bobby", "serve", "--vision", "--no-vision"]).is_err());
         assert!(Cli::try_parse_from(["bobby", "mcp-stdio", "--vision", "--no-vision"]).is_err());
+    }
+
+    #[test]
+    fn cdp_command_parses_port_override() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["bobby", "cdp", "--cdp-port", "9333"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Cdp {
+                cdp_port,
+                vision,
+                no_vision,
+                ..
+            }) => {
+                assert_eq!(cdp_port, Some(9333));
+                assert!(!vision);
+                assert!(!no_vision);
+            }
+            _ => panic!("expected Cdp command"),
+        }
+    }
+
+    #[test]
+    fn doctor_reports_cdp_listen_when_enabled_in_config() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str(
+            r#"
+[cdp]
+enabled = true
+host = "127.0.0.1"
+port = 9333
+"#,
+        );
+        std::fs::write(&config, text).unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+
+        let check = report.check("cdp-listen").expect("cdp-listen check");
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.detail.contains("127.0.0.1:9333"));
     }
 }

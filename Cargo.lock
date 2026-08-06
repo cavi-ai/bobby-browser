@@ -8,6 +8,7 @@ version = "0.6.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
+ "auth-broker",
  "base64 0.23.0",
  "intent-engine",
  "serde",
@@ -523,6 +524,7 @@ dependencies = [
  "anyhow",
  "artifact-store",
  "async-trait",
+ "auth-broker",
  "broker",
  "chrono",
  "clap",
@@ -615,6 +617,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.0",
+ "cdp-gateway",
  "chrono",
  "config",
  "futures-util",
@@ -630,6 +633,7 @@ dependencies = [
  "task-scheduler",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tower",
  "tracing",
  "types",
@@ -2203,13 +2207,8 @@ dependencies = [
 name = "js-engine"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "types",
 ]
 
 [[package]]
@@ -2496,6 +2495,7 @@ version = "0.6.0"
 dependencies = [
  "acp-client",
  "async-trait",
+ "auth-broker",
  "config",
  "intent-engine",
  "thiserror 2.0.18",
@@ -4093,7 +4093,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

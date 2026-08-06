@@ -34,16 +34,27 @@ async fn main() -> agent_client_protocol::Result<()> {
         .builder()
         .on_receive_request(
             async move |request: InitializeRequest, responder, _connection| {
+                if initialize_mode == "initialize-disconnect" {
+                    std::process::exit(0);
+                }
                 let mut response = InitializeResponse::new(request.protocol_version)
                     .agent_capabilities(AgentCapabilities::new().prompt_capabilities(
                         PromptCapabilities::new().image(initialize_mode != "no-image"),
                     ));
                 if matches!(
                     initialize_mode.as_str(),
-                    "auth" | "auth-fail" | "auth-disconnect"
+                    "auth" | "auth-fail" | "auth-rejected" | "auth-disconnect"
                 ) {
                     response = response.auth_methods(vec![AuthMethod::Agent(
                         AuthMethodAgent::new("opencode-login", "OpenCode Login"),
+                    )]);
+                } else if initialize_mode == "password" {
+                    response = response.auth_methods(vec![AuthMethod::Agent(
+                        AuthMethodAgent::new("password", "Password"),
+                    )]);
+                } else if initialize_mode == "oauth-device-code" {
+                    response = response.auth_methods(vec![AuthMethod::Agent(
+                        AuthMethodAgent::new("oauth-device-code", "OAuth Device Code"),
                     )]);
                 }
                 responder.respond(response)
@@ -58,6 +69,11 @@ async fn main() -> agent_client_protocol::Result<()> {
                 );
                 if authenticate_mode == "auth-fail" {
                     responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                } else if authenticate_mode == "auth-rejected" {
+                    responder.respond_with_error(agent_client_protocol::Error::new(
+                        -32001,
+                        "authentication rejected",
+                    ))
                 } else if authenticate_mode == "auth-disconnect" {
                     std::process::exit(0)
                 } else {

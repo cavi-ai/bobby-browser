@@ -302,6 +302,8 @@ pub struct AcpServer {
 }
 
 impl AcpServer {
+    /// Build a server from an [`AuthenticatedRuntime`] and the principal's
+    /// capability set (used to decide permission prompts).
     pub fn new(
         runtime: Arc<AuthenticatedRuntime>,
         principal_capabilities: Vec<Capability>,

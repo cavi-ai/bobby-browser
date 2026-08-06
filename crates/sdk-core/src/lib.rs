@@ -1,3 +1,10 @@
+//! Runtime service and authenticated interface adapter.
+//!
+//! [`RuntimeService`] is the unauthenticated application core: sessions, pages,
+//! recovery, and command execution. [`AuthenticatedRuntime`] wraps it with
+//! capability checks, idempotency, and session ownership — the type every
+//! public adapter (HTTP, MCP, CDP, ACP) holds.
+
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};

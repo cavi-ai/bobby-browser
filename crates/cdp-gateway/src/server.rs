@@ -91,6 +91,8 @@ use crate::{
     MAX_QUEUED_EVENTS,
 };
 
+/// Errors from CDP discovery endpoints (`/json/version`, `/json/list`) and
+/// WebSocket upgrade before a session is established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoveryError {
     Unauthorized,
@@ -119,9 +121,15 @@ pub struct TargetDescription {
     pub web_socket_debugger_url: String,
 }
 
+/// CDP discovery and WebSocket gateway backed by an [`Authority`] and
+/// [`RuntimeInterface`].
+///
+/// Construct with [`Self::new`], optionally configure artifacts and upload
+/// staging, then expose [`Self::router`] on the host HTTP server.
 pub struct CdpGateway {
     authority: Arc<dyn Authority>,
-    runtime: Arc<dyn RuntimeInterface>,
+    bind_runtime:
+        Arc<dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static>,
     registry: MethodRegistry,
     websocket_base: String,
     browser_id: String,
@@ -134,6 +142,8 @@ pub struct CdpGateway {
 }
 
 impl CdpGateway {
+    /// Create a gateway. `websocket_base` is the public origin clients use for
+    /// debugger URLs (for example `ws://127.0.0.1:9222`).
     pub fn new<A, R>(
         authority: Arc<A>,
         runtime: Arc<R>,
@@ -144,9 +154,29 @@ impl CdpGateway {
         A: Authority + 'static,
         R: RuntimeInterface + 'static,
     {
+        let runtime: Arc<dyn RuntimeInterface> = runtime;
+        Self::with_binder(
+            authority,
+            Arc::new(move |_| runtime.clone()),
+            registry,
+            websocket_base,
+        )
+    }
+
+    pub fn with_binder<A>(
+        authority: Arc<A>,
+        bind_runtime: Arc<
+            dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static,
+        >,
+        registry: MethodRegistry,
+        websocket_base: impl Into<String>,
+    ) -> Self
+    where
+        A: Authority + 'static,
+    {
         Self {
             authority,
-            runtime,
+            bind_runtime,
             registry,
             websocket_base: websocket_base.into().trim_end_matches('/').to_owned(),
             browser_id: Uuid::new_v4().simple().to_string(),
@@ -219,8 +249,8 @@ impl CdpGateway {
     ) -> Result<Vec<TargetDescription>, DiscoveryError> {
         let handle = self.authenticate(bearer).await?;
         let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
-        let sessions = self
-            .runtime
+        let runtime = (self.bind_runtime)(handle);
+        let sessions = runtime
             .list_sessions(ctx)
             .await
             .map_err(|_| DiscoveryError::Runtime)?;
@@ -246,9 +276,10 @@ impl CdpGateway {
             return Err(DiscoveryError::NotFound);
         }
         let handle = self.authenticate(bearer).await?;
+        let runtime = (self.bind_runtime)(handle.clone());
         let connection = Arc::new(CdpConnection::with_targets(
             handle,
-            self.runtime.clone(),
+            runtime,
             self.registry.clone(),
             ConnectionShared {
                 targets: self.targets.clone(),
@@ -310,6 +341,10 @@ const MAX_ISOLATED_WORLDS: usize = 256;
 const MAX_PENDING_TAB_CHILDREN: usize = 256;
 const MAX_BROWSER_OBSERVERS: usize = 512;
 
+/// One authenticated CDP WebSocket session.
+///
+/// Created by [`CdpGateway::upgrade`] and dispatches CDP method calls through
+/// the shared runtime interface.
 pub struct CdpConnection {
     connection_id: String,
     handle: CapabilityHandle,
@@ -516,6 +551,7 @@ impl UploadStaging {
 }
 
 impl CdpConnection {
+    /// Build a standalone connection (tests and harness use).
     pub fn new(
         handle: CapabilityHandle,
         runtime: Arc<dyn RuntimeInterface>,

@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use auth_broker::AuthStrategy;
 use config::{AppConfig, NodeConfig, NodeKind, VisionAcpProfile, VisionAuthKind};
 use intent_engine::{HttpVisionAssist, VisionAssist};
 use types::{CommandError, ErrorCode, ErrorLayer};
@@ -166,12 +167,7 @@ impl NodeRegistry {
         if let Some(profile) = self.acp_profiles.get(name) {
             let assist =
                 acp_client::AcpVisionAssist::new(profile.command.clone(), profile.args.clone())
-                    .with_advertised_auth(matches!(
-                        profile.auth,
-                        VisionAuthKind::Advertised
-                            | VisionAuthKind::OAuthAuthorizationCode
-                            | VisionAuthKind::OAuthDeviceCode
-                    ));
+                    .with_auth_strategy(vision_auth_strategy(profile.auth));
             tracing::debug!(node = name, "node.vision.acp_resolved");
             return Ok(Arc::new(assist));
         }
@@ -197,10 +193,40 @@ impl NodeRegistry {
         );
         Ok(Arc::new(assist))
     }
+
+    pub fn auth_driver(&self, name: &str) -> Result<acp_client::AcpAuthDriver, NodeError> {
+        let profile = self
+            .acp_profiles
+            .get(name)
+            .ok_or_else(|| NodeError::Unknown(name.to_owned()))?;
+        Ok(acp_client::AcpAuthDriver::new(
+            profile.command.clone(),
+            profile.args.clone(),
+        ))
+    }
+
+    pub fn auth_strategy(&self, name: &str) -> Result<AuthStrategy, NodeError> {
+        let profile = self
+            .acp_profiles
+            .get(name)
+            .ok_or_else(|| NodeError::Unknown(name.to_owned()))?;
+        Ok(vision_auth_strategy(profile.auth))
+    }
 }
 
 /// The name a legacy `[vision]` endpoint is carried forward under.
 pub const LEGACY_VISION_NODE: &str = "vision";
+
+pub fn vision_auth_strategy(kind: VisionAuthKind) -> AuthStrategy {
+    match kind {
+        VisionAuthKind::Advertised => AuthStrategy::Advertised,
+        VisionAuthKind::OAuthAuthorizationCode => AuthStrategy::OAuthAuthorizationCode,
+        VisionAuthKind::OAuthDeviceCode => AuthStrategy::OAuthDeviceCode,
+        VisionAuthKind::Environment => AuthStrategy::Environment,
+        VisionAuthKind::ExistingSession => AuthStrategy::ExistingSession,
+        VisionAuthKind::None => AuthStrategy::None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -335,6 +361,29 @@ mod tests {
     }
 
     #[test]
+    fn every_vision_auth_kind_maps_to_distinct_auth_strategy() {
+        use auth_broker::AuthStrategy::*;
+        assert_eq!(vision_auth_strategy(VisionAuthKind::Advertised), Advertised);
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::OAuthAuthorizationCode),
+            OAuthAuthorizationCode
+        );
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::OAuthDeviceCode),
+            OAuthDeviceCode
+        );
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::Environment),
+            Environment
+        );
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::ExistingSession),
+            ExistingSession
+        );
+        assert_eq!(vision_auth_strategy(VisionAuthKind::None), None);
+    }
+
+    #[test]
     fn acp_profile_is_a_named_vision_node() {
         let config = AppConfig::from_toml_str(
             r#"
@@ -351,5 +400,84 @@ auth = "advertised"
         let registry = NodeRegistry::from_config(&config);
         assert_eq!(registry.names().collect::<Vec<_>>(), ["codex"]);
         assert!(registry.vision("codex").is_ok());
+    }
+
+    #[test]
+    fn acp_profile_resolves_to_an_auth_driver_and_strategy() {
+        let config = AppConfig::from_toml_str(
+            r#"
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "oauth-device-code"
+"#,
+        )
+        .unwrap();
+        let registry = NodeRegistry::from_config(&config);
+
+        assert!(registry.auth_driver("codex").is_ok());
+        assert_eq!(
+            registry.auth_strategy("codex"),
+            Ok(AuthStrategy::OAuthDeviceCode)
+        );
+        assert_eq!(
+            registry.auth_driver("missing").unwrap_err(),
+            NodeError::Unknown("missing".to_owned())
+        );
+    }
+
+    #[test]
+    fn acp_oauth_auth_kinds_wire_distinct_strategies() {
+        let oauth_code = AppConfig::from_toml_str(
+            r#"
+[vision]
+backend = "acp"
+profile = "codex"
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "oauth-authorization-code"
+"#,
+        )
+        .unwrap();
+        let oauth_device = AppConfig::from_toml_str(
+            r#"
+[vision]
+backend = "acp"
+profile = "codex"
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "oauth-device-code"
+"#,
+        )
+        .unwrap();
+        let code_profile = oauth_code.vision.acp_profiles.get("codex").unwrap();
+        let device_profile = oauth_device.vision.acp_profiles.get("codex").unwrap();
+        let code_assist = acp_client::AcpVisionAssist::new(
+            code_profile.command.clone(),
+            code_profile.args.clone(),
+        )
+        .with_auth_strategy(vision_auth_strategy(code_profile.auth));
+        let device_assist = acp_client::AcpVisionAssist::new(
+            device_profile.command.clone(),
+            device_profile.args.clone(),
+        )
+        .with_auth_strategy(vision_auth_strategy(device_profile.auth));
+        assert_eq!(
+            code_assist.auth_strategy(),
+            vision_auth_strategy(VisionAuthKind::OAuthAuthorizationCode)
+        );
+        assert_eq!(
+            device_assist.auth_strategy(),
+            vision_auth_strategy(VisionAuthKind::OAuthDeviceCode)
+        );
+        assert_ne!(code_assist.auth_strategy(), device_assist.auth_strategy());
+        assert!(NodeRegistry::from_config(&oauth_code)
+            .vision("codex")
+            .is_ok());
+        assert!(NodeRegistry::from_config(&oauth_device)
+            .vision("codex")
+            .is_ok());
     }
 }

@@ -126,6 +126,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
     std::fs::write(&resume, b"Ada Lovelace").unwrap();
 
     let config = AppConfig {
+        cdp: config::CdpConfig::default(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

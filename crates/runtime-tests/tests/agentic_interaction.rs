@@ -55,6 +55,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
     let root = tempfile::tempdir().unwrap();
     let artifacts_dir = root.path().join("artifacts");
     let config = AppConfig {
+        cdp: config::CdpConfig::default(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

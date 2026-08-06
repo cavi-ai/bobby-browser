@@ -16,6 +16,7 @@ use worker_pool::{ChromiumWorkerFactory, WorkerFactory};
 
 fn config(root: &tempfile::TempDir) -> AppConfig {
     AppConfig {
+        cdp: config::CdpConfig::default(),
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,

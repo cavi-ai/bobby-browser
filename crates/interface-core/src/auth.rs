@@ -26,6 +26,10 @@ struct AuthorityRecord {
     revoked: Arc<AtomicBool>,
 }
 
+/// In-memory bearer-token registry for development and tests.
+///
+/// Production hosts may supply a persistent [`Authority`] instead. Issue tokens
+/// with [`Self::issue`]; verify incoming requests with [`Self::verify`].
 #[derive(Clone)]
 pub struct AuthorityStore {
     records: Arc<RwLock<Vec<AuthorityRecord>>>,
@@ -164,6 +168,10 @@ impl Authority for AuthorityStore {
 }
 
 #[async_trait]
+/// Bearer-token authentication and optional principal issuance.
+///
+/// Adapters call [`Self::authenticate`] on every request. Implementations must
+/// fail closed on unknown, expired, or revoked credentials.
 pub trait Authority: Send + Sync {
     async fn authenticate(
         &self,

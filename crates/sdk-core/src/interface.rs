@@ -19,6 +19,11 @@ use types::{
 
 use crate::RuntimeService;
 
+/// Capability-checked, idempotent wrapper around [`RuntimeService`].
+///
+/// Implements [`interface_core::RuntimeInterface`] for HTTP, MCP, CDP, and ACP.
+/// Construct with [`Self::new`] and pass to adapter crates; never expose
+/// [`RuntimeService`] directly on a public surface.
 #[derive(Clone)]
 pub struct AuthenticatedRuntime {
     inner: RuntimeService,
@@ -32,10 +37,12 @@ pub struct AuthenticatedRuntime {
 }
 
 impl AuthenticatedRuntime {
+    /// Wrap `inner` with the principal's live capability handle.
     pub fn new(inner: RuntimeService, authority: CapabilityHandle) -> Self {
         Self::with_idempotency(inner, authority, IdempotencyStore::default())
     }
 
+    /// Wrap `inner` with capability checks and a shared idempotency store.
     pub fn with_idempotency(
         inner: RuntimeService,
         authority: CapabilityHandle,
@@ -53,6 +60,7 @@ impl AuthenticatedRuntime {
         }
     }
 
+    /// Wrap `inner` and record session ownership for multi-tenant isolation.
     pub fn with_session_ownership(
         inner: RuntimeService,
         authority: CapabilityHandle,

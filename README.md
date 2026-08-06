@@ -45,6 +45,7 @@ Verify, then run:
 ```bash
 bobby doctor          # config, credential, storage, browsers, MCP handshake
 bobby serve           # http://127.0.0.1:7777/healthz
+bobby cdp             # authenticated CDP on 127.0.0.1:9222 (dedicated port)
 ```
 
 [CLI reference](docs/bobby-browser/source/pages/guides/cli.md) ·
