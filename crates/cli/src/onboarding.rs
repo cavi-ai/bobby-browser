@@ -30,6 +30,12 @@ const GATEWAY_COMMAND: &str = if cfg!(windows) {
     "mcp-gateway"
 };
 
+const ACP_GATEWAY_COMMAND: &str = if cfg!(windows) {
+    "acp-gateway.exe"
+} else {
+    "acp-gateway"
+};
+
 fn bootstrap_env_placeholders() -> serde_json::Value {
     serde_json::json!({
         "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN": "${AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN}",
@@ -85,9 +91,17 @@ pub struct HandshakeReport {
 /// Resolve the gateway binary: a sibling of the current executable first
 /// (workspace `target/` layouts keep them together), then PATH.
 fn resolve_gateway() -> Result<PathBuf> {
+    resolve_sibling_or_path(GATEWAY_COMMAND)
+}
+
+fn resolve_acp_gateway() -> Result<PathBuf> {
+    resolve_sibling_or_path(ACP_GATEWAY_COMMAND)
+}
+
+fn resolve_sibling_or_path(command: &str) -> Result<PathBuf> {
     if let Ok(current) = std::env::current_exe() {
         if let Some(dir) = current.parent() {
-            let sibling = dir.join(GATEWAY_COMMAND);
+            let sibling = dir.join(command);
             if sibling.is_file() {
                 return Ok(sibling);
             }
@@ -95,14 +109,38 @@ fn resolve_gateway() -> Result<PathBuf> {
     }
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join(GATEWAY_COMMAND);
+            let candidate = dir.join(command);
             if candidate.is_file() {
                 return Ok(candidate);
             }
         }
     }
     Err(anyhow!(
-        "{GATEWAY_COMMAND} not found next to the bobby binary or on PATH"
+        "{command} not found next to the bobby binary or on PATH"
+    ))
+}
+
+/// Absolute path to `acp-gateway` for host config fragments.
+fn static_acp_server_entry() -> Result<(String, Vec<String>)> {
+    let gateway = match INSTALLED_CLI.with(|slot| slot.borrow().clone()) {
+        Some(bobby) => {
+            let sibling = bobby
+                .parent()
+                .map(|dir| dir.join(ACP_GATEWAY_COMMAND))
+                .filter(|path| path.is_file());
+            match sibling {
+                Some(path) => path,
+                None => resolve_acp_gateway()?,
+            }
+        }
+        None => resolve_acp_gateway()?,
+    };
+    Ok((
+        gateway
+            .to_str()
+            .ok_or_else(|| anyhow!("acp-gateway path is not valid UTF-8"))?
+            .to_owned(),
+        Vec::new(),
     ))
 }
 
@@ -281,6 +319,8 @@ pub enum HostKind {
     Zed,
     /// VS Code: project `.vscode/mcp.json` (`servers`).
     Vscode,
+    /// ACP stdio: project `.acp.json` launching `acp-gateway` with bootstrap env.
+    Acp,
 }
 
 const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
@@ -318,6 +358,7 @@ fn host_config_path(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
             .context("config directory unavailable")?
             .join("zed")
             .join("settings.json")),
+        HostKind::Acp => Ok(project_root.join(".acp.json")),
     }
 }
 
@@ -325,21 +366,46 @@ fn host_config_path(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
 /// preserving everything already there. Returns the file written.
 pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
     let path = host_config_path(kind, project_root)?;
-    let (command, args) = static_server_entry()?;
     let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
         Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)
             .with_context(|| format!("{} is not valid JSON", path.display()))?,
         _ => serde_json::json!({}),
     };
-    let entry = match kind {
-        HostKind::Claude => serde_json::json!({"command": command, "args": args}),
-        HostKind::Vscode => serde_json::json!({"type": "stdio", "command": command, "args": args}),
-        HostKind::Zed => serde_json::json!({"command": {"path": command, "args": args, "env": {}}}),
-    };
-    let section = match kind {
-        HostKind::Claude => "mcpServers",
-        HostKind::Vscode => "servers",
-        HostKind::Zed => "context_servers",
+    let (entry, section) = match kind {
+        HostKind::Claude => {
+            let (command, args) = static_server_entry()?;
+            (
+                serde_json::json!({"command": command, "args": args}),
+                "mcpServers",
+            )
+        }
+        HostKind::Vscode => {
+            let (command, args) = static_server_entry()?;
+            (
+                serde_json::json!({"type": "stdio", "command": command, "args": args}),
+                "servers",
+            )
+        }
+        HostKind::Zed => {
+            let (command, args) = static_server_entry()?;
+            (
+                serde_json::json!({"command": {"path": command, "args": args, "env": {}}}),
+                "context_servers",
+            )
+        }
+        HostKind::Acp => {
+            // ACP hosts launch `acp-gateway` directly with bootstrap env
+            // placeholders — no `bobby mcp-stdio`-style loader.
+            let (command, args) = static_acp_server_entry()?;
+            (
+                serde_json::json!({
+                    "command": command,
+                    "args": args,
+                    "env": bootstrap_env_placeholders(),
+                }),
+                "agentServers",
+            )
+        }
     };
     let table = config
         .as_object_mut()
@@ -525,7 +591,7 @@ pub struct InstallOptions {
     pub skill_openclaw: bool,
     pub companion: bool,
     pub extension: Option<PathBuf>,
-    /// Copy `bobby` (+ sibling `mcp-gateway`) onto a writable bin dir on PATH.
+    /// Copy `bobby` (+ sibling `mcp-gateway` / `acp-gateway`) onto a writable bin dir on PATH.
     pub cli: bool,
     pub force: bool,
     pub yes: bool,
@@ -580,7 +646,7 @@ fn path_var_contains(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy this `bobby` binary (and sibling `mcp-gateway` when present) into
+/// Copy this `bobby` binary (and sibling gateways when present) into
 /// `dest_dir`. Returns the installed `bobby` path and whether `dest_dir` is
 /// on PATH.
 pub fn install_cli_into(dest_dir: &Path) -> Result<(PathBuf, bool)> {
@@ -591,10 +657,12 @@ pub fn install_cli_into(dest_dir: &Path) -> Result<(PathBuf, bool)> {
     copy_executable(&exe, &bobby_dest)?;
 
     if let Some(dir) = exe.parent() {
-        let gateway_src = dir.join(GATEWAY_COMMAND);
-        if gateway_src.is_file() {
-            let gateway_dest = dest_dir.join(GATEWAY_COMMAND);
-            copy_executable(&gateway_src, &gateway_dest)?;
+        for command in [GATEWAY_COMMAND, ACP_GATEWAY_COMMAND] {
+            let gateway_src = dir.join(command);
+            if gateway_src.is_file() {
+                let gateway_dest = dest_dir.join(command);
+                copy_executable(&gateway_src, &gateway_dest)?;
+            }
         }
     }
 
@@ -682,15 +750,16 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let cli_enabled = cli || use_defaults;
     let cli_label = match resolve_cli_bin_dir() {
         Ok(bin_dir) if directory_on_path(&bin_dir) => format!(
-            "CLI on PATH: install bobby (+ mcp-gateway) to {}",
+            "CLI on PATH: install bobby (+ mcp-gateway, acp-gateway) to {}",
             bin_dir.display()
         ),
         Ok(bin_dir) => format!(
-            "CLI on PATH: install bobby (+ mcp-gateway) to {} (add this dir to PATH)",
+            "CLI on PATH: install bobby (+ mcp-gateway, acp-gateway) to {} (add this dir to PATH)",
             bin_dir.display()
         ),
         Err(_) => {
-            "CLI on PATH: install bobby (+ mcp-gateway) to ~/.cargo/bin or ~/.local/bin".to_owned()
+            "CLI on PATH: install bobby (+ mcp-gateway, acp-gateway) to ~/.cargo/bin or ~/.local/bin"
+                .to_owned()
         }
     };
     items.push(InstallItem {
@@ -712,12 +781,19 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }),
     });
 
-    for host in [HostKind::Claude, HostKind::Zed, HostKind::Vscode] {
+    for host in [HostKind::Claude, HostKind::Zed, HostKind::Vscode, HostKind::Acp] {
         let selected = hosts.contains(&host);
         let default_on = matches!(host, HostKind::Claude);
         let root = project_root.clone();
+        let label = match host {
+            HostKind::Acp => {
+                "Acp: merge the acp-gateway entry into .acp.json (bootstrap env placeholders)"
+                    .to_owned()
+            }
+            _ => format!("{host:?}: merge the MCP server entry into its config"),
+        };
         items.push(InstallItem {
-            label: format!("{host:?}: merge the MCP server entry into its config"),
+            label,
             enabled: selected || (use_defaults && default_on),
             run: Box::new(move || {
                 let path = merge_host_config(host, &root)?;
@@ -932,6 +1008,51 @@ mod install_tests {
         let vscode: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&vscode_path).unwrap()).unwrap();
         assert_eq!(vscode["servers"]["bobby-browser"]["type"], "stdio");
+    }
+
+    #[test]
+    fn acp_merge_writes_agent_servers_with_bootstrap_placeholders() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let gateway = bin.path().join(ACP_GATEWAY_COMMAND);
+        std::fs::write(&gateway, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gateway, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![bin.path().to_path_buf()];
+        if let Some(existing) = &previous {
+            paths.extend(std::env::split_paths(existing));
+        }
+        let joined = std::env::join_paths(paths).unwrap();
+        unsafe { std::env::set_var("PATH", joined) };
+
+        let root = tempfile::tempdir().unwrap();
+        let path = merge_host_config(HostKind::Acp, root.path()).unwrap();
+        assert!(path.ends_with(".acp.json"));
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let server = &written["agentServers"]["bobby-browser"];
+        let command = server["command"].as_str().unwrap();
+        assert!(
+            command.ends_with(ACP_GATEWAY_COMMAND),
+            "expected acp-gateway path, got {command}"
+        );
+        assert!(server["args"].as_array().unwrap().is_empty());
+        assert_eq!(
+            server["env"]["AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN"],
+            "${AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN}"
+        );
+        // No mcp-stdio loader — ACP launches the gateway with bootstrap env.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("mcp-stdio"));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 
     #[test]

@@ -1006,7 +1006,7 @@ impl Server {
                     }),
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                if input.boundary.unwrap_or(false) && input.auto_checkpoint.unwrap_or(false) {
+                if input.boundary.unwrap_or(false) && input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope)
                         .await
                 } else {
@@ -1176,7 +1176,7 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                if input.auto_checkpoint.unwrap_or(false) {
+                if input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope)
                         .await
                 } else {
@@ -1229,7 +1229,7 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                if input.auto_checkpoint.unwrap_or(false) {
+                if input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope)
                         .await
                 } else {
@@ -2413,7 +2413,8 @@ page_scoped_args!(NavigateArgs {
 /// Click is the one flat primitive that can be Boundary class, so — like the
 /// intent tools — it accepts caller-pinned `commandId`/`attemptId` for the
 /// pre-action checkpoint gate (see `pin_envelope_ids`). When `boundary` is
-/// true, `autoCheckpoint` mints that checkpoint in the same call.
+/// true, `autoCheckpoint` defaults to true and mints that checkpoint in the
+/// same call.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ClickArgs {
@@ -3027,7 +3028,7 @@ fn tool_description(name: &str) -> &'static str {
         "page_close" => "Close a page in an owned session. Requires browser:mutate. Destructive: the page and its in-flight commands are gone immediately. On failure with notFound, the page id is stale -- call page_list for current ids.",
         "page_activate" => "Bring a page to the front in an owned session. Requires browser:mutate. Produces the activated page's URL and title. On failure with notFound, the page id is stale -- call page_list for current ids.",
         "navigate" => "Navigate a page to a URL and wait for the requested load state. Requires browser:mutate. Produces navigation evidence with the settled URL and title. On failure with invalidRequest, the URL scheme isn't http(s) or data -- use one of those; on deadlineExceeded, retry with a longer timeout_ms.",
-        "click" => "Click an element identified by a selector or a resolved target. Requires browser:mutate. Produces execution-path evidence for the click. When boundary is true, autoCheckpoint true mints the required checkpoint in the same call; else pin commandId/attemptId and checkpoint_save them first. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
+        "click" => "Click an element identified by a selector or a resolved target. Requires browser:mutate. Produces execution-path evidence for the click. When boundary is true, autoCheckpoint defaults to true and mints the required checkpoint in the same call (pass false to author your own). On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
         "type_text" => "Type text into an element identified by a selector or a resolved target, optionally clearing it first. Requires browser:mutate. Produces execution-path evidence for the input. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
         "wait_for" => "Wait for a page condition with a bounded timeout. Requires browser:mutate. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
         "control_action" => "Perform one typed native form-control action and return the reread control state. Requires browser:mutate, and file:upload too if the action is setFiles. Produces control-action evidence with the post-action value. On failure with targetNotFound, take a fresh form_snapshot and pass the new target.",
@@ -3044,9 +3045,9 @@ fn tool_description(name: &str) -> &'static str {
         "intent_locate" => "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
         "intent_fill" => "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
         "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable). Requires browser:mutate and intent:execute. Produces per-field resolution and fill evidence in order. On failure with verificationFailed, targetNotFound, or intentActionMismatch on one field, the fields before it are already filled -- re-run with only the remaining fields.",
-        "intent_submit_and_verify" => "Submit a form and verify the expected state (Boundary; refused without a matching pre-saved checkpoint). Requires browser:mutate and intent:execute. autoCheckpoint true mints it in this call and returns checkpointId; else pin commandId/attemptId and checkpoint_save them first. On failure with needsReconciliation, do not retry -- call recovery_status.",
+        "intent_submit_and_verify" => "Submit a form and verify the expected state (Boundary). Requires browser:mutate and intent:execute. autoCheckpoint defaults to true and mints the checkpoint in this call (returns checkpointId); pass false and pin commandId/attemptId with checkpoint_save first to author invariants. On failure with needsReconciliation, do not retry -- call recovery_status.",
         "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
-        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint true mints the required checkpoint in the same call. On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
+        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint defaults to true and mints the checkpoint in the same call (pass false to author your own). On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
         "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure: verificationFailed (no HAR captured), browserCommandFailed (engine could not persist it), or internal (write failed) -- none caller-fixable; retry, and report if it persists.",

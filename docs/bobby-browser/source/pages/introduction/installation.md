@@ -40,9 +40,17 @@ shows the version you need.
 
 ## Install a GitHub Release binary
 
+One-liner (Linux / macOS):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
+```
+
+Optional: `BOBBY_VERSION=0.6.0` (no leading `v`) and `INSTALL_DIR=~/.local/bin`.
+
 Assets are named
 `bobby-browser-<version>-{linux|macos|windows}-{x64|arm64}.tar.gz` (`.zip` on
-Windows). Example for the latest macOS arm64 release:
+Windows). Manual example for the latest macOS arm64 release:
 
 ```bash
 TAG="$(curl -fsSL https://api.github.com/repos/cavi-ai/bobby-browser/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"

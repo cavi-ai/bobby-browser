@@ -122,10 +122,11 @@ fn fill_and_submit_form(arguments: &Value) -> Option<Value> {
          commandId its outcome carries.\n\
          \n\
          3. The submit is Boundary class: the runtime refuses it unless a matching checkpoint \
-         already exists. The short way is one call: go straight to step 4 and pass \
-         autoCheckpoint=true, and the runtime mints the checkpoint for you and returns its \
+         already exists. autoCheckpoint defaults to true, so the short way is one call: go \
+         straight to step 4 and the runtime mints the checkpoint for you and returns its \
          checkpointId. Do the rest of this step by hand only when you need to author the \
-         checkpoint's invariants or replayableInputs. Pick two fresh UUIDs -- one for the \
+         checkpoint's invariants or replayableInputs (pass autoCheckpoint=false on the \
+         submit). Pick two fresh UUIDs -- one for the \
          submit's commandId, one for its attemptId -- then call checkpoint_save with \
          checkpoint set to a WorkflowCheckpoint for this workflowId, sessionId, and pageId \
          (schemaVersion, checkpointId, attemptId set to your chosen attemptId, restartUrl and \
@@ -138,8 +139,8 @@ fn fill_and_submit_form(arguments: &Value) -> Option<Value> {
          own, is rejected.\n\
          \n\
          4. Call intent_submit_and_verify with sessionId=\"{session_id}\", pageId=\"{page_id}\", \
-         the same workflowId, autoCheckpoint=true (or the SAME commandId and attemptId you \
-         pinned in step 3, if you checkpointed by hand), a purpose \
+         the same workflowId (omit autoCheckpoint, or pass false with the SAME commandId and \
+         attemptId you pinned in step 3 if you checkpointed by hand), a purpose \
          describing the submit control, and expectedState describing the page condition that \
          proves the submit landed. If the outcome is needsReconciliation, do NOT retry it -- \
          the submit may have already landed. Instead call recovery_status with the workflowId \
