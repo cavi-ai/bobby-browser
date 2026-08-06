@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
 use chrono::{Duration, Utc};
 use interface_core::{
-    canonical_sha256, command_identity_sha256, Authority, AuthorityStore, CapabilityHandle,
-    IdempotencyPermit, IdempotencyReservation, IdempotencyStore, RuntimeInterface,
-    SessionOwnershipAuthority, SessionOwnershipRecorder, SessionOwnershipRegistry,
+    command_identity_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyPermit,
+    IdempotencyReservation, IdempotencyStore, RuntimeInterface, SessionOwnershipAuthority,
+    SessionOwnershipRecorder, SessionOwnershipRegistry,
 };
 use page_runtime::{PageRuntime, RecoveryCoordinator};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};

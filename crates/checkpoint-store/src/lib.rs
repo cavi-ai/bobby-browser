@@ -209,7 +209,7 @@ impl CheckpointStore {
             }
             found.push(checkpoint);
         }
-        found.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        found.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
         found.truncate(limit);
         Ok(found)
     }
