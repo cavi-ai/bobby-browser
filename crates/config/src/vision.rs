@@ -137,7 +137,6 @@ fn default_vision_timeout_ms() -> u64 {
     15_000
 }
 
-
 /// One addressable node: a separate process with a bounded contract, reached
 /// over HTTP.
 ///
@@ -182,4 +181,3 @@ impl NodeConfig {
         })
     }
 }
-

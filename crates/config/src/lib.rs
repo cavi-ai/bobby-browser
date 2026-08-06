@@ -1,5 +1,5 @@
-mod vision_write;
 mod vision;
+mod vision_write;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

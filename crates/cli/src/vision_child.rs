@@ -3,7 +3,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use config::{AppConfig, NodeConfig, NodeKind, VisionProviderConfig};
+use config::{AppConfig, NodeKind, VisionProviderConfig};
 use node_registry::{NodeRegistry, LEGACY_VISION_NODE};
 use url::Url;
 
@@ -269,6 +269,7 @@ impl Drop for ManagedVisionProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use config::NodeConfig;
     use config::{VisionConfig, VisionProviderConfig};
     use std::collections::BTreeMap;
 
