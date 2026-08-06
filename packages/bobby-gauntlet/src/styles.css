@@ -16,6 +16,25 @@
   color: var(--ink);
 }
 
+.interruption-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgb(15 23 42 / 62%);
+}
+
+.interruption-dialog {
+  width: min(30rem, 100%);
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--surface);
+  box-shadow: 0 1.5rem 4rem rgb(15 23 42 / 28%);
+}
+
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: radial-gradient(circle at 80% 0%, #e7efd8 0, transparent 36rem), var(--canvas); }
 button, input, select { font: inherit; }

@@ -5,12 +5,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::{Multipart, Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, Request, Response, StatusCode, header};
+use axum::http::{header, HeaderMap, Request, Response, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
 
@@ -213,7 +213,10 @@ impl ScenarioServer {
     pub async fn start(config: ScenarioConfig) -> TestResult<Self> {
         let verifier = config.recaptcha.as_ref().map(|recaptcha| {
             Arc::new(GoogleRecaptchaVerifier {
-                client: reqwest::Client::new(),
+                client: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(8))
+                    .build()
+                    .expect("reCAPTCHA HTTP client configuration is valid"),
                 secret: recaptcha.secret.clone(),
             }) as Arc<dyn RecaptchaVerifier>
         });
@@ -273,6 +276,7 @@ impl ScenarioServer {
             .route("/api/documents/{id}/confirm", post(confirm_preview))
             .route("/api/integrations/ledger-cloud", get(integration_state))
             .route("/authorize/ledger-cloud", get(authorize_page))
+            .route("/level-two-checkpoint", get(level_two_checkpoint))
             .route(
                 "/api/integrations/ledger-cloud/complete",
                 post(complete_authorization),
@@ -617,6 +621,12 @@ async fn document_preview(AxumPath(id): AxumPath<String>) -> Html<String> {
     Html(format!(
         r#"<!doctype html><title>Document preview</title><main><h1>Approved customer document</h1><p>Document {id}</p><form method="post" action="/api/documents/{id}/confirm"><button id="confirm-preview" type="submit" aria-label="Confirm document preview">Confirm document</button></form></main>"#
     ))
+}
+
+async fn level_two_checkpoint() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html><html><head><title>Level 2 checkpoint</title></head><body><main><h1>Account checkpoint</h1><p>Confirm the onboarding details in the original window.</p><button type="button" onclick="window.close()">Return to onboarding</button></main></body></html>"#,
+    )
 }
 
 async fn confirm_preview(
