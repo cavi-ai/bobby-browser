@@ -15,10 +15,56 @@ use tokio::sync::{Mutex, Notify};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GauntletLevel {
+    One,
+    Two,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LevelTwoTrapPlan {
+    pub extra_modal: bool,
+    pub extra_popup: bool,
+    pub reversed_identity_fields: bool,
+    pub delayed_control_ms: u64,
+}
+
+impl LevelTwoTrapPlan {
+    fn seeded(seed: &str) -> Self {
+        let digest = Sha256::digest(seed.as_bytes());
+        Self {
+            extra_modal: true,
+            extra_popup: true,
+            reversed_identity_fields: digest[0] & 1 == 1,
+            delayed_control_ms: 150 + u64::from(digest[1]),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecaptchaConfig {
+    site_key: String,
+    secret: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicRunConfig {
+    level: u8,
+    seed: String,
+    traps: LevelTwoTrapPlan,
+    recaptcha_site_key: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScenarioConfig {
     pub seed: String,
     pub reject_postal_once: bool,
+    pub level: GauntletLevel,
+    pub traps: LevelTwoTrapPlan,
+    pub recaptcha: Option<RecaptchaConfig>,
 }
 
 impl ScenarioConfig {
@@ -26,6 +72,44 @@ impl ScenarioConfig {
         Self {
             seed: seed.into(),
             reject_postal_once: true,
+            level: GauntletLevel::One,
+            traps: LevelTwoTrapPlan::default(),
+            recaptcha: None,
+        }
+    }
+
+    pub fn level_two(
+        seed: impl Into<String>,
+        site_key: impl Into<String>,
+        secret: impl Into<String>,
+    ) -> TestResult<Self> {
+        let seed = seed.into();
+        let site_key = site_key.into();
+        let secret = secret.into();
+        if site_key.trim().is_empty() || secret.trim().is_empty() {
+            return Err("Level 2 requires non-empty reCAPTCHA site key and secret".into());
+        }
+        Ok(Self {
+            traps: LevelTwoTrapPlan::seeded(&seed),
+            seed,
+            reject_postal_once: true,
+            level: GauntletLevel::Two,
+            recaptcha: Some(RecaptchaConfig { site_key, secret }),
+        })
+    }
+
+    pub fn public_config(&self) -> PublicRunConfig {
+        PublicRunConfig {
+            level: match self.level {
+                GauntletLevel::One => 1,
+                GauntletLevel::Two => 2,
+            },
+            seed: self.seed.clone(),
+            traps: self.traps.clone(),
+            recaptcha_site_key: self
+                .recaptcha
+                .as_ref()
+                .map(|config| config.site_key.clone()),
         }
     }
 }
@@ -77,6 +161,8 @@ struct RunState {
 #[derive(Debug)]
 struct SharedState {
     run_id: String,
+    public_config: PublicRunConfig,
+    recaptcha: Option<RecaptchaConfig>,
     dist: PathBuf,
     inner: Mutex<RunState>,
     report_generated: Notify,
@@ -98,6 +184,8 @@ impl ScenarioServer {
         let run_id = format!("run-{}", sanitize(&config.seed));
         let state = Arc::new(SharedState {
             run_id,
+            public_config: config.public_config(),
+            recaptcha: config.recaptcha.clone(),
             dist,
             inner: Mutex::new(RunState {
                 atlas_priority: "normal".into(),
@@ -119,6 +207,7 @@ impl ScenarioServer {
             preview_confirmed: Notify::new(),
         });
         let app = Router::new()
+            .route("/api/run-config", get(run_config))
             .route("/api/dashboard", get(dashboard))
             .route("/api/customers", get(customers))
             .route("/api/customers/{id}", get(customer))
@@ -156,7 +245,13 @@ impl ScenarioServer {
     }
 
     pub fn application_url(&self, path: &str) -> String {
-        format!("{}{}?run={}", self.base_url(), path, self.run_id())
+        format!(
+            "{}{}?run={}&level={}",
+            self.base_url(),
+            path,
+            self.run_id(),
+            self.state.public_config.level
+        )
     }
 
     pub fn run_id(&self) -> &str {
@@ -208,6 +303,16 @@ impl ScenarioServer {
             .map_err(|_| "preview confirmation was not observed within 10 seconds")?;
         Ok(())
     }
+}
+
+async fn run_config(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    Json(state.public_config.clone()).into_response()
 }
 
 impl Drop for ScenarioServer {
@@ -596,7 +701,31 @@ fn sanitize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScenarioConfig, ScenarioServer};
+    use super::{GauntletLevel, LevelTwoTrapPlan, ScenarioConfig, ScenarioServer};
+
+    #[test]
+    fn level_one_is_the_compatible_default() {
+        let config = ScenarioConfig::seeded("atlas");
+        assert_eq!(config.level, GauntletLevel::One);
+        assert!(config.recaptcha.is_none());
+    }
+
+    #[test]
+    fn level_two_traps_are_seeded_and_public_config_never_contains_the_secret() {
+        let first = ScenarioConfig::level_two("atlas", "site-test", "secret-canary").unwrap();
+        let second = ScenarioConfig::level_two("atlas", "site-test", "secret-canary").unwrap();
+        assert_eq!(first.traps, second.traps);
+        assert_ne!(first.traps, LevelTwoTrapPlan::default());
+        let public = serde_json::to_string(&first.public_config()).unwrap();
+        assert!(public.contains("site-test"));
+        assert!(!public.contains("secret-canary"));
+    }
+
+    #[test]
+    fn level_two_rejects_missing_recaptcha_configuration() {
+        assert!(ScenarioConfig::level_two("atlas", "", "secret").is_err());
+        assert!(ScenarioConfig::level_two("atlas", "site", "").is_err());
+    }
 
     #[tokio::test]
     async fn priority_mutation_is_run_scoped_and_counted_once() {
