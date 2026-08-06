@@ -179,7 +179,7 @@ impl intent_engine::VisionAssist for AcpVisionAssist {
     ) -> Result<intent_engine::VisionProposal, CommandError> {
         let (width, height) = png_dimensions(&request.screenshot_png)
             .ok_or_else(|| vision_error("vision screenshot is not a valid bounded PNG"))?;
-        let digest = format!("{:x}", Sha256::digest(&request.screenshot_png));
+        let digest = hex::encode(Sha256::digest(&request.screenshot_png));
         let allowed_actions = match request.intent_kind.as_str() {
             "extract" => vec!["extract_value".to_owned()],
             "fill" | "type" => vec!["click".to_owned(), "type_text".to_owned()],

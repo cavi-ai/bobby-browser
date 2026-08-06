@@ -62,7 +62,7 @@ pub(super) fn evidence_refs<'a>(
             let bytes = serde_json::to_vec(item).map_err(skill_contract_error)?;
             SkillEvidenceRef::new(
                 format!("skill-recovery-{index}-{:?}", item.tactic).to_ascii_lowercase(),
-                format!("{:x}", Sha256::digest(bytes)),
+                hex::encode(Sha256::digest(bytes)),
             )
             .map_err(skill_contract_error)
         })

@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 pub fn assert_file_digest(path: &Path, expected: &str) -> Result<(), String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual = hex::encode(Sha256::digest(bytes));
     if actual == expected {
         Ok(())
     } else {
@@ -104,11 +104,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("report.csv");
         std::fs::write(&path, b"actual report").unwrap();
-        let expected = format!("{:x}", Sha256::digest(b"expected report"));
+        let expected = hex::encode(Sha256::digest(b"expected report"));
 
         let error = assert_file_digest(&path, &expected).unwrap_err();
 
         assert!(error.contains(&expected));
-        assert!(error.contains(&format!("{:x}", Sha256::digest(b"actual report"))));
+        assert!(error.contains(&hex::encode(Sha256::digest(b"actual report"))));
     }
 }

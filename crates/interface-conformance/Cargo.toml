@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+hex = { workspace = true }
 serde.workspace = true
 chrono.workspace = true
 tokio.workspace = true

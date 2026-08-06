@@ -249,7 +249,7 @@ impl<'de> Deserialize<'de> for GateResult {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(all(test, unix))]

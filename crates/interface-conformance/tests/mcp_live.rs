@@ -1000,7 +1000,7 @@ fn completed(outcome: &CommandOutcome) -> &Vec<Evidence> {
 fn proof(kind: &str, bytes: &[u8]) -> EvidenceProof {
     EvidenceProof {
         kind: kind.into(),
-        sha256: format!("{:x}", Sha256::digest(bytes)),
+        sha256: hex::encode(Sha256::digest(bytes)),
         size: bytes.len() as u64,
     }
 }
@@ -1011,10 +1011,7 @@ fn emit_equality_proof(proof: &CanonicalProof) {
     let mut normalized = proof.clone();
     let raw = normalized.evidence.clone();
     for item in &mut normalized.evidence {
-        item.sha256 = format!(
-            "{:x}",
-            Sha256::digest(format!("verified-canonical-{}", item.kind))
-        );
+        item.sha256 = hex::encode(Sha256::digest(format!("verified-canonical-{}", item.kind)));
         item.size = 1;
     }
     std::fs::write(path,serde_json::to_vec(&serde_json::json!({"proof":normalized,"rawEvidence":raw,"normalization":"raw sha256 and size verified by adapter; canonical digest attests the same evidence kind invariant"})).unwrap()).unwrap();

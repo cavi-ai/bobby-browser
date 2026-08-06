@@ -228,7 +228,7 @@ impl RecoveryReceipt {
     ) -> Result<String, String> {
         let bytes = serde_json::to_vec(&(command_outcome, skill_outcome, tactic_evidence))
             .map_err(|error| error.to_string())?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(hex::encode(Sha256::digest(bytes)))
     }
 }
 

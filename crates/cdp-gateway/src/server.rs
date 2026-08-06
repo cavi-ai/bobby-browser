@@ -1065,7 +1065,7 @@ impl CdpConnection {
                             Ok(bytes) => bytes,
                             Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "verified screenshot artifact was unavailable")),
                         };
-                        let sha = format!("{:x}", Sha256::digest(&bytes));
+                        let sha = hex::encode(Sha256::digest(&bytes));
                         if bytes.len() as u64 != expected_bytes || &sha != expected_sha {
                             return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "screenshot artifact integrity check failed"));
                         }
@@ -1208,7 +1208,7 @@ impl CdpConnection {
                                 }) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not produce download evidence")); };
                                 let Some(store) = self.artifacts.as_ref() else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "artifact reader is not configured")); };
                                 let Ok(data) = std::fs::read(&path) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "verified download was unavailable")); };
-                                if data.len() as u64 != expected_bytes || format!("{:x}", Sha256::digest(&data)) != expected_sha {
+                                if data.len() as u64 != expected_bytes || hex::encode(Sha256::digest(&data)) != expected_sha {
                                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download evidence integrity check failed"));
                                 }
                                 let record = match store.put(&download_session, &download_page, "application/octet-stream", "bin", &data, data.len()).await {
@@ -1401,7 +1401,7 @@ impl CdpConnection {
                                     Ok(data) => data,
                                     Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "verified download was unavailable")),
                                 };
-                                let actual_sha = format!("{:x}", Sha256::digest(&data));
+                                let actual_sha = hex::encode(Sha256::digest(&data));
                                 if data.len() as u64 != expected_bytes || actual_sha != expected_sha {
                                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download evidence integrity check failed"));
                                 }
@@ -1410,7 +1410,7 @@ impl CdpConnection {
                                     Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import failed")),
                                 };
                                 match store.get(&session_id, &record.artifact_id).await {
-                                    Ok(imported) if imported.len() as u64 == expected_bytes && format!("{:x}", Sha256::digest(&imported)) == expected_sha => {}
+                                    Ok(imported) if imported.len() as u64 == expected_bytes && hex::encode(Sha256::digest(&imported)) == expected_sha => {}
                                     Err(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import verification failed")),
                                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "download import integrity check failed")),
                                 };

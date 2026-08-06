@@ -12,6 +12,7 @@ default = []
 test-support = []
 
 [dependencies]
+hex = { workspace = true }
 anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true

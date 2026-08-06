@@ -346,7 +346,7 @@ impl CheckpointStore {
 }
 
 fn checkpoint_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn checkpoint_authority_digest(

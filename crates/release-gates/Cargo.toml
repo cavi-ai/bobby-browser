@@ -12,6 +12,7 @@ name = "release-gates"
 path = "src/main.rs"
 
 [dependencies]
+hex = { workspace = true }
 companion-protocol = { path = "../companion-protocol" }
 serde.workspace = true
 serde_json.workspace = true

@@ -207,10 +207,7 @@ fn forged_bundle_value(
         results,
         verdict,
     };
-    let bundle_sha256 = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&evidence).unwrap())
-    );
+    let bundle_sha256 = hex::encode(Sha256::digest(serde_json::to_vec(&evidence).unwrap()));
     serde_json::to_value(ForgedBundleEnvelope {
         schema_version,
         catalog_sha256,
@@ -450,7 +447,7 @@ async fn successful_security_run_persists_a_bounded_integrity_checked_bundle() {
         .all(|result| result.required && result.status == GateStatus::Passed));
     assert_eq!(
         bundle.manifest_sha256,
-        format!("{:x}", Sha256::digest(manifest_bytes.as_bytes()))
+        hex::encode(Sha256::digest(manifest_bytes.as_bytes()))
     );
     assert_eq!(bundle.bundle_sha256().unwrap().len(), 64);
 
