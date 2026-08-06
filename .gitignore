@@ -16,6 +16,7 @@ bootstrap.env
 .worktrees/
 worktrees/
 .mcp.json
+.acp.json
 AGENTS.md
 # Added by code-review-graph
 .code-review-graph/
