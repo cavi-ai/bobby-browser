@@ -21,10 +21,10 @@ if [[ ! -d "$BOBBY_FIREFOX_PROFILE" ]]; then
   exit 2
 fi
 
-# KeepAlive launch agent (com.mirza.bobby-browser-firefox) owns this profile in
-# local Mirza setups. Dogfood must launch its own Firefox, so pause the agent
-# for the duration and restore it afterward.
-FIREFOX_AGENT_LABEL="com.mirza.bobby-browser-firefox"
+# KeepAlive launch agent (com.bobby_browser.firefox) may own this profile.
+# Dogfood must launch its own Firefox, so pause the agent for the duration
+# and restore it afterward.
+FIREFOX_AGENT_LABEL="com.bobby_browser.firefox"
 FIREFOX_AGENT_PLIST="$HOME/Library/LaunchAgents/${FIREFOX_AGENT_LABEL}.plist"
 FIREFOX_AGENT_PAUSED=0
 restore_firefox_agent() {
