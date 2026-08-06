@@ -1,6 +1,7 @@
 import { ApiError, type NorthstarApi } from "../api.js";
 import { element, pageHeader, status } from "../components.js";
 import type { BillingCycle, OnboardingInput, Plan, RunConfig } from "../models.js";
+import { RecaptchaController } from "../recaptcha.js";
 
 export async function onboardingPage(document: Document, api: NorthstarApi, config: RunConfig): Promise<HTMLElement> {
   const page = element(document, "section", { className: "page" });
@@ -34,10 +35,14 @@ export async function onboardingPage(document: Document, api: NorthstarApi, conf
   const submit = element(document, "button", { text: "Create customer" });
   submit.type = "submit";
   let recaptcha: HTMLElement | undefined;
+  let recaptchaController: RecaptchaController | undefined;
   if (config.level === 2 && config.recaptchaSiteKey) {
     recaptcha = element(document, "div", { className: "g-recaptcha" });
     recaptcha.dataset.sitekey = config.recaptchaSiteKey;
-    ensureRecaptchaScript(document);
+    recaptchaController = new RecaptchaController();
+    void recaptchaController.mount(recaptcha, config.recaptchaSiteKey).catch(() => {
+      errors.replaceChildren(element(document, "p", { text: "reCAPTCHA could not be loaded. Reload the page to try again." }));
+    });
   }
   form.append(errors, fields);
   if (recaptcha !== undefined) form.append(recaptcha);
@@ -63,7 +68,8 @@ export async function onboardingPage(document: Document, api: NorthstarApi, conf
       confirmEmail.focus();
       return;
     }
-    const recaptchaResponse = recaptcha?.querySelector<HTMLTextAreaElement>("[name='g-recaptcha-response']")?.value;
+    const recaptchaResponse = recaptchaController?.response()
+      || recaptcha?.querySelector<HTMLTextAreaElement>("[name='g-recaptcha-response']")?.value;
     if (config.level === 2 && !recaptchaResponse) {
       errors.append(element(document, "p", { text: "Complete the reCAPTCHA challenge before creating the customer." }));
       errors.focus();
@@ -96,16 +102,6 @@ export async function onboardingPage(document: Document, api: NorthstarApi, conf
     }).finally(() => { submit.disabled = false; });
   });
   return page;
-}
-
-function ensureRecaptchaScript(document: Document): void {
-  const source = "https://www.google.com/recaptcha/api.js";
-  if (document.querySelector(`script[src='${source}']`) !== null) return;
-  const script = document.createElement("script");
-  script.src = source;
-  script.async = true;
-  script.defer = true;
-  document.head.append(script);
 }
 
 function inputField(document: Document, labelText: string, type: string, autocomplete: string): { label: HTMLLabelElement; input: HTMLInputElement } {
