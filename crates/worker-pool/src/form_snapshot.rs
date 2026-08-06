@@ -520,7 +520,7 @@ pub fn control_action_evidence(
         }
         (ControlAction::SetText { value }, FormControlState::Empty) => value.is_empty(),
         (ControlAction::SetText { value }, FormControlState::Redacted { present }) => {
-            *present == !value.is_empty()
+            *present != value.is_empty()
         }
         (ControlAction::SetChecked { checked }, FormControlState::Checked { checked: actual }) => {
             checked == actual

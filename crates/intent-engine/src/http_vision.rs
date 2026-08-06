@@ -60,7 +60,8 @@ impl HttpVisionAssist {
             Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
         );
         let secure = parsed.scheme() == "https";
-        if !secure && !(parsed.scheme() == "http" && loopback) {
+        let allowed = secure || (parsed.scheme() == "http" && loopback);
+        if !allowed {
             return Err(provider_error(
                 "vision endpoint must be https, or http only on loopback",
             ));
