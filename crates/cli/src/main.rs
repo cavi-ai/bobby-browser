@@ -39,7 +39,7 @@ use vision_child::{
     decide_vision_child, enforce_force_on_spawn, ManagedVisionProxy, VisionChildDecision,
     VisionSpawnPolicy,
 };
-use vision_proxy::{serve as serve_vision_proxy, OpenAiUpstream, ProxyConfig};
+use vision_proxy::{serve as serve_vision_proxy, OpenAiUpstream, OllamaUpstream, ProxyConfig, UpstreamKind};
 
 #[derive(Clone)]
 pub struct NativeHostInstallConfig {
@@ -241,7 +241,7 @@ enum CliCommand {
     /// Configure a vision provider profile in config.toml (deprecated alias)
     #[command(name = "vision-connect", hide = true)]
     VisionConnect(VisionConnectArgs),
-    /// Run the loopback vision proxy (propose/extract → OpenAI)
+    /// Run the loopback vision proxy (propose/extract → OpenAI or Ollama)
     VisionProxy {
         /// Bind address (loopback default)
         #[arg(long, default_value = "127.0.0.1:9100")]
@@ -249,15 +249,18 @@ enum CliCommand {
         /// HTTP path for propose/extract POST
         #[arg(long, default_value = "/vision")]
         path: String,
-        /// Upstream provider (v1: openai only)
+        /// Upstream provider: "openai" or "ollama"
         #[arg(long, default_value = "openai")]
         upstream: String,
-        /// OpenAI model id
+        /// Model id (for openai: gpt-4o; for ollama: llava:7b)
         #[arg(long, default_value = "gpt-4o")]
         model: String,
         /// OpenAI API base URL (tests / proxies)
         #[arg(long, default_value = "https://api.openai.com/v1")]
         openai_base_url: String,
+        /// Ollama base URL (default http://127.0.0.1:11434)
+        #[arg(long, default_value = "http://127.0.0.1:11434")]
+        ollama_base_url: String,
         /// Upstream API key env var (default OPENAI_API_KEY; empty value skips key)
         #[arg(long)]
         api_key_env: Option<String>,
@@ -570,9 +573,10 @@ pub async fn run() -> Result<()> {
             upstream,
             model,
             openai_base_url,
+            ollama_base_url,
             api_key_env,
         } => {
-            run_vision_proxy(bind, path, upstream, model, openai_base_url, api_key_env).await?;
+            run_vision_proxy(bind, path, upstream, model, openai_base_url, ollama_base_url, api_key_env).await?;
         }
     }
 
@@ -756,25 +760,32 @@ async fn run_vision_proxy(
     upstream: String,
     model: String,
     openai_base_url: String,
+    ollama_base_url: String,
     api_key_env: Option<String>,
 ) -> Result<()> {
-    if upstream != "openai" {
-        anyhow::bail!("unsupported upstream {upstream:?}; v1 supports only \"openai\"");
-    }
-
-    let bearer_token = require_vision_proxy_bearer()?;
-    let api_key = match api_key_env {
-        None => require_upstream_api_key(Some("OPENAI_API_KEY"))?,
-        Some(name) if name.trim().is_empty() => require_upstream_api_key(None)?,
-        Some(name) => require_upstream_api_key(Some(name.trim()))?,
-    };
     let bind: SocketAddr = bind.parse().context("invalid --bind address")?;
+    let bearer_token = require_vision_proxy_bearer()?;
 
-    let upstream = Arc::new(OpenAiUpstream::new(api_key, model, openai_base_url));
+    let upstream: Arc<dyn vision_proxy::Upstream> = match upstream.as_str() {
+        "openai" => {
+            let api_key = match api_key_env {
+                None => require_upstream_api_key(Some("OPENAI_API_KEY"))?,
+                Some(name) if name.trim().is_empty() => require_upstream_api_key(None)?,
+                Some(name) => require_upstream_api_key(Some(name.trim()))?,
+            };
+            Arc::new(OpenAiUpstream::new(api_key, model, openai_base_url))
+        }
+        "ollama" => {
+            Arc::new(OllamaUpstream::new(model, ollama_base_url))
+        }
+        _other => anyhow::bail!("unsupported upstream {upstream:?}; expected \"openai\" or \"ollama\""),
+    };
+
     let config = ProxyConfig {
         bind,
         path,
         bearer_token,
+        upstream_kind: UpstreamKind::OpenAi,  // Default, not used when upstream is trait object
     };
 
     serve_vision_proxy(config, upstream)

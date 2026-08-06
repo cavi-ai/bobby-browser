@@ -14,11 +14,19 @@ use crate::upstream::{ExtractInput, ProposeInput, Upstream, UpstreamError};
 use crate::validate::{validate_extract, validate_proposal, ValidateError};
 use crate::wire::{ExtractRequest, ProposeRequest};
 
+/// Upstream provider type for the vision proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamKind {
+    OpenAi,
+    Ollama,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProxyConfig {
     pub bind: SocketAddr,
     pub path: String,
     pub bearer_token: String,
+    pub upstream_kind: UpstreamKind,
 }
 
 #[derive(Clone)]
