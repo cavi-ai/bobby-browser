@@ -119,11 +119,17 @@ Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
 
 - For ACP profiles, `bobby doctor` reports `vision-routing`,
   `vision-acp-reachability`, and `vision-auth-path` separately and performs no
-  model call. If reachability warns, verify the configured harness executable;
-  if auth fails during use, complete the OAuth/device flow in that harness.
+  model call or harness `authenticate`. If reachability warns, verify the
+  configured harness executable is on PATH. `vision-auth-path` describes the
+  configured `auth-broker` strategy only — doctor does not probe whether the
+  harness advertises a matching method.
+- At runtime Bobby calls harness `authenticate` via `auth-broker`; unmatched
+  methods fail closed. Multi-step OAuth continue is not productized — log in
+  through the harness CLI (or use `existing-session` / `environment`) before
+  vision assist. Bobby does not read IDE Keychains.
 - ACP harness credentials are not Bobby configuration. Do not paste provider
-  tokens into `config.toml`; use `advertised` auth or an existing harness
-  session. Direct/local providers remain available with `--backend direct`.
+  tokens into `config.toml`. Direct/local providers remain available with
+  `--backend direct`.
 
 - Needs **all three**: `vision:assist` capability, session
   `executionPolicy.visionAssist = true`, and `[vision].endpoint_url`.

@@ -82,7 +82,12 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
             "Wrote ACP vision profile {name:?} to {}",
             config_path.display()
         );
-        eprintln!("Authentication is performed by the ACP harness using {auth:?}; no provider token was stored.");
+        eprintln!(
+            "Configured auth strategy {auth:?}; at runtime Bobby calls harness authenticate via auth-broker (no Keychain access)."
+        );
+        eprintln!(
+            "No provider token was stored here. Unmatched harness auth methods fail closed; multi-step OAuth continue is not productized yet."
+        );
         return Ok(());
     }
     if !opts.backend.eq_ignore_ascii_case("direct") {
