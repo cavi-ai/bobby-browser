@@ -496,6 +496,30 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.submit_authorized(ctx, envelope, false).await
     }
 
+    async fn submit_with_auto_checkpoint(
+        &self,
+        ctx: RequestContext,
+        envelope: CommandEnvelope,
+    ) -> InterfaceResult<(CommandOutcome, types::CheckpointId)> {
+        // Both gates the manual sequence passes: writing a checkpoint and
+        // running the command. Sugar must not widen authority.
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        self.authorize_submit(&ctx, &envelope.command, false)?;
+        self.require_owned_session(&ctx, &envelope.session_id)?;
+        let vision_capability_ok = self
+            .authorization
+            .capability_handle()
+            .capabilities()
+            .contains(Capability::VisionAssist)
+            && ctx.capabilities.contains(Capability::VisionAssist);
+        self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
+        self.inner
+            .submit_with_auto_checkpoint(envelope, vision_capability_ok, false)
+            .await
+            .map_err(|error| map_runtime_error(&ctx, error))
+    }
+
     async fn checkpoint(
         &self,
         ctx: RequestContext,

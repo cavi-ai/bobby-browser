@@ -1156,7 +1156,12 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                if input.auto_checkpoint.unwrap_or(false) {
+                    self.submit_envelope_with_auto_checkpoint(context, envelope)
+                        .await
+                } else {
+                    self.submit_envelope(context, envelope).await
+                }
             }
             "intent_wait_for_state" => {
                 let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {
@@ -1204,7 +1209,12 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                if input.auto_checkpoint.unwrap_or(false) {
+                    self.submit_envelope_with_auto_checkpoint(context, envelope)
+                        .await
+                } else {
+                    self.submit_envelope(context, envelope).await
+                }
             }
             "intent_dismiss_obstruction" => {
                 let input: IntentDismissObstructionArgs = match bounded_parse(call.arguments) {
@@ -1757,6 +1767,42 @@ impl Server {
         )
     }
 
+    /// One call for a Boundary command: mint the checkpoint, then run it.
+    ///
+    /// The gate in `Executor::validate` is unchanged and still matches on all
+    /// five fields. A checkpoint that fails to save fails the call, so this is
+    /// never a way to reach a Boundary action without one.
+    async fn submit_envelope_with_auto_checkpoint(
+        &self,
+        context: types::RequestContext,
+        envelope: types::CommandEnvelope,
+    ) -> interface_core::InterfaceResult<Value> {
+        let registration_context = context.clone();
+        let (outcome, checkpoint_id) = self
+            .runtime
+            .submit_with_auto_checkpoint(context, envelope.clone())
+            .await?;
+        let admission = self
+            .resources
+            .register_outcome(&self.handle, &registration_context, &envelope, &outcome)
+            .await;
+        let mut value = to_json(outcome)?;
+        admission.apply_to_mcp_value(&mut value, &envelope.command_id);
+        if let Some(object) = value.as_object_mut() {
+            object.insert("workflowId".to_owned(), json!(envelope.workflow_id.clone()));
+            object.insert("attemptId".to_owned(), json!(envelope.attempt_id.clone()));
+            // So the caller can still name this checkpoint to `workflow_recover`.
+            object.insert("checkpointId".to_owned(), json!(checkpoint_id));
+        }
+        self.events
+            .append_for(
+                registration_context.principal_id.clone(),
+                interface_core::Event::new("command.outcome", value.clone()),
+            )
+            .await;
+        Ok(value)
+    }
+
     async fn submit_envelope(
         &self,
         context: types::RequestContext,
@@ -2231,6 +2277,7 @@ intent_args!(IntentSubmitAndVerifyArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
     expected_state: types::WaitForCommand,
+    auto_checkpoint: Option<bool>,
 });
 
 intent_args!(IntentWaitForStateArgs {
@@ -2243,6 +2290,7 @@ intent_args!(IntentFollowArgs {
     hints: Option<types::IntentHints>,
     expected_destination: types::WaitForCommand,
     boundary: Option<bool>,
+    auto_checkpoint: Option<bool>,
 });
 
 intent_args!(IntentDismissObstructionArgs {
@@ -2861,9 +2909,9 @@ fn tool_description(name: &str) -> &'static str {
         "intent_locate" => "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
         "intent_fill" => "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
         "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable). Requires browser:mutate and intent:execute. Produces per-field resolution and fill evidence in order. On failure with verificationFailed, targetNotFound, or intentActionMismatch on one field, the fields before it are already filled -- re-run with only the remaining fields.",
-        "intent_submit_and_verify" => "Submit a form and verify the expected resulting state (Boundary; refused without a matching pre-saved checkpoint). Requires browser:mutate and intent:execute. Pin commandId/attemptId, checkpoint_save with those exact ids first, then call with the same ones. On failure with needsReconciliation, do not retry -- the submit may have already landed; call recovery_status and reconcile before continuing.",
+        "intent_submit_and_verify" => "Submit a form and verify the expected state (Boundary; refused without a matching pre-saved checkpoint). Requires browser:mutate and intent:execute. autoCheckpoint true mints it in this call and returns checkpointId; else pin commandId/attemptId and checkpoint_save them first. On failure with needsReconciliation, do not retry -- call recovery_status.",
         "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
-        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and destination evidence. On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
+        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint true mints the required checkpoint in the same call. On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
         "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure: verificationFailed (no HAR captured), browserCommandFailed (engine could not persist it), or internal (write failed) -- none caller-fixable; retry, and report if it persists.",

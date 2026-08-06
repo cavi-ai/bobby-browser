@@ -45,6 +45,13 @@ impl RuntimeInterface for FakeRuntime {
     ) -> InterfaceResult<Vec<WorkflowId>> {
         unreachable!()
     }
+    async fn submit_with_auto_checkpoint(
+        &self,
+        _: RequestContext,
+        _: types::CommandEnvelope,
+    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+        unreachable!()
+    }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
         unreachable!()
     }

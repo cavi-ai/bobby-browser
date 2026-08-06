@@ -356,6 +356,74 @@ impl RuntimeService {
             .await
     }
 
+    /// Mints the pre-action checkpoint a Boundary command requires, then runs it.
+    ///
+    /// The gateway cannot do this: a `WorkflowCheckpoint` needs `restart_url`
+    /// and `current_url`, and nothing on `RuntimeInterface` exposes live page
+    /// state. So the three calls an agent used to make -- pin ids, save a
+    /// checkpoint naming them, submit -- collapse here, where the page
+    /// registry and the context graph are both reachable.
+    ///
+    /// This is sugar over `Executor::validate`, never a bypass. The gate still
+    /// runs and still matches on all five fields; a checkpoint that fails to
+    /// save refuses the submit rather than proceeding unprotected.
+    pub async fn submit_with_auto_checkpoint(
+        &self,
+        envelope: CommandEnvelope,
+        vision_capability_ok: bool,
+        one_shot_session_ok: bool,
+    ) -> Result<(CommandOutcome, types::CheckpointId), RuntimeError> {
+        let recovery = self
+            .recovery
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Internal("recovery is unavailable".into()))?;
+        let page_id = envelope
+            .page_id
+            .clone()
+            .ok_or_else(|| RuntimeError::NotFound("page".into()))?;
+        let page = self.pages.get(&page_id).await?;
+        let url = page.url.clone().unwrap_or_default();
+
+        // Ids only -- the journal stays the authority for the evidence itself.
+        let mut evidence = Vec::new();
+        for command_id in self.pages.context().commands_for(&page_id) {
+            if let Ok(items) = self.pages.evidence_for_command(command_id).await {
+                evidence.extend(items);
+            }
+        }
+
+        let checkpoint = types::WorkflowCheckpoint {
+            schema_version: types::WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: types::CheckpointId::new(),
+            workflow_id: envelope.workflow_id.clone(),
+            attempt_id: envelope.attempt_id.clone(),
+            session_id: envelope.session_id.clone(),
+            page_id,
+            restart_url: url.clone(),
+            current_url: url,
+            cursor: None,
+            boundary_command_id: Some(envelope.command_id.clone()),
+            recovery_class: types::CommandClass::Boundary,
+            // Nothing is asserted that the collected evidence does not already
+            // support, so the invariant evaluation inside `save_verified`
+            // cannot fail on a checkpoint this function authored.
+            invariants: Vec::new(),
+            replayable_inputs: Vec::new(),
+            evidence: Vec::new(),
+            recovery_history: Vec::new(),
+            recovery_receipts: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        let saved = recovery
+            .save_verified(checkpoint, evidence)
+            .await
+            .map_err(|error| RuntimeError::Internal(format!("checkpoint save failed: {error}")))?;
+        let outcome = self
+            .submit_with_vision_grant(envelope, vision_capability_ok, one_shot_session_ok)
+            .await;
+        Ok((outcome, saved.checkpoint_id))
+    }
+
     async fn submit_with_vision_grant(
         &self,
         envelope: CommandEnvelope,

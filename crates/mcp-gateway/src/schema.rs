@@ -327,7 +327,10 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             intent_required(&["purpose", "fields"]),
         ),
         "intent_submit_and_verify" => (
-            intent_properties(json!({"expectedState":{"$ref":"#/$defs/WaitForCommand"}})),
+            intent_properties(json!({
+                "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+                "autoCheckpoint":{"type":"boolean"}
+            })),
             intent_required(&["purpose", "expectedState"]),
         ),
         // The only intent with no purpose/hints of its own.
@@ -341,7 +344,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "intent_follow" => (
             intent_properties(json!({
                 "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
-                "boundary":{"type":"boolean"}
+                "boundary":{"type":"boolean"},
+                "autoCheckpoint":{"type":"boolean"}
             })),
             intent_required(&["purpose", "expectedDestination"]),
         ),

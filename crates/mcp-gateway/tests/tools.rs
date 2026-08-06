@@ -3504,3 +3504,173 @@ async fn recovery_status_requires_exactly_one_of_workflow_id_or_session_id() {
         "asking by sessionId must not be an argument error: {by_session}"
     );
 }
+
+/// `autoCheckpoint` mints the checkpoint the boundary gate demands.
+///
+/// The manual sequence is three calls -- pin commandId/attemptId,
+/// `checkpoint_save` naming those exact ids, then submit. The gateway cannot
+/// collapse it on its own: a `WorkflowCheckpoint` needs `restartUrl` and
+/// `currentUrl`, and nothing on the runtime interface exposes live page state.
+/// So the runtime mints it, and the saved checkpoint must match the envelope
+/// on every field `Executor::validate` compares, or the gate rejects it.
+#[tokio::test]
+async fn auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let workers = Arc::new(WorkerPool::new(4, Arc::new(MinimalFactory)));
+    let checkpoint_store = checkpoint_store::CheckpointStore::open(root.path().join("checkpoints"))
+        .await
+        .unwrap();
+    let runtime_service = RuntimeService::with_recovery(
+        SessionManager::new(workers.clone()),
+        PageRuntime::new_with_checkpoints(journal, workers, checkpoint_store.clone()),
+        page_runtime::RecoveryCoordinator::new(checkpoint_store.clone()),
+    );
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000c1")),
+            [
+                Capability::SessionWrite,
+                Capability::PageWrite,
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::RecoveryWrite,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let server = Server::new(Arc::new(AuthenticatedRuntime::new(runtime_service, handle)));
+    initialize(&server).await;
+
+    let session = server
+        .handle_message(request(
+            100,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"fixture"}}),
+        ))
+        .await
+        .unwrap();
+    let session_id = session_id_from_structured_content(&session);
+    let page = server
+        .handle_message(request(
+            101,
+            "tools/call",
+            json!({
+                "name":"page_open",
+                "arguments":{"sessionId":session_id.0.to_string()}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(page["result"]["isError"], false, "{page}");
+    let page_id = page["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let workflow_id = types::WorkflowId::new().0.to_string();
+    let submitted = server
+        .handle_message(request(
+            102,
+            "tools/call",
+            json!({
+                "name":"intent_submit_and_verify",
+                "arguments":{
+                    "sessionId":session_id.0.to_string(),
+                    "pageId":page_id,
+                    "workflowId":workflow_id,
+                    "purpose":"submit the application",
+                    "expectedState":{
+                        "condition":{"kind":"document","ready":"interactive"},
+                        "timeoutMs":1000
+                    },
+                    "autoCheckpoint":true
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(submitted["error"].is_null(), "{submitted}");
+    let structured = &submitted["result"]["structuredContent"];
+    assert!(
+        structured["checkpointId"].is_string(),
+        "the minted checkpoint must be nameable to workflow_recover: {submitted}"
+    );
+
+    // The five fields `Executor::validate` compares, plus the class. A
+    // checkpoint that misses any one of them is refused by the gate, so this
+    // is what makes the one-call form work rather than merely return.
+    let saved = checkpoint_store
+        .load(&types::WorkflowId(workflow_id.parse().unwrap()))
+        .await
+        .expect("autoCheckpoint must persist a checkpoint under the envelope's workflow");
+    assert_eq!(saved.session_id, session_id);
+    assert_eq!(saved.page_id.0.to_string(), page_id);
+    assert_eq!(saved.recovery_class, types::CommandClass::Boundary);
+    assert_eq!(
+        saved
+            .boundary_command_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+        structured["commandId"].as_str().map(str::to_owned),
+        "the checkpoint must name the command it guards"
+    );
+    assert_eq!(
+        saved.attempt_id.0.to_string(),
+        structured["attemptId"].as_str().unwrap(),
+        "the checkpoint must name the attempt that ran"
+    );
+}
+
+/// `autoCheckpoint` is sugar over the boundary gate, never a way around it.
+///
+/// Without a recovery coordinator there is nowhere to save a checkpoint, so
+/// the call must fail rather than run the Boundary command unprotected. The
+/// same runtime accepts the identical command with `autoCheckpoint` absent,
+/// which is what makes this a statement about the checkpoint and not about
+/// the fixture.
+#[tokio::test]
+async fn auto_checkpoint_refuses_the_submit_when_the_checkpoint_cannot_be_saved() {
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+
+    let arguments = |auto: bool| {
+        json!({
+            "name":"intent_submit_and_verify",
+            "arguments":{
+                "sessionId":SessionId::new().0.to_string(),
+                "pageId":types::PageId::new().0.to_string(),
+                "purpose":"submit the application",
+                "expectedState":{
+                    "condition":{"kind":"document","ready":"interactive"},
+                    "timeoutMs":1000
+                },
+                "autoCheckpoint":auto
+            }
+        })
+    };
+
+    let refused = server
+        .handle_message(request(110, "tools/call", arguments(true)))
+        .await
+        .unwrap();
+    assert!(
+        !refused["error"].is_null(),
+        "a checkpoint that cannot be saved must fail the submit: {refused}"
+    );
+
+    // Same command, same runtime, no autoCheckpoint: reaches dispatch. The
+    // failure above is the checkpoint, not the fixture.
+    let without = server
+        .handle_message(request(111, "tools/call", arguments(false)))
+        .await
+        .unwrap();
+    assert!(without["error"].is_null(), "{without}");
+}
