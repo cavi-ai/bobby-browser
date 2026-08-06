@@ -191,14 +191,10 @@ async fn prefill_resolves_stuck_form_on_firefox() {
         propose_calls: propose_calls.clone(),
     });
     let config = base_config(root.path(), true);
-    let firefox = runtime_tests::launch_installed_firefox_runtime(
-        installed,
-        &config,
-        "about:blank",
-        root.path().join("descriptor.json"),
-    )
-    .await
-    .expect("launch installed Firefox runtime");
+    let firefox =
+        runtime_tests::launch_installed_firefox_runtime(installed, &config, "about:blank")
+            .await
+            .expect("launch installed Firefox runtime");
     let runtime = RuntimeService::build_with_worker_factory_and_vision_assist(
         &config,
         firefox.factory(),

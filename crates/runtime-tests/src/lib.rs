@@ -199,9 +199,11 @@ pub async fn launch_installed_firefox_runtime(
     installed: InstalledFirefoxConfig,
     runtime_config: &AppConfig,
     startup_url: &str,
-    descriptor_path: PathBuf,
 ) -> Result<InstalledFirefoxRuntime, CommandError> {
     validate_installed_config(&installed)?;
+    let state_dir = proof_state_dir();
+    std::fs::create_dir_all(&state_dir).map_err(io_error)?;
+    let descriptor_path = state_dir.join("native-host-descriptor.json");
     let process_observations = ProcessObservationCollector::new(Vec::new());
     let enrollment = cli::start_firefox_profile_enrollment(
         cli::FirefoxProfileEnrollmentConfig {
