@@ -398,7 +398,22 @@ impl std::error::Error for ConfigLoadError {
 
 impl AppConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
-        self.interface.validate()
+        self.interface.validate()?;
+        if self.cdp.enabled {
+            let loopback = self.cdp.host == "localhost"
+                || self
+                    .cdp
+                    .host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback());
+            if !loopback {
+                return Err("cdp host must be loopback when enabled");
+            }
+            if self.cdp.port == self.server.port {
+                return Err("cdp port must differ from server port when enabled");
+            }
+        }
+        Ok(())
     }
 
     /// Parse an [`AppConfig`] from a TOML document and validate it.
@@ -855,6 +870,28 @@ scheduler_journal_path = "s"
         .expect("parse");
         assert!(cfg.cdp.enabled);
         assert_eq!(cfg.cdp.port, 9333);
+    }
+
+    #[test]
+    fn enabled_cdp_rejects_non_loopback_hosts() {
+        let mut config = super::AppConfig::default();
+        config.cdp.enabled = true;
+        config.cdp.host = "0.0.0.0".into();
+        assert_eq!(
+            config.validate(),
+            Err("cdp host must be loopback when enabled")
+        );
+    }
+
+    #[test]
+    fn enabled_cdp_rejects_the_http_port() {
+        let mut config = super::AppConfig::default();
+        config.cdp.enabled = true;
+        config.cdp.port = config.server.port;
+        assert_eq!(
+            config.validate(),
+            Err("cdp port must differ from server port when enabled")
+        );
     }
 
     #[test]

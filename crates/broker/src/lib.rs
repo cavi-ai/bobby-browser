@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -636,7 +636,7 @@ async fn bootstrap_listener_with<T, Clock, Build, BuildFuture, Bind, BindFuture>
     now: Clock,
     build_runtime: Build,
     bind_listener: Bind,
-) -> anyhow::Result<(Router, T, Arc<JobScheduler>, CdpBootstrap)>
+) -> anyhow::Result<(Router, T, Arc<JobScheduler>, Option<CdpBootstrap>)>
 where
     Clock: Fn() -> chrono::DateTime<chrono::Utc>,
     Build: FnOnce(AppConfig) -> BuildFuture,
@@ -672,10 +672,10 @@ where
     );
     let upload_staging_root = config
         .browser
-        .upload_roots
-        .first()
-        .cloned()
-        .unwrap_or_else(|| config.browser.downloads_dir.clone());
+        .artifacts_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("upload-staging");
     let bindings = Arc::new(RuntimeBindingCache::new(config.interface.max_principals));
     let bind_runtime: Arc<RuntimeBinder> = {
         let bindings = Arc::clone(&bindings);
@@ -691,12 +691,12 @@ where
             }) as Arc<dyn RuntimeInterface>
         })
     };
-    let cdp_bootstrap = CdpBootstrap {
+    let cdp_bootstrap = config.cdp.enabled.then(|| CdpBootstrap {
         authority: persistent_authority.clone(),
         bind_runtime: Arc::clone(&bind_runtime),
         artifact_store: artifact_store.clone(),
         upload_staging_root,
-    };
+    });
     let artifact_reader = ArtifactReader::new(
         artifact_store.clone(),
         ownership,
@@ -763,21 +763,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         },
     )
     .await?;
-    let cdp_listen = if cdp_config.enabled {
-        Some(
-            cdp::spawn_cdp_listener_with_shutdown(
-                &cdp_config,
-                cdp_bootstrap.authority,
-                cdp_bootstrap.bind_runtime,
-                cdp_bootstrap.artifact_store,
-                cdp_bootstrap.upload_staging_root,
-                shutdown_signal(),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let cdp_listen = spawn_configured_cdp(&cdp_config, cdp_bootstrap).await?;
     let run_handle = {
         let scheduler = Arc::clone(&scheduler);
         tokio::spawn(async move { scheduler.run().await })
@@ -794,10 +780,41 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     .await;
     jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
     if let Some(cdp) = cdp_listen {
-        let _ = tokio::time::timeout(shutdown_timeout, cdp.handle).await;
+        log_cdp_shutdown(cdp, shutdown_timeout).await;
     }
     serve_result?;
     Ok(())
+}
+
+async fn spawn_configured_cdp(
+    config: &config::CdpConfig,
+    bootstrap: Option<CdpBootstrap>,
+) -> anyhow::Result<Option<CdpListen>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    let bootstrap = bootstrap
+        .ok_or_else(|| anyhow::anyhow!("enabled CDP listener has no runtime bootstrap"))?;
+    Ok(Some(
+        cdp::spawn_cdp_listener_with_shutdown(
+            config,
+            bootstrap.authority,
+            bootstrap.bind_runtime,
+            bootstrap.artifact_store,
+            bootstrap.upload_staging_root,
+            shutdown_signal(),
+        )
+        .await?,
+    ))
+}
+
+async fn log_cdp_shutdown(cdp: CdpListen, timeout: std::time::Duration) {
+    match tokio::time::timeout(timeout, cdp.handle).await {
+        Ok(Ok(Ok(()))) => tracing::info!("cdp.shutdown.complete"),
+        Ok(Ok(Err(error))) => tracing::warn!(%error, "cdp.listener.failed"),
+        Ok(Err(error)) => tracing::warn!(%error, "cdp.listener.join_failed"),
+        Err(_) => tracing::warn!("cdp.shutdown.timeout"),
+    }
 }
 
 /// Test-only helpers shared by broker integration tests. Not part of the public API.
@@ -1150,21 +1167,7 @@ where
         },
     )
     .await?;
-    let cdp_listen = if cdp_config.enabled {
-        Some(
-            cdp::spawn_cdp_listener_with_shutdown(
-                &cdp_config,
-                cdp_bootstrap.authority,
-                cdp_bootstrap.bind_runtime,
-                cdp_bootstrap.artifact_store,
-                cdp_bootstrap.upload_staging_root,
-                shutdown_signal(),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let cdp_listen = spawn_configured_cdp(&cdp_config, cdp_bootstrap).await?;
     let run_handle = {
         let scheduler = Arc::clone(&scheduler);
         tokio::spawn(async move { scheduler.run().await })
@@ -1181,7 +1184,7 @@ where
     .await;
     jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
     if let Some(cdp) = cdp_listen {
-        let _ = tokio::time::timeout(shutdown_timeout, cdp.handle).await;
+        log_cdp_shutdown(cdp, shutdown_timeout).await;
     }
     serve_result?;
     Ok(())
