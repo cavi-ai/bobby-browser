@@ -128,7 +128,8 @@ pub struct TargetDescription {
 /// staging, then expose [`Self::router`] on the host HTTP server.
 pub struct CdpGateway {
     authority: Arc<dyn Authority>,
-    runtime: Arc<dyn RuntimeInterface>,
+    bind_runtime:
+        Arc<dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static>,
     registry: MethodRegistry,
     websocket_base: String,
     browser_id: String,
@@ -153,9 +154,29 @@ impl CdpGateway {
         A: Authority + 'static,
         R: RuntimeInterface + 'static,
     {
+        let runtime: Arc<dyn RuntimeInterface> = runtime;
+        Self::with_binder(
+            authority,
+            Arc::new(move |_| runtime.clone()),
+            registry,
+            websocket_base,
+        )
+    }
+
+    pub fn with_binder<A>(
+        authority: Arc<A>,
+        bind_runtime: Arc<
+            dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static,
+        >,
+        registry: MethodRegistry,
+        websocket_base: impl Into<String>,
+    ) -> Self
+    where
+        A: Authority + 'static,
+    {
         Self {
             authority,
-            runtime,
+            bind_runtime,
             registry,
             websocket_base: websocket_base.into().trim_end_matches('/').to_owned(),
             browser_id: Uuid::new_v4().simple().to_string(),
@@ -228,8 +249,8 @@ impl CdpGateway {
     ) -> Result<Vec<TargetDescription>, DiscoveryError> {
         let handle = self.authenticate(bearer).await?;
         let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
-        let sessions = self
-            .runtime
+        let runtime = (self.bind_runtime)(handle);
+        let sessions = runtime
             .list_sessions(ctx)
             .await
             .map_err(|_| DiscoveryError::Runtime)?;
@@ -255,9 +276,10 @@ impl CdpGateway {
             return Err(DiscoveryError::NotFound);
         }
         let handle = self.authenticate(bearer).await?;
+        let runtime = (self.bind_runtime)(handle.clone());
         let connection = Arc::new(CdpConnection::with_targets(
             handle,
-            self.runtime.clone(),
+            runtime,
             self.registry.clone(),
             ConnectionShared {
                 targets: self.targets.clone(),

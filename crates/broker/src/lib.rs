@@ -603,7 +603,7 @@ struct StartupGate {
 
 struct CdpBootstrap {
     authority: Arc<authority_persist::PersistentAuthority>,
-    runtime: Arc<AuthenticatedRuntime>,
+    bind_runtime: Arc<RuntimeBinder>,
     artifact_store: artifact_store::ArtifactStore,
     upload_staging_root: PathBuf,
 }
@@ -647,7 +647,6 @@ where
     config.validate().map_err(anyhow::Error::msg)?;
     let authority =
         Arc::new(EnrolledAuthority::enroll(startup, config.interface.max_principals).await?);
-    let startup_handle = authority.startup_handle();
     // `PersistentAuthority` wraps a clone of the enrolled authority; the clone shares the
     // same `AuthorityStore` records via `Arc`, so `AppState` authenticates and issues
     // through the persisted path while `StartupGate` keeps its own handle on the
@@ -677,14 +676,24 @@ where
         .first()
         .cloned()
         .unwrap_or_else(|| config.browser.downloads_dir.clone());
-    let cdp_runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
-        runtime.clone(),
-        startup_handle,
-        recorder.clone(),
-    ));
+    let bindings = Arc::new(RuntimeBindingCache::new(config.interface.max_principals));
+    let bind_runtime: Arc<RuntimeBinder> = {
+        let bindings = Arc::clone(&bindings);
+        let runtime = runtime.clone();
+        let recorder = recorder.clone();
+        Arc::new(move |handle| {
+            bindings.bind(handle, |handle| {
+                AuthenticatedRuntime::with_session_ownership(
+                    runtime.clone(),
+                    handle,
+                    recorder.clone(),
+                )
+            }) as Arc<dyn RuntimeInterface>
+        })
+    };
     let cdp_bootstrap = CdpBootstrap {
         authority: persistent_authority.clone(),
-        runtime: cdp_runtime,
+        bind_runtime: Arc::clone(&bind_runtime),
         artifact_store: artifact_store.clone(),
         upload_staging_root,
     };
@@ -699,7 +708,6 @@ where
     )
     .map_err(anyhow::Error::new)?;
     let events = EventStore::new(config.interface.max_event_retention);
-    let bindings = RuntimeBindingCache::new(config.interface.max_principals);
     let scheduler = Arc::new(
         jobs::journal_scheduler(&config)
             .await
@@ -708,15 +716,7 @@ where
     let app = router(
         AppState::new(
             persistent_authority,
-            move |handle| {
-                bindings.bind(handle, |handle| {
-                    AuthenticatedRuntime::with_session_ownership(
-                        runtime.clone(),
-                        handle,
-                        recorder.clone(),
-                    )
-                }) as Arc<dyn RuntimeInterface>
-            },
+            move |handle| bind_runtime(handle),
             config.interface.clone(),
         )
         .with_scheduler(Arc::clone(&scheduler))
@@ -768,7 +768,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
             cdp::spawn_cdp_listener_with_shutdown(
                 &cdp_config,
                 cdp_bootstrap.authority,
-                cdp_bootstrap.runtime,
+                cdp_bootstrap.bind_runtime,
                 cdp_bootstrap.artifact_store,
                 cdp_bootstrap.upload_staging_root,
                 shutdown_signal(),
@@ -1031,7 +1031,9 @@ pub mod testing {
 
     /// Boots a dedicated CDP listener with the same startup bearer used by
     /// [`app_with_admin`], for integration tests that exercise discovery over TCP.
-    pub async fn spawn_test_cdp_listener(cdp_config: CdpConfig) -> (CdpListen, String) {
+    pub async fn spawn_test_cdp_listener(
+        cdp_config: CdpConfig,
+    ) -> (CdpListen, Arc<EnrolledAuthority>, String) {
         let startup = StartupCredential::new(
             ADMIN_BEARER.to_owned(),
             PrincipalId::from_uuid(Uuid::nil()),
@@ -1056,7 +1058,6 @@ pub mod testing {
                 .await
                 .expect("admin authority enrolls"),
         );
-        let startup_handle = authority.startup_handle();
         let persistent_authority = Arc::new(
             PersistentAuthority::open((*authority).clone(), unique_authority_path())
                 .await
@@ -1071,21 +1072,26 @@ pub mod testing {
         std::fs::create_dir_all(&upload_root).expect("upload dir creates");
         let artifact_store =
             artifact_store::ArtifactStore::new(&artifacts_dir, 8 * 1024 * 1024, 16_384);
-        let cdp_runtime = Arc::new(AuthenticatedRuntime::with_session_ownership(
-            runtime,
-            startup_handle,
-            recorder,
-        ));
+        let bindings = Arc::new(crate::RuntimeBindingCache::new(4));
+        let bind_runtime: Arc<crate::RuntimeBinder> = Arc::new(move |handle| {
+            bindings.bind(handle, |handle| {
+                AuthenticatedRuntime::with_session_ownership(
+                    runtime.clone(),
+                    handle,
+                    recorder.clone(),
+                )
+            }) as Arc<dyn RuntimeInterface>
+        });
         let listen = cdp::spawn_cdp_listener(
             &cdp_config,
             persistent_authority,
-            cdp_runtime,
+            bind_runtime,
             artifact_store,
             upload_root,
         )
         .await
         .expect("cdp listener binds");
-        (listen, ADMIN_BEARER.to_owned())
+        (listen, authority, ADMIN_BEARER.to_owned())
     }
 }
 
@@ -1149,7 +1155,7 @@ where
             cdp::spawn_cdp_listener_with_shutdown(
                 &cdp_config,
                 cdp_bootstrap.authority,
-                cdp_bootstrap.runtime,
+                cdp_bootstrap.bind_runtime,
                 cdp_bootstrap.artifact_store,
                 cdp_bootstrap.upload_staging_root,
                 shutdown_signal(),

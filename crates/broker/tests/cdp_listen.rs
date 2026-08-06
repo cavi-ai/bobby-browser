@@ -2,10 +2,12 @@ use std::net::SocketAddr;
 
 use broker::testing;
 use config::CdpConfig;
+use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 async fn http_get(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, String) {
     let mut stream = TcpStream::connect(addr).await.expect("connect to listener");
@@ -34,7 +36,7 @@ async fn http_get(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, S
 
 #[tokio::test]
 async fn cdp_listener_serves_json_version_when_enabled() {
-    let (cdp, bearer) = testing::spawn_test_cdp_listener(CdpConfig {
+    let (cdp, _authority, bearer) = testing::spawn_test_cdp_listener(CdpConfig {
         enabled: true,
         host: "127.0.0.1".into(),
         port: 0,
@@ -46,6 +48,64 @@ async fn cdp_listener_serves_json_version_when_enabled() {
         body.contains("webSocketDebuggerUrl"),
         "expected discovery payload, got: {body}"
     );
+    cdp.handle.abort();
+}
+
+#[tokio::test]
+async fn cdp_listener_binds_runtime_for_an_issued_principal() {
+    let (cdp, authority, _startup_bearer) = testing::spawn_test_cdp_listener(CdpConfig {
+        enabled: true,
+        host: "127.0.0.1".into(),
+        port: 0,
+    })
+    .await;
+    let principal = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+    let bearer = authority
+        .issue(
+            principal,
+            vec![types::Capability::SessionRead],
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .await
+        .expect("principal bearer issues")
+        .expose_once();
+
+    let (status, body) = http_get(cdp.addr, "/json/list", Some(&bearer)).await;
+    assert_eq!(status, 200, "response: {body}");
+
+    let (status, body) = http_get(cdp.addr, "/json/version", Some(&bearer)).await;
+    assert_eq!(status, 200, "response: {body}");
+    let payload = body.split("\r\n\r\n").nth(1).expect("response has body");
+    let websocket_url = serde_json::from_str::<serde_json::Value>(payload)
+        .expect("version response is JSON")["webSocketDebuggerUrl"]
+        .as_str()
+        .expect("version response carries websocket URL")
+        .to_owned();
+    let mut request = websocket_url.into_client_request().expect("request builds");
+    request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {bearer}")).expect("bearer header is valid"),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("issued principal upgrades websocket");
+    socket
+        .send(Message::Text(
+            r#"{"id":1,"method":"Target.getTargets","params":{}}"#.into(),
+        ))
+        .await
+        .expect("session command sends");
+    let response = socket
+        .next()
+        .await
+        .expect("session command responds")
+        .expect("websocket response is valid")
+        .into_text()
+        .expect("response is text");
+    let response: serde_json::Value = serde_json::from_str(&response).expect("response is JSON");
+    assert_eq!(response["id"], 1);
+    assert!(response.get("error").is_none(), "response: {response}");
+    socket.close(None).await.expect("websocket closes");
     cdp.handle.abort();
 }
 

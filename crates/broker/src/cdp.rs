@@ -2,7 +2,6 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use config::CdpConfig;
 use interface_core::Authority;
-use sdk_core::AuthenticatedRuntime;
 
 pub struct CdpListen {
     pub addr: SocketAddr,
@@ -12,14 +11,14 @@ pub struct CdpListen {
 pub async fn spawn_cdp_listener<A: Authority + 'static>(
     config: &CdpConfig,
     authority: Arc<A>,
-    runtime: Arc<AuthenticatedRuntime>,
+    bind_runtime: Arc<crate::RuntimeBinder>,
     artifacts: artifact_store::ArtifactStore,
     upload_staging_root: PathBuf,
 ) -> anyhow::Result<CdpListen> {
     spawn_cdp_listener_with_shutdown(
         config,
         authority,
-        runtime,
+        bind_runtime,
         artifacts,
         upload_staging_root,
         std::future::pending(),
@@ -30,7 +29,7 @@ pub async fn spawn_cdp_listener<A: Authority + 'static>(
 pub async fn spawn_cdp_listener_with_shutdown<A: Authority + 'static>(
     config: &CdpConfig,
     authority: Arc<A>,
-    runtime: Arc<AuthenticatedRuntime>,
+    bind_runtime: Arc<crate::RuntimeBinder>,
     artifacts: artifact_store::ArtifactStore,
     upload_staging_root: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -40,9 +39,9 @@ pub async fn spawn_cdp_listener_with_shutdown<A: Authority + 'static>(
     let bound = listener.local_addr()?;
     let ws_base = format!("ws://{bound}");
     let gateway = Arc::new(
-        cdp_gateway::CdpGateway::new(
+        cdp_gateway::CdpGateway::with_binder(
             authority,
-            runtime,
+            bind_runtime,
             cdp_gateway::MethodRegistry::compiled(),
             ws_base,
         )
