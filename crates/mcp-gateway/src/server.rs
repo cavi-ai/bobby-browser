@@ -116,8 +116,22 @@ impl Server {
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             shutting_down: AtomicBool::new(false),
-            toolset: std::sync::Mutex::new(crate::toolset::Toolset::default()),
+            toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
         }
+    }
+
+    /// Start on `toolset` unless `BOBBY_MCP_TOOLSET` already chose one, so
+    /// the environment stays the operator's last word over the config file.
+    /// Narrowing only changes what `tools/list` advertises; every tool stays
+    /// callable and every capability gate stays in force.
+    pub fn with_startup_toolset(self, toolset: crate::toolset::Toolset) -> Self {
+        if crate::toolset::Toolset::from_env().is_none() {
+            *self
+                .toolset
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = toolset;
+        }
+        self
     }
 
     /// This principal's outbound notification fan-out. A transport subscribes

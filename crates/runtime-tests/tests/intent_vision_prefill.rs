@@ -102,6 +102,7 @@ fn base_config(root: &std::path::Path, prefill: bool) -> AppConfig {
         context: Default::default(),
         nodes: Default::default(),
         cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
     }
 }
 

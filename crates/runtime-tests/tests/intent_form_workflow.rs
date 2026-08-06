@@ -127,6 +127,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
 
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

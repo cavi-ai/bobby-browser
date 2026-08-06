@@ -97,6 +97,22 @@ pub struct AppConfig {
     pub nodes: std::collections::BTreeMap<String, NodeConfig>,
     #[serde(default)]
     pub cdp: CdpConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+}
+
+/// MCP gateway presentation settings. Nothing here is an enforcement
+/// boundary -- capability gates remain the only one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpConfig {
+    /// Toolset phase a connection starts in: `full` (default), `explore`,
+    /// `act`, `intent`, or `verify`. A narrow phase cuts the `tools/list`
+    /// handshake substantially -- the full surface is ~127 KB, `explore` is
+    /// ~42 KB -- which the agent would otherwise pay before its first call.
+    /// Hidden tools stay callable, and the agent can widen with
+    /// `toolset_select` at any time. `BOBBY_MCP_TOOLSET` overrides this.
+    #[serde(default)]
+    pub startup_toolset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

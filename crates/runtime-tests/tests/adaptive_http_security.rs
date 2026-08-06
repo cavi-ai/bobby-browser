@@ -25,6 +25,7 @@ fn snapshot(url: String) -> HttpStateSnapshot {
 fn config(root: &tempfile::TempDir, max_download_bytes: usize) -> AppConfig {
     AppConfig {
         cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,

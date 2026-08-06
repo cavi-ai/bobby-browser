@@ -110,6 +110,7 @@ async fn typed_values_never_reach_the_context_store() {
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
         cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
         context: config::ContextConfig {
             dir: Some(context_dir.clone()),
             ..config::ContextConfig::default()

@@ -73,6 +73,7 @@ fn config(root: &std::path::Path, context_dir: &std::path::Path) -> config::AppC
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig::default(),
         cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
         context: config::ContextConfig {
             dir: Some(context_dir.to_path_buf()),
             ..config::ContextConfig::default()
