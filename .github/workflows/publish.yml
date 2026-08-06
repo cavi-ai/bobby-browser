@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   publish-sdk:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Named in the npm trusted publisher, so it is part of the OIDC subject
     # claim npm matches against — not decoration. Removing it changes the claim
     # to a repo-level subject and npm rejects the exchange.
