@@ -128,6 +128,25 @@ test("Level 2 renders an irregular form and submits the real reCAPTCHA widget re
   const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/onboarding" }).window;
   Object.defineProperty(globalThis, "window", { configurable: true, value: window });
   Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  let renderedSiteKey = "";
+  Object.defineProperty(window, "grecaptcha", {
+    configurable: true,
+    value: {
+      render(container: HTMLElement, options: { sitekey: string; callback: (token: string) => void }): number {
+        renderedSiteKey = options.sitekey;
+        const response = window.document.createElement("textarea");
+        response.name = "g-recaptcha-response";
+        response.value = "verified-widget-token";
+        container.append(response);
+        options.callback(response.value);
+        return 7;
+      },
+      getResponse(widgetId: number): string {
+        assert.equal(widgetId, 7);
+        return "verified-widget-token";
+      },
+    },
+  });
   let checkpoint = "";
   window.open = ((url?: string | URL) => { checkpoint = String(url); return null; }) as typeof window.open;
   const root = window.document.querySelector<HTMLElement>("#app");
@@ -142,7 +161,9 @@ test("Level 2 renders an irregular form and submits the real reCAPTCHA widget re
   assert.equal(window.document.querySelector("[role='dialog'][aria-label='Workflow interruption']"), null);
   const widget = window.document.querySelector<HTMLElement>(".g-recaptcha");
   assert.equal(widget?.dataset.sitekey, "public-site-key");
-  assert.ok(window.document.querySelector("script[src='https://www.google.com/recaptcha/api.js']"));
+  await eventually(window.document, "textarea[name='g-recaptcha-response']");
+  assert.equal(renderedSiteKey, "public-site-key");
+  assert.ok(window.document.querySelector("script[src='https://www.google.com/recaptcha/api.js?render=explicit']"));
   const identityLabels = [...window.document.querySelectorAll(".form-grid > label")]
     .map((label) => label.firstChild?.textContent);
   assert.deepEqual(identityLabels.slice(0, 2), ["Work email", "Full name"]);
@@ -160,10 +181,6 @@ test("Level 2 renders an irregular form and submits the real reCAPTCHA widget re
     assert.ok(input, `${label} input`);
     input.value = value;
   }
-  const token = window.document.createElement("textarea");
-  token.name = "g-recaptcha-response";
-  token.value = "verified-widget-token";
-  widget?.append(token);
   window.document.querySelector<HTMLFormElement>("form[aria-label='Customer onboarding']")?.requestSubmit();
 
   await eventually(window.document, "[role='status']");
