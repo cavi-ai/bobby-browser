@@ -71,15 +71,6 @@ request_timeout_ms = 30000
 max_concurrent_requests = 8
 
 [vision]
-endpoint_url = "http://127.0.0.1:9100/vision"
-token_env = "BOBBY_VISION_TOKEN"
-provider = "lmstudio"
-
-[vision.providers]
-
-[vision.providers.lmstudio]
-base_url = "http://127.0.0.1:1234/v1"
-model = "local-model"
 # ACP harness example (OAuth stays in the harness):
 # backend = "acp"
 # profile = "codex"

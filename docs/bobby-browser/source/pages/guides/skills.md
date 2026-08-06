@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.6.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # Internal skill runtime (Ghost / ZigZagZig)

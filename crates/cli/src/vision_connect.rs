@@ -415,11 +415,13 @@ mod tests {
 
         let loaded = AppConfig::load(&config_path).unwrap();
         assert_eq!(loaded.vision.provider.as_deref(), Some("lmstudio"));
-        assert_eq!(
-            loaded.vision.endpoint_url.as_deref(),
-            Some(LOOPBACK_ENDPOINT)
-        );
-        assert_eq!(loaded.vision.token_env.as_deref(), Some(VISION_TOKEN_ENV));
+        // The endpoint lives in [nodes.vision]; `upsert_vision_platform`
+        // drops the legacy [vision] copies so there is one source of truth.
+        let node = loaded.nodes.get("vision").expect("[nodes.vision] written");
+        assert_eq!(node.endpoint_url, LOOPBACK_ENDPOINT);
+        assert_eq!(node.token_env.as_deref(), Some(VISION_TOKEN_ENV));
+        assert!(loaded.vision.endpoint_url.is_none());
+        assert!(loaded.vision.token_env.is_none());
         let (_, profile) = loaded.vision.selected_provider().unwrap();
         assert_eq!(profile.base_url, "http://127.0.0.1:1234/v1");
         assert_eq!(profile.model, "local-model");

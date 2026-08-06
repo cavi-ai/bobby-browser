@@ -158,5 +158,4 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "job_cancel" => "Cancel one owned job by id. Requires job:cancel. Same as DELETE /v1/jobs/{job}. On failure with notFound, the id is unknown or not owned.",
         _ => "Runtime operation.",
     }
-
 }
