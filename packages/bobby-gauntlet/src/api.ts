@@ -9,6 +9,7 @@ import type {
   Priority,
   ReportInput,
   ReportState,
+  RunConfig,
 } from "./models.js";
 
 export class ApiError extends Error {
@@ -39,6 +40,10 @@ export class NorthstarApi {
     return this.request("/api/dashboard");
   }
 
+  runConfig(): Promise<RunConfig> {
+    return this.request("/api/run-config");
+  }
+
   customers(query = ""): Promise<CustomerSummary[]> {
     return this.request(`/api/customers?q=${encodeURIComponent(query)}`);
   }
@@ -55,11 +60,11 @@ export class NorthstarApi {
     });
   }
 
-  onboard(input: OnboardingInput): Promise<OnboardingReceipt> {
+  onboard(input: OnboardingInput, recaptchaResponse?: string): Promise<OnboardingReceipt> {
     return this.request("/api/onboarding", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify(recaptchaResponse === undefined ? input : { ...input, recaptchaResponse }),
     });
   }
 
