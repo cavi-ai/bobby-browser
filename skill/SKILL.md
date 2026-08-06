@@ -23,7 +23,7 @@ Never claim an action worked without its evidence.
 
 ## Setup
 
-1. Operator runs `bobby install` (or `bobby install --host <claude|zed|vscode>
+1. Operator runs `bobby install` (or `bobby install --host <claude|zed|vscode|acp>
    --skill --yes`). That writes the bootstrap credential, merges MCP config,
    and installs this skill into `~/.agents/skills/bobby-browser/` (project:
    `.agents/skills/` with `--project-skill`). Optional: `--skill-claude`,
@@ -82,11 +82,11 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
 
 1. **Checkpoint before boundaries.** `intent_submit_and_verify` and
    `intent_follow` with `boundary: true` are Boundary commands: refused
-   without a matching checkpoint saved *first*. Set `autoCheckpoint: true`
-   and the runtime mints it inside the same call, returning its
-   `checkpointId` — one call instead of three. Do it by hand only when you
-   need to author the checkpoint's `invariants` or `replayableInputs`: pin
-   two UUIDs, pass them as `commandId`/`attemptId` to both `checkpoint_save`
+   without a matching checkpoint. `autoCheckpoint` defaults to `true` and
+   mints it inside the same call, returning its `checkpointId`. Pass
+   `autoCheckpoint: false` only when you need to author the checkpoint's
+   `invariants` or `replayableInputs`: pin two UUIDs, pass them as
+   `commandId`/`attemptId` to both `checkpoint_save`
    (`boundaryCommandId`/`attemptId` in the checkpoint) and the Boundary
    call, and put commands you already ran in `evidenceRefs` — never
    hand-authored evidence.

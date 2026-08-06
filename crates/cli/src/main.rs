@@ -116,7 +116,7 @@ enum CliCommand {
         /// Path to a built companion extension (else built from the repo)
         #[arg(long)]
         extension: Option<PathBuf>,
-        /// Install `bobby` (+ `mcp-gateway`) onto PATH (~/.cargo/bin or ~/.local/bin)
+        /// Install `bobby` (+ `mcp-gateway`, `acp-gateway`) onto PATH (~/.cargo/bin or ~/.local/bin)
         #[arg(long)]
         cli: bool,
         /// Regenerate the bootstrap credential even if one exists
@@ -1073,6 +1073,58 @@ fn vision_endpoint_unreachable_detail(endpoint: &str) -> String {
     }
 }
 
+/// Whether config names any usable vision route: legacy `[vision].endpoint_url`,
+/// a `[nodes.*.kind = "vision"]` entry, or a selected ACP vision backend.
+fn vision_route_configured(config: &AppConfig) -> bool {
+    if config
+        .vision
+        .endpoint_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
+    {
+        return true;
+    }
+    if config
+        .nodes
+        .values()
+        .any(|node| matches!(node.kind, config::NodeKind::Vision))
+    {
+        return true;
+    }
+    matches!(
+        config.vision.selected_backend(),
+        Some(config::VisionBackendSelection::Acp { .. })
+    )
+}
+
+fn bootstrap_csv_holds(caps_csv: &str, capability: &str) -> bool {
+    caps_csv
+        .split(',')
+        .any(|entry| entry.trim() == capability)
+}
+
+fn check_vision_route_for_assist(
+    config: &AppConfig,
+    holds_vision_assist: bool,
+) -> Option<DoctorCheck> {
+    if !holds_vision_assist {
+        return None;
+    }
+    if vision_route_configured(config) {
+        Some(DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-route".to_string(),
+            detail: "vision:assist has a configured route".to_string(),
+        })
+    } else {
+        Some(DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "vision-route".to_string(),
+            detail: "vision:assist is granted but no vision route is configured; run `bobby vision connect`".to_string(),
+        })
+    }
+}
+
 /// 1x1 transparent PNG for the doctor propose probe.
 const DOCTOR_PROBE_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -1595,6 +1647,22 @@ fn run_doctor(
                     heal.added.join(", ")
                 ),
             );
+        }
+    }
+
+    let holds_vision_assist = {
+        let from_file = bootstrap_path_for_heal
+            .as_ref()
+            .filter(|path| path.exists())
+            .and_then(|path| bootstrap_local::load_bootstrap_capabilities_csv(path).ok());
+        let from_env = std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES").ok();
+        from_file
+            .or(from_env)
+            .is_some_and(|caps| bootstrap_csv_holds(&caps, "vision:assist"))
+    };
+    if let Some(config) = &config {
+        if let Some(check) = check_vision_route_for_assist(config, holds_vision_assist) {
+            push_doctor_check(&mut report, check);
         }
     }
 
@@ -3573,6 +3641,47 @@ auth = "oauth-device-code"
         let external = vision_endpoint_unreachable_detail("https://vision.example.com/propose");
         assert!(external.contains("external vision endpoint"));
         assert!(!external.contains("auto-spawn"));
+    }
+
+    #[test]
+    fn doctor_warns_when_vision_assist_has_no_route() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let bootstrap = root.path().join("bootstrap.env");
+        let material =
+            bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+
+        let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
+        let check = report.check("vision-route").expect("vision-route check");
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("bobby vision connect"));
+    }
+
+    #[test]
+    fn doctor_ok_when_vision_assist_has_endpoint_route() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"[vision]
+endpoint_url = "http://127.0.0.1:9100/vision"
+"#,
+        )
+        .unwrap();
+        let bootstrap = root.path().join("bootstrap.env");
+        let material =
+            bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+
+        let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
+        let check = report.check("vision-route").expect("vision-route check");
+        assert_eq!(check.status, DoctorStatus::Ok);
     }
 
     #[test]

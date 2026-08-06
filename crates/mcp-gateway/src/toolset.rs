@@ -200,61 +200,62 @@ const VERIFY: &[&str] = &[
     "job_cancel",
 ];
 
+/// Every tool the gateway can advertise. Kept sorted so docs parity and
+/// phase-membership tests stay deterministic.
+pub const EVERY_TOOL: &[&str] = &[
+    "a11y_snapshot",
+    "checkpoint_save",
+    "click",
+    "command_execute",
+    "context_ask",
+    "context_neighbors",
+    "control_action",
+    "cookie_delete",
+    "cookie_get",
+    "cookie_set",
+    "dialog",
+    "download_url",
+    "emulate",
+    "evaluate_javascript",
+    "events_read",
+    "extract_structured",
+    "form_snapshot",
+    "inspect",
+    "intent_complete_form",
+    "intent_dismiss_obstruction",
+    "intent_extract",
+    "intent_fill",
+    "intent_follow",
+    "intent_locate",
+    "intent_submit_and_verify",
+    "intent_wait_for_state",
+    "job_cancel",
+    "job_status",
+    "job_submit",
+    "navigate",
+    "network_log",
+    "page_activate",
+    "page_close",
+    "page_list",
+    "page_open",
+    "pdf",
+    "recovery_status",
+    "runtime_info",
+    "screenshot",
+    "session_close",
+    "session_create",
+    "session_list",
+    "toolset_select",
+    "type_text",
+    "upload_files",
+    "wait_for",
+    "workflow_recover",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every tool the gateway advertises. Duplicated rather than imported so a
-    /// tool added to `list_tools` without a phase fails here.
-    const EVERY_TOOL: &[&str] = &[
-        "a11y_snapshot",
-        "checkpoint_save",
-        "click",
-        "command_execute",
-        "context_ask",
-        "context_neighbors",
-        "control_action",
-        "cookie_delete",
-        "cookie_get",
-        "cookie_set",
-        "dialog",
-        "download_url",
-        "emulate",
-        "evaluate_javascript",
-        "events_read",
-        "extract_structured",
-        "form_snapshot",
-        "inspect",
-        "intent_complete_form",
-        "intent_dismiss_obstruction",
-        "intent_extract",
-        "intent_fill",
-        "intent_follow",
-        "intent_locate",
-        "intent_submit_and_verify",
-        "intent_wait_for_state",
-        "job_cancel",
-        "job_status",
-        "job_submit",
-        "navigate",
-        "network_log",
-        "page_activate",
-        "page_close",
-        "page_list",
-        "page_open",
-        "pdf",
-        "recovery_status",
-        "runtime_info",
-        "screenshot",
-        "session_close",
-        "session_create",
-        "session_list",
-        "toolset_select",
-        "type_text",
-        "upload_files",
-        "wait_for",
-        "workflow_recover",
-    ];
+    use std::collections::BTreeSet;
 
     #[test]
     fn full_advertises_everything_except_verify_only_jobs() {
@@ -369,5 +370,46 @@ mod tests {
         for phase in Toolset::ALL {
             assert_eq!(Toolset::parse(phase.as_str()), Some(phase));
         }
+    }
+
+    /// Docs table in `mcp-tools.md` must name exactly [`EVERY_TOOL`].
+    #[test]
+    fn mcp_tools_docs_match_every_tool() {
+        const DOCS: &str =
+            include_str!("../../../docs/bobby-browser/source/pages/surfaces/mcp-tools.md");
+        let mut documented = BTreeSet::new();
+        let mut in_tools = false;
+        for line in DOCS.lines() {
+            if line.starts_with("## Tools") {
+                in_tools = true;
+                continue;
+            }
+            if in_tools && line.starts_with("## ") {
+                break;
+            }
+            if !in_tools {
+                continue;
+            }
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("| `") else {
+                continue;
+            };
+            let Some(name) = rest.split('`').next() else {
+                continue;
+            };
+            if name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                documented.insert(name.to_owned());
+            }
+        }
+        let expected: BTreeSet<_> = EVERY_TOOL.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(
+            documented, expected,
+            "docs tool table drifted from EVERY_TOOL\nonly in docs: {:?}\nonly in EVERY_TOOL: {:?}",
+            documented.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&documented).collect::<Vec<_>>()
+        );
     }
 }

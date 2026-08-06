@@ -19,7 +19,7 @@ pub mod protocol;
 mod resources;
 mod schema;
 mod server;
-mod toolset;
+pub mod toolset;
 mod jobs;
 
 #[doc(hidden)]

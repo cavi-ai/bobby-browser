@@ -55,6 +55,7 @@ Tools are advertised only when the principal holds the required capability.
 | `events_read` | `session:read` | Read retained events after a cursor |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
 | `context_ask` | `page:read` | Ask the retained page context where a described control is |
+| `context_neighbors` | `context:read` | Show remembered form structure around a described control (siblings, success counters) |
 | `toolset_select` | none | Narrow `tools/list` to one phase |
 | `recovery_status` | `recovery:read` | Read a workflow checkpoint and recovery receipts |
 | `cookie_get` | `browser:mutate` | Read cookies (all origins or filtered) |
@@ -65,6 +66,9 @@ Tools are advertised only when the principal holds the required capability.
 | `cookie_set` | `browser:mutate` | Store cookies |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
+| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` builtins; verify-phase advertise) |
+| `job_status` | `job:read` | Read one owned job by id |
+| `job_cancel` | `job:cancel` | Cancel one owned job by id |
 
 The flat browser tools (`navigate` … `evaluate_javascript` /
 `extract_structured`, plus `page_activate` / `a11y_snapshot`) and the
@@ -210,11 +214,11 @@ agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `full` | everything the principal's capabilities allow (default) | ~130 KB |
-| `explore` | read the page, navigate, wait | ~42 KB |
+| `explore` | read the page, navigate, wait (default) | ~42 KB |
 | `act` | raw primitives and `command_execute` | ~54 KB |
 | `intent` | the `intent_*` family and `extract_structured` | ~74 KB |
-| `verify` | evidence, checkpoints, recovery | ~49 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~49 KB |
+| `full` | everything the principal's capabilities allow (except verify-only jobs) | ~130 KB |
 
 Session and page lifecycle, `runtime_info`, and `toolset_select` itself appear
 in every phase.
