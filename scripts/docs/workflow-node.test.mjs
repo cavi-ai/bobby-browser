@@ -32,3 +32,17 @@ test("npm publish is tag-guarded and idempotent under OIDC trusted publishing", 
   assert.doesNotMatch(workflow, /NODE_AUTH_TOKEN:\s*\$\{/);
   assert.doesNotMatch(workflow, /secrets\.NPM_TOKEN/);
 });
+
+test("reusable docs workflow preserves caller dry-run through every publish guard", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/publish-docs.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(workflow, /DRY_RUN:\s*\$\{\{ inputs\.dry_run \|\| 'false' \}\}/);
+  assert.equal(
+    workflow.match(/if:\s*\$\{\{ env\.DRY_RUN != 'true' \}\}/g)?.length,
+    2,
+    "both release upload and consumer dispatch must be disabled by caller dry-run",
+  );
+});
