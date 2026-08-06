@@ -193,6 +193,25 @@ impl NodeRegistry {
         );
         Ok(Arc::new(assist))
     }
+
+    pub fn auth_driver(&self, name: &str) -> Result<acp_client::AcpAuthDriver, NodeError> {
+        let profile = self
+            .acp_profiles
+            .get(name)
+            .ok_or_else(|| NodeError::Unknown(name.to_owned()))?;
+        Ok(acp_client::AcpAuthDriver::new(
+            profile.command.clone(),
+            profile.args.clone(),
+        ))
+    }
+
+    pub fn auth_strategy(&self, name: &str) -> Result<AuthStrategy, NodeError> {
+        let profile = self
+            .acp_profiles
+            .get(name)
+            .ok_or_else(|| NodeError::Unknown(name.to_owned()))?;
+        Ok(vision_auth_strategy(profile.auth))
+    }
 }
 
 /// The name a legacy `[vision]` endpoint is carried forward under.
@@ -381,6 +400,30 @@ auth = "advertised"
         let registry = NodeRegistry::from_config(&config);
         assert_eq!(registry.names().collect::<Vec<_>>(), ["codex"]);
         assert!(registry.vision("codex").is_ok());
+    }
+
+    #[test]
+    fn acp_profile_resolves_to_an_auth_driver_and_strategy() {
+        let config = AppConfig::from_toml_str(
+            r#"
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "oauth-device-code"
+"#,
+        )
+        .unwrap();
+        let registry = NodeRegistry::from_config(&config);
+
+        assert!(registry.auth_driver("codex").is_ok());
+        assert_eq!(
+            registry.auth_strategy("codex"),
+            Ok(AuthStrategy::OAuthDeviceCode)
+        );
+        assert_eq!(
+            registry.auth_driver("missing").unwrap_err(),
+            NodeError::Unknown("missing".to_owned())
+        );
     }
 
     #[test]
