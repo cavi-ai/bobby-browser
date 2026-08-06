@@ -3,6 +3,7 @@ mod jobs_client;
 mod onboarding;
 mod vision_child;
 mod vision_connect;
+mod vision_login;
 
 use anyhow::{Context, Result};
 use companion_core::{
@@ -277,6 +278,15 @@ struct VisionConnectArgs {
     yes: bool,
 }
 
+#[derive(clap::Args)]
+struct VisionLoginArgs {
+    /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Named ACP vision profile to authenticate
+    name: String,
+}
+
 impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
     fn from(args: VisionConnectArgs) -> Self {
         Self {
@@ -298,6 +308,8 @@ impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
 enum VisionCommands {
     /// Configure a vision provider profile in config.toml
     Connect(VisionConnectArgs),
+    /// Establish or verify the configured ACP harness login
+    Login(VisionLoginArgs),
 }
 
 #[derive(clap::Subcommand)]
@@ -481,6 +493,7 @@ pub async fn run() -> Result<()> {
         CliCommand::Jobs { command } => run_jobs(command)?,
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
+            VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
         },
         CliCommand::VisionConnect(args) => vision_connect::connect(args.into())?,
         CliCommand::VisionProxy {
@@ -3097,6 +3110,29 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
                 assert_eq!(provider.as_deref(), Some("openai"));
             }
             _ => panic!("unexpected vision-connect alias parse"),
+        }
+    }
+
+    #[test]
+    fn vision_login_clap_parses_named_profile() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "bobby",
+            "vision",
+            "login",
+            "codex",
+            "--config",
+            "/tmp/config.toml",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::Vision {
+                command: VisionCommands::Login(VisionLoginArgs { name, config }),
+            }) => {
+                assert_eq!(name, "codex");
+                assert_eq!(config.as_deref(), Some(Path::new("/tmp/config.toml")));
+            }
+            _ => panic!("unexpected vision login parse"),
         }
     }
 
