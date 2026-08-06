@@ -3449,3 +3449,58 @@ async fn a_retry_under_one_idempotency_key_replays_instead_of_dispatching_again(
         "a different command under the same key must still conflict: {conflict}"
     );
 }
+
+/// `recovery_status` takes exactly one key, and says so when it does not.
+///
+/// An agent that was compacted has no `workflowId` left, so it asks by
+/// `sessionId` instead. Both keys at once are two different questions in one
+/// call and neither is not a question at all; the validator's schema subset
+/// cannot express exactly-one-of, so the handler enforces it by name rather
+/// than picking a silent precedence.
+#[tokio::test]
+async fn recovery_status_requires_exactly_one_of_workflow_id_or_session_id() {
+    let server = fixture_server(vec![Capability::RecoveryRead]).await;
+
+    for (case, arguments) in [
+        ("neither", json!({})),
+        (
+            "both",
+            json!({
+                "workflowId":types::WorkflowId::new().0.to_string(),
+                "sessionId":SessionId::new().0.to_string()
+            }),
+        ),
+    ] {
+        let response = server
+            .handle_message(request(
+                90,
+                "tools/call",
+                json!({"name":"recovery_status","arguments":arguments}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response["error"]["code"], -32602, "{case}: {response}");
+        assert_eq!(
+            response["error"]["data"]["reason"], "exactlyOneOfWorkflowIdOrSessionId",
+            "{case}: {response}"
+        );
+    }
+
+    // Asking by session is accepted as a shape -- it reaches the runtime
+    // instead of being refused at the argument boundary.
+    let by_session = server
+        .handle_message(request(
+            91,
+            "tools/call",
+            json!({
+                "name":"recovery_status",
+                "arguments":{"sessionId":SessionId::new().0.to_string()}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        by_session["error"]["code"], -32602,
+        "asking by sessionId must not be an argument error: {by_session}"
+    );
+}

@@ -171,6 +171,49 @@ impl CheckpointStore {
         Ok(checkpoint)
     }
 
+    /// Checkpoints belonging to `session_id`, newest first, capped at `limit`.
+    ///
+    /// The store is one file per workflow with no index, so an agent that lost
+    /// its `workflowId` -- compacted, restarted -- had no way back to a
+    /// recoverable workflow at all. This is that way back.
+    ///
+    /// Filtering is the caller's to finish: a checkpoint records its
+    /// `session_id` but no principal, so ownership has to be enforced above
+    /// this, against the session-ownership registry.
+    ///
+    /// Unreadable and stale-schema entries are skipped rather than failing the
+    /// listing -- one corrupt file must not hide every other recoverable
+    /// workflow.
+    pub async fn list_for_session(
+        &self,
+        session_id: &types::SessionId,
+        limit: usize,
+    ) -> Result<Vec<WorkflowCheckpoint>, CheckpointStoreError> {
+        let mut entries = tokio::fs::read_dir(self.root.as_path()).await?;
+        let mut found: Vec<WorkflowCheckpoint> = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // `<workflow>.skill-issuance.json` shares the directory.
+            if !name.ends_with(".json") || name.ends_with(".skill-issuance.json") {
+                continue;
+            }
+            let Ok(bytes) = tokio::fs::read(entry.path()).await else {
+                continue;
+            };
+            let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes) else {
+                continue;
+            };
+            if checkpoint.session_id != *session_id || self.validate_schema(&checkpoint).is_err() {
+                continue;
+            }
+            found.push(checkpoint);
+        }
+        found.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        found.truncate(limit);
+        Ok(found)
+    }
+
     async fn read_bytes(&self, workflow_id: &WorkflowId) -> Result<Vec<u8>, CheckpointStoreError> {
         tokio::fs::read(self.path(workflow_id))
             .await

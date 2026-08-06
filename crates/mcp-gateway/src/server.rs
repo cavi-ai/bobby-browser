@@ -30,7 +30,9 @@ use crate::protocol::{
     METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
 };
 use crate::resources::{static_resource_body, static_resources};
-use crate::schema::{advertised_tool_schema, tool_output_schema, validate_tool_arguments};
+use crate::schema::{
+    advertised_tool_schema, tool_output_schema, validate_tool_arguments, MAX_RECOVERABLE_WORKFLOWS,
+};
 use crate::ArtifactResources;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
@@ -1612,14 +1614,37 @@ impl Server {
                     .and_then(to_json)
             }
             "recovery_status" => {
-                let input: WorkflowRecoverArgs = match bounded_parse(call.arguments) {
+                let input: RecoveryStatusArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                self.runtime
-                    .recovery_status(context, input.workflow_id)
-                    .await
-                    .and_then(to_json)
+                // Exactly one key. Both would be two different questions in one
+                // call, neither is not a question at all; the JSON Schema
+                // subset this validator implements cannot say so, and a silent
+                // precedence rule would answer a question the caller did not
+                // ask.
+                match (input.workflow_id, input.session_id) {
+                    (Some(workflow_id), None) => self
+                        .runtime
+                        .recovery_status(context, workflow_id)
+                        .await
+                        .and_then(to_json),
+                    (None, Some(session_id)) => {
+                        let limit = input
+                            .limit
+                            .unwrap_or(MAX_RECOVERABLE_WORKFLOWS)
+                            .clamp(1, MAX_RECOVERABLE_WORKFLOWS);
+                        self.runtime
+                            .workflows_for_session(context, session_id.clone(), limit)
+                            .await
+                            .map(|workflows| {
+                                json!({"sessionId": session_id, "workflows": workflows})
+                            })
+                    }
+                    _ => {
+                        return invalid_params_reason(id, "exactlyOneOfWorkflowIdOrSessionId");
+                    }
+                }
             }
             "events_read" => {
                 let input: EventsReadArgs = match bounded_parse(call.arguments) {
@@ -2130,6 +2155,21 @@ struct ToolsetSelectArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkflowRecoverArgs {
     workflow_id: types::WorkflowId,
+}
+
+/// `recovery_status` answers by workflow, or discovers a session's workflows.
+///
+/// Both optional here, exactly one enforced in the handler: an agent that was
+/// compacted has no `workflowId` left to ask with.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryStatusArgs {
+    #[serde(default)]
+    workflow_id: Option<types::WorkflowId>,
+    #[serde(default)]
+    session_id: Option<types::SessionId>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 macro_rules! page_scoped_args {
@@ -2794,7 +2834,7 @@ fn tool_description(name: &str) -> &'static str {
         "form_snapshot" => "Read a bounded, engine-neutral inventory of a page's form controls without exposing selectors or sensitive values. Requires page:read.",
         "screenshot" => "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
         "events_read" => "Read retained runtime events for this principal after a cursor, bounded by a limit. Requires session:read. Long-polls: it blocks until an event past the cursor arrives or the request deadline expires (about 60s), so it is not a quick read. The notifications/bobby/event channel pushes the same frames without polling -- see bobby://failure-taxonomy.",
-        "recovery_status" => "Read a workflow's checkpoint and recovery receipts without attempting recovery. Requires recovery:read.",
+        "recovery_status" => "Read a workflow's checkpoint and recovery receipts without attempting recovery, or pass sessionId instead of workflowId to list that session's recoverable workflows newest-first. Pass exactly one. Requires recovery:read.",
         "cookie_get" => "Read cookies visible to a page, optionally filtered by URL. Requires browser:mutate.",
         "checkpoint_save" => "Persist a verified workflow checkpoint. Requires recovery:write. Pass evidenceRefs -- command ids whose evidence the runtime resolves from its journal. For a Boundary command, save BEFORE it with recoveryClass boundary and boundaryCommandId/attemptId equal to the ids you pass that command. On failure with a missing command id, confirm the command completed first.",
         "workflow_recover" => "Recover a workflow from its last verified checkpoint, resuming, restarting, or flagging reconciliation. Requires recovery:write. Produces recovery evidence and the decision reached. On failure with notFound, this principal doesn't own the checkpoint's session (it may be closed) -- verify with session_list. A missing checkpoint itself surfaces as an opaque internal error, not notFound.",

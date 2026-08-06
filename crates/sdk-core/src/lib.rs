@@ -522,6 +522,18 @@ impl RuntimeService {
             .await
     }
 
+    pub async fn workflows_for_session(
+        &self,
+        session_id: &types::SessionId,
+        limit: usize,
+    ) -> Result<Vec<WorkflowId>, RecoveryError> {
+        self.recovery
+            .as_ref()
+            .ok_or(RecoveryError::WorkersUnavailable)?
+            .workflows_for_session(session_id, limit)
+            .await
+    }
+
     pub async fn recover_for_session(
         &self,
         workflow_id: &WorkflowId,

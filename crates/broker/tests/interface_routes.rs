@@ -96,6 +96,14 @@ impl RuntimeInterface for CountingRuntime {
     ) -> InterfaceResult<types::RecoveryStatus> {
         unreachable!()
     }
+    async fn workflows_for_session(
+        &self,
+        _: RequestContext,
+        _: types::SessionId,
+        _: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>> {
+        unreachable!()
+    }
     async fn delete_session(
         &self,
         ctx: RequestContext,

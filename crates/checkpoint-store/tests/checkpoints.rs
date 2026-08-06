@@ -248,3 +248,68 @@ async fn authority_digest_ignores_recovery_history_but_content_version_changes()
     assert_eq!(second.digest(), authority_digest);
     assert_ne!(second.content_digest(), content_digest);
 }
+
+/// An agent that lost its `workflowId` can find its workflows again.
+///
+/// The store is one file per workflow with no index, so before this there was
+/// no way back at all: a compacted or restarted agent could not name any of
+/// its own in-flight workflows, and `recovery_status`/`workflow_recover` take
+/// the id as their only key.
+#[tokio::test]
+async fn a_session_lists_its_own_workflows_newest_first_within_the_cap() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let session = SessionId::new();
+
+    let mut expected = Vec::new();
+    for index in 0..4 {
+        let mut entry = checkpoint(WorkflowId::new(), "https://example.test/step");
+        entry.session_id = session.clone();
+        // Deterministic ordering: no reliance on filesystem or clock ticks.
+        entry.created_at = Utc::now() + Duration::seconds(index);
+        store.save(&entry).await.unwrap();
+        expected.push(entry.workflow_id.clone());
+    }
+    // Another session's workflow shares the directory and must not appear.
+    let other = checkpoint(WorkflowId::new(), "https://example.test/other");
+    store.save(&other).await.unwrap();
+
+    let listed = store.list_for_session(&session, 32).await.unwrap();
+    let ids: Vec<_> = listed
+        .iter()
+        .map(|entry| entry.workflow_id.clone())
+        .collect();
+    expected.reverse();
+    assert_eq!(ids, expected, "newest first, and only this session's");
+
+    let capped = store.list_for_session(&session, 2).await.unwrap();
+    assert_eq!(capped.len(), 2, "the cap bounds the listing");
+    assert_eq!(
+        capped[0].workflow_id, expected[0],
+        "the cap keeps the newest"
+    );
+
+    let none = store.list_for_session(&SessionId::new(), 32).await.unwrap();
+    assert!(none.is_empty(), "an unknown session lists nothing");
+}
+
+/// One unreadable file must not hide every other recoverable workflow.
+#[tokio::test]
+async fn a_corrupt_entry_is_skipped_rather_than_failing_the_listing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let session = SessionId::new();
+    let mut good = checkpoint(WorkflowId::new(), "https://example.test/good");
+    good.session_id = session.clone();
+    store.save(&good).await.unwrap();
+
+    std::fs::write(
+        root.path().join(format!("{}.json", WorkflowId::new().0)),
+        b"{ not json",
+    )
+    .unwrap();
+
+    let listed = store.list_for_session(&session, 32).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].workflow_id, good.workflow_id);
+}

@@ -622,6 +622,25 @@ impl RuntimeInterface for AuthenticatedRuntime {
             })
     }
 
+    async fn workflows_for_session(
+        &self,
+        ctx: RequestContext,
+        session: types::SessionId,
+        limit: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::ReadCheckpoint)?;
+        // A checkpoint records its session but no principal, so ownership is
+        // enforced here against the same registry the single-workflow path
+        // uses. A session the caller does not own answers as absence, matching
+        // `recovery_status`.
+        self.require_owned_session(&ctx, &session)?;
+        self.inner
+            .workflows_for_session(&session, limit)
+            .await
+            .map_err(|_| internal_error(&ctx))
+    }
+
     async fn recover(
         &self,
         ctx: RequestContext,

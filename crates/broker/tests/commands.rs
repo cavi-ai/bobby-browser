@@ -37,6 +37,14 @@ impl RuntimeInterface for FakeRuntime {
     ) -> InterfaceResult<types::RecoveryStatus> {
         unreachable!()
     }
+    async fn workflows_for_session(
+        &self,
+        _: RequestContext,
+        _: types::SessionId,
+        _: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>> {
+        unreachable!()
+    }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
         unreachable!()
     }
