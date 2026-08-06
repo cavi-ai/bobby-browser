@@ -14,6 +14,7 @@ node_modules/
 bootstrap.env
 **/.bobby-browser/
 .worktrees/
+worktrees/
 .mcp.json
 AGENTS.md
 # Added by code-review-graph
