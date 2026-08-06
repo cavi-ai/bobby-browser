@@ -3,23 +3,9 @@
 //! query, and fragment never reach the key. IP literals and single-label
 //! hosts key as-is.
 //!
-//! The workspace carries no public-suffix dependency (verified against
-//! `Cargo.lock` 2026-08-05), so the multi-label suffix table below is
-//! hand-rolled and deliberately short: it covers the common second-level
-//! registries and defaults to last-two-labels otherwise. A wrong entry only
-//! over- or under-shards a site's file; it never leaks one site's context
-//! into a different registrable domain.
-
-/// Well-known multi-label public suffixes. Keep sorted; lookup is linear
-/// over a table this small.
-const MULTI_LABEL_SUFFIXES: &[&str] = &[
-    "ac.jp", "ac.kr", "ac.nz", "ac.th", "ac.uk", "co.id", "co.il", "co.in", "co.jp", "co.kr",
-    "co.nz", "co.th", "co.uk", "co.za", "com.ar", "com.au", "com.br", "com.cn", "com.co", "com.hk",
-    "com.mx", "com.my", "com.ph", "com.pl", "com.sa", "com.sg", "com.tr", "com.tw", "com.vn",
-    "edu.au", "edu.cn", "edu.sg", "firm.in", "gov.au", "gov.cn", "gov.in", "gov.uk", "ne.jp",
-    "net.au", "net.cn", "net.in", "net.uk", "or.jp", "or.kr", "org.au", "org.cn", "org.in",
-    "org.nz", "org.uk", "org.za",
-];
+//! Registrable-domain boundaries come from the maintained Public Suffix List,
+//! including its private section. That keeps unrelated hosted tenants in
+//! separate context records.
 
 /// Derives the persisted site key for a page URL.
 ///
@@ -43,15 +29,10 @@ fn registrable_domain(host: &str) -> String {
     {
         return host.to_string();
     }
-    let labels: Vec<&str> = host.split('.').collect();
-    for suffix in MULTI_LABEL_SUFFIXES {
-        if host.ends_with(suffix) && labels.len() > 2 {
-            let suffix_labels = suffix.split('.').count();
-            let keep = (suffix_labels + 1).min(labels.len());
-            return labels[labels.len() - keep..].join(".");
-        }
-    }
-    labels[labels.len() - 2..].join(".")
+    psl::domain(host.as_bytes())
+        .and_then(|domain| std::str::from_utf8(domain.as_bytes()).ok())
+        .unwrap_or(host)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -73,6 +54,13 @@ mod tests {
             ("https://example.co.uk/", Some("https://example.co.uk")),
             ("https://shop.example.co.uk/", Some("https://example.co.uk")),
             ("https://example.com.au/x", Some("https://example.com.au")),
+            (
+                "https://alice.github.io/app",
+                Some("https://alice.github.io"),
+            ),
+            ("https://bob.github.io/app", Some("https://bob.github.io")),
+            ("https://one.pages.dev/", Some("https://one.pages.dev")),
+            ("https://two.pages.dev/", Some("https://two.pages.dev")),
             ("https://127.0.0.1:3000/app", Some("https://127.0.0.1")),
             ("http://[::1]:8080/x", Some("http://[::1]")),
             ("http://localhost:9000/", Some("http://localhost")),

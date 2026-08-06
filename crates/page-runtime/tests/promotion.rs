@@ -200,9 +200,10 @@ async fn typed_values_never_reach_the_store() {
     ];
     promotion.record_outcome(Some(URL), &evidence, true).await;
     promotion.flush().await;
+    let profile_dir = promotion.store().root().to_path_buf();
     drop(promotion);
 
-    for entry in std::fs::read_dir(temp.path().join("profile-a")).unwrap() {
+    for entry in std::fs::read_dir(profile_dir).unwrap() {
         let bytes = std::fs::read(entry.unwrap().path()).unwrap();
         let text = String::from_utf8_lossy(&bytes);
         assert!(
