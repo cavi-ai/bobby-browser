@@ -140,7 +140,7 @@ impl ContextStore {
         root: impl AsRef<Path>,
         profile_id: &str,
     ) -> Result<(Self, OpenReport), ContextStoreError> {
-        let root = root.as_ref().join(sanitize_component(profile_id));
+        let root = root.as_ref().join(encode_component(profile_id));
         tokio::fs::create_dir_all(&root).await?;
         let lock = Lockfile::claim(&root).await?;
         let mut index = BTreeMap::new();
@@ -171,6 +171,19 @@ impl ContextStore {
             },
             report,
         ))
+    }
+
+    /// Opens a store and applies its retention policy before returning it to
+    /// the runtime. `today` is explicit so boundary behavior stays testable.
+    pub async fn open_with_ttl(
+        root: impl AsRef<Path>,
+        profile_id: &str,
+        ttl_days: u32,
+        today: u32,
+    ) -> Result<(Self, OpenReport), ContextStoreError> {
+        let (store, report) = Self::open(root, profile_id).await?;
+        store.sweep(ttl_days, today).await?;
+        Ok((store, report))
     }
 
     /// In-memory view of a site, if present.
@@ -273,9 +286,17 @@ impl ContextStore {
             }
         }
         for key in emptied {
-            let _ = tokio::fs::remove_file(self.path(&key)).await;
+            tokio::fs::remove_file(self.path(&key)).await?;
         }
-        self.flush().await;
+        let failed = self.flush().await;
+        if !failed.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "retention sweep failed to persist {} site(s): {}",
+                failed.len(),
+                failed.join(", ")
+            ))
+            .into());
+        }
         Ok(dropped)
     }
 
@@ -285,7 +306,7 @@ impl ContextStore {
 
     fn path(&self, site_key: &str) -> PathBuf {
         self.root
-            .join(format!("{}.json", sanitize_component(site_key)))
+            .join(format!("{}.json", encode_component(site_key)))
     }
 
     async fn write_site(&self, key: &str, site: &SiteContext) -> Result<(), ContextStoreError> {
@@ -297,7 +318,7 @@ impl ContextStore {
         let destination = self.path(key);
         let temporary = self.root.join(format!(
             ".{}.{}.tmp",
-            sanitize_component(key),
+            encode_component(key),
             uuid::Uuid::new_v4()
         ));
         let result = async {
@@ -338,49 +359,52 @@ async fn load_envelope(path: &Path) -> Result<(String, SiteContext), String> {
     Ok((envelope.site_key, envelope.site))
 }
 
-/// Site keys are `scheme://host`, so `/` and `:` must not reach the
-/// filesystem verbatim.
-fn sanitize_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
+/// Injective filesystem encoding for arbitrary UTF-8 identity strings.
+fn encode_component(value: &str) -> String {
+    hex::encode(value.as_bytes())
 }
 
 struct Lockfile {
-    path: PathBuf,
+    _file: std::fs::File,
 }
 
 impl Lockfile {
     async fn claim(root: &Path) -> Result<Self, ContextStoreError> {
         let path = root.join(".context-store.lock");
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        match options.open(&path).await {
-            Ok(mut file) => {
-                file.write_all(format!("{}\n", std::process::id()).as_bytes())
-                    .await?;
-                file.sync_all().await?;
-                Ok(Self { path })
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            if !metadata.file_type().is_file() {
+                return Err(ContextStoreError::AlreadyLocked);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(ContextStoreError::AlreadyLocked)
-            }
-            Err(error) => Err(error.into()),
         }
-    }
-}
-
-impl Drop for Lockfile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(&path)?;
+        let path_metadata = std::fs::symlink_metadata(&path)?;
+        let file_metadata = file.metadata()?;
+        if !path_metadata.file_type().is_file() || !file_metadata.file_type().is_file() {
+            return Err(ContextStoreError::AlreadyLocked);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if path_metadata.dev() != file_metadata.dev()
+                || path_metadata.ino() != file_metadata.ino()
+            {
+                return Err(ContextStoreError::AlreadyLocked);
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(ContextStoreError::AlreadyLocked),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
     }
 }

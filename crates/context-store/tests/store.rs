@@ -60,7 +60,9 @@ async fn round_trip_persists_site_structure() {
 #[tokio::test]
 async fn corrupt_and_unsupported_files_are_skipped_and_reported() {
     let temp = tempfile::tempdir().unwrap();
-    let profile_dir = temp.path().join("profile-a");
+    // Literal UTF-8 hex encoding of `profile-a`; keep this independent of the
+    // production encoder so a lossy encoding regression cannot bless itself.
+    let profile_dir = temp.path().join("70726f66696c652d61");
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(profile_dir.join("garbage.json"), b"{not json").unwrap();
     std::fs::write(
@@ -91,6 +93,24 @@ async fn profiles_are_isolated() {
 }
 
 #[tokio::test]
+async fn profiles_with_colliding_sanitized_names_are_isolated() {
+    let temp = tempfile::tempdir().unwrap();
+    let (slash_profile, _) = ContextStore::open(temp.path(), "a/b").await.unwrap();
+    slash_profile
+        .upsert_site("https://example.com", site(&["Slash profile"], 100))
+        .await;
+    assert!(slash_profile.flush().await.is_empty());
+    drop(slash_profile);
+
+    let (underscore_profile, report) = ContextStore::open(temp.path(), "a_b").await.unwrap();
+    assert_eq!(report.sites_loaded, 0);
+    assert!(underscore_profile
+        .site("https://example.com")
+        .await
+        .is_none());
+}
+
+#[tokio::test]
 async fn lock_contention_refuses_the_second_writer() {
     let temp = tempfile::tempdir().unwrap();
     let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
@@ -102,6 +122,17 @@ async fn lock_contention_refuses_the_second_writer() {
     drop(store);
     let (reopened, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
     drop(reopened);
+}
+
+#[tokio::test]
+async fn stale_lockfile_does_not_block_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_dir = temp.path().join("70726f66696c652d61");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(profile_dir.join(".context-store.lock"), b"stale-pid\n").unwrap();
+
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    drop(store);
 }
 
 #[tokio::test]
@@ -170,6 +201,21 @@ async fn sweep_drops_only_expired_records() {
 
     let (_reopened, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
     assert_eq!(report.sites_loaded, 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sweep_reports_persistence_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store
+        .upsert_site("https://stale.example", site(&["Email"], 1))
+        .await;
+    assert!(store.flush().await.is_empty());
+    std::fs::remove_dir_all(store.root()).unwrap();
+
+    let error = store.sweep(90, 200).await.unwrap_err();
+    assert!(matches!(error, ContextStoreError::Io(_)));
 }
 
 #[tokio::test]

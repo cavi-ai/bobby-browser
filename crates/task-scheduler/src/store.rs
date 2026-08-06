@@ -162,21 +162,21 @@ async fn compact_journal<'a>(
         .truncate(true)
         .open(&temporary)
         .await?;
-    let mut sequence = 0_u64;
-    let mut terminal_written = 0_usize;
-    let mut jobs: Vec<&Job> = jobs.collect();
+    let (mut terminal, mut jobs): (Vec<&Job>, Vec<&Job>) = jobs.partition(|job| {
+        matches!(
+            job.status,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+        )
+    });
+    terminal.sort_by_key(|job| std::cmp::Reverse(job.completed_at.unwrap_or(job.created_at)));
+    terminal.truncate(COMPACT_RETAINED_TERMINAL);
+    jobs.extend(terminal);
     jobs.sort_by_key(|job| job.created_at);
-    for job in jobs {
+    for (sequence, job) in jobs.into_iter().enumerate() {
         let terminal = matches!(
             job.status,
             JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
         );
-        if terminal {
-            terminal_written += 1;
-            if terminal_written > COMPACT_RETAINED_TERMINAL {
-                continue;
-            }
-        }
         let event = if terminal {
             JobEvent::from_status(&job.status)
         } else {
@@ -184,7 +184,7 @@ async fn compact_journal<'a>(
         };
         let record = JournalRecord {
             schema_version: JOURNAL_SCHEMA_VERSION,
-            sequence,
+            sequence: sequence as u64,
             recorded_at: Utc::now(),
             event,
             job: job.clone(),
@@ -192,7 +192,6 @@ async fn compact_journal<'a>(
         let mut bytes = serde_json::to_vec(&record)?;
         bytes.push(b'\n');
         file.write_all(&bytes).await?;
-        sequence += 1;
     }
     file.sync_all().await?;
     drop(file);
