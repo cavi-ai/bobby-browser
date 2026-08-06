@@ -335,7 +335,14 @@ impl ContextGraph {
             // unanswerable.
             return None;
         }
-        (confidence >= CONTEXT_CONFIDENCE_FLOOR).then_some(ContextAnswer { target, confidence })
+        (confidence >= CONTEXT_CONFIDENCE_FLOOR).then_some(ContextAnswer {
+            target,
+            confidence,
+            observed_at: types::ContextObservedAt::Generation {
+                generation: entry.generation,
+            },
+            source: None,
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PageId, PageContext>> {
@@ -429,10 +436,11 @@ impl ProposalLookup for ContextGraph {
 /// Scores how well a described control matches a node, or `None` if it does not
 /// match at all.
 ///
-/// Only exact accessible-name equality scores at full confidence. Softer
-/// matches score below the floor on purpose, so a substring hit on a long
-/// label cannot become a confident wrong answer.
-fn score_match(
+/// The ladder, pinned: exact accessible name 1.0, role+name 0.9, node name
+/// 0.8, then token-overlap fuzzy at 0.8 × coverage — capped there so a fuzzy
+/// hit can never tie or beat an exact one, and only full containment reaches
+/// the floor.
+pub(crate) fn score_match(
     needle: &str,
     target: &AccessibilityTarget,
     node: &AccessibilityNode,
@@ -450,7 +458,27 @@ fn score_match(
             return Some(0.8);
         }
     }
-    None
+    fuzzy_score(needle, &name)
+}
+
+/// Token-overlap score: 0.8 × (needle tokens found in the name). `None` when
+/// no needle token appears, and for single-token needles — a lone token
+/// hitting a long label is the confident-wrong-answer case the floor exists
+/// to refuse.
+pub(crate) fn fuzzy_score(needle: &str, name: &str) -> Option<f32> {
+    let tokens: Vec<&str> = needle.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return None;
+    }
+    let name_tokens: std::collections::HashSet<&str> = name.split_whitespace().collect();
+    let covered = tokens
+        .iter()
+        .filter(|token| name_tokens.contains(*token))
+        .count();
+    if covered == 0 {
+        return None;
+    }
+    Some(0.8 * covered as f32 / tokens.len() as f32)
 }
 
 #[cfg(test)]

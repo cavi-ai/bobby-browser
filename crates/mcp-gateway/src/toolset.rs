@@ -111,6 +111,7 @@ const EXPLORE: &[&str] = &[
     "inspect",
     "screenshot",
     "context_ask",
+    "context_neighbors",
     "navigate",
     "wait_for",
     "network_log",
@@ -153,6 +154,7 @@ const INTENT: &[&str] = &[
     "a11y_snapshot",
     "form_snapshot",
     "context_ask",
+    "context_neighbors",
 ];
 
 const VERIFY: &[&str] = &[
@@ -165,6 +167,7 @@ const VERIFY: &[&str] = &[
     "form_snapshot",
     "screenshot",
     "context_ask",
+    "context_neighbors",
     "pdf",
 ];
 
@@ -180,6 +183,7 @@ mod tests {
         "click",
         "command_execute",
         "context_ask",
+        "context_neighbors",
         "control_action",
         "cookie_delete",
         "cookie_get",

@@ -20,23 +20,7 @@ use uuid::uuid;
 use mcp_gateway::TOOLS_LIST_BYTE_BUDGET;
 
 pub fn all_capabilities() -> Vec<Capability> {
-    vec![
-        Capability::SessionRead,
-        Capability::SessionWrite,
-        Capability::PageRead,
-        Capability::PageWrite,
-        Capability::BrowserMutate,
-        Capability::FileUpload,
-        Capability::FileDownload,
-        Capability::JavascriptEvaluate,
-        Capability::IntentExecute,
-        Capability::VisionAssist,
-        Capability::ArtifactRead,
-        Capability::ArtifactCapture,
-        Capability::RecoveryRead,
-        Capability::RecoveryWrite,
-        Capability::AuthorityAdmin,
-    ]
+    Capability::ALL.to_vec()
 }
 
 async fn fixture_server(capabilities: Vec<Capability>) -> Server {
@@ -261,8 +245,9 @@ const READ_ONLY: &[&str] = &[
     "events_read",
     "recovery_status",
     "cookie_get",
-    // Reads the retained page context; touches no page.
+    // Read the retained page context; touch no page.
     "context_ask",
+    "context_neighbors",
     // Changes only what `tools/list` advertises to this connection.
     "toolset_select",
     // Pure observers: they never mutate the page.

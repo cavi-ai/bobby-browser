@@ -592,3 +592,67 @@ async fn delete_session_route_removes_the_session_and_returns_204() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn context_routes_require_context_read_and_validate_ids() {
+    let (app, token) = authenticated_app([Capability::PageRead], InterfaceConfig::default()).await;
+    let session = uuid!("20000000-0000-0000-0000-000000000020");
+    let page = uuid!("30000000-0000-0000-0000-000000000030");
+
+    let denied_ask = app
+        .clone()
+        .oneshot(authorized(
+            "GET",
+            &format!("/v1/context/ask?sessionId={session}&pageId={page}&description=Email"),
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied_ask.status(), StatusCode::FORBIDDEN);
+
+    let denied_site = app
+        .clone()
+        .oneshot(authorized(
+            "GET",
+            "/v1/context/site/https%3A%2F%2Fexample.test",
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied_site.status(), StatusCode::FORBIDDEN);
+
+    let (app, token) =
+        authenticated_app([Capability::ContextRead], InterfaceConfig::default()).await;
+    let malformed = app
+        .clone()
+        .oneshot(authorized(
+            "GET",
+            "/v1/context/ask?sessionId=nope&pageId=nope&description=Email",
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // RuntimeService::default() has no promotion sink: the store answers
+    // null, and the call still succeeds — absence is an answer, not an error.
+    let unknown_site = app
+        .clone()
+        .oneshot(authorized(
+            "GET",
+            "/v1/context/site/https%3A%2F%2Fexample.test",
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown_site.status(), StatusCode::OK);
+    let body = to_bytes(unknown_site.into_body(), 16 * 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({ "site": null })
+    );
+}

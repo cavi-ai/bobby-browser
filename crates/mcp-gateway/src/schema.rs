@@ -54,6 +54,14 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId", "description"],
         ),
+        "context_neighbors" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "description": string(1, 256)
+            }),
+            vec!["sessionId", "pageId", "description"],
+        ),
         "toolset_select" => (
             json!({
                 "toolset": {"type":"string","enum":["full","explore","act","intent","verify"]}

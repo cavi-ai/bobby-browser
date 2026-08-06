@@ -39,6 +39,8 @@ pub(crate) fn protected_router() -> Router<AppState> {
             get(form_snapshot),
         )
         .route("/v1/commands", post(submit_command))
+        .route("/v1/context/ask", get(context_ask))
+        .route("/v1/context/site/{key}", get(context_site))
         .route("/v1/checkpoints", post(checkpoint))
         .route(
             "/v1/recovery/{workflow}",
@@ -105,6 +107,48 @@ async fn open_page(
         .await
         .map(Json)
         .map_err(ProtocolError::from)
+}
+
+#[derive(Clone)]
+struct ContextAskQuery {
+    session: types::SessionId,
+    page: types::PageId,
+    description: String,
+}
+
+async fn context_ask(
+    Extension(request): Extension<AuthenticatedRequest>,
+    Extension(query): Extension<ContextAskQuery>,
+) -> Result<Json<serde_json::Value>, ProtocolError> {
+    request
+        .runtime
+        .authorize_operation(request.context.clone(), InterfaceOperation::ReadContext)
+        .await
+        .map_err(ProtocolError::from)?;
+    let answer = request
+        .runtime
+        .context_ask(
+            request.context,
+            query.session,
+            query.page,
+            query.description,
+        )
+        .await
+        .map_err(ProtocolError::from)?;
+    // `None` is an answer, not a failure — same contract as MCP context_ask.
+    Ok(Json(serde_json::json!({ "answer": answer })))
+}
+
+async fn context_site(
+    Path(key): Path<String>,
+    Extension(request): Extension<AuthenticatedRequest>,
+) -> Result<Json<serde_json::Value>, ProtocolError> {
+    let site = request
+        .runtime
+        .context_site(request.context, key)
+        .await
+        .map_err(ProtocolError::from)?;
+    Ok(Json(serde_json::json!({ "site": site })))
 }
 
 async fn form_snapshot(
@@ -893,6 +937,37 @@ struct FormSnapshotQuery {
     max_controls: Option<u32>,
 }
 
+fn parse_context_ask_query(
+    query: Option<&str>,
+    correlation_id: &types::CorrelationId,
+) -> Result<ContextAskQuery, ProtocolError> {
+    let invalid =
+        || ProtocolError::invalid_with(InterfaceErrorCode::InvalidRequest, correlation_id.clone());
+    let pairs =
+        url::form_urlencoded::parse(query.ok_or_else(invalid)?.as_bytes()).collect::<Vec<_>>();
+    if pairs.len() != 3 {
+        return Err(invalid());
+    }
+    let mut session = None;
+    let mut page = None;
+    let mut description = None;
+    for (key, value) in pairs {
+        match key.as_ref() {
+            "sessionId" => session = Some(Uuid::parse_str(&value).map_err(|_| invalid())?),
+            "pageId" => page = Some(Uuid::parse_str(&value).map_err(|_| invalid())?),
+            "description" if !value.is_empty() && value.len() <= 256 => {
+                description = Some(value.into_owned())
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    Ok(ContextAskQuery {
+        session: types::SessionId(session.ok_or_else(invalid)?),
+        page: types::PageId(page.ok_or_else(invalid)?),
+        description: description.ok_or_else(invalid)?,
+    })
+}
+
 pub(crate) async fn validate_request_boundary(
     state: &AppState,
     request: &mut Request,
@@ -939,6 +1014,9 @@ pub(crate) async fn validate_request_boundary(
             }
             parsed.max_controls = value;
         }
+        request.extensions_mut().insert(parsed);
+    } else if path == "/v1/context/ask" {
+        let parsed = parse_context_ask_query(request.uri().query(), &correlation_id)?;
         request.extensions_mut().insert(parsed);
     } else if request.uri().query().is_some() {
         return Err(ProtocolError::invalid_with(

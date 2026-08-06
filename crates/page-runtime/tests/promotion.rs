@@ -254,3 +254,180 @@ async fn a_runtime_without_durable_profile_has_no_promotion_sink() {
     let runtime = runtime.with_context_promotion(Arc::new(ContextPromotion::new(store)));
     assert!(runtime.context_promotion().is_some());
 }
+
+async fn seeded(name: &str, role: &str, ordinal: Option<usize>) -> ContextPromotion {
+    let (promotion, _temp) = promotion().await;
+    let evidence = vec![
+        Evidence::Resolution {
+            target: Box::new(TargetSpec {
+                role: Some(role.to_string()),
+                accessible_name: Some(name.to_string()),
+                ordinal,
+                ..TargetSpec::default()
+            }),
+            fingerprint: Box::new(TargetFingerprint {
+                page_id: PageId::new(),
+                frame: None,
+                role: Some(role.to_string()),
+                name: Some(name.to_string()),
+                stable_attributes: BTreeMap::new(),
+            }),
+            candidates: Vec::new(),
+            best_match_authorized: false,
+        },
+        Evidence::IntentExecution {
+            record: record("fill", IntentResolutionPath::Deterministic),
+        },
+    ];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+    promotion
+}
+
+#[tokio::test]
+async fn persisted_ladder_scores_are_pinned() {
+    let promotion = seeded("Email address", "textbox", Some(1)).await;
+    let url = Some(URL);
+
+    let exact = promotion.ask(url, "Email address").await.unwrap();
+    assert_eq!(exact.confidence, 1.0);
+    let role_name = promotion.ask(url, "textbox Email address").await.unwrap();
+    assert_eq!(role_name.confidence, 0.9);
+    let fuzzy_full = promotion.ask(url, "address email").await.unwrap();
+    assert_eq!(fuzzy_full.confidence, 0.8);
+    assert!(
+        promotion
+            .ask(url, "email address missing-token")
+            .await
+            .is_none(),
+        "partial token coverage must score under the floor"
+    );
+    assert!(
+        promotion.ask(url, "email").await.is_none(),
+        "single-token needles never fuzzy-match"
+    );
+}
+
+#[tokio::test]
+async fn fuzzy_never_beats_exact() {
+    // "Sign in" exact-matches one control and fuzzy-matches none; a needle
+    // that exact-matches one control and only partially covers another must
+    // return the exact control at 1.0.
+    let promotion = seeded("Sign in", "button", None).await;
+    let evidence = vec![
+        Evidence::Resolution {
+            target: Box::new(TargetSpec {
+                role: Some("link".into()),
+                accessible_name: Some("Sign in with SSO".into()),
+                ordinal: None,
+                ..TargetSpec::default()
+            }),
+            fingerprint: Box::new(TargetFingerprint {
+                page_id: PageId::new(),
+                frame: None,
+                role: Some("link".into()),
+                name: Some("Sign in with SSO".into()),
+                stable_attributes: BTreeMap::new(),
+            }),
+            candidates: Vec::new(),
+            best_match_authorized: false,
+        },
+        Evidence::IntentExecution {
+            record: record("follow", IntentResolutionPath::Deterministic),
+        },
+    ];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+
+    let answer = promotion.ask(Some(URL), "sign in").await.unwrap();
+    assert_eq!(answer.confidence, 1.0);
+    assert_eq!(answer.target.accessible_name, "Sign in");
+}
+
+#[tokio::test]
+async fn persisted_answers_are_marked_with_provenance() {
+    let promotion = seeded("Email address", "textbox", Some(2)).await;
+    let answer = promotion.ask(Some(URL), "Email address").await.unwrap();
+    assert_eq!(
+        answer.observed_at,
+        types::ContextObservedAt::Persisted,
+        "a remembered answer must not claim a live generation"
+    );
+    assert_eq!(answer.source, Some(types::ContextAnswerSource::Observed));
+    assert_eq!(answer.target.ordinal, Some(2));
+}
+
+#[tokio::test]
+async fn vision_seeded_answers_carry_their_source() {
+    let (promotion, _temp) = promotion().await;
+    let evidence = vec![
+        Evidence::Resolution {
+            target: Box::new(TargetSpec {
+                role: Some("button".into()),
+                accessible_name: Some("Sign in".into()),
+                ordinal: None,
+                ..TargetSpec::default()
+            }),
+            fingerprint: Box::new(TargetFingerprint {
+                page_id: PageId::new(),
+                frame: None,
+                role: Some("button".into()),
+                name: Some("Sign in".into()),
+                stable_attributes: BTreeMap::new(),
+            }),
+            candidates: Vec::new(),
+            best_match_authorized: false,
+        },
+        Evidence::IntentExecution {
+            record: record("locate", IntentResolutionPath::VisionFallback),
+        },
+    ];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+
+    let answer = promotion.ask(Some(URL), "Sign in").await.unwrap();
+    assert_eq!(
+        answer.source,
+        Some(types::ContextAnswerSource::VisionPromoted)
+    );
+}
+
+#[tokio::test]
+async fn unknown_sites_answer_nothing() {
+    let (promotion, _temp) = promotion().await;
+    assert!(promotion
+        .ask(Some("https://never-seen.example/login"), "Email address")
+        .await
+        .is_none());
+    assert!(promotion.ask(None, "Email address").await.is_none());
+}
+
+#[tokio::test]
+async fn ambiguous_remembered_controls_answer_nothing() {
+    let promotion = seeded("Address", "textbox", Some(1)).await;
+    let evidence = vec![
+        Evidence::Resolution {
+            target: Box::new(TargetSpec {
+                role: Some("textbox".into()),
+                accessible_name: Some("Address".into()),
+                ordinal: Some(2),
+                ..TargetSpec::default()
+            }),
+            fingerprint: Box::new(TargetFingerprint {
+                page_id: PageId::new(),
+                frame: None,
+                role: Some("textbox".into()),
+                name: Some("Address".into()),
+                stable_attributes: BTreeMap::new(),
+            }),
+            candidates: Vec::new(),
+            best_match_authorized: false,
+        },
+        Evidence::IntentExecution {
+            record: record("fill", IntentResolutionPath::Deterministic),
+        },
+    ];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+
+    assert!(
+        promotion.ask(Some(URL), "Address").await.is_none(),
+        "two same-name remembered controls must tie-refuse"
+    );
+}

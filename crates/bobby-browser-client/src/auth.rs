@@ -50,6 +50,8 @@ pub enum Capability {
     VisionAssist,
     #[serde(rename = "artifact:read")]
     ArtifactRead,
+    #[serde(rename = "context:read")]
+    ContextRead,
     #[serde(rename = "artifact:capture")]
     ArtifactCapture,
     #[serde(rename = "recovery:read")]
@@ -71,6 +73,34 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Every capability, for callers that must not drift as variants are added --
+    /// notably the `tools/list` byte-budget gate, which under-measures the connect
+    /// payload if it misses a capability that advertises a tool. `all_is_exhaustive`
+    /// fails to compile when a variant is added without being listed here.
+    pub const ALL: [Self; 21] = [
+        Self::SessionRead,
+        Self::SessionWrite,
+        Self::PageRead,
+        Self::PageWrite,
+        Self::BrowserMutate,
+        Self::FileUpload,
+        Self::FileDownload,
+        Self::JavascriptEvaluate,
+        Self::IntentExecute,
+        Self::VisionAssist,
+        Self::ArtifactRead,
+        Self::ContextRead,
+        Self::ArtifactCapture,
+        Self::RecoveryRead,
+        Self::RecoveryWrite,
+        Self::JobSubmit,
+        Self::JobRead,
+        Self::JobCancel,
+        Self::AuthorityAdmin,
+        Self::BrowserFingerprint,
+        Self::BrowserHumanize,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SessionRead => "session:read",
@@ -84,6 +114,7 @@ impl Capability {
             Self::IntentExecute => "intent:execute",
             Self::VisionAssist => "vision:assist",
             Self::ArtifactRead => "artifact:read",
+            Self::ContextRead => "context:read",
             Self::ArtifactCapture => "artifact:capture",
             Self::RecoveryRead => "recovery:read",
             Self::RecoveryWrite => "recovery:write",
@@ -121,6 +152,7 @@ impl std::str::FromStr for Capability {
             "intent:execute" => Self::IntentExecute,
             "vision:assist" => Self::VisionAssist,
             "artifact:read" => Self::ArtifactRead,
+            "context:read" => Self::ContextRead,
             "artifact:capture" => Self::ArtifactCapture,
             "recovery:read" => Self::RecoveryRead,
             "recovery:write" => Self::RecoveryWrite,
@@ -200,5 +232,52 @@ mod tests {
         assert_eq!(json, "\"authority:admin\"");
         let parsed: Capability = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, Capability::AuthorityAdmin);
+    }
+
+    #[test]
+    fn all_is_exhaustive_and_unique() {
+        // The wildcard-free match below stops compiling when a variant is added,
+        // which is the point: a capability missing from ALL silently shrinks what
+        // the byte-budget gate measures.
+        fn listed(capability: Capability) {
+            match capability {
+                Capability::SessionRead
+                | Capability::SessionWrite
+                | Capability::PageRead
+                | Capability::PageWrite
+                | Capability::BrowserMutate
+                | Capability::FileUpload
+                | Capability::FileDownload
+                | Capability::JavascriptEvaluate
+                | Capability::IntentExecute
+                | Capability::VisionAssist
+                | Capability::ArtifactRead
+                | Capability::ContextRead
+                | Capability::ArtifactCapture
+                | Capability::RecoveryRead
+                | Capability::RecoveryWrite
+                | Capability::JobSubmit
+                | Capability::JobRead
+                | Capability::JobCancel
+                | Capability::AuthorityAdmin
+                | Capability::BrowserFingerprint
+                | Capability::BrowserHumanize => {}
+            }
+            assert!(
+                Capability::ALL.contains(&capability),
+                "{capability:?} is missing from Capability::ALL"
+            );
+        }
+
+        for capability in Capability::ALL {
+            listed(capability);
+            assert_eq!(
+                capability.as_str().parse::<Capability>().unwrap(),
+                capability
+            );
+        }
+
+        let unique = Capability::ALL.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), Capability::ALL.len(), "ALL has duplicates");
     }
 }

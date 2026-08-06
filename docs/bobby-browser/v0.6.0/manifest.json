@@ -3,12 +3,12 @@
   "package": "bobby-browser",
   "product": "bobby-browser",
   "version": "0.6.0",
-  "contentSha256": "f597bdecd0877cc29053520a8fd4767b781895160587e8c912f859d3e3537b1a",
+  "contentSha256": "420ae55da6a1d776260be2fd439ceeaf481d01b7e93e42ac65aae7df2e6c8ee8",
   "publicBasePath": "/docs/bobby-browser/v0.6.0",
   "stableAlias": "/docs/bobby-browser",
   "release": {
     "tag": "v0.6.0",
-    "commit": "867ff033b56f8a5fde9bd9ee9b2d145d6c843438"
+    "commit": "cd7fd334eeec454b8dc9d18c4aa3a86166180ea5"
   },
-  "generatedAt": "2026-08-06T02:29:55.000Z"
+  "generatedAt": "2026-08-06T15:49:52.000Z"
 }
