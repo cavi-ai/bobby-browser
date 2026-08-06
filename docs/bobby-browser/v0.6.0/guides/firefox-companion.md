@@ -21,38 +21,44 @@ with TTL-bound leases.
 All steps run on the machine that hosts Firefox. Paths below use the macOS
 state dir `~/Library/Application Support/bobby-browser`; adjust as needed.
 
-### 1. Build the extension
+Unsigned permanent sideloading requires Firefox Developer Edition, Nightly,
+or ESR — release Firefox refuses unsigned extensions.
+
+### 1. Install (build + native host + profile sideload)
+
+From a checkout:
 
 ```bash
-cd packages/firefox-companion
-tsc -p tsconfig.json --noEmit
-esbuild src/background.ts src/content.ts --bundle --format=iife \
-  --platform=browser --outdir=dist
-cp manifest.json dist/manifest.json
+make firefox
 ```
 
-(or `pnpm --filter @cavi-ai/bobby-firefox-companion build`)
-
-### 2. Create a dedicated profile and sideload the extension
-
-Unsigned sideloading requires Firefox Developer Edition, Nightly, or ESR —
-release Firefox refuses unsigned permanent extensions.
+or:
 
 ```bash
-PROFILE="$HOME/Library/Application Support/bobby-browser/firefox-profile"
-mkdir -p "$PROFILE/extensions"
-cat > "$PROFILE/user.js" <<'EOF'
+pnpm --filter @cavi-ai/bobby-firefox-companion build
+./target/release/bobby install --companion
+```
+
+That single step:
+
+- copies the built extension into the bobby config dir
+- installs the native messaging host (`com.bobby_browser.companion`)
+- creates the Bobby Firefox profile and writes required `user.js` prefs
+- permanently sideloads an **unpacked** extension into
+  `$PROFILE/extensions/firefox-companion@bobby-browser.local/`
+- writes `firefox-enroll-defaults.json` for popup Pair
+
+Prefs written (appended if missing; existing custom lines are kept):
+
+```
 user_pref("xpinstall.signatures.required", false);
 user_pref("extensions.autoDisableScopes", 14);
-// Fingerprint stack: RFP fights UA/locale/tz spoof; dark theme matches persona.
 user_pref("privacy.resistFingerprinting", false);
 user_pref("ui.systemUsesDarkTheme", 1);
-EOF
-(cd dist && zip -r "$PROFILE/extensions/firefox-companion@bobby-browser.local.xpi" .)
 ```
 
-Both extension prefs are required: the first permits unsigned extensions, the second
-auto-enables sideloaded ones (otherwise the extension installs disabled
+Both extension prefs are required: the first permits unsigned extensions, the
+second auto-enables sideloaded ones (otherwise the extension installs disabled
 pending a consent click). The fingerprint prefs keep Resist Fingerprinting from
 clobbering the BiDi/init-script persona and lean `prefers-color-scheme` toward
 dark (init script also forces the matchMedia result).
@@ -62,12 +68,26 @@ native getter so the value is `false` while `Function.prototype.toString` still
 reports `[native code]` (required for CreepJS `webDriverIsOn` / lieProps).
 Do not expect a preference alone to clear webdriver under an active BiDi session.
 
-### 3. Install the native messaging host
+You do **not** need `about:debugging` → Load Temporary Add-on for the normal
+path. Re-run `make firefox` after rebuilding to refresh the sideload (Firefox
+picks it up on restart).
 
-`bobby install` (enable the Firefox companion item) copies the built extension,
-installs the native host, and writes `firefox-enroll-defaults.json` with the
-default profile path and descriptor location. The manual command below is
-equivalent when you need explicit paths:
+#### Manual / CI sideload (optional)
+
+If you must assemble the profile by hand (or prefer an `.xpi`):
+
+```bash
+PROFILE="$HOME/Library/Application Support/bobby-browser/firefox-profile"
+mkdir -p "$PROFILE/extensions"
+# write the same user.js prefs as above, then either:
+#   unpacked: copy dist/ → "$PROFILE/extensions/firefox-companion@bobby-browser.local/"
+#   or pack:  (cd dist && zip -r "$PROFILE/extensions/firefox-companion@bobby-browser.local.xpi" .)
+```
+
+### 2. Native messaging host (already done by install)
+
+`make firefox` / `bobby install --companion` installs the native host. The
+manual command below is only for explicit paths:
 
 ```bash
 STATE="$HOME/Library/Application Support/bobby-browser"
@@ -78,12 +98,14 @@ bobby install-firefox-native-host \
   --descriptor "$STATE/firefox-native-host-descriptor.json"
 ```
 
-All paths must be absolute. The installer refuses to clobber, writes the
-wrapper `0700` and manifest `0600`, and rolls back on partial failure.
+All paths must be absolute. The installer upgrades bobby-managed wrapper and
+manifest files, writes the wrapper `0700` and manifest `0600`, and rolls back
+on partial failure.
 
-### 4. Start Firefox with BiDi
+### 3. Start Firefox with BiDi
 
 ```bash
+PROFILE="$HOME/Library/Application Support/bobby-browser/firefox-profile"
 "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox" \
   --no-remote --foreground \
   --profile "$PROFILE" \
@@ -91,18 +113,20 @@ wrapper `0700` and manifest `0600`, and rolls back on partial failure.
   about:blank
 ```
 
+If you use the local launchd agent: `make firefox-start`.
+
 Firefox writes the BiDi endpoint to `$PROFILE/WebDriverBiDiServer.json`. A
 fixed port keeps `bidiUrl` stable across restarts; `--remote-debugging-port=0`
 also works if you read the port back from that file.
 
-### 5. Enroll via popup Pair
+### 4. Enroll via popup Pair
 
 The extension generates and persists its own profile id on first run, so
 `browser-selection.json` cannot be written until enrollment completes. Use
 the companion toolbar popup (yellow **Bobby Companion** badge) as the
 primary enroll path:
 
-1. With Firefox still running under the Bobby profile (step 4), click the
+1. With Firefox still running under the Bobby profile (step 3), click the
    toolbar badge and choose **Pair**.
 2. The native host infers `profileDir` from install defaults and the BiDi
    URL from `$PROFILE/WebDriverBiDiServer.json`, runs the same enrollment
@@ -150,7 +174,7 @@ bobby enroll-firefox-profile \
 On success it prints a single-line JSON value and writes the same
 `browser-selection.json` as popup Pair.
 
-### 6. Serve
+### 5. Serve
 
 ```bash
 bobby serve
@@ -171,14 +195,15 @@ backoff, so restarts of either side self-heal).
 - Verify the engine in command evidence: completed commands carry
   `browserExecution` evidence with `engine: "firefox"` and
   `interactionPath: "engineNative"`.
-- Re-sideload a new extension xpi after rebuilding `dist/`; Firefox picks it
-  up on restart.
+- After rebuilding the extension, re-run `make firefox` (or
+  `bobby install --companion`) so the profile sideload refreshes; Firefox
+  picks it up on restart.
 
 ### Operator popup
 
 The toolbar popup is the day-to-day operator panel for the companion:
 
-- **Pair / Re-pair** — enroll or refresh pairing (see step 5).
+- **Pair / Re-pair** — enroll or refresh pairing (see step 4).
 - **Connection** — paired/unpaired badge, companion and profile ids when
   paired, or an unpaired reason.
 - **Session** — active lease count; when the host owns fingerprint spoofing,
@@ -191,7 +216,8 @@ The toolbar popup is the day-to-day operator panel for the companion:
   error when present.
 
 Host-managed fingerprint cannot be flipped from the popup. After changing
-popup code, rebuild and re-sideload `dist/` (see re-sideload note above).
+popup code, rebuild and re-run `make firefox` so the profile sideload
+refreshes.
 
 ## Limitations
 
