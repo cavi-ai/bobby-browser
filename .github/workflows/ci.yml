@@ -267,13 +267,19 @@ jobs:
             --descriptor "$GITHUB_WORKSPACE/target/firefox-companion-proof/native-host-descriptor.json"
 
       - name: Firefox live tests
-        run: >-
-          xvfb-run -a cargo test -p runtime-tests --locked
-          --test firefox_companion
-          --test behavioral_firefox
-          --test fingerprint_firefox
-          --test intent_vision_prefill_firefox
-          -- --ignored --test-threads=1
+        run: |
+          PREFILL_PROFILE="$RUNNER_TEMP/bobby-firefox-prefill-profile"
+          mkdir -p "$PREFILL_PROFILE"
+          BOBBY_FIREFOX_PROFILE="$PREFILL_PROFILE" xvfb-run -a \
+            cargo test -p runtime-tests --locked \
+            --test intent_vision_prefill_firefox \
+            -- --ignored --test-threads=1
+
+          xvfb-run -a cargo test -p runtime-tests --locked \
+            --test firefox_companion \
+            --test behavioral_firefox \
+            --test fingerprint_firefox \
+            -- --ignored --test-threads=1
 
   node:
     name: node · typescript · docs

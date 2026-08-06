@@ -173,6 +173,12 @@ impl InstalledFirefoxRuntime {
     }
 }
 
+impl Drop for InstalledFirefoxRuntime {
+    fn drop(&mut self) {
+        terminate_firefox_on_drop(&mut self._firefox);
+    }
+}
+
 impl InstalledFirefoxConfig {
     pub fn from_env() -> Result<Self, String> {
         fn required(name: &str) -> Result<PathBuf, String> {
@@ -1935,8 +1941,12 @@ async fn wait_for_confirmation(
 }
 
 async fn terminate_firefox(child: &mut Child) {
-    let _ = child.start_kill();
+    terminate_firefox_on_drop(child);
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+fn terminate_firefox_on_drop(child: &mut Child) {
+    let _ = child.start_kill();
 }
 
 fn io_error(error: std::io::Error) -> CommandError {
@@ -1955,6 +1965,19 @@ fn workflow_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drop_cleanup_requests_firefox_child_termination() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+
+        terminate_firefox_on_drop(&mut child);
+
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("child termination timed out")
+            .expect("wait for terminated child");
+    }
 
     #[test]
     fn companion_install_uses_the_standard_temporary_bidi_path_command() {
