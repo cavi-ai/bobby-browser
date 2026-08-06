@@ -1098,9 +1098,7 @@ fn vision_route_configured(config: &AppConfig) -> bool {
 }
 
 fn bootstrap_csv_holds(caps_csv: &str, capability: &str) -> bool {
-    caps_csv
-        .split(',')
-        .any(|entry| entry.trim() == capability)
+    caps_csv.split(',').any(|entry| entry.trim() == capability)
 }
 
 fn check_vision_route_for_assist(
@@ -3651,8 +3649,7 @@ auth = "oauth-device-code"
         let config = root.path().join("config.toml");
         std::fs::write(&config, "").unwrap();
         let bootstrap = root.path().join("bootstrap.env");
-        let material =
-            bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
         let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
@@ -3675,8 +3672,7 @@ endpoint_url = "http://127.0.0.1:9100/vision"
         )
         .unwrap();
         let bootstrap = root.path().join("bootstrap.env");
-        let material =
-            bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
         bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
         let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();

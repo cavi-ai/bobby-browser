@@ -406,7 +406,8 @@ mod tests {
         }
         let expected: BTreeSet<_> = EVERY_TOOL.iter().map(|s| (*s).to_owned()).collect();
         assert_eq!(
-            documented, expected,
+            documented,
+            expected,
             "docs tool table drifted from EVERY_TOOL\nonly in docs: {:?}\nonly in EVERY_TOOL: {:?}",
             documented.difference(&expected).collect::<Vec<_>>(),
             expected.difference(&documented).collect::<Vec<_>>()

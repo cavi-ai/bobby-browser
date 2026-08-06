@@ -206,6 +206,16 @@ async fn http_accepts_evidence_refs() {
 #[tokio::test]
 async fn no_adapter_advertises_a_caller_supplied_evidence_argument() {
     let server = mcp_server().await;
+    // `tools/list` defaults to the narrow explore phase, which advertises
+    // neither of these tools. This asserts a schema's shape, not the default
+    // phase's membership, so widen first.
+    server
+        .handle_message(json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"toolset_select","arguments":{"toolset":"full"}}
+        }))
+        .await
+        .expect("toolset_select answers");
     let listed = server
         .handle_message(json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}))
         .await

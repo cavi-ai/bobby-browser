@@ -1661,12 +1661,14 @@ impl Server {
                 match jobs
                     .submit(
                         &context.principal_id,
-                        input.name,
-                        input.payload.unwrap_or(Value::Null),
-                        priority,
-                        input.max_retries.unwrap_or(3),
-                        input.timeout_ms,
-                        Some(context.correlation_id.as_uuid().to_string()),
+                        crate::jobs::JobSubmission {
+                            name: input.name,
+                            payload: input.payload.unwrap_or(Value::Null),
+                            priority,
+                            max_retries: input.max_retries.unwrap_or(3),
+                            timeout_ms: input.timeout_ms,
+                            correlation_id: Some(context.correlation_id.as_uuid().to_string()),
+                        },
                     )
                     .await
                 {
@@ -3047,7 +3049,7 @@ fn tool_description(name: &str) -> &'static str {
         "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable). Requires browser:mutate and intent:execute. Produces per-field resolution and fill evidence in order. On failure with verificationFailed, targetNotFound, or intentActionMismatch on one field, the fields before it are already filled -- re-run with only the remaining fields.",
         "intent_submit_and_verify" => "Submit a form and verify the expected state (Boundary). Requires browser:mutate and intent:execute. autoCheckpoint defaults to true and mints the checkpoint in this call (returns checkpointId); pass false and pin commandId/attemptId with checkpoint_save first to author invariants. On failure with needsReconciliation, do not retry -- call recovery_status.",
         "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
-        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint defaults to true and mints the checkpoint in the same call (pass false to author your own). On failure with needsReconciliation, do not retry -- call recovery_status first; on targetNotFound, take a fresh a11y_snapshot.",
+        "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint defaults true and mints the checkpoint in that call; pass false to author your own. On failure with needsReconciliation, do not retry -- call recovery_status; on targetNotFound, snapshot again.",
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
         "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Requires browser:mutate. Produces HAR-artifact evidence with entry count, byte size, and checksum. On failure: verificationFailed (no HAR captured), browserCommandFailed (engine could not persist it), or internal (write failed) -- none caller-fixable; retry, and report if it persists.",

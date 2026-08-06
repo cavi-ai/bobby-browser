@@ -11,6 +11,7 @@
 #![recursion_limit = "256"]
 
 mod annotations;
+mod jobs;
 /// Server-to-client MCP notifications (runtime events, tool-list changes).
 pub mod notify;
 mod prompts;
@@ -20,7 +21,6 @@ mod resources;
 mod schema;
 mod server;
 pub mod toolset;
-mod jobs;
 
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
@@ -62,8 +62,8 @@ pub const TOOLS_LIST_BYTE_BUDGET: usize = 128 * 1024;
 /// No single tool may approach the whole type system on its own.
 pub const PER_TOOL_BYTE_BUDGET: usize = 32 * 1024;
 
+pub use jobs::{InProcessJobPort, JobPort, JobPortError, JobPriorityWire, JobSubmission};
 pub use notify::{NotificationSink, NotificationStream};
 pub use resources::{ArtifactCatalogFull, ArtifactResources};
 pub use server::Server;
 pub use toolset::Toolset;
-pub use jobs::{InProcessJobPort, JobPort, JobPortError, JobPriorityWire};

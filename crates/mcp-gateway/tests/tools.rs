@@ -411,6 +411,17 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
     let server = Server::new(runtime.clone());
     initialize(&server).await;
+    // `tools/list` defaults to the narrow explore phase, which advertises
+    // neither of these tools. This asserts a schema's shape, not the default
+    // phase's membership, so widen first.
+    server
+        .handle_message(request(
+            49,
+            "tools/call",
+            json!({"name":"toolset_select","arguments":{"toolset":"full"}}),
+        ))
+        .await
+        .unwrap();
     let listed = server
         .handle_message(request(50, "tools/list", json!({})))
         .await

@@ -4,7 +4,7 @@
 
 Release candidate. No version bump yet.
 
-- `[mcp] startup_toolset`, overridden by `BOBBY_MCP_TOOLSET`: `explore` (default), `act`, `intent`, `verify`, `full`. Sets the phase at connect so the first `tools/list` stays small (~42 KiB on explore). Widen with `toolset_select`.
+- **Breaking (MCP surface):** `tools/list` now defaults to the `explore` phase instead of the full surface. An existing client that connects and does not call `toolset_select` sees the read/snapshot/navigate lifecycle only — no mutation, intent, checkpoint, or `command_execute` tools. `[mcp] startup_toolset`, overridden by `BOBBY_MCP_TOOLSET`, selects the phase at connect: `explore` (default), `act`, `intent`, `verify`, `full`. The first `tools/list` is ~42 KiB on `explore` against 128 KiB on `full`. Capability gates are unchanged and remain the only enforcement boundary; hidden tools stay callable.
 - MCP `job_submit` / `job_status` / `job_cancel` mirror HTTP `/v1/jobs` (same caps). Advertised in the `verify` phase; callable whenever a job port is attached (`bobby mcp-stdio` and `bobby serve` MCP HTTP).
 - Unix release binaries are `strip`ped before packaging. Installation docs cover curl download of GitHub Release assets.
 - Docs: public agent skill (`bobby install --skill`) vs internal SkillGhost / ZigZagZig runtime — navigation title "Internal skill runtime".

@@ -17,6 +17,13 @@ cargo build -p acp-gateway --release
 # binary: ./target/release/acp-gateway
 ```
 
+Or install the host fragment with the CLI (copies `acp-gateway` when built
+alongside `bobby`, writes project `.acp.json` with bootstrap env placeholders):
+
+```bash
+bobby install --host acp --cli --yes
+```
+
 Startup takes the same four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables as
 `bobby init` writes; missing or invalid input fails closed. Protocol version
 pinned: ACP schema v1 (`agent-client-protocol` 2.x).
