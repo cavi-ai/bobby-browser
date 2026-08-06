@@ -137,6 +137,7 @@ impl ModernRuntime {
         let uploads_dir = root.join("uploads");
         std::fs::create_dir_all(&uploads_dir)?;
         let config = AppConfig {
+            cdp: config::CdpConfig::default(),
             http: config::HttpConfig {
                 allow_loopback: true,
                 ..config::HttpConfig::default()
@@ -721,6 +722,7 @@ fn runtime_config(
     artifacts_dir: PathBuf,
 ) -> AppConfig {
     AppConfig {
+        cdp: config::CdpConfig::default(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

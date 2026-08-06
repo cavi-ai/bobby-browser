@@ -75,6 +75,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
     });
 
     let config = AppConfig {
+        cdp: config::CdpConfig::default(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

@@ -151,6 +151,7 @@ async fn adaptive_http() {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
     let config = AppConfig {
+        cdp: config::CdpConfig::default(),
         server: ServerConfig {
             host: "127.0.0.1".into(),
             port: 0,
