@@ -301,8 +301,12 @@ async fn provider_loss_never_fails_a_deterministically_resolvable_intent() {
 #[tokio::test]
 #[ignore = "requires installed headed Firefox + companion profile (BOBBY_FIREFOX_*)"]
 async fn prefill_resolves_stuck_form_on_firefox() {
-    let installed = runtime_tests::InstalledFirefoxConfig::from_env()
-        .expect("installed Firefox test configuration");
+    // The chromium CI suite runs every ignored test in this binary; without
+    // the Firefox fixture env this test is a no-op there. The firefox suite
+    // provides the env and exercises it for real.
+    let Ok(installed) = runtime_tests::InstalledFirefoxConfig::from_env() else {
+        return;
+    };
     let root = tempfile::tempdir().unwrap();
     let propose_calls = Arc::new(AtomicUsize::new(0));
     let assist = Arc::new(CountingVision {

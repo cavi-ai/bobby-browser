@@ -272,6 +272,7 @@ jobs:
           --test firefox_companion
           --test behavioral_firefox
           --test fingerprint_firefox
+          --test intent_vision_prefill
           -- --ignored --test-threads=1
 
   node:
