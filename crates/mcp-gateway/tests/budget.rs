@@ -38,7 +38,12 @@ async fn fixture_server(capabilities: Vec<Capability>) -> Server {
         RuntimeService::default(),
         handle.clone(),
     ));
-    let server = Server::new(runtime);
+    let server = Server::new(runtime)
+        .with_startup_toolset(mcp_gateway::Toolset::Full)
+        .with_jobs({
+            let (port, _scheduler) = mcp_gateway::InProcessJobPort::memory();
+            Arc::new(port)
+        });
     initialize(&server).await;
     server
 }
@@ -255,6 +260,7 @@ const READ_ONLY: &[&str] = &[
     "intent_locate",
     "intent_wait_for_state",
     "intent_extract",
+    "job_status",
 ];
 
 const DESTRUCTIVE: &[&str] = &[
@@ -263,6 +269,7 @@ const DESTRUCTIVE: &[&str] = &[
     "cookie_delete",
     "intent_submit_and_verify",
     "intent_follow",
+    "job_cancel",
 ];
 
 // `command_execute` accepts an arbitrary `RuntimeCommand`, including `Navigate` and

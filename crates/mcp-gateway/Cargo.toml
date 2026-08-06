@@ -25,6 +25,8 @@ sdk-core = { path = "../sdk-core", version = "0.6.0" }
 config = { path = "../config", version = "0.6.0" }
 artifact-store = { path = "../artifact-store", version = "0.6.0" }
 firefox-companion = { path = "../firefox-companion", version = "0.6.0" }
+async-trait.workspace = true
+task-scheduler = { path = "../task-scheduler", version = "0.6.0" }
 
 [dev-dependencies]
 types = { path = "../types", version = "0.6.0", features = ["schema"] }

@@ -229,6 +229,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "selector": string(1, MAX_STRING_BYTES),
                 "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                 "boundary": {"type":"boolean"},
+                "autoCheckpoint":{"type":"boolean"},
                 "expectedUrl": nullable(string(1, MAX_URL_BYTES))
             }),
             vec!["sessionId", "pageId"],
@@ -374,6 +375,18 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["checkpoint"],
         ),
         "workflow_recover" => (json!({"workflowId":id()}), vec!["workflowId"]),
+        "job_submit" => (
+            json!({
+                "name": string(1, MAX_STRING_BYTES),
+                "payload": {},
+                "priority": {"type":"string","enum":["low","normal","high","critical"]},
+                "maxRetries": {"type":"integer","minimum":0,"maximum":32},
+                "timeoutMs": timeout_ms()
+            }),
+            vec!["name"],
+        ),
+        "job_status" => (json!({"jobId": string(1, 128)}), vec!["jobId"]),
+        "job_cancel" => (json!({"jobId": string(1, 128)}), vec!["jobId"]),
         // Either key: `workflowId` for a known workflow, or `sessionId` to
         // discover the recoverable workflows of a session. Neither is required
         // here because exactly-one-of is not expressible in the subset this
@@ -510,6 +523,28 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         }
         "checkpoint_save" => output_ref("CheckpointRecord"),
         "workflow_recover" => output_ref("RecoveryDecision"),
+        "job_submit" => object(
+            json!({
+                "jobId": string(1, 128),
+                "status": string(1, 32)
+            }),
+            &["jobId", "status"],
+        ),
+        "job_status" => object(
+            json!({
+                "id": string(1, 128),
+                "name": string(1, MAX_STRING_BYTES),
+                "status": string(1, 32)
+            }),
+            &["id", "name", "status"],
+        ),
+        "job_cancel" => object(
+            json!({
+                "cancelled": {"type":"boolean"},
+                "jobId": string(1, 128)
+            }),
+            &["cancelled", "jobId"],
+        ),
         "recovery_status" => object(
             json!({
                 "workflowId":id(),

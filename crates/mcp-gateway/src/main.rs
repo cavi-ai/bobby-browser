@@ -94,10 +94,46 @@ async fn run() -> anyhow::Result<()> {
         })?;
         server = server.with_startup_toolset(toolset);
     }
+    let (job_port, scheduler) = match broker_jobs_for_stdio(&config).await {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::warn!(%error, "mcp-stdio jobs disabled: scheduler failed to start");
+            (None, None)
+        }
+    };
+    if let Some(job_port) = job_port {
+        server = server.with_jobs(job_port);
+    }
+    let _scheduler_run = scheduler.map(|scheduler| {
+        tokio::spawn(async move {
+            if let Err(error) = scheduler.run().await {
+                tracing::warn!(%error, "mcp-stdio job scheduler stopped");
+            }
+        })
+    });
     server
         .serve(tokio::io::stdin(), tokio::io::stdout())
         .await?;
     Ok(())
+}
+
+async fn broker_jobs_for_stdio(
+    config: &AppConfig,
+) -> anyhow::Result<(
+    Option<std::sync::Arc<dyn mcp_gateway::JobPort>>,
+    Option<std::sync::Arc<task_scheduler::JobScheduler>>,
+)> {
+    let scheduler = mcp_gateway::InProcessJobPort::from_scheduler(
+        task_scheduler::JobScheduler::from_config(
+            task_scheduler::SchedulerConfig::default()
+                .with_journal_path(config.storage.scheduler_journal_path.clone())
+                .with_drain_timeout(config.server.shutdown_timeout_ms),
+        )
+        .await
+        .map_err(anyhow::Error::new)?,
+    );
+    let (port, scheduler) = scheduler;
+    Ok((Some(std::sync::Arc::new(port) as _), Some(scheduler)))
 }
 
 async fn explicit_startup_handle() -> anyhow::Result<interface_core::CapabilityHandle> {

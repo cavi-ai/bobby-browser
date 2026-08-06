@@ -36,8 +36,27 @@ cargo add bobby-browser-client
 ```
 
 Do not treat registry installs as available until `npm view` / `cargo search`
-shows the version you need. GitHub Release binaries (when cut) unpack to a
-`bobby` binary; see the repository Releases page.
+shows the version you need.
+
+## Install a GitHub Release binary
+
+Assets are named
+`bobby-browser-<version>-{linux|macos|windows}-{x64|arm64}.tar.gz` (`.zip` on
+Windows). Example for the latest macOS arm64 release:
+
+```bash
+TAG="$(curl -fsSL https://api.github.com/repos/cavi-ai/bobby-browser/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
+VERSION="${TAG#v}"
+curl -fsSL -o bobby.tgz \
+  "https://github.com/cavi-ai/bobby-browser/releases/download/${TAG}/bobby-browser-${VERSION}-macos-arm64.tar.gz"
+tar -xzf bobby.tgz
+install -m 755 "bobby-browser-${VERSION}-macos-arm64/bobby" ~/.local/bin/bobby
+bobby doctor
+```
+
+Pick `linux-x64`, `linux-arm64`, `macos-x64`, or `windows-x64` to match your
+host. Release archives are stripped on Unix; see the repository Releases page
+for every asset.
 
 ## Bootstrap credential
 
