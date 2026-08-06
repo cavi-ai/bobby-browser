@@ -196,6 +196,7 @@ jobs:
           --test intent_follow_workflow
           --test intent_form_workflow
           --test intent_vision_escalation
+          --test intent_vision_prefill
           --test interface_capacity
           --test interface_recovery
           --test interface_security

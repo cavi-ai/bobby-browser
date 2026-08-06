@@ -125,6 +125,16 @@ impl RuntimeService {
         Self::build_inner(config, factory, None, None, None).await
     }
 
+    /// Build with an explicit worker factory and an injected [`VisionAssist`]
+    /// provider (Firefox-companion runtimes under test).
+    pub async fn build_with_worker_factory_and_vision_assist(
+        config: &AppConfig,
+        factory: Arc<dyn WorkerFactory>,
+        assist: Arc<dyn VisionAssist>,
+    ) -> Result<Self, RuntimeError> {
+        Self::build_inner(config, factory, None, Some(assist), None).await
+    }
+
     /// Build with a durable profile identity (Firefox-companion runtimes):
     /// attaches context promotion so verified intent outcomes persist
     /// structural control memory under `<context.dir>/<profile-id>/`.
