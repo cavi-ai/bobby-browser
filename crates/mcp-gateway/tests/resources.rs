@@ -111,7 +111,7 @@ impl BrowserWorker for ScreenshotWorker {
             filename: "fixture.txt".to_owned(),
             path: self.download_path.to_string_lossy().into_owned(),
             bytes: DOWNLOAD_BYTES.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(DOWNLOAD_BYTES)),
+            sha256: hex::encode(Sha256::digest(DOWNLOAD_BYTES)),
         }])
     }
     async fn close_page_command(

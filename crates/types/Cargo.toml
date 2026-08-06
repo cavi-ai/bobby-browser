@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+hex = { workspace = true }
 chrono.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true

@@ -241,7 +241,7 @@ impl ArtifactResources {
             .await
             .map_err(|_| resource_error(context, InterfaceErrorCode::ArtifactDenied))?;
         if bytes.len() as u64 != expected_bytes
-            || format!("{:x}", sha2::Sha256::digest(&bytes)) != expected_sha256
+            || hex::encode(sha2::Sha256::digest(&bytes)) != expected_sha256
         {
             return Err(resource_error(context, InterfaceErrorCode::ArtifactDenied));
         }

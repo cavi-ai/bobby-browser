@@ -219,7 +219,7 @@ impl CertificationBundle {
             results: &self.results,
             verdict: self.verdict.into(),
         })?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(hex::encode(Sha256::digest(bytes)))
     }
 
     fn validate_semantics(&self) -> Result<(), BundleError> {
@@ -623,7 +623,7 @@ where
     #[cfg(not(unix))]
     return Err(CliError::UnsupportedPlatform);
     let manifest = ReleaseManifest::from_slice(&manifest_bytes)?;
-    let manifest_sha256 = format!("{:x}", Sha256::digest(&manifest_bytes));
+    let manifest_sha256 = hex::encode(Sha256::digest(&manifest_bytes));
     #[cfg(unix)]
     let output_target = prepare_output_target(&paths)?;
 

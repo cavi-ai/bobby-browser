@@ -40,7 +40,8 @@ shows the version you need.
 
 ## Install a GitHub Release binary
 
-One-liner (Linux / macOS):
+One-liner (Linux / macOS) — installs `bobby`, `mcp-gateway`, and `acp-gateway`
+into `INSTALL_DIR` (default `~/.local/bin`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
@@ -48,9 +49,23 @@ curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/
 
 Optional: `BOBBY_VERSION=0.6.0` (no leading `v`) and `INSTALL_DIR=~/.local/bin`.
 
+### Homebrew (macOS / Linuxbrew)
+
+From a checkout of this repo (custom formula; not yet on homebrew-core):
+
+```bash
+brew install --formula ./Formula/bobby-browser.rb
+```
+
+The formula downloads the matching GitHub Release tarball and installs the
+same three binaries.
+
+### Manual download
+
 Assets are named
 `bobby-browser-<version>-{linux|macos|windows}-{x64|arm64}.tar.gz` (`.zip` on
-Windows). Manual example for the latest macOS arm64 release:
+Windows). Each archive contains `bobby`, `mcp-gateway`, and `acp-gateway`.
+Example for the latest macOS arm64 release:
 
 ```bash
 TAG="$(curl -fsSL https://api.github.com/repos/cavi-ai/bobby-browser/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
@@ -58,7 +73,8 @@ VERSION="${TAG#v}"
 curl -fsSL -o bobby.tgz \
   "https://github.com/cavi-ai/bobby-browser/releases/download/${TAG}/bobby-browser-${VERSION}-macos-arm64.tar.gz"
 tar -xzf bobby.tgz
-install -m 755 "bobby-browser-${VERSION}-macos-arm64/bobby" ~/.local/bin/bobby
+STAGE="bobby-browser-${VERSION}-macos-arm64"
+install -m 755 "$STAGE/bobby" "$STAGE/mcp-gateway" "$STAGE/acp-gateway" ~/.local/bin/
 bobby doctor
 ```
 

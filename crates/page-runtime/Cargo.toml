@@ -12,6 +12,7 @@ default = []
 test-support = ["skill-runtime/test-support"]
 
 [dependencies]
+hex = { workspace = true }
 jsonschema.workspace = true
 artifact-store = { path = "../artifact-store", version = "0.6.0" }
 async-trait.workspace = true

@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+hex = { workspace = true }
 anyhow.workspace = true
 cookie.workspace = true
 encoding_rs.workspace = true

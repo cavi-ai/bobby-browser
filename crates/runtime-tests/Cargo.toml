@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+hex = { workspace = true }
 artifact-store = { path = "../artifact-store" }
 async-trait.workspace = true
 axum = { workspace = true, features = ["multipart"] }

@@ -212,7 +212,7 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
         .await?;
     server.wait_for_preview_confirmation().await?;
     let snapshot = server.snapshot().await;
-    let expected = format!("{:x}", Sha256::digest(std::fs::read(&fixture)?));
+    let expected = hex::encode(Sha256::digest(std::fs::read(&fixture)?));
     persist_evidence("documents", &server, &runtime).await?;
     assert_eq!(snapshot.uploaded_sha256.as_deref(), Some(expected.as_str()));
     assert_eq!(snapshot.uploaded_customer_id.as_deref(), Some("cus_atlas"));

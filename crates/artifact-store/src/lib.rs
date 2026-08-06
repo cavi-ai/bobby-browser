@@ -213,7 +213,7 @@ impl ArtifactStore {
             return Err(ArtifactError::InvalidMetadata);
         }
 
-        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let sha256 = hex::encode(Sha256::digest(bytes));
         let artifact_id = if content_addressed {
             sha256.clone()
         } else {
@@ -484,7 +484,7 @@ fn validate_directory(
         .ok_or(ArtifactError::InvalidMetadata)?;
     let bytes =
         std::fs::read(directory.join(format!("{artifact_id}.{extension}"))).map_err(read_error)?;
-    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let actual_sha256 = hex::encode(Sha256::digest(&bytes));
     if bytes.len() as u64 != expected_bytes || actual_sha256 != expected_sha256 {
         return Err(ArtifactError::InvalidMetadata);
     }

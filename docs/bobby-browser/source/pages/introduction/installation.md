@@ -47,7 +47,7 @@ into `INSTALL_DIR` (default `~/.local/bin`):
 curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
 ```
 
-Optional: `BOBBY_VERSION=0.6.0` (no leading `v`) and `INSTALL_DIR=~/.local/bin`.
+Optional: `BOBBY_VERSION={{PRODUCT_VERSION}}` (no leading `v`) and `INSTALL_DIR=~/.local/bin`.
 
 ### Homebrew (macOS / Linuxbrew)
 

@@ -34,13 +34,9 @@ const OUTBOX_PENDING_PREFIX: &str = "recovery outbox pending: ";
 fn issued_command_identity(
     envelope: &CommandEnvelope,
 ) -> Result<SkillCommandIdentity, SkillFailure> {
-    let command_sha256 = format!(
-        "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&envelope.command)
-                .map_err(|_| SkillFailure::ConfigurationConflict)?
-        )
-    );
+    let command_sha256 = hex::encode(Sha256::digest(
+        serde_json::to_vec(&envelope.command).map_err(|_| SkillFailure::ConfigurationConflict)?,
+    ));
     SkillCommandIdentity::new(
         envelope.command_id.clone(),
         envelope.workflow_id.clone(),

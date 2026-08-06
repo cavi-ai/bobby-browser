@@ -272,7 +272,7 @@ impl BoundedResponse {
             status: self.status.as_u16(),
             redirect_chain: self.redirects.clone(),
             bytes: self.body.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&self.body)),
+            sha256: hex::encode(Sha256::digest(&self.body)),
             elapsed_ms: self.elapsed_ms,
             content_type: content_type(&self.headers),
         }

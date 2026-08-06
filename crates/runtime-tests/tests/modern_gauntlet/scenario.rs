@@ -327,7 +327,7 @@ impl ScenarioServer {
             uploaded_sha256: state
                 .uploaded
                 .as_ref()
-                .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+                .map(|bytes| hex::encode(Sha256::digest(bytes))),
             uploaded_customer_id: state.uploaded_customer_id.clone(),
             uploaded_filename: state.uploaded_filename.clone(),
             uploaded_media_type: state.uploaded_media_type.clone(),
@@ -386,7 +386,7 @@ impl Drop for ScenarioServer {
                     "priorityUpdates": inner.priority_updates,
                     "onboardingRecords": inner.onboarding_records,
                     "onboarding": inner.onboarding,
-                    "uploadedSha256": inner.uploaded.as_ref().map(|bytes| format!("{:x}", Sha256::digest(bytes))),
+                    "uploadedSha256": inner.uploaded.as_ref().map(|bytes| hex::encode(Sha256::digest(bytes))),
                     "uploadedCustomerId": inner.uploaded_customer_id,
                     "uploadedFilename": inner.uploaded_filename,
                     "uploadedMediaType": inner.uploaded_media_type,
@@ -608,7 +608,7 @@ async fn upload_document(
         )
             .into_response();
     };
-    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let digest = hex::encode(Sha256::digest(&bytes));
     let mut inner = state.inner.lock().await;
     inner.uploaded = Some(bytes);
     inner.uploaded_customer_id = customer_id.clone();
@@ -699,7 +699,7 @@ async fn report_state(
     if let Err(error) = require_run(&headers, &state) {
         return error.into_response();
     }
-    Json(json!({ "id": id, "status": "complete", "filename": "atlas-operations.csv", "mediaType": "text/csv", "downloadUrl": "/api/reports/rep_atlas_01/download", "sha256": format!("{:x}", Sha256::digest(b"customer,priority\nAtlas Labs,high\n")) })).into_response()
+    Json(json!({ "id": id, "status": "complete", "filename": "atlas-operations.csv", "mediaType": "text/csv", "downloadUrl": "/api/reports/rep_atlas_01/download", "sha256": hex::encode(Sha256::digest(b"customer,priority\nAtlas Labs,high\n")) })).into_response()
 }
 
 async fn latest_report(
@@ -716,7 +716,7 @@ async fn latest_report(
         )
             .into_response();
     }
-    Json(json!({ "id": "rep_atlas_01", "status": "complete", "filename": "atlas-operations.csv", "mediaType": "text/csv", "downloadUrl": "/api/reports/rep_atlas_01/download", "sha256": format!("{:x}", Sha256::digest(b"customer,priority\nAtlas Labs,high\n")) })).into_response()
+    Json(json!({ "id": "rep_atlas_01", "status": "complete", "filename": "atlas-operations.csv", "mediaType": "text/csv", "downloadUrl": "/api/reports/rep_atlas_01/download", "sha256": hex::encode(Sha256::digest(b"customer,priority\nAtlas Labs,high\n")) })).into_response()
 }
 
 async fn download_report() -> Response<Body> {

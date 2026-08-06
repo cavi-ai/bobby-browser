@@ -59,12 +59,12 @@ pub(crate) fn bootstrap_injected_script(params: &Value) -> Result<Value, CdpErro
         .get("expression")
         .and_then(Value::as_str)
         .ok_or_else(|| CdpError::new(CdpErrorCode::InvalidParams, "missing runtime expression"))?;
-    let digest = format!("{:x}", Sha256::digest(expression.as_bytes()));
+    let digest = hex::encode(Sha256::digest(expression.as_bytes()));
     let identity = (expression.len(), digest.as_str());
     let normalized = normalize_playwright_frame_seq(expression);
     let normalized_digest = normalized
         .as_ref()
-        .map(|value| format!("{:x}", Sha256::digest(value.as_bytes())));
+        .map(|value| hex::encode(Sha256::digest(value.as_bytes())));
     let normalized_identity = normalized
         .as_ref()
         .zip(normalized_digest.as_deref())

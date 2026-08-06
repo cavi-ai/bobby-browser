@@ -3204,7 +3204,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                         false,
                     )
                 })?;
-                if format!("{:x}", Sha256::digest(&bytes)) != artifact_id.to_ascii_lowercase() {
+                if hex::encode(Sha256::digest(&bytes)) != artifact_id.to_ascii_lowercase() {
                     return Err(driver_error(
                         ErrorCode::PolicyDenied,
                         "upload artifact digest verification failed",
@@ -3355,8 +3355,8 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .iter()
             .map(|path| {
                 format!(
-                    "upload://sha256/{:x}",
-                    Sha256::digest(path.as_os_str().as_encoded_bytes())
+                    "upload://sha256/{}",
+                    hex::encode(Sha256::digest(path.as_os_str().as_encoded_bytes()))
                 )
             })
             .collect();

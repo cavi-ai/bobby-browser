@@ -65,13 +65,13 @@ schemars = { version = "1", features = ["derive", "uuid1", "chrono04"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "stream", "json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "gzip", "brotli", "stream", "json", "form"] }
 rustix = { version = "1.1.4", features = ["fs"] }
 scraper = "0.27"
-sha2 = "0.10"
+sha2 = "0.11.0"
 subtle = "2"
 cookie = "0.18"
-dialoguer = "0.11"
+dialoguer = "0.12.0"
 dirs = "6"
 encoding_rs = "0.8"
 futures-util = "0.3"
@@ -94,7 +94,7 @@ tokio = { version = "1", default-features = false, features = [
 tokio-tungstenite = "0.30"
 tempfile = "3"
 toml = "1.1"
-toml_edit = "0.22"
+toml_edit = "0.25.13+spec-1.1.0"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }

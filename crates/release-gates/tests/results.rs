@@ -27,7 +27,7 @@ fn expected_evidence_sha256(result: &GateResult) -> String {
         diagnostics: &result.diagnostics,
     })
     .unwrap();
-    format!("{:x}", Sha256::digest(preimage))
+    hex::encode(Sha256::digest(preimage))
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn result_digest_is_stable_and_redaction_covers_every_text_surface() {
     let serialized = serde_json::to_vec(&result).unwrap();
     assert_eq!(
         result.digest_hex().unwrap(),
-        format!("{:x}", Sha256::digest(serialized))
+        hex::encode(Sha256::digest(serialized))
     );
     assert_eq!(result.digest_hex().unwrap().len(), 64);
 }

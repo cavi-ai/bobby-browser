@@ -102,7 +102,7 @@ impl EngineSkillAdapter {
         };
         let bytes =
             serde_json::to_vec(&canonical).map_err(|_| SkillFailure::ConfigurationConflict)?;
-        let digest = format!("{:x}", Sha256::digest(bytes));
+        let digest = hex::encode(Sha256::digest(bytes));
         let profile = SkillProfile::new(
             self.version.clone(),
             self.engine,

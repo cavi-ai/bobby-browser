@@ -18,11 +18,15 @@ cargo build -p acp-gateway --release
 ```
 
 Or install the host fragment with the CLI (copies `acp-gateway` when built
-alongside `bobby`, writes project `.acp.json` with bootstrap env placeholders):
+alongside `bobby`, writes project `.acp.json` pointing at `bobby acp-stdio`):
 
 ```bash
 bobby install --host acp --cli --yes
 ```
+
+`bobby acp-stdio` loads the bootstrap credential the same way `bobby mcp-stdio`
+does, then execs `acp-gateway`. No bootstrap env vars belong in the host
+config file.
 
 Startup takes the same four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables as
 `bobby init` writes; missing or invalid input fails closed. Protocol version

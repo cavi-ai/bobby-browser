@@ -1622,7 +1622,7 @@ impl BrowserWorker for ChromiumWorker {
                 filename: begin.suggested_filename.clone(),
                 path: path.to_string_lossy().into_owned(),
                 bytes: bytes.len() as u64,
-                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                sha256: hex::encode(Sha256::digest(&bytes)),
             },
             resolved.evidence,
         ])

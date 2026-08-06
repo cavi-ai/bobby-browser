@@ -407,6 +407,11 @@ impl HealBootstrapReport {
 }
 
 /// Union an existing capabilities CSV with [`DEFAULT_CAPABILITIES`].
+///
+/// Test-only: every production heal passes an explicit floor
+/// ([`capabilities_for_preset`] or the caller's own), so shipping this as
+/// reachable API would be dead code.
+#[cfg(test)]
 pub fn union_capabilities_csv(existing_csv: &str) -> Result<(String, Vec<&'static str>)> {
     union_capabilities_csv_with(existing_csv, DEFAULT_CAPABILITIES)
 }
@@ -514,7 +519,8 @@ pub fn heal_process_env_capabilities() -> Result<HealBootstrapReport> {
         .ok()
         .and_then(|raw| BootstrapPreset::parse(&raw))
         .unwrap_or(BootstrapPreset::Unrestricted);
-    let (healed_csv, added) = union_capabilities_csv_with(&existing, capabilities_for_preset(preset))?;
+    let (healed_csv, added) =
+        union_capabilities_csv_with(&existing, capabilities_for_preset(preset))?;
     if added.is_empty() {
         return Ok(HealBootstrapReport::default());
     }

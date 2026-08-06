@@ -477,7 +477,7 @@ fn read_committed_artifact(
         .map_err(|_| BoundaryError::Denied)?;
     let bytes = read_bounded_file(payload_fd.into(), expected_bytes)?;
     if bytes.len() as u64 != expected_bytes
-        || format!("{:x}", Sha256::digest(&bytes)) != expected_sha256
+        || hex::encode(Sha256::digest(&bytes)) != expected_sha256
     {
         return Err(BoundaryError::Denied);
     }

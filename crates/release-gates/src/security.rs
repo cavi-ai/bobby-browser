@@ -174,7 +174,7 @@ pub fn security_catalog_sha256() -> String {
         }
         digest_catalog_field(&mut digest, check.proof.marker.as_bytes());
     }
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 fn digest_catalog_field(digest: &mut Sha256, value: &[u8]) {
