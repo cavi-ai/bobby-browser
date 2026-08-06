@@ -32,6 +32,11 @@ Generate them with `bobby init` (writes `…/bobby-browser/bootstrap.env`), then
 either export the file into the environment or point your MCP client `env` at
 those keys. Missing or invalid startup input fails closed.
 
+For agent hosts that should not mint principals, use
+`bobby init --preset agent`. That omits `authority:admin`, writes
+`# bobby-bootstrap-preset: agent`, and keeps heal from widening past the agent
+floor. Default `bobby init` remains unrestricted (includes `authority:admin`).
+
 There is no single `AUTOMATION_RUNTIME_TOKEN` env var for stdio startup. That
 name is only a conventional alias for the **client** bearer when talking to the
 HTTP runtime / TypeScript SDK.
