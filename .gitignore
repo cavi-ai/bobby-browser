@@ -25,12 +25,23 @@ AGENTS.md
 .gemini/
 .kiro/
 .qoder/
+.cursor/
+.codebuddy/
 
-docs/plans
+# Agent plans/specs — local only
+docs/plans/
+docs/plans/**
 docs/superpowers/
+docs/superpowers/**
 .superpowers/
+.superpowers/**
 .remember/
-
+docs/brainstorms/
+docs/brainstorms/**
+docs/specs/
+docs/specs/**
+plans/
+plans/**
 
 QODER.md
 AGENTS.md
@@ -38,7 +49,7 @@ CODEBUDDY.md
 GEMINI.md
 KIRO.md
 CLAUDE.md
-
+.bobby-browser/
 opencode.jsonc
 
 # Test-run artifacts: the scheduler journal a broker fixture opens on start.
