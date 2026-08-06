@@ -1559,6 +1559,50 @@ async fn stuck_outcome_with_prior_evidence(
         };
     }
 
+    // Prefill cache consult, before any screenshot: a remembered proposal
+    // answers the stuck field for free. Only reachable when
+    // `[vision].prefill` threaded a cache through an open gate.
+    if let Some(proposals) = &vision.proposals {
+        let key = report.purpose.clone().unwrap_or_default();
+        if let Some(cached) = proposals.proposal_for(page_id, &key) {
+            match execute_vision_action(
+                page_id,
+                browser,
+                &VisionAction::Click {
+                    x: cached.x,
+                    y: cached.y,
+                },
+            )
+            .await
+            {
+                Ok(mut act_evidence) => {
+                    let mut evidence = prior_evidence;
+                    evidence.append(&mut act_evidence);
+                    let artifact_ids = artifact_ids_from(&evidence);
+                    evidence.push(intent_evidence(execution_record_with_path(
+                        report.intent_kind,
+                        report.purpose.clone(),
+                        report.plan_summary.clone(),
+                        report.candidates.clone(),
+                        None,
+                        "visionPrefill",
+                        ResolutionDetails {
+                            path: IntentResolutionPath::VisionPrefill,
+                            vision_proposal_sha256: None,
+                            artifact_ids,
+                        },
+                    )));
+                    return IntentOutcome::Completed { evidence };
+                }
+                Err(_) => {
+                    // A cached proposal that cannot be executed is dropped,
+                    // never retried; live escalation proceeds unchanged.
+                    proposals.drop_proposal(page_id, &key);
+                }
+            }
+        }
+    }
+
     escalate_with_vision(
         report,
         stuck_evidence,

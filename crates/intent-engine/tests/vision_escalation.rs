@@ -160,6 +160,7 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
             session_ok: false,
             capability_ok: false,
             assist: Some(assist),
+            proposals: None,
         },
     )
     .await;
@@ -203,6 +204,7 @@ async fn stuck_with_gates_uses_vision_propose_and_execute() {
             session_ok: true,
             capability_ok: true,
             assist: Some(assist),
+            proposals: None,
         },
     )
     .await;
@@ -245,6 +247,7 @@ async fn low_confidence_proposal_fails_closed() {
             session_ok: true,
             capability_ok: true,
             assist: Some(assist),
+            proposals: None,
         },
     )
     .await;
@@ -288,6 +291,7 @@ async fn policy_denied_never_calls_vision() {
             session_ok: true,
             capability_ok: true,
             assist: Some(assist),
+            proposals: None,
         },
     )
     .await;
@@ -333,6 +337,7 @@ async fn an_open_session_policy_does_not_substitute_for_the_capability() {
             session_ok: true,
             capability_ok: false,
             assist: Some(assist),
+            proposals: None,
         },
     )
     .await;
@@ -374,6 +379,7 @@ async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
             session_ok: false,
             capability_ok: true,
             assist: Some(assist),
+            proposals: None,
         },
     )
     .await;
@@ -386,4 +392,295 @@ async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
         panic!("expected Failed, got {outcome:?}");
     };
     assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+}
+
+#[derive(Default)]
+struct FakeProposals {
+    hits: std::collections::HashMap<String, intent_engine::CachedProposal>,
+    consulted: Arc<AtomicBool>,
+    dropped: Arc<AtomicUsize>,
+}
+
+impl intent_engine::ProposalLookup for FakeProposals {
+    fn proposal_for(&self, _page: &PageId, purpose: &str) -> Option<intent_engine::CachedProposal> {
+        self.consulted.store(true, Ordering::SeqCst);
+        self.hits
+            .get(purpose.trim().to_lowercase().as_str())
+            .cloned()
+    }
+    fn drop_proposal(&self, _page: &PageId, _purpose: &str) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+    fn record_proposals(
+        &self,
+        _page: &PageId,
+        _proposals: Vec<(String, intent_engine::CachedProposal)>,
+    ) {
+    }
+}
+
+fn cached_click(confidence: f32) -> intent_engine::CachedProposal {
+    intent_engine::CachedProposal {
+        x: 12.0,
+        y: 34.0,
+        confidence,
+    }
+}
+
+#[tokio::test]
+async fn cache_hit_never_calls_the_provider() {
+    let called = Arc::new(AtomicBool::new(false));
+    let click_xy_calls = Arc::new(AtomicUsize::new(0));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: click_proposal(0.91),
+    });
+    let proposals = Arc::new(FakeProposals {
+        hits: [("continue".to_string(), cached_click(0.9))]
+            .into_iter()
+            .collect(),
+        consulted: Arc::new(AtomicBool::new(false)),
+        dropped: Arc::new(AtomicUsize::new(0)),
+    });
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        click_xy_calls: click_xy_calls.clone(),
+        ..FakeBrowser::default()
+    };
+    let page_id = PageId::new();
+
+    let outcome = IntentEngine::execute(
+        &locate(),
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: Some(proposals),
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(
+        !called.load(Ordering::SeqCst),
+        "provider was called despite a cache hit"
+    );
+    assert_eq!(click_xy_calls.load(Ordering::SeqCst), 1);
+    let record = evidence.iter().find_map(|item| match item {
+        Evidence::IntentExecution { record } => Some(record),
+        _ => None,
+    });
+    let record = record.expect("IntentExecution evidence");
+    assert_eq!(record.resolution_path, IntentResolutionPath::VisionPrefill);
+    assert_eq!(record.verification, "visionPrefill");
+}
+
+#[tokio::test]
+async fn cache_miss_falls_through_to_live_escalation() {
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: click_proposal(0.91),
+    });
+    let proposals = Arc::new(FakeProposals::default());
+    let consulted = proposals.consulted.clone();
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        click_xy_calls: Arc::new(AtomicUsize::new(0)),
+        ..FakeBrowser::default()
+    };
+    let page_id = PageId::new();
+
+    let outcome = IntentEngine::execute(
+        &locate(),
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: Some(proposals),
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { .. } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(
+        consulted.load(Ordering::SeqCst),
+        "cache was never consulted"
+    );
+    assert!(
+        called.load(Ordering::SeqCst),
+        "provider was not called on a miss"
+    );
+}
+
+#[tokio::test]
+async fn closed_gates_never_consult_the_cache() {
+    for (session_ok, capability_ok) in [(true, false), (false, true)] {
+        let proposals = Arc::new(FakeProposals {
+            hits: [("continue".to_string(), cached_click(0.9))]
+                .into_iter()
+                .collect(),
+            consulted: Arc::new(AtomicBool::new(false)),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        });
+        let consulted = proposals.consulted.clone();
+        let browser = FakeBrowser::default();
+        let page_id = PageId::new();
+
+        let outcome = IntentEngine::execute(
+            &locate(),
+            &page_id,
+            &browser,
+            &VisionContext {
+                session_ok,
+                capability_ok,
+                assist: None,
+                proposals: Some(proposals),
+            },
+        )
+        .await;
+
+        let IntentOutcome::Failed { .. } = outcome else {
+            panic!("expected Failed, got {outcome:?}");
+        };
+        assert!(
+            !consulted.load(Ordering::SeqCst),
+            "cache consulted with gates closed ({session_ok}, {capability_ok})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_cached_proposal_is_dropped_and_escalates_live() {
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: click_proposal(0.91),
+    });
+    let proposals = Arc::new(FakeProposals {
+        hits: [("continue".to_string(), cached_click(0.9))]
+            .into_iter()
+            .collect(),
+        consulted: Arc::new(AtomicBool::new(false)),
+        dropped: Arc::new(AtomicUsize::new(0)),
+    });
+    let dropped = proposals.dropped.clone();
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        // click_xy fails for the cached click, succeeds for the live one?
+        // FakeBrowser::click_xy always succeeds here, so use a failing
+        // override via gather_error-free path: simulate by flag.
+        click_xy_calls: Arc::new(AtomicUsize::new(0)),
+        ..FakeBrowser::default()
+    };
+    let _ = browser;
+    // Use a browser whose click_xy fails to force the drop path.
+    let browser = FailingClickBrowser {
+        inner: FakeBrowser {
+            screenshot_png: b"png".to_vec(),
+            ..FakeBrowser::default()
+        },
+    };
+    let page_id = PageId::new();
+
+    let outcome = IntentEngine::execute(
+        &locate(),
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: Some(proposals),
+        },
+    )
+    .await;
+
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "bad entry was not dropped"
+    );
+    assert!(
+        called.load(Ordering::SeqCst),
+        "live escalation did not run after a failed cached proposal"
+    );
+    let IntentOutcome::Failed { .. } = outcome else {
+        // Live escalation runs click_xy again, which fails here too — the
+        // outcome is a vision act failure, which is correct and expected.
+        panic!("expected Failed from the failing live act, got {outcome:?}");
+    };
+}
+
+/// A browser whose click_xy always fails, to exercise the cached-proposal
+/// drop path; everything else delegates to FakeBrowser.
+struct FailingClickBrowser {
+    inner: FakeBrowser,
+}
+
+#[async_trait]
+impl IntentBrowser for FailingClickBrowser {
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        self.inner.collect_candidates(page_id, target).await
+    }
+    async fn click(
+        &self,
+        page_id: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.click(page_id, command).await
+    }
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(CommandError {
+            code: ErrorCode::VisionAssistFailed,
+            message: "click_xy failed".into(),
+            layer: types::ErrorLayer::Page,
+            retryable: false,
+        })
+    }
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.type_text(page_id, command).await
+    }
+    async fn upload_files(
+        &self,
+        page_id: &PageId,
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.upload_files(page_id, command).await
+    }
+    async fn wait_for(
+        &self,
+        page_id: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.wait_for(page_id, command).await
+    }
+    async fn capture_screenshot(
+        &self,
+        page_id: &PageId,
+        command: &CaptureScreenshotCommand,
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        self.inner.capture_screenshot(page_id, command).await
+    }
 }
