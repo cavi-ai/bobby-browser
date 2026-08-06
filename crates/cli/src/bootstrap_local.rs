@@ -416,7 +416,11 @@ pub fn ensure_unrestricted_bootstrap(path: &Path) -> Result<HealBootstrapReport>
 
 fn xdg_config_bootstrap_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    Some(home.join(".config").join("bobby-browser").join("bootstrap.env"))
+    Some(
+        home.join(".config")
+            .join("bobby-browser")
+            .join("bootstrap.env"),
+    )
 }
 
 struct BootstrapEnvFields {
@@ -788,7 +792,9 @@ mod tests {
         assert!(report.file_rewritten);
         let rewritten = std::fs::read_to_string(&path).unwrap();
         assert!(rewritten.lines().all(|line| {
-            line.trim().is_empty() || line.trim().starts_with("export ") || line.trim().starts_with('#')
+            line.trim().is_empty()
+                || line.trim().starts_with("export ")
+                || line.trim().starts_with('#')
         }));
         assert!(rewritten.contains("browser:fingerprint"));
         load_startup_from_env_file(&path).unwrap();

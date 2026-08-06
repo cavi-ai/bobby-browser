@@ -1187,7 +1187,10 @@ fn run_doctor(
                     ),
                 );
             }
-            Ok(_) if path.exists() || std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES").is_ok() => {
+            Ok(_)
+                if path.exists()
+                    || std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES").is_ok() =>
+            {
                 report.ok(
                     "bootstrap-capabilities",
                     "current (matches defaults)".to_string(),
@@ -1203,11 +1206,7 @@ fn run_doctor(
         }
         if path.exists() {
             match bootstrap_local::load_bootstrap_capabilities_csv(path) {
-                Ok(caps)
-                    if !caps
-                        .split(',')
-                        .any(|c| c.trim() == "browser:fingerprint") =>
-                {
+                Ok(caps) if !caps.split(',').any(|c| c.trim() == "browser:fingerprint") => {
                     report.warn(
                         "bootstrap-capabilities",
                         "bootstrap still lacks browser:fingerprint after heal".to_string(),
