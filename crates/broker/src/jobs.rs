@@ -62,6 +62,9 @@ pub fn register_builtin_handlers(scheduler: &mut JobScheduler) {
     scheduler.register_handler("sleep".to_string(), Arc::new(SleepHandler));
 }
 
+/// Built-in handler names registered by [`register_builtin_handlers`].
+pub const BUILTIN_JOB_HANDLERS: &[&str] = &["echo", "sleep"];
+
 /// Build scheduler config from app storage + server drain settings.
 pub fn scheduler_config_from_app(config: &AppConfig) -> SchedulerConfig {
     SchedulerConfig::default()

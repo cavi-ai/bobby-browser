@@ -49,6 +49,10 @@ pub fn ensure_loopback_vision_defaults(config: &mut VisionConfig) {
 
 /// Upsert vision platform settings into `path`, preserving unrelated tables.
 ///
+/// The HTTP vision endpoint is written under `[nodes.vision]` (`kind = "vision"`)
+/// so runtime resolution goes through `NodeRegistry` without a dual-truth
+/// `[vision].endpoint_url`. Provider profiles stay under `[vision.providers.*]`.
+///
 /// Only env var names are written — never secret values.
 pub fn upsert_vision_platform(
     path: &Path,
@@ -66,9 +70,9 @@ pub fn upsert_vision_platform(
     };
 
     let vision = ensure_table(doc.as_table_mut(), "vision")?;
-
-    vision["endpoint_url"] = value(endpoint_url);
-    vision["token_env"] = value(token_env);
+    // Prefer [nodes.vision] for the HTTP endpoint; drop legacy dual-truth keys.
+    vision.remove("endpoint_url");
+    vision.remove("token_env");
     vision["provider"] = value(provider);
 
     let providers = ensure_table(vision, "providers")?;
@@ -81,6 +85,12 @@ pub fn upsert_vision_platform(
     } else {
         provider_table.remove("api_key_env");
     }
+
+    let nodes = ensure_table(doc.as_table_mut(), "nodes")?;
+    let node = ensure_table(nodes, "vision")?;
+    node["kind"] = value("vision");
+    node["endpoint_url"] = value(endpoint_url);
+    node["token_env"] = value(token_env);
 
     std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)?;
     Ok(())
@@ -166,8 +176,15 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("host = \"127.0.0.1\""));
         assert!(text.contains("[vision.providers.lmstudio]"));
+        assert!(text.contains("[nodes.vision]"));
+        assert!(text.contains("kind = \"vision\""));
         let loaded = AppConfig::load(&path).unwrap();
         assert_eq!(loaded.vision.provider.as_deref(), Some("lmstudio"));
+        assert!(loaded.vision.endpoint_url.is_none());
+        assert_eq!(
+            loaded.nodes.get("vision").map(|n| n.endpoint_url.as_str()),
+            Some("http://127.0.0.1:9100/vision")
+        );
     }
 
     #[test]

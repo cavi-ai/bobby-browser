@@ -244,6 +244,17 @@ fn check_javascript_session_gate(holds_javascript_evaluate: bool) -> Option<Doct
     })
 }
 
+fn check_builtin_job_handlers() -> DoctorCheck {
+    DoctorCheck {
+        status: DoctorStatus::Ok,
+        name: "job-handlers".to_string(),
+        detail: format!(
+            "builtin job handlers: {} (job_submit name=…)",
+            broker::BUILTIN_JOB_HANDLERS.join(", ")
+        ),
+    }
+}
+
 fn check_bootstrap_preset(path: Option<&Path>, caps_csv: Option<&str>) -> DoctorCheck {
     let preset = bootstrap_local::read_bootstrap_preset(path);
     let holds_admin = caps_csv.is_some_and(|caps| bootstrap_csv_holds(caps, "authority:admin"));
@@ -834,6 +845,7 @@ pub(crate) fn run_doctor(
     if let Some(check) = check_javascript_session_gate(holds_javascript_evaluate) {
         push_doctor_check(&mut report, check);
     }
+    push_doctor_check(&mut report, check_builtin_job_handlers());
 
     let caps_for_preset = bootstrap_path_for_heal
         .as_ref()

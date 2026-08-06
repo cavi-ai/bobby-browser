@@ -16,6 +16,12 @@ in-process recovery strategies and are not MCP tools.
 
 Jobs: `job_submit` / `job_status` / `job_cancel` (needs `job:*` caps). They
 advertise after `toolset_select` → `verify`. Same contract as HTTP `/v1/jobs`.
+Built-in handlers today: `echo` (returns payload) and `sleep` (`payload.ms`).
+`bobby doctor` lists them under `job-handlers`.
+
+Release layout is three binaries (`bobby`, `mcp-gateway`, `acp-gateway`). Keep
+`tools/list` small with Explore (`toolset_select` / `BOBBY_MCP_TOOLSET=explore`)
+unless you need the full catalog.
 
 bobby-browser is a browser automation runtime, not an agent. You drive it
 through MCP tools; the runtime verifies every effect and returns evidence.
