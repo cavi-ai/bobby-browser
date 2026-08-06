@@ -42,7 +42,7 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     env:
-      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
     steps:
       - uses: actions/checkout@v7
         with:
