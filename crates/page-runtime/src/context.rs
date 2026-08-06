@@ -83,6 +83,9 @@ struct PageContext {
     /// Ids only, never the evidence: the journal stays the single authority on
     /// what happened, and a copy here could disagree with it.
     commands: Vec<CommandId>,
+    /// Kind names of those same commands, same order, same cap. Kinds are
+    /// static strings ("fill", "click"), never values.
+    command_kinds: Vec<&'static str>,
     nodes: Vec<AccessibilityNode>,
     /// Vision proposals cached for this page, valid only while
     /// `proposals_at == generation`.
@@ -118,6 +121,7 @@ impl ContextGraph {
             observed_at: 0,
             recorded_seq: seq,
             commands: Vec::new(),
+            command_kinds: Vec::new(),
             nodes: Vec::new(),
             proposals: Vec::new(),
             proposals_at: 0,
@@ -132,7 +136,7 @@ impl ContextGraph {
     /// Unlike [`Self::record`], this does not require the page to have been
     /// observed, and it survives invalidation: what happened on a page stays
     /// true after the page changes.
-    pub fn record_command(&self, page: &PageId, command: CommandId) {
+    pub fn record_command(&self, page: &PageId, command: CommandId, kind: &'static str) {
         let seq = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -145,6 +149,7 @@ impl ContextGraph {
             observed_at: 0,
             recorded_seq: seq,
             commands: Vec::new(),
+            command_kinds: Vec::new(),
             nodes: Vec::new(),
             proposals: Vec::new(),
             proposals_at: 0,
@@ -154,8 +159,29 @@ impl ContextGraph {
         }
         if entry.commands.len() >= MAX_RETAINED_COMMANDS {
             entry.commands.remove(0);
+            entry.command_kinds.remove(0);
         }
         entry.commands.push(command);
+        entry.command_kinds.push(kind);
+    }
+
+    /// Kind names of the most recent commands recorded against `page`,
+    /// newest last, capped at 8. For the vision prompt's recent-commands
+    /// block; kinds only, never values.
+    pub fn recent_command_kinds(&self, page: &PageId) -> Vec<String> {
+        self.lock()
+            .get(page)
+            .map(|entry| {
+                entry
+                    .command_kinds
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .rev()
+                    .map(|kind| (*kind).to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Caches vision proposals for `page`, stamped at the current
@@ -318,6 +344,33 @@ impl ContextGraph {
         self.pages
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Static kind name for a command ("fill", "click", …), for the vision
+/// prompt's recent-commands block. Never carries values.
+pub fn command_kind_name(command: &RuntimeCommand) -> &'static str {
+    match command {
+        RuntimeCommand::Intent(intent) => match intent {
+            types::IntentCommand::Locate(_) => "locate",
+            types::IntentCommand::Fill(_) => "fill",
+            types::IntentCommand::CompleteForm(_) => "complete_form",
+            types::IntentCommand::SubmitAndVerify(_) => "submit_and_verify",
+            types::IntentCommand::WaitForState(_) => "wait_for_state",
+            types::IntentCommand::Follow(_) => "follow",
+            types::IntentCommand::DismissObstruction(_) => "dismiss_obstruction",
+            types::IntentCommand::Extract(_) => "extract",
+        },
+        RuntimeCommand::Primitive(primitive) => match primitive {
+            PrimitiveCommand::Navigate(_) => "navigate",
+            PrimitiveCommand::Click(_) => "click",
+            PrimitiveCommand::TypeText(_) => "type_text",
+            PrimitiveCommand::Inspect(_) => "inspect",
+            PrimitiveCommand::WaitFor(_) => "wait_for",
+            PrimitiveCommand::AccessibilitySnapshot(_) => "a11y_snapshot",
+            PrimitiveCommand::CaptureScreenshot(_) => "screenshot",
+            _ => "primitive",
+        },
     }
 }
 

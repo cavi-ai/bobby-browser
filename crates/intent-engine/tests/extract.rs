@@ -345,6 +345,7 @@ async fn extract_escalates_missing_field_to_vision_and_uses_the_proposed_value()
             assist: Some(assist),
             proposals: None,
             defer_escalation: false,
+            prompt_context: None,
         },
     )
     .await;
@@ -401,6 +402,7 @@ async fn extract_reports_field_missing_when_vision_confidence_is_below_floor() {
             assist: Some(assist),
             proposals: None,
             defer_escalation: false,
+            prompt_context: None,
         },
     )
     .await;

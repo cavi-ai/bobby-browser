@@ -19,6 +19,32 @@ pub struct VisionProposeRequest {
     pub intent_kind: String,
     pub screenshot_png: Vec<u8>,
     pub stuck: StuckKind,
+    /// Optional context block enriching the provider prompt. Structure and
+    /// command kinds only — never typed values or page text.
+    pub context: Option<VisionPromptContext>,
+}
+
+/// Context for a vision prompt: where the page is, what the candidate
+/// controls look like, and what recently happened. Every field is
+/// structural; the type has nowhere to carry a value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionPromptContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<VisionPromptCandidate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_command_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionPromptCandidate {
+    pub role: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +58,10 @@ pub struct VisionContextBudget {
 impl Default for VisionContextBudget {
     fn default() -> Self {
         Self {
-            max_text_bytes: 1_024,
+            // Raised for the context block: url + top-K candidates + recent
+            // command kinds must fit beside purpose and intent kind, and the
+            // budget test proves the block is still bounded.
+            max_text_bytes: 4_096,
             max_image_bytes: 4 * 1_024 * 1_024,
             max_image_width: 4_096,
             max_image_height: 4_096,
@@ -59,6 +88,7 @@ pub struct VisionPacketInput {
     pub region: VisionImageRegion,
     pub allowed_actions: Vec<String>,
     pub evidence_digest: String,
+    pub context: Option<VisionPromptContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +100,7 @@ pub struct VisionTaskPacket {
     pub region: VisionImageRegion,
     pub allowed_actions: Vec<String>,
     pub evidence_digest: String,
+    pub context: Option<VisionPromptContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,10 +134,18 @@ pub fn compile_vision_packet(
     input: VisionPacketInput,
     budget: VisionContextBudget,
 ) -> Result<VisionTaskPacket, VisionPacketError> {
+    let context_bytes = input
+        .context
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|_| VisionPacketError::TextBudgetExceeded)?
+        .map_or(0, |bytes| bytes.len());
     let text_bytes = input
         .purpose
         .len()
         .checked_add(input.intent_kind.len())
+        .and_then(|total| total.checked_add(context_bytes))
         .ok_or(VisionPacketError::TextBudgetExceeded)?;
     if text_bytes > budget.max_text_bytes {
         return Err(VisionPacketError::TextBudgetExceeded);
@@ -146,6 +185,7 @@ pub fn compile_vision_packet(
         region,
         allowed_actions: input.allowed_actions,
         evidence_digest: input.evidence_digest,
+        context: input.context,
     })
 }
 

@@ -83,6 +83,7 @@ async fn propose_posts_expected_openai_body_and_maps_response() {
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "aGVsbG8=".into(),
+            context: None,
         })
         .await
         .unwrap();
@@ -136,6 +137,7 @@ async fn malformed_model_json_returns_invalid() {
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "abc".into(),
+            context: None,
         })
         .await
         .unwrap_err();
@@ -154,6 +156,7 @@ async fn empty_api_key_omits_authorization_header() {
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "aGVsbG8=".into(),
+            context: None,
         })
         .await
         .unwrap();
@@ -188,4 +191,63 @@ async fn extract_maps_value_from_model_json() {
         .expect("request captured");
     assert_eq!(body["model"], json!("gpt-4o"));
     assert_eq!(body["response_format"], json!({ "type": "json_object" }));
+}
+
+#[tokio::test]
+async fn propose_renders_the_context_block_into_the_prompt() {
+    let (base_url, state) = start_mock_openai().await;
+    let upstream = OpenAiUpstream::new("test-key".into(), "gpt-4o".into(), base_url);
+
+    upstream
+        .propose(ProposeInput {
+            purpose: "find email field".into(),
+            intent_kind: "fill".into(),
+            stuck: "targetMissing".into(),
+            screenshot_png_b64: "aGVsbG8=".into(),
+            context: Some(vision_proxy::wire::ProposeContext {
+                url: Some("https://example.test/signup".into()),
+                candidates: vec![
+                    vision_proxy::wire::ProposeContextCandidate {
+                        role: "textbox".into(),
+                        name: "Email address".into(),
+                        ordinal: Some(1),
+                    },
+                    vision_proxy::wire::ProposeContextCandidate {
+                        role: "button".into(),
+                        name: "Continue".into(),
+                        ordinal: None,
+                    },
+                ],
+                recent_command_kinds: vec!["navigate".into(), "fill".into()],
+            }),
+        })
+        .await
+        .unwrap();
+
+    let body = state
+        .last_body
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("request captured");
+    let messages = body["messages"].as_array().expect("messages array");
+    let user = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user message");
+    let text = user["content"]
+        .as_array()
+        .expect("multimodal content")
+        .iter()
+        .find(|p| p["type"] == "text")
+        .expect("text part")["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("purpose: find email field"), "{text}");
+    assert!(text.contains("url: https://example.test/signup"), "{text}");
+    assert!(text.contains("candidates:"), "{text}");
+    assert!(text.contains("- textbox \"Email address\" (#1)"), "{text}");
+    assert!(text.contains("- button \"Continue\""), "{text}");
+    assert!(text.contains("recentCommands: navigate, fill"), "{text}");
 }

@@ -13,6 +13,7 @@ pub use verify::{compatible, execution_record, summarize_target, verify_fill};
 pub use vision::{
     compile_vision_packet, proposal_sha256, validate_backend_result, CachedProposal,
     ProposalLookup, VisionAction, VisionAssist, VisionBackendResult, VisionContextBudget,
-    VisionImageRegion, VisionPacketError, VisionPacketInput, VisionProposal, VisionProposeRequest,
-    VisionTaskPacket, VISION_CONFIDENCE_FLOOR,
+    VisionImageRegion, VisionPacketError, VisionPacketInput, VisionPromptCandidate,
+    VisionPromptContext, VisionProposal, VisionProposeRequest, VisionTaskPacket,
+    VISION_CONFIDENCE_FLOOR,
 };

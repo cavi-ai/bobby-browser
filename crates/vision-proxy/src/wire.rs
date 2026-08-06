@@ -7,6 +7,30 @@ pub struct ProposeRequest {
     pub intent_kind: String,
     pub stuck: String,
     pub screenshot_png: String,
+    /// Optional context block: page url, candidate controls, recent command
+    /// kinds. Structure only; rendered into the upstream prompt.
+    #[serde(default)]
+    pub context: Option<ProposeContext>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProposeContext {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub candidates: Vec<ProposeContextCandidate>,
+    #[serde(default)]
+    pub recent_command_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProposeContextCandidate {
+    pub role: String,
+    pub name: String,
+    #[serde(default)]
+    pub ordinal: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

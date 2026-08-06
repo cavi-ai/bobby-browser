@@ -91,6 +91,7 @@ async fn handle_propose(state: &AppState, body: Value) -> Response {
         intent_kind: request.intent_kind,
         stuck: request.stuck,
         screenshot_png_b64: request.screenshot_png,
+        context: request.context,
     };
 
     let proposal = match state.upstream.propose(input).await {

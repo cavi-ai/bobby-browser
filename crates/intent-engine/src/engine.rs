@@ -32,6 +32,10 @@ pub struct VisionContext {
     /// returns its plain stuck failure instead of escalating, so the form
     /// can batch one screenshot for every remaining purpose.
     pub defer_escalation: bool,
+    /// Base prompt context (page url, recent command kinds) supplied by the
+    /// runtime; the engine merges per-stuck candidates into it. `None`
+    /// keeps every request byte-identical to before.
+    pub prompt_context: Option<crate::VisionPromptContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -304,6 +308,7 @@ async fn batch_prefill(
                 intent_kind: "fill".to_owned(),
                 screenshot_png: png.clone(),
                 stuck: StuckKind::TargetMissing,
+                context: vision.prompt_context.clone(),
             })
             .await
         else {
@@ -1489,6 +1494,7 @@ async fn escalate_extract_field_with_vision(
             intent_kind: "extract".to_owned(),
             screenshot_png: png,
             stuck,
+            context: vision.prompt_context.clone(),
         })
         .await
     {
@@ -1749,6 +1755,7 @@ async fn stuck_outcome_with_prior_evidence(
         page_id,
         browser,
         assist.as_ref(),
+        vision.prompt_context.clone(),
     )
     .await
 }
@@ -1792,6 +1799,7 @@ async fn escalate_with_vision(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     assist: &dyn VisionAssist,
+    prompt_context: Option<crate::VisionPromptContext>,
 ) -> IntentOutcome {
     let StuckReport {
         intent_kind,
@@ -1828,12 +1836,28 @@ async fn escalate_with_vision(
         }
     };
 
+    let mut context = prompt_context;
+    if !candidates.is_empty() {
+        let block = context.get_or_insert_with(crate::VisionPromptContext::default);
+        block.candidates = candidates
+            .iter()
+            .take(5)
+            .filter_map(|candidate| {
+                Some(crate::VisionPromptCandidate {
+                    role: candidate.role.clone()?,
+                    name: candidate.name.clone()?,
+                    ordinal: None,
+                })
+            })
+            .collect();
+    }
     let proposal = match assist
         .propose(VisionProposeRequest {
             purpose: purpose.clone().unwrap_or_default(),
             intent_kind: intent_kind.to_owned(),
             screenshot_png: png,
             stuck: kind,
+            context,
         })
         .await
     {

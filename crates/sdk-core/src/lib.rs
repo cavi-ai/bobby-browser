@@ -249,6 +249,7 @@ impl RuntimeService {
         let nodes = Arc::new(NodeRegistry::from_config(config));
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
+        pages = pages.with_context_graph_attached();
         if config.vision.prefill {
             pages = pages.with_vision_prefill_enabled();
         }
