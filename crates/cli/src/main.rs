@@ -140,6 +140,22 @@ enum CliCommand {
         #[arg(long, conflicts_with = "vision")]
         no_vision: bool,
     },
+    /// Run the runtime with authenticated CDP enabled on the dedicated port
+    Cdp {
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+        #[arg(long)]
+        bootstrap_env: Option<PathBuf>,
+        /// CDP listen port override
+        #[arg(long)]
+        cdp_port: Option<u16>,
+        #[arg(long, conflicts_with = "no_vision")]
+        vision: bool,
+        #[arg(long, conflicts_with = "vision")]
+        no_vision: bool,
+    },
     /// Run the Firefox native-messaging host
     FirefoxNativeHost {
         /// Absolute path to the native-host descriptor JSON
@@ -415,78 +431,18 @@ pub async fn run() -> Result<()> {
             vision,
             no_vision,
         } => {
-            let config_path = resolve_config_path(config);
-            let config_existed = config_path.exists();
             let policy = policy_from_flags(vision, no_vision);
-            let config = AppConfig::load(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let (mut config, decision, _vision_child) =
-                prepare_vision_child(&config_path, config, policy)?;
-            if decision.should_spawn {
-                tracing::info!(
-                    bind = %decision.bind,
-                    path = %decision.path,
-                    reason = %decision.reason,
-                    "spawned loopback vision-proxy sidecar"
-                );
-            } else if matches!(policy, VisionSpawnPolicy::ForceOn) {
-                tracing::info!(reason = %decision.reason, "vision sidecar not spawned");
-            }
-            let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
-            let resolved = bootstrap_local::resolve_startup_credential_with(
-                &config.server.host,
-                &bootstrap_path,
-                broker::StartupCredential::from_env,
-            )?;
-            let startup = match resolved {
-                bootstrap_local::ResolveOutcome::FromEnv(c)
-                | bootstrap_local::ResolveOutcome::FromFile(c) => c,
-                bootstrap_local::ResolveOutcome::Generated {
-                    credential,
-                    material,
-                } => {
-                    eprintln!(
-                        "Generated loopback bootstrap at {}",
-                        bootstrap_path.display()
-                    );
-                    eprintln!("Bootstrap bearer (copy now; will not be shown again):");
-                    eprintln!("{}", material.bearer());
-                    credential
-                }
-            };
-            let _telemetry = observability::init(&config.observability)?;
-            if config_existed {
-                tracing::info!(path = %config_path.display(), "loaded config file");
-            } else {
-                tracing::info!(
-                    path = %config_path.display(),
-                    "config file not found, using built-in defaults"
-                );
-            }
-            let (selection, _source) = resolve_browser_selection()?;
-            let durable_profile_id = match &selection.preference {
-                config::EnginePreferenceConfig::Exact {
-                    engine: config::BrowserEngineConfig::Firefox,
-                    profile_id: Some(profile_id),
-                } => Some(profile_id.clone()),
-                _ => None,
-            };
-            if durable_profile_id.is_some() && config.context.dir.is_none() {
-                config.context.dir = Some(
-                    dirs::config_dir()
-                        .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
-                        .join("bobby-browser")
-                        .join("context"),
-                );
-            }
-            let factory = compose_worker_factory(&config, selection)?;
-            match durable_profile_id {
-                Some(profile_id) => {
-                    broker::serve_with_context_promotion(config, startup, factory, profile_id)
-                        .await?
-                }
-                None => broker::serve_with_worker_factory(config, startup, factory).await?,
-            }
+            run_broker_serve(config, bootstrap_env, policy, false, None).await?;
+        }
+        CliCommand::Cdp {
+            config,
+            bootstrap_env,
+            cdp_port,
+            vision,
+            no_vision,
+        } => {
+            let policy = policy_from_flags(vision, no_vision);
+            run_broker_serve(config, bootstrap_env, policy, true, cdp_port).await?;
         }
         CliCommand::FirefoxNativeHost { descriptor } => {
             let _telemetry = observability::init(&Default::default())?;
@@ -547,6 +503,92 @@ fn policy_from_flags(vision: bool, no_vision: bool) -> VisionSpawnPolicy {
     } else {
         VisionSpawnPolicy::Auto
     }
+}
+
+async fn run_broker_serve(
+    config_cli: Option<PathBuf>,
+    bootstrap_env: Option<PathBuf>,
+    policy: VisionSpawnPolicy,
+    force_cdp: bool,
+    cdp_port: Option<u16>,
+) -> Result<()> {
+    let config_path = resolve_config_path(config_cli);
+    let config_existed = config_path.exists();
+    let config = AppConfig::load(&config_path)
+        .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+    let (mut config, decision, _vision_child) =
+        prepare_vision_child(&config_path, config, policy)?;
+    if force_cdp {
+        config.cdp.enabled = true;
+        if let Some(port) = cdp_port {
+            config.cdp.port = port;
+        }
+    }
+    if decision.should_spawn {
+        tracing::info!(
+            bind = %decision.bind,
+            path = %decision.path,
+            reason = %decision.reason,
+            "spawned loopback vision-proxy sidecar"
+        );
+    } else if matches!(policy, VisionSpawnPolicy::ForceOn) {
+        tracing::info!(reason = %decision.reason, "vision sidecar not spawned");
+    }
+    let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+    let resolved = bootstrap_local::resolve_startup_credential_with(
+        &config.server.host,
+        &bootstrap_path,
+        broker::StartupCredential::from_env,
+    )?;
+    let startup = match resolved {
+        bootstrap_local::ResolveOutcome::FromEnv(c)
+        | bootstrap_local::ResolveOutcome::FromFile(c) => c,
+        bootstrap_local::ResolveOutcome::Generated {
+            credential,
+            material,
+        } => {
+            eprintln!(
+                "Generated loopback bootstrap at {}",
+                bootstrap_path.display()
+            );
+            eprintln!("Bootstrap bearer (copy now; will not be shown again):");
+            eprintln!("{}", material.bearer());
+            credential
+        }
+    };
+    let _telemetry = observability::init(&config.observability)?;
+    if config_existed {
+        tracing::info!(path = %config_path.display(), "loaded config file");
+    } else {
+        tracing::info!(
+            path = %config_path.display(),
+            "config file not found, using built-in defaults"
+        );
+    }
+    let (selection, _source) = resolve_browser_selection()?;
+    let durable_profile_id = match &selection.preference {
+        config::EnginePreferenceConfig::Exact {
+            engine: config::BrowserEngineConfig::Firefox,
+            profile_id: Some(profile_id),
+        } => Some(profile_id.clone()),
+        _ => None,
+    };
+    if durable_profile_id.is_some() && config.context.dir.is_none() {
+        config.context.dir = Some(
+            dirs::config_dir()
+                .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
+                .join("bobby-browser")
+                .join("context"),
+        );
+    }
+    let factory = compose_worker_factory(&config, selection)?;
+    match durable_profile_id {
+        Some(profile_id) => {
+            broker::serve_with_context_promotion(config, startup, factory, profile_id).await?
+        }
+        None => broker::serve_with_worker_factory(config, startup, factory).await?,
+    }
+    Ok(())
 }
 
 fn prepare_vision_child(
@@ -1045,6 +1087,13 @@ fn run_doctor(
         }
         if let Some(check) = check_vision_upstream_key(&config.vision) {
             push_doctor_check(&mut report, check);
+        }
+
+        if config.cdp.enabled {
+            report.ok(
+                "cdp-listen",
+                format!("{}:{}", config.cdp.host, config.cdp.port),
+            );
         }
 
         if !matches!(config.vision.backend, Some(config::VisionBackendKind::Acp)) {
@@ -3101,5 +3150,57 @@ api_key_env = "OPENAI_API_KEY"
         use clap::Parser;
         assert!(Cli::try_parse_from(["bobby", "serve", "--vision", "--no-vision"]).is_err());
         assert!(Cli::try_parse_from(["bobby", "mcp-stdio", "--vision", "--no-vision"]).is_err());
+    }
+
+    #[test]
+    fn cdp_command_parses_port_override() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["bobby", "cdp", "--cdp-port", "9333"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Cdp {
+                cdp_port,
+                vision,
+                no_vision,
+                ..
+            }) => {
+                assert_eq!(cdp_port, Some(9333));
+                assert!(!vision);
+                assert!(!no_vision);
+            }
+            _ => panic!("expected Cdp command"),
+        }
+    }
+
+    #[test]
+    fn doctor_reports_cdp_listen_when_enabled_in_config() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str(
+            r#"
+[cdp]
+enabled = true
+host = "127.0.0.1"
+port = 9333
+"#,
+        );
+        std::fs::write(&config, text).unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+
+        let check = report.check("cdp-listen").expect("cdp-listen check");
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.detail.contains("127.0.0.1:9333"));
     }
 }
