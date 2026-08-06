@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use auth_broker::AuthStrategy;
 use config::{AppConfig, NodeConfig, NodeKind, VisionAcpProfile, VisionAuthKind};
 use intent_engine::{HttpVisionAssist, VisionAssist};
 use types::{CommandError, ErrorCode, ErrorLayer};
@@ -202,6 +203,17 @@ impl NodeRegistry {
 /// The name a legacy `[vision]` endpoint is carried forward under.
 pub const LEGACY_VISION_NODE: &str = "vision";
 
+pub fn vision_auth_strategy(kind: VisionAuthKind) -> AuthStrategy {
+    match kind {
+        VisionAuthKind::Advertised => AuthStrategy::Advertised,
+        VisionAuthKind::OAuthAuthorizationCode => AuthStrategy::OAuthAuthorizationCode,
+        VisionAuthKind::OAuthDeviceCode => AuthStrategy::OAuthDeviceCode,
+        VisionAuthKind::Environment => AuthStrategy::Environment,
+        VisionAuthKind::ExistingSession => AuthStrategy::ExistingSession,
+        VisionAuthKind::None => AuthStrategy::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +344,32 @@ mod tests {
             registry.resolve("anything", NodeKind::Vision),
             Err(NodeError::Unknown("anything".to_owned()))
         );
+    }
+
+    #[test]
+    fn every_vision_auth_kind_maps_to_distinct_auth_strategy() {
+        use auth_broker::AuthStrategy::*;
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::Advertised),
+            Advertised
+        );
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::OAuthAuthorizationCode),
+            OAuthAuthorizationCode
+        );
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::OAuthDeviceCode),
+            OAuthDeviceCode
+        );
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::Environment),
+            Environment
+        );
+        assert_eq!(
+            vision_auth_strategy(VisionAuthKind::ExistingSession),
+            ExistingSession
+        );
+        assert_eq!(vision_auth_strategy(VisionAuthKind::None), None);
     }
 
     #[test]
