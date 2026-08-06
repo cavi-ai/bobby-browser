@@ -1415,7 +1415,8 @@ fn evidence_variants() -> Vec<Value> {
                 "condition":{"$ref":"#/$defs/WaitCondition"},
                 "elapsedMs":{"type":"integer","minimum":0},
                 "observations":{"type":"integer","minimum":0},
-                "excludedClasses":array(string(1, MAX_STRING_BYTES), MAX_EXCLUDED_CLASSES)
+                "excludedClasses":array(string(1, MAX_STRING_BYTES), MAX_EXCLUDED_CLASSES),
+                "observed":string(0, types::MAX_WAIT_OBSERVED_CHARS)
             }),
             &["condition", "elapsedMs", "observations"],
         ),

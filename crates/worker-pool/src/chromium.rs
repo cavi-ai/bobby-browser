@@ -1641,7 +1641,7 @@ impl BrowserWorker for ChromiumWorker {
             observations += 1;
             let tracker = self.network_trackers.lock().await.get(page_id).cloned();
             let page = self.page_handle(page_id).await?;
-            let (satisfied, excluded_classes) = wait_condition_satisfied(
+            let poll = wait_condition_satisfied(
                 &self.browser,
                 page_id,
                 &page,
@@ -1650,12 +1650,13 @@ impl BrowserWorker for ChromiumWorker {
                 &mut quiet_since,
             )
             .await?;
-            if satisfied {
+            if poll.satisfied {
                 return Ok(vec![Evidence::Wait {
                     condition: command.condition.clone(),
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     observations,
-                    excluded_classes,
+                    excluded_classes: poll.excluded_classes,
+                    observed: poll.observed.map(|value| bound_observed(&value)),
                 }]);
             }
             if Instant::now() >= deadline {
@@ -2194,6 +2195,48 @@ fn http_equivalence_unproven(message: impl Into<String>) -> CommandError {
     }
 }
 
+/// Truncates a wait observation on a character boundary.
+///
+/// Byte-index truncation panics inside a multi-byte codepoint, which is how
+/// extraction used to die on any non-ASCII page.
+fn bound_observed(value: &str) -> String {
+    match value.char_indices().nth(types::MAX_WAIT_OBSERVED_CHARS) {
+        Some((index, _)) => value[..index].to_owned(),
+        None => value.to_owned(),
+    }
+}
+
+/// What one wait poll saw.
+///
+/// `observed` is the value the condition's matcher ran against, so a satisfied
+/// wait can report it instead of throwing it away. Only the conditions that
+/// read a value carry one: `Text`, `Value`, `Url`, and `Document`. `Element`
+/// and `NetworkQuiet` match on presence and counts, not on a value, so theirs
+/// stays `None` rather than inventing a string.
+struct WaitPoll {
+    satisfied: bool,
+    excluded_classes: Vec<String>,
+    observed: Option<String>,
+}
+
+impl WaitPoll {
+    fn matched(satisfied: bool) -> Self {
+        Self {
+            satisfied,
+            excluded_classes: Vec::new(),
+            observed: None,
+        }
+    }
+
+    fn saw(satisfied: bool, observed: impl Into<String>) -> Self {
+        Self {
+            satisfied,
+            excluded_classes: Vec::new(),
+            observed: Some(observed.into()),
+        }
+    }
+}
+
 async fn wait_condition_satisfied(
     browser: &Mutex<Option<Browser>>,
     page_id: &PageId,
@@ -2201,7 +2244,7 @@ async fn wait_condition_satisfied(
     tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
     condition: &WaitCondition,
     quiet_since: &mut Option<Instant>,
-) -> Result<(bool, Vec<String>), CommandError> {
+) -> Result<WaitPoll, CommandError> {
     match condition {
         WaitCondition::Element { target, state } => {
             let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
@@ -2234,21 +2277,21 @@ async fn wait_condition_satisfied(
                 Err(error) => return Err(error),
             };
             let Some(resolved) = resolved else {
-                return Ok((matches!(state, types::ElementState::Detached), Vec::new()));
+                return Ok(WaitPoll::matched(matches!(
+                    state,
+                    types::ElementState::Detached
+                )));
             };
             let visible = resolved.visible(page).await?;
             let enabled = resolved.enabled(page).await?;
-            Ok((
-                match state {
-                    types::ElementState::Attached => true,
-                    types::ElementState::Detached => false,
-                    types::ElementState::Visible => visible,
-                    types::ElementState::Hidden => !visible,
-                    types::ElementState::Enabled => enabled,
-                    types::ElementState::Disabled => !enabled,
-                },
-                Vec::new(),
-            ))
+            Ok(WaitPoll::matched(match state {
+                types::ElementState::Attached => true,
+                types::ElementState::Detached => false,
+                types::ElementState::Visible => visible,
+                types::ElementState::Hidden => !visible,
+                types::ElementState::Enabled => enabled,
+                types::ElementState::Disabled => !enabled,
+            }))
         }
         WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
             let mut browser = browser.lock().await;
@@ -2261,7 +2304,7 @@ async fn wait_condition_satisfied(
             let resolved = match resolved {
                 Ok(resolved) => resolved,
                 Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
-                    return Ok((false, Vec::new()))
+                    return Ok(WaitPoll::matched(false))
                 }
                 Err(error) => return Err(error),
             };
@@ -2270,7 +2313,7 @@ async fn wait_condition_satisfied(
             } else {
                 resolved.inner_text(page).await?.unwrap_or_default()
             };
-            Ok((text_matches(matcher, &value)?, Vec::new()))
+            Ok(WaitPoll::saw(text_matches(matcher, &value)?, value))
         }
         WaitCondition::Url { matcher } => {
             let url = page
@@ -2278,7 +2321,7 @@ async fn wait_condition_satisfied(
                 .await
                 .map_err(command_failed)?
                 .unwrap_or_default();
-            Ok((text_matches(matcher, &url)?, Vec::new()))
+            Ok(WaitPoll::saw(text_matches(matcher, &url)?, url))
         }
         WaitCondition::Document { ready } => {
             let state: String = page
@@ -2287,7 +2330,7 @@ async fn wait_condition_satisfied(
                 .map_err(command_failed)?
                 .into_value()
                 .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            Ok((
+            Ok(WaitPoll::saw(
                 match ready {
                     WaitUntil::Commit => true,
                     WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
@@ -2295,7 +2338,7 @@ async fn wait_condition_satisfied(
                     }
                     WaitUntil::NetworkIdle => state == "complete",
                 },
-                Vec::new(),
+                state,
             ))
         }
         WaitCondition::NetworkQuiet {
@@ -2319,13 +2362,18 @@ async fn wait_condition_satisfied(
             let (in_flight, excluded_classes) = tracker.snapshot(&filters).await;
             if in_flight <= *max_in_flight {
                 let since = quiet_since.get_or_insert_with(Instant::now);
-                Ok((
-                    since.elapsed() >= Duration::from_millis(*idle_ms),
+                Ok(WaitPoll {
+                    satisfied: since.elapsed() >= Duration::from_millis(*idle_ms),
                     excluded_classes,
-                ))
+                    observed: None,
+                })
             } else {
                 *quiet_since = None;
-                Ok((false, excluded_classes))
+                Ok(WaitPoll {
+                    satisfied: false,
+                    excluded_classes,
+                    observed: None,
+                })
             }
         }
     }
@@ -2696,6 +2744,30 @@ fn set_cookie_param(
 
 #[cfg(test)]
 mod tests {
+    use super::bound_observed;
+
+    /// A wait observation is truncated on a character boundary.
+    ///
+    /// Byte-index truncation panics inside a multi-byte codepoint, which is
+    /// how extraction used to die on any non-ASCII page.
+    #[test]
+    fn a_wait_observation_is_bounded_on_a_character_boundary() {
+        let ascii = "a".repeat(types::MAX_WAIT_OBSERVED_CHARS + 50);
+        assert_eq!(
+            bound_observed(&ascii).chars().count(),
+            types::MAX_WAIT_OBSERVED_CHARS
+        );
+
+        // Every char is 3 bytes, so a byte-index cut would land mid-codepoint.
+        let multibyte = "\u{6f22}".repeat(types::MAX_WAIT_OBSERVED_CHARS + 50);
+        let bounded = bound_observed(&multibyte);
+        assert_eq!(bounded.chars().count(), types::MAX_WAIT_OBSERVED_CHARS);
+        assert!(multibyte.starts_with(&bounded));
+
+        let short = "https://example.com/order/confirmed";
+        assert_eq!(bound_observed(short), short);
+    }
+
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 

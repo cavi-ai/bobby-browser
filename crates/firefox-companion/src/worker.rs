@@ -186,6 +186,14 @@ pub trait ExtensionObserver: Send + Sync {
     }
 }
 
+/// Truncates a wait observation on a character boundary, matching Chromium.
+fn bound_observed(value: &str) -> String {
+    match value.char_indices().nth(types::MAX_WAIT_OBSERVED_CHARS) {
+        Some((index, _)) => value[..index].to_owned(),
+        None => value.to_owned(),
+    }
+}
+
 struct CompanionPageBinding {
     ticket: PageBindingTicket,
     expected_page_id: PageId,
@@ -3760,7 +3768,9 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let mut observations = 0;
         loop {
             observations += 1;
-            let satisfied = match &command.condition {
+            // Parity with Chromium: a Url wait reports what it read, an
+            // Element wait matches on presence and has no value to report.
+            let (satisfied, observed) = match &command.condition {
                 WaitCondition::Url { matcher } => {
                     let context = self.context(page_id).await?;
                     let response = self
@@ -3792,7 +3802,10 @@ impl BrowserWorker for FirefoxCompanionWorker {
                             false,
                         ));
                     }
-                    bounded_text_matches(matcher, url)?
+                    (
+                        bounded_text_matches(matcher, url)?,
+                        Some(bound_observed(url)),
+                    )
                 }
                 WaitCondition::Element { target, state } => {
                     let context = self.context(page_id).await?;
@@ -3821,13 +3834,14 @@ impl BrowserWorker for FirefoxCompanionWorker {
                                 "awaitPromise": false,
                                 "resultOwnership": "none",
                             })).await?;
-                            response
+                            let satisfied = response
                                 .pointer("/result/value")
                                 .and_then(Value::as_bool)
-                                .unwrap_or(false)
+                                .unwrap_or(false);
+                            (satisfied, None)
                         }
                         Err(error) if error.code == ErrorCode::TargetNotFound => {
-                            matches!(state, types::ElementState::Detached)
+                            (matches!(state, types::ElementState::Detached), None)
                         }
                         Err(error) => return Err(error),
                     }
@@ -3846,6 +3860,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     observations,
                     excluded_classes: Vec::new(),
+                    observed,
                 }]);
             }
             let now = Instant::now();

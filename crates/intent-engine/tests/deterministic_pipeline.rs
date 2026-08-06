@@ -69,6 +69,7 @@ impl IntentBrowser for FakeBrowser {
                 elapsed_ms: 12,
                 observations: 1,
                 excluded_classes: Vec::new(),
+                observed: None,
             }])
         } else {
             Err(CommandError {

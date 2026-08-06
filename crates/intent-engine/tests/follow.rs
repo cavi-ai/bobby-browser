@@ -162,6 +162,7 @@ async fn follow_clicks_target_then_waits_for_destination_without_boundary() {
             elapsed_ms: 8,
             observations: 1,
             excluded_classes: Vec::new(),
+            observed: None,
         }],
     };
     let page_id = PageId::new();
@@ -223,6 +224,7 @@ async fn follow_forwards_boundary_true_verbatim_to_the_click_command() {
             elapsed_ms: 4,
             observations: 1,
             excluded_classes: Vec::new(),
+            observed: None,
         }],
     };
     let page_id = PageId::new();
@@ -263,6 +265,7 @@ async fn follow_sets_expected_url_from_exact_wait() {
             elapsed_ms: 3,
             observations: 1,
             excluded_classes: Vec::new(),
+            observed: None,
         }],
     };
     let page_id = PageId::new();

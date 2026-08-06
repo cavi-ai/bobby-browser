@@ -206,6 +206,14 @@ pub enum CommandOutcome {
     },
 }
 
+/// Upper bound on [`Evidence::Wait`]'s `observed` value, in characters.
+///
+/// A verification value -- a matched label, a URL, a ready state -- not page
+/// text. Truncation is on a character boundary; a byte index can land inside a
+/// multi-byte codepoint and panic, which is exactly how extraction used to die
+/// on non-ASCII pages.
+pub const MAX_WAIT_OBSERVED_CHARS: usize = 512;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
@@ -285,6 +293,16 @@ pub enum Evidence {
         observations: u64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         excluded_classes: Vec<String>,
+        /// What the satisfying poll actually read: the element text or value,
+        /// the URL, or the document ready state, depending on the condition.
+        ///
+        /// The wait already reads this to decide whether it is satisfied. It
+        /// used to be discarded, so an agent that verified a submit had to
+        /// spend a second round trip snapshotting the page to learn what it
+        /// had just confirmed. Bounded by [`MAX_WAIT_OBSERVED_CHARS`] -- this
+        /// is a verification value, never a page-text dump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed: Option<String>,
     },
     Screenshot {
         artifact_id: String,
