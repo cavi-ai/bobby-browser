@@ -250,32 +250,15 @@ impl RuntimeService {
             ),
             network,
         );
-        let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> = structured_extractor
-            .or_else(|| {
-                config.vision.endpoint_url.as_ref().and_then(|endpoint| {
-                    let bearer = config
-                        .vision
-                        .token_env
-                        .as_ref()
-                        .and_then(|name| std::env::var(name).ok());
-                    intent_engine::HttpVisionAssist::new(
-                        endpoint.clone(),
-                        bearer,
-                        std::time::Duration::from_millis(config.vision.timeout_ms),
-                    )
-                    .ok()
-                    .map(|provider| {
-                        std::sync::Arc::new(provider) as Arc<dyn intent_engine::StructuredExtractor>
-                    })
-                })
-            });
+        let nodes = Arc::new(NodeRegistry::from_config(config));
+        let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> =
+            structured_extractor.or_else(|| nodes.http_structured_extractor());
         if let Some(assist) = vision_assist {
             adaptive = adaptive.with_vision_assist(assist);
         }
         if let Some(extractor) = provider {
             adaptive = adaptive.with_structured_extractor(extractor);
         }
-        let nodes = Arc::new(NodeRegistry::from_config(config));
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
         pages = pages.with_context_graph_attached();

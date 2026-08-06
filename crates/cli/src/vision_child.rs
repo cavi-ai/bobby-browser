@@ -81,9 +81,9 @@ fn decide_vision_child_with_probe(
         return VisionChildDecision::skipped("multiple vision nodes configured; refusing to spawn");
     };
 
-    let Some(node) = node_config(config, &node_name) else {
+    let Some(node) = registry.http_node(&node_name).cloned() else {
         return VisionChildDecision::skipped(format!(
-            "vision node {node_name} not found in config"
+            "vision node {node_name} not found in registry"
         ));
     };
 
@@ -154,23 +154,6 @@ fn select_vision_node_name(registry: &NodeRegistry, policy: VisionSpawnPolicy) -
                 .map(|_| LEGACY_VISION_NODE.to_string()),
             _ => None,
         },
-    }
-}
-
-fn node_config(config: &AppConfig, name: &str) -> Option<NodeConfig> {
-    if let Some(node) = config.nodes.get(name) {
-        return Some(node.clone());
-    }
-    if name == LEGACY_VISION_NODE && config.nodes.is_empty() {
-        let endpoint_url = config.vision.endpoint_url.clone()?;
-        Some(NodeConfig {
-            kind: NodeKind::Vision,
-            endpoint_url,
-            token_env: config.vision.token_env.clone(),
-            timeout_ms: config.vision.timeout_ms,
-        })
-    } else {
-        None
     }
 }
 
