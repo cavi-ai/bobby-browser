@@ -78,6 +78,8 @@ pub enum CompileError {
     EmptyFieldName,
     #[error("duplicate extract field name: {0}")]
     DuplicateFieldName(String),
+    #[error("hints set accessibleName and an exact nearText to different values")]
+    ConflictingNameHints,
 }
 
 pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileError> {
@@ -85,13 +87,13 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         IntentCommand::Locate(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
             Ok(IntentPlan::Locate {
-                target: compile_target(purpose, &intent.hints),
+                target: compile_target(purpose, &intent.hints)?,
             })
         }
         IntentCommand::Fill(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
             Ok(IntentPlan::Fill {
-                target: compile_target(purpose, &intent.hints),
+                target: compile_target(purpose, &intent.hints)?,
                 value: intent.value.clone(),
             })
         }
@@ -116,7 +118,7 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                 fields.push(CompleteFormFieldPlan {
                     name: field.name.clone(),
                     purpose: purpose.into(),
-                    target: compile_target(purpose, &field.hints),
+                    target: compile_target(purpose, &field.hints)?,
                     value: field.value.clone(),
                 });
             }
@@ -125,7 +127,7 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         IntentCommand::SubmitAndVerify(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
             Ok(IntentPlan::SubmitAndVerify {
-                target: compile_target(purpose, &intent.hints),
+                target: compile_target(purpose, &intent.hints)?,
                 expected_state: intent.expected_state.clone(),
             })
         }
@@ -136,7 +138,7 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         IntentCommand::Follow(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
             Ok(IntentPlan::Follow {
-                target: compile_target(purpose, &intent.hints),
+                target: compile_target(purpose, &intent.hints)?,
                 expected_destination: intent.expected_destination.clone(),
                 boundary: intent.boundary,
             })
@@ -144,7 +146,7 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         IntentCommand::DismissObstruction(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
             Ok(IntentPlan::DismissObstruction {
-                target: compile_target(purpose, &intent.hints),
+                target: compile_target(purpose, &intent.hints)?,
                 timeout_ms: intent.timeout_ms,
             })
         }
@@ -167,7 +169,7 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                 fields.push(ExtractFieldPlan {
                     name: name.to_owned(),
                     purpose: purpose.to_owned(),
-                    target: compile_target(purpose, &field.hints),
+                    target: compile_target(purpose, &field.hints)?,
                     value: field.value.clone(),
                 });
             }
@@ -187,7 +189,7 @@ fn validate_purpose(purpose: &str) -> Result<&str, CompileError> {
     Ok(trimmed)
 }
 
-fn compile_target(purpose: &str, hints: &IntentHints) -> TargetSpec {
+fn compile_target(purpose: &str, hints: &IntentHints) -> Result<TargetSpec, CompileError> {
     let mut target = TargetSpec {
         role: hints.role.clone(),
         ordinal: hints.ordinal,
@@ -197,7 +199,18 @@ fn compile_target(purpose: &str, hints: &IntentHints) -> TargetSpec {
         ..TargetSpec::default()
     };
 
-    match &hints.near_text {
+    // `accessibleName` is the snapshot-shaped spelling of an exact `nearText`.
+    // Two different names is a caller mistake with no safe reading, so refuse
+    // instead of silently preferring one.
+    let name_hint = match (&hints.accessible_name, &hints.near_text) {
+        (Some(name), Some(TextMatch::Exact(near))) if name != near => {
+            return Err(CompileError::ConflictingNameHints);
+        }
+        (Some(name), _) => Some(TextMatch::Exact(name.clone())),
+        (None, matcher) => matcher.clone(),
+    };
+
+    match &name_hint {
         Some(TextMatch::Exact(name)) if hints.role.is_some() => {
             target.accessible_name = Some(name.clone());
         }
@@ -212,5 +225,5 @@ fn compile_target(purpose: &str, hints: &IntentHints) -> TargetSpec {
         }
     }
 
-    target
+    Ok(target)
 }

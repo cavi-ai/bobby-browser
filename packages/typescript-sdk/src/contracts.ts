@@ -224,6 +224,12 @@ export type PrimitiveCommand =
 
 export interface IntentHints {
   role?: string | null;
+  /**
+   * Accessible name of the control, matched exactly. Accepts an
+   * `a11y_snapshot` node's `target` verbatim. Equivalent to an exact
+   * `nearText`; setting both to different values is refused.
+   */
+  accessibleName?: string | null;
   nearText?: TextMatch | null;
   ordinal?: number | null;
   framePath?: TargetSpec[];
