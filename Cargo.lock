@@ -2491,6 +2491,7 @@ version = "0.6.0"
 dependencies = [
  "acp-client",
  "async-trait",
+ "auth-broker",
  "config",
  "intent-engine",
  "thiserror 2.0.18",
