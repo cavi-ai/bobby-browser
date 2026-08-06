@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use acp_client::{AcpClientError, AcpHarnessClient, AcpVisionAssist};
+use auth_broker::AuthStrategy;
 use intent_engine::{
     StuckKind, VisionAssist, VisionImageRegion, VisionProposeRequest, VisionTaskPacket,
 };
@@ -65,10 +66,11 @@ async fn one_task_uses_one_child_and_closes_it() {
 }
 
 #[tokio::test]
-async fn advertised_authentication_precedes_child_creation() {
+async fn advertised_still_authenticates_first_method() {
     let temp = tempfile::tempdir().expect("tempdir");
     let log = temp.path().join("lifecycle.log");
     let reply = client_for_mode(&log, "auth")
+        .with_auth_strategy(AuthStrategy::Advertised)
         .delegate(packet())
         .await
         .expect("authenticated vision reply");
@@ -81,6 +83,61 @@ async fn advertised_authentication_precedes_child_creation() {
             .collect::<Vec<_>>(),
         ["authenticate:opencode-login", "new", "close"]
     );
+}
+
+#[tokio::test]
+async fn oauth_device_code_does_not_silently_use_unrelated_advertised_method() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let error = client_for_mode(&log, "password")
+        .with_auth_strategy(AuthStrategy::OAuthDeviceCode)
+        .delegate(packet())
+        .await
+        .expect_err("oauth device code must not fall back to password auth");
+
+    assert!(
+        matches!(error, AcpClientError::Authentication(_)),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("OAuthDeviceCode"),
+        "{error:?}"
+    );
+    assert!(!log.exists(), "no harness lifecycle may run before auth selection");
+}
+
+#[tokio::test]
+async fn oauth_device_code_authenticates_matching_harness_method() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let reply = client_for_mode(&log, "oauth-device-code")
+        .with_auth_strategy(AuthStrategy::OAuthDeviceCode)
+        .delegate(packet())
+        .await
+        .expect("oauth device code vision reply");
+
+    assert_eq!(reply.capabilities.auth_method_ids, ["oauth-device-code"]);
+    assert_eq!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["authenticate:oauth-device-code", "new", "close"]
+    );
+}
+
+#[tokio::test]
+async fn disabled_advertised_authentication_does_not_invoke_login() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let log = temp.path().join("lifecycle.log");
+    let reply = client_for_mode(&log, "auth")
+        .with_auth_strategy(AuthStrategy::None)
+        .delegate(packet())
+        .await
+        .expect("vision reply without advertised login");
+
+    assert_eq!(reply.capabilities.auth_method_ids, ["opencode-login"]);
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "new\nclose\n");
 }
 
 #[tokio::test]
@@ -118,20 +175,6 @@ async fn transport_loss_during_advertised_authentication_stays_transport() {
         std::fs::read_to_string(log).unwrap(),
         "authenticate:opencode-login\n"
     );
-}
-
-#[tokio::test]
-async fn disabled_advertised_authentication_does_not_invoke_login() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let log = temp.path().join("lifecycle.log");
-    let reply = client_for_mode(&log, "auth")
-        .with_advertised_auth(false)
-        .delegate(packet())
-        .await
-        .expect("vision reply without advertised login");
-
-    assert_eq!(reply.capabilities.auth_method_ids, ["opencode-login"]);
-    assert_eq!(std::fs::read_to_string(log).unwrap(), "new\nclose\n");
 }
 
 fn client_for_mode(log: &std::path::Path, mode: &str) -> AcpHarnessClient {

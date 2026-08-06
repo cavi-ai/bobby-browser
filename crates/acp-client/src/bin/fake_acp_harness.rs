@@ -45,6 +45,14 @@ async fn main() -> agent_client_protocol::Result<()> {
                     response = response.auth_methods(vec![AuthMethod::Agent(
                         AuthMethodAgent::new("opencode-login", "OpenCode Login"),
                     )]);
+                } else if initialize_mode == "password" {
+                    response = response.auth_methods(vec![AuthMethod::Agent(
+                        AuthMethodAgent::new("password", "Password"),
+                    )]);
+                } else if initialize_mode == "oauth-device-code" {
+                    response = response.auth_methods(vec![AuthMethod::Agent(
+                        AuthMethodAgent::new("oauth-device-code", "OAuth Device Code"),
+                    )]);
                 }
                 responder.respond(response)
             },

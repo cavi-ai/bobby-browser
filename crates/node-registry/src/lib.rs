@@ -165,14 +165,11 @@ impl NodeRegistry {
     /// deny-by-default double gate turns into a declined escalation.
     pub fn vision(&self, name: &str) -> Result<Arc<dyn VisionAssist>, NodeError> {
         if let Some(profile) = self.acp_profiles.get(name) {
-            let assist =
-                acp_client::AcpVisionAssist::new(profile.command.clone(), profile.args.clone())
-                    .with_advertised_auth(matches!(
-                        profile.auth,
-                        VisionAuthKind::Advertised
-                            | VisionAuthKind::OAuthAuthorizationCode
-                            | VisionAuthKind::OAuthDeviceCode
-                    ));
+            let assist = acp_client::AcpVisionAssist::new(
+                profile.command.clone(),
+                profile.args.clone(),
+            )
+            .with_auth_strategy(vision_auth_strategy(profile.auth));
             tracing::debug!(node = name, "node.vision.acp_resolved");
             return Ok(Arc::new(assist));
         }
@@ -389,5 +386,56 @@ auth = "advertised"
         let registry = NodeRegistry::from_config(&config);
         assert_eq!(registry.names().collect::<Vec<_>>(), ["codex"]);
         assert!(registry.vision("codex").is_ok());
+    }
+
+    #[test]
+    fn acp_oauth_auth_kinds_wire_distinct_strategies() {
+        let oauth_code = AppConfig::from_toml_str(
+            r#"
+[vision]
+backend = "acp"
+profile = "codex"
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "oauth-authorization-code"
+"#,
+        )
+        .unwrap();
+        let oauth_device = AppConfig::from_toml_str(
+            r#"
+[vision]
+backend = "acp"
+profile = "codex"
+[vision.acp_profiles.codex]
+command = "codex"
+args = ["acp"]
+auth = "oauth-device-code"
+"#,
+        )
+        .unwrap();
+        let code_profile = oauth_code.vision.acp_profiles.get("codex").unwrap();
+        let device_profile = oauth_device.vision.acp_profiles.get("codex").unwrap();
+        let code_assist = acp_client::AcpVisionAssist::new(
+            code_profile.command.clone(),
+            code_profile.args.clone(),
+        )
+        .with_auth_strategy(vision_auth_strategy(code_profile.auth));
+        let device_assist = acp_client::AcpVisionAssist::new(
+            device_profile.command.clone(),
+            device_profile.args.clone(),
+        )
+        .with_auth_strategy(vision_auth_strategy(device_profile.auth));
+        assert_eq!(
+            code_assist.auth_strategy(),
+            vision_auth_strategy(VisionAuthKind::OAuthAuthorizationCode)
+        );
+        assert_eq!(
+            device_assist.auth_strategy(),
+            vision_auth_strategy(VisionAuthKind::OAuthDeviceCode)
+        );
+        assert_ne!(code_assist.auth_strategy(), device_assist.auth_strategy());
+        assert!(NodeRegistry::from_config(&oauth_code).vision("codex").is_ok());
+        assert!(NodeRegistry::from_config(&oauth_device).vision("codex").is_ok());
     }
 }

@@ -8,6 +8,7 @@ version = "0.6.0"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
+ "auth-broker",
  "base64 0.23.0",
  "intent-engine",
  "serde",

@@ -19,12 +19,15 @@ use agent_client_protocol::{
     },
     AcpAgent, AcpAgentConfig, Agent, ConnectionTo, ErrorCode as AcpErrorCode,
 };
+use auth_broker::{AuthError, AuthStrategy};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use intent_engine::{VisionAction, VisionBackendResult, VisionTaskPacket};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{sync::Mutex, time::timeout};
 use types::{CommandError, ErrorCode, ErrorLayer};
+
+use crate::auth_driver::AcpAuthDriver;
 
 const MAX_STREAMED_RESULT_BYTES: usize = 64 * 1024;
 
@@ -69,7 +72,7 @@ pub struct AcpHarnessClient {
     launch: AcpAgentConfig,
     cwd: PathBuf,
     timeout: Duration,
-    authenticate_advertised: bool,
+    auth_strategy: AuthStrategy,
 }
 
 impl AcpHarnessClient {
@@ -78,7 +81,7 @@ impl AcpHarnessClient {
             launch: AcpAgentConfig::new(command).args(args),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             timeout: Duration::from_secs(30),
-            authenticate_advertised: true,
+            auth_strategy: AuthStrategy::Advertised,
         }
     }
 
@@ -95,9 +98,23 @@ impl AcpHarnessClient {
     }
 
     #[must_use]
-    pub fn with_advertised_auth(mut self, enabled: bool) -> Self {
-        self.authenticate_advertised = enabled;
+    pub fn with_auth_strategy(mut self, strategy: AuthStrategy) -> Self {
+        self.auth_strategy = strategy;
         self
+    }
+
+    #[must_use]
+    pub fn with_advertised_auth(self, enabled: bool) -> Self {
+        self.with_auth_strategy(if enabled {
+            AuthStrategy::Advertised
+        } else {
+            AuthStrategy::None
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn auth_strategy(&self) -> AuthStrategy {
+        self.auth_strategy
     }
 
     pub async fn delegate(
@@ -108,7 +125,7 @@ impl AcpHarnessClient {
         let cwd = self.cwd.clone();
         timeout(
             self.timeout,
-            run_task(launch, cwd, packet, self.authenticate_advertised),
+            run_task(launch, cwd, packet, self.auth_strategy),
         )
         .await
         .map_err(|_| AcpClientError::Timeout)?
@@ -137,9 +154,20 @@ impl AcpVisionAssist {
     }
 
     #[must_use]
+    pub fn with_auth_strategy(mut self, strategy: AuthStrategy) -> Self {
+        self.client = self.client.with_auth_strategy(strategy);
+        self
+    }
+
+    #[must_use]
     pub fn with_advertised_auth(mut self, enabled: bool) -> Self {
         self.client = self.client.with_advertised_auth(enabled);
         self
+    }
+
+    #[doc(hidden)]
+    pub fn auth_strategy(&self) -> AuthStrategy {
+        self.client.auth_strategy()
     }
 }
 
@@ -210,7 +238,7 @@ async fn run_task(
     launch: AcpAgentConfig,
     cwd: PathBuf,
     packet: VisionTaskPacket,
-    authenticate_advertised: bool,
+    auth_strategy: AuthStrategy,
 ) -> Result<AcpVisionReply, AcpClientError> {
     let output = Arc::new(Mutex::new(String::new()));
     let overflowed = Arc::new(Mutex::new(false));
@@ -265,17 +293,14 @@ async fn run_task(
             if !capabilities.image {
                 return Ok(Err(AcpClientError::ImageUnsupported));
             }
-            if authenticate_advertised {
-                if let Some(method) = initialized.auth_methods.first() {
-                    let method_id = method.id().0.to_string();
-                    if let Err(error) = connection
-                        .send_request(AuthenticateRequest::new(method.id().clone()))
-                        .block_task()
-                        .await
-                    {
-                        return Ok(Err(classify_authentication_error(&method_id, error)));
-                    }
-                }
+            if let Err(error) = authenticate_for_strategy(
+                &connection,
+                &initialized.auth_methods,
+                auth_strategy,
+            )
+            .await
+            {
+                return Ok(Err(error));
             }
 
             let session = connection
@@ -387,6 +412,38 @@ fn decode_result(raw: &str) -> Result<VisionBackendResult, AcpClientError> {
 
 fn transport(error: impl std::fmt::Display) -> AcpClientError {
     AcpClientError::Transport(error.to_string())
+}
+
+async fn authenticate_for_strategy(
+    connection: &ConnectionTo<Agent>,
+    auth_methods: &[agent_client_protocol::schema::v1::AuthMethod],
+    strategy: AuthStrategy,
+) -> Result<(), AcpClientError> {
+    if strategy == AuthStrategy::None {
+        return Ok(());
+    }
+    let method_id = match AcpAuthDriver::select_method_for_strategy(auth_methods, strategy) {
+        Ok(Some(method_id)) => method_id,
+        Ok(None) => return Ok(()),
+        Err(AuthError::UnsupportedStrategy) => {
+            return Err(AcpClientError::Authentication(format!(
+                "authentication strategy {strategy:?} is not supported by the harness"
+            )));
+        }
+        Err(AuthError::Transport(message)) => {
+            return Err(AcpClientError::Transport(message));
+        }
+        Err(error) => {
+            return Err(AcpClientError::Authentication(error.to_string()));
+        }
+    };
+    let method_label = method_id.0.to_string();
+    connection
+        .send_request(AuthenticateRequest::new(method_id))
+        .block_task()
+        .await
+        .map(|_| ())
+        .map_err(|error| classify_authentication_error(&method_label, error))
 }
 
 fn classify_authentication_error(
