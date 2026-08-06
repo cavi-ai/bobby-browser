@@ -21,7 +21,6 @@ const EXISTING_SESSION_ID: &str = "existing-session";
 #[derive(Debug, Clone)]
 pub struct AcpAuthDriver {
     launch: AcpAgentConfig,
-    cwd: PathBuf,
     timeout: Duration,
 }
 
@@ -29,15 +28,8 @@ impl AcpAuthDriver {
     pub fn new(command: impl Into<PathBuf>, args: impl IntoIterator<Item = String>) -> Self {
         Self {
             launch: AcpAgentConfig::new(command).args(args),
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             timeout: Duration::from_secs(30),
         }
-    }
-
-    #[must_use]
-    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
-        self.cwd = cwd.into();
-        self
     }
 
     #[must_use]
@@ -104,7 +96,7 @@ impl AcpAuthDriver {
         let agent = AcpAgent::new(launch);
         let method_id_for_error = method_id.0.to_string();
         let profile = profile.clone();
-        tokio::time::timeout(self.timeout, async {
+        let outcome = tokio::time::timeout(self.timeout, async {
             agent_client_protocol::Client
                 .builder()
                 .connect_with(agent, move |connection: ConnectionTo<Agent>| {
@@ -122,23 +114,21 @@ impl AcpAuthDriver {
                             .await
                         {
                             Ok(_response) => {
-                                Ok(AuthProgress::Authenticated(CredentialHandle::new(
+                                Ok(AuthenticateOutcome::Authenticated(CredentialHandle::new(
                                     profile,
                                     strategy,
                                     Arc::new(method_id.0.to_string()),
                                 )))
                             }
                             Err(error) if error.code == AcpErrorCode::AuthRequired => {
-                                Ok(AuthProgress::Pending(AuthChallenge {
+                                Ok(AuthenticateOutcome::Pending(AuthChallenge {
                                     id: method_id_for_error,
                                     strategy,
                                     verification_uri: None,
                                     user_code: None,
                                 }))
                             }
-                            Err(error) => Err(agent_client_protocol::util::internal_error(
-                                format!("method {method_id_for_error}: {error}"),
-                            )),
+                            Err(_) => Ok(AuthenticateOutcome::Rejected),
                         }
                     }
                 })
@@ -146,7 +136,12 @@ impl AcpAuthDriver {
         })
         .await
         .map_err(|_| AuthError::Transport("ACP authenticate timed out".into()))?
-        .map_err(|error| AuthError::Transport(error.to_string()))
+        .map_err(|error| AuthError::Transport(error.to_string()))?;
+        match outcome {
+            AuthenticateOutcome::Authenticated(handle) => Ok(AuthProgress::Authenticated(handle)),
+            AuthenticateOutcome::Pending(challenge) => Ok(AuthProgress::Pending(challenge)),
+            AuthenticateOutcome::Rejected => Err(AuthError::Rejected),
+        }
     }
 }
 
@@ -189,16 +184,44 @@ impl AuthDriver for AcpAuthDriver {
     }
 
     async fn refresh(&self, handle: &CredentialHandle) -> Result<AuthProgress, AuthError> {
-        Ok(AuthProgress::Authenticated(handle.clone()))
+        match self.health(handle).await {
+            AuthStatus::Healthy => Ok(AuthProgress::Authenticated(handle.clone())),
+            AuthStatus::ReauthenticationRequired => {
+                self.begin(handle.profile(), handle.strategy()).await
+            }
+            AuthStatus::Unavailable => Err(AuthError::Transport("ACP harness unavailable".into())),
+            AuthStatus::PendingUserAction | AuthStatus::Revoked => {
+                Err(AuthError::InvalidTransition)
+            }
+        }
     }
 
     async fn revoke(&self, _handle: CredentialHandle) -> Result<(), AuthError> {
         Ok(())
     }
 
-    async fn health(&self, _handle: &CredentialHandle) -> AuthStatus {
-        AuthStatus::Healthy
+    async fn health(&self, handle: &CredentialHandle) -> AuthStatus {
+        let Ok(methods) = self.initialize().await else {
+            return AuthStatus::Unavailable;
+        };
+        let Some(method_id) = handle.payload::<String>() else {
+            return AuthStatus::Healthy;
+        };
+        if methods
+            .iter()
+            .any(|method| method.id().0.as_ref() == method_id)
+        {
+            AuthStatus::Healthy
+        } else {
+            AuthStatus::ReauthenticationRequired
+        }
     }
+}
+
+enum AuthenticateOutcome {
+    Authenticated(CredentialHandle),
+    Pending(AuthChallenge),
+    Rejected,
 }
 
 fn strategy_for_method(method: &AuthMethod) -> Option<AuthStrategy> {
