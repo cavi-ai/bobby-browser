@@ -395,18 +395,38 @@ pub async fn run_installed_firefox_workflow(
     )?);
 
     let operation_started = Instant::now();
-    let typed = worker
-        .type_text(
-            &page_id,
-            &TypeTextCommand {
-                selector: "#name".into(),
-                target: None,
-                value: "Bobby".into(),
-                clear_first: true,
-                expected_url: None,
-            },
-        )
-        .await?;
+    let mut typed = Vec::new();
+    for action_number in 1..=12 {
+        let value = if action_number == 12 {
+            "Bobby".to_owned()
+        } else {
+            format!("Bobby {action_number}")
+        };
+        let action_evidence = worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: "#name".into(),
+                    target: None,
+                    value,
+                    clear_first: true,
+                    expected_url: None,
+                },
+            )
+            .await?;
+        worker
+            .inspect(
+                &page_id,
+                &InspectCommand {
+                    selector: Some("#name".into()),
+                    ..InspectCommand::default()
+                },
+            )
+            .await?;
+        if action_number == 12 {
+            typed = action_evidence;
+        }
+    }
     retained.extend(typed.clone());
     let typed_duration_ms = operation_started.elapsed().as_millis().max(1) as u64;
 
