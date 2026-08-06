@@ -128,11 +128,18 @@ test("Level 2 renders an irregular form and submits the real reCAPTCHA widget re
   const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/onboarding" }).window;
   Object.defineProperty(globalThis, "window", { configurable: true, value: window });
   Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  let checkpoint = "";
+  window.open = ((url?: string | URL) => { checkpoint = String(url); return null; }) as typeof window.open;
   const root = window.document.querySelector<HTMLElement>("#app");
   assert.ok(root);
   const app = mountNorthstar(root, new NorthstarApi("run-level-two", fetcher), config);
   await app.navigate("/onboarding");
 
+  const interruption = window.document.querySelector<HTMLElement>("[role='dialog'][aria-label='Workflow interruption']");
+  assert.ok(interruption);
+  interruption.querySelector<HTMLButtonElement>("button")?.click();
+  assert.match(checkpoint, /\/level-two-checkpoint\?seed=level-two-browser/);
+  assert.equal(window.document.querySelector("[role='dialog'][aria-label='Workflow interruption']"), null);
   const widget = window.document.querySelector<HTMLElement>(".g-recaptcha");
   assert.equal(widget?.dataset.sitekey, "public-site-key");
   assert.ok(window.document.querySelector("script[src='https://www.google.com/recaptcha/api.js']"));

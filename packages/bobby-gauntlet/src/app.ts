@@ -8,6 +8,7 @@ import { onboardingPage } from "./pages/onboarding.js";
 import { LEVEL_ONE_RUN_CONFIG, type RunConfig } from "./models.js";
 import { reportsPage } from "./pages/reports.js";
 import { createRouter, type AppRouter, type Route } from "./router.js";
+import { levelTwoInterruption } from "./traps.js";
 
 export interface NorthstarApp { navigate(path: string): Promise<void>; }
 
@@ -16,8 +17,15 @@ export function mountNorthstar(root: HTMLElement, api: NorthstarApi, config: Run
   const window = document.defaultView;
   if (window === null) throw new Error("Northstar requires a browser window");
   const router = createRouter(window);
+  let interruptionShown = false;
   const render = async (route: Route): Promise<void> => {
-    root.replaceChildren(applicationShell(document, await northstarPage(document, route, api, router, config), router));
+    const shell = applicationShell(document, await northstarPage(document, route, api, router, config), router);
+    if (!interruptionShown) {
+      const interruption = levelTwoInterruption(document, config);
+      if (interruption !== null) shell.append(interruption);
+      interruptionShown = true;
+    }
+    root.replaceChildren(shell);
   };
   router.subscribe(render);
   return { navigate: router.navigate };
