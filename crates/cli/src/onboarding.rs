@@ -360,17 +360,46 @@ pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf>
     Ok(path)
 }
 
-/// Install the agent skill. `project` selects the project `.claude/skills/`
-/// tree; otherwise the user-level `~/.claude/skills/` tree. Returns the file
-/// written.
-pub fn install_skill(project: bool, project_root: &Path) -> Result<PathBuf> {
-    let base = if project {
-        project_root.join(".claude").join("skills")
-    } else {
-        dirs::home_dir()
+/// Which skill tree `install_skill` writes into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillKind {
+    /// Universal agent skills: `.agents/skills/` or `~/.agents/skills/`.
+    Agents,
+    /// Claude Code only: `.claude/skills/` or `~/.claude/skills/`.
+    Claude,
+    /// OpenClaw: always `~/.openclaw/skills/` (no project tree).
+    OpenClaw,
+}
+
+/// Install the agent skill for one host family. `project` selects the project
+/// tree for [`SkillKind::Agents`] and [`SkillKind::Claude`]; OpenClaw is
+/// always user-level. Returns the file written.
+pub fn install_skill(kind: SkillKind, project: bool, project_root: &Path) -> Result<PathBuf> {
+    let base = match kind {
+        SkillKind::Agents => {
+            if project {
+                project_root.join(".agents").join("skills")
+            } else {
+                dirs::home_dir()
+                    .context("home directory unavailable")?
+                    .join(".agents")
+                    .join("skills")
+            }
+        }
+        SkillKind::Claude => {
+            if project {
+                project_root.join(".claude").join("skills")
+            } else {
+                dirs::home_dir()
+                    .context("home directory unavailable")?
+                    .join(".claude")
+                    .join("skills")
+            }
+        }
+        SkillKind::OpenClaw => dirs::home_dir()
             .context("home directory unavailable")?
-            .join(".claude")
-            .join("skills")
+            .join(".openclaw")
+            .join("skills"),
     };
     let dir = base.join(SKILL_NAME);
     std::fs::create_dir_all(&dir)?;
@@ -477,8 +506,15 @@ struct InstallItem {
 #[derive(Debug, Default)]
 pub struct InstallOptions {
     pub hosts: Vec<HostKind>,
+    /// Install the universal agents skill (`~/.agents/skills/` or project).
     pub skill: bool,
+    /// Prefer the project `.agents/skills/` (and `.claude/skills/` when
+    /// `--skill-claude`) tree instead of the user-level tree.
     pub project_skill: bool,
+    /// Also install into Claude Code's skill tree.
+    pub skill_claude: bool,
+    /// Also install into OpenClaw's skill tree (`~/.openclaw/skills/`).
+    pub skill_openclaw: bool,
     pub companion: bool,
     pub extension: Option<PathBuf>,
     /// Copy `bobby` (+ sibling `mcp-gateway`) onto a writable bin dir on PATH.
@@ -493,6 +529,9 @@ pub struct InstallOptions {
 fn use_install_defaults(options: &InstallOptions) -> bool {
     options.hosts.is_empty()
         && !options.skill
+        && !options.project_skill
+        && !options.skill_claude
+        && !options.skill_openclaw
         && !options.companion
         && !options.cli
         && !options.force
@@ -580,6 +619,8 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         hosts,
         skill,
         project_skill,
+        skill_claude,
+        skill_openclaw,
         companion,
         extension,
         cli,
@@ -590,6 +631,8 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let extension = extension.as_deref();
     let skill = *skill;
     let project_skill = *project_skill;
+    let skill_claude = *skill_claude;
+    let skill_openclaw = *skill_openclaw;
     let companion = *companion;
     let cli = *cli;
     let force = *force;
@@ -693,27 +736,61 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
 
     items.push(InstallItem {
         label: if project_skill {
-            "Agent skill: install into this project's .claude/skills/".to_owned()
+            "Agent skill (agents): install into this project's .agents/skills/".to_owned()
         } else {
-            "Agent skill: install into ~/.claude/skills/".to_owned()
+            "Agent skill (agents): install into ~/.agents/skills/".to_owned()
         },
-        enabled: skill,
+        // `--project-skill` alone means "install agents skill into the project".
+        enabled: skill || project_skill,
         run: Box::new({
             let root = project_root.clone();
             move || {
-                let path = install_skill(project_skill, &root)?;
+                let path = install_skill(SkillKind::Agents, project_skill, &root)?;
                 Ok(format!("installed to {}", path.display()))
             }
         }),
     });
 
-    let interactive = !yes && hosts.is_empty() && !skill && !companion && !cli && !force;
+    items.push(InstallItem {
+        label: if project_skill {
+            "Agent skill (claude): install into this project's .claude/skills/".to_owned()
+        } else {
+            "Agent skill (claude): install into ~/.claude/skills/".to_owned()
+        },
+        enabled: skill_claude,
+        run: Box::new({
+            let root = project_root.clone();
+            move || {
+                let path = install_skill(SkillKind::Claude, project_skill, &root)?;
+                Ok(format!("installed to {}", path.display()))
+            }
+        }),
+    });
+
+    items.push(InstallItem {
+        label: "Agent skill (openclaw): install into ~/.openclaw/skills/".to_owned(),
+        enabled: skill_openclaw,
+        run: Box::new(|| {
+            let path = install_skill(SkillKind::OpenClaw, false, Path::new("."))?;
+            Ok(format!("installed to {}", path.display()))
+        }),
+    });
+
+    let interactive = !yes
+        && hosts.is_empty()
+        && !skill
+        && !project_skill
+        && !skill_claude
+        && !skill_openclaw
+        && !companion
+        && !cli
+        && !force;
     if interactive {
         if !std::io::IsTerminal::is_terminal(&std::io::stdin())
             || !std::io::IsTerminal::is_terminal(&std::io::stdout())
         {
             anyhow::bail!(
-                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode> --skill --cli --yes"
+                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode> --skill [--skill-claude] [--skill-openclaw] --cli --yes"
             );
         }
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
@@ -774,6 +851,18 @@ mod install_tests {
             ..InstallOptions::default()
         }));
         assert!(!use_install_defaults(&InstallOptions {
+            project_skill: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            skill_claude: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            skill_openclaw: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
             hosts: vec![HostKind::Claude],
             ..InstallOptions::default()
         }));
@@ -801,10 +890,10 @@ mod install_tests {
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let server = &written["mcpServers"]["bobby-browser"];
-        assert!(
-            server["command"].as_str().unwrap().ends_with("bobby")
-                || server["command"].as_str().unwrap().contains("bobby")
-        );
+        // Under `cargo test --lib` current_exe is the `cli` test harness, not
+        // the `bobby` bin — assert the host entry shape, not the binary name.
+        let command = server["command"].as_str().unwrap();
+        assert!(!command.is_empty(), "command must be set");
         assert_eq!(server["args"][0].as_str().unwrap(), "mcp-stdio");
         // No credential material anywhere in the file.
         let text = std::fs::read_to_string(&path).unwrap();
@@ -838,12 +927,34 @@ mod install_tests {
     }
 
     #[test]
-    fn the_skill_installs_into_the_project_tree() {
+    fn the_agents_skill_installs_into_the_project_tree() {
         let root = tempfile::tempdir().unwrap();
-        let path = install_skill(true, root.path()).unwrap();
+        let path = install_skill(SkillKind::Agents, true, root.path()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("---\nname: bobby-browser"));
+        assert!(path.ends_with(".agents/skills/bobby-browser/SKILL.md"));
+    }
+
+    #[test]
+    fn the_claude_skill_installs_into_the_claude_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let path = install_skill(SkillKind::Claude, true, root.path()).unwrap();
         assert!(path.ends_with(".claude/skills/bobby-browser/SKILL.md"));
+    }
+
+    #[test]
+    fn the_openclaw_skill_installs_into_the_user_openclaw_tree() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let path = install_skill(SkillKind::OpenClaw, true, Path::new("/unused")).unwrap();
+        assert!(path.ends_with(".openclaw/skills/bobby-browser/SKILL.md"));
+        assert!(path.starts_with(home.path()));
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 
     #[test]
