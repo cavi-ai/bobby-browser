@@ -1,3 +1,10 @@
+//! Shared interface layer for every runtime adapter.
+//!
+//! Defines the authenticated [`RuntimeInterface`] trait, bearer-token
+//! [`Authority`], capability [`AuthorizationGuard`], idempotency stores, event
+//! fan-out, and session-ownership records. HTTP, MCP, CDP, and ACP all call
+//! the same trait so capability and evidence semantics stay aligned.
+
 mod artifacts;
 mod auth;
 mod events;
@@ -33,6 +40,11 @@ pub use session_ownership::{
 
 pub type InterfaceResult<T> = Result<T, InterfaceError>;
 
+/// Authenticated runtime operations every adapter implements.
+///
+/// Each method takes a [`RequestContext`] carrying the principal, capability
+/// set, deadline, and optional idempotency key. Implementations must fail
+/// closed on missing capabilities and expired deadlines.
 #[async_trait]
 pub trait RuntimeInterface: Send + Sync {
     async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo>;
@@ -129,12 +141,14 @@ pub trait RuntimeInterface: Send + Sync {
     ) -> InterfaceResult<types::RecoveryStatus>;
 }
 
+/// Capability and identity checks for one authenticated principal.
 #[derive(Clone)]
 pub struct AuthorizationGuard {
     authority: CapabilityHandle,
 }
 
 impl AuthorizationGuard {
+    /// Build a guard from a verified [`CapabilityHandle`].
     pub fn new(authority: CapabilityHandle) -> Self {
         Self { authority }
     }

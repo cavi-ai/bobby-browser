@@ -91,6 +91,8 @@ use crate::{
     MAX_QUEUED_EVENTS,
 };
 
+/// Errors from CDP discovery endpoints (`/json/version`, `/json/list`) and
+/// WebSocket upgrade before a session is established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoveryError {
     Unauthorized,
@@ -119,6 +121,11 @@ pub struct TargetDescription {
     pub web_socket_debugger_url: String,
 }
 
+/// CDP discovery and WebSocket gateway backed by an [`Authority`] and
+/// [`RuntimeInterface`].
+///
+/// Construct with [`Self::new`], optionally configure artifacts and upload
+/// staging, then expose [`Self::router`] on the host HTTP server.
 pub struct CdpGateway {
     authority: Arc<dyn Authority>,
     runtime: Arc<dyn RuntimeInterface>,
@@ -134,6 +141,8 @@ pub struct CdpGateway {
 }
 
 impl CdpGateway {
+    /// Create a gateway. `websocket_base` is the public origin clients use for
+    /// debugger URLs (for example `ws://127.0.0.1:9222`).
     pub fn new<A, R>(
         authority: Arc<A>,
         runtime: Arc<R>,
@@ -310,6 +319,10 @@ const MAX_ISOLATED_WORLDS: usize = 256;
 const MAX_PENDING_TAB_CHILDREN: usize = 256;
 const MAX_BROWSER_OBSERVERS: usize = 512;
 
+/// One authenticated CDP WebSocket session.
+///
+/// Created by [`CdpGateway::upgrade`] and dispatches CDP method calls through
+/// the shared runtime interface.
 pub struct CdpConnection {
     connection_id: String,
     handle: CapabilityHandle,
@@ -516,6 +529,7 @@ impl UploadStaging {
 }
 
 impl CdpConnection {
+    /// Build a standalone connection (tests and harness use).
     pub fn new(
         handle: CapabilityHandle,
         runtime: Arc<dyn RuntimeInterface>,

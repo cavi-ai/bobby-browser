@@ -1,8 +1,20 @@
+//! Model Context Protocol adapter over the shared runtime interface.
+//!
+//! Implements MCP JSON-RPC over stdio or streamable HTTP: `initialize`,
+//! `tools/list`, `tools/call`, resources, prompts, and server notifications.
+//! Every tool call goes through the same [`sdk_core::AuthenticatedRuntime`]
+//! the HTTP and CDP adapters use.
+//!
+//! Start from [`Server::new`] for production wiring, or [`Server::serve`] for
+//! a stdio transport loop.
+
 #![recursion_limit = "256"]
 
 mod annotations;
+/// Server-to-client MCP notifications (runtime events, tool-list changes).
 pub mod notify;
 mod prompts;
+/// JSON-RPC frame limits and error codes shared by transports.
 pub mod protocol;
 mod resources;
 mod schema;
