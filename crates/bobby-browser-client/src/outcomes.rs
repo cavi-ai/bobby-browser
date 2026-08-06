@@ -291,6 +291,9 @@ pub enum Evidence {
 pub enum IntentResolutionPath {
     Deterministic,
     VisionFallback,
+    /// Resolved from a cached vision proposal (lazy batch prefill) rather
+    /// than a live stuck-rescue escalation.
+    VisionPrefill,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

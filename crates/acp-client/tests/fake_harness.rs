@@ -21,6 +21,7 @@ fn packet() -> VisionTaskPacket {
         },
         allowed_actions: vec!["click".into()],
         evidence_digest: "a".repeat(64),
+        context: None,
     }
 }
 
@@ -205,6 +206,7 @@ async fn adapter_rejects_evidence_substitution_from_the_harness() {
             intent_kind: "submit".into(),
             stuck: StuckKind::TargetMissing,
             screenshot_png: png,
+            context: None,
         })
         .await
         .expect_err("evidence substitution must fail");

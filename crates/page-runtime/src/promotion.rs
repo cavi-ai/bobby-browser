@@ -80,7 +80,9 @@ impl ContextPromotion {
         };
         let Some(mut control) = control else { return };
         let source = match record.resolution_path {
-            IntentResolutionPath::VisionFallback => RecordSource::VisionPromoted,
+            IntentResolutionPath::VisionFallback | IntentResolutionPath::VisionPrefill => {
+                RecordSource::VisionPromoted
+            }
             IntentResolutionPath::Deterministic => RecordSource::Observed,
         };
         let stats = control

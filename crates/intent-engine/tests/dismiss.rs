@@ -376,6 +376,9 @@ async fn dismiss_still_present_after_click_escalates_to_vision_and_preserves_pri
             session_ok: true,
             capability_ok: true,
             assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
         },
     )
     .await;

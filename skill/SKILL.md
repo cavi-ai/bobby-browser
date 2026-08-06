@@ -93,7 +93,7 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
    not replay the command.
 5. **Read before write.** Take an `a11y_snapshot`, pass its targets straight
    into `click` / `type_text` / `upload_files` — no selector guessing.
-6. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
+7. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
    come back as digest-verified artifacts (`artifact://<id>` via
    `artifact:read`). The `bobby://` docs are readable by any principal.
 

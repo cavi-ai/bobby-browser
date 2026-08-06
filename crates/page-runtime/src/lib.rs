@@ -133,6 +133,27 @@ impl PageRuntime {
         self.promotion.as_ref()
     }
 
+    /// Enables lazy batch vision prefill against this runtime's context
+    /// graph (`[vision].prefill`). Off by default; when off, the intent path
+    /// is byte-identical to before.
+    pub fn with_vision_prefill_enabled(mut self) -> Self {
+        self.adaptive = self
+            .adaptive
+            .clone()
+            .with_vision_prefill(self.context.clone());
+        self
+    }
+
+    /// Attaches this runtime's context graph to the adaptive engine so
+    /// escalation prompts carry the recent-commands block.
+    pub fn with_context_graph_attached(mut self) -> Self {
+        self.adaptive = self
+            .adaptive
+            .clone()
+            .with_context_graph(self.context.clone());
+        self
+    }
+
     pub(crate) async fn observe_durable_phase(&self, phase: CommandPhase) {
         if let Some(observer) = &self.phase_observer {
             observer.durable_phase_reached(phase).await;

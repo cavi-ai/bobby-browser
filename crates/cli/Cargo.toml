@@ -38,6 +38,7 @@ node-registry = { path = "../node-registry", version = "0.6.0" }
 companion-protocol = { path = "../companion-protocol", version = "0.6.0" }
 companion-core = { path = "../companion-core", version = "0.6.0" }
 firefox-companion = { path = "../firefox-companion", version = "0.6.0" }
+intent-engine = { path = "../intent-engine", version = "0.6.0" }
 observability = { path = "../observability", version = "0.6.0" }
 mcp-gateway = { path = "../mcp-gateway", version = "0.6.0" }
 libc = "0.2"

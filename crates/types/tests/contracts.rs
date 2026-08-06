@@ -1028,6 +1028,19 @@ fn extract_runtime_command_envelope_golden_json() {
 }
 
 #[test]
+fn intent_resolution_paths_round_trip_their_wire_strings() {
+    for (path, wire) in [
+        (IntentResolutionPath::Deterministic, "deterministic"),
+        (IntentResolutionPath::VisionFallback, "visionFallback"),
+        (IntentResolutionPath::VisionPrefill, "visionPrefill"),
+    ] {
+        assert_eq!(serde_json::to_string(&path).unwrap(), format!("\"{wire}\""));
+        let parsed: IntentResolutionPath = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+        assert_eq!(parsed, path);
+    }
+}
+
+#[test]
 fn extraction_evidence_round_trips_with_and_without_a_value() {
     let resolved = Evidence::Extraction {
         field: "displayName".into(),

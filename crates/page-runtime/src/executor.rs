@@ -376,8 +376,11 @@ impl PageRuntime {
             // does not go stale when the page changes, so it outlives the
             // generation bump below.
             if !evidence.is_empty() {
-                self.context()
-                    .record_command(page_id, envelope.command_id.clone());
+                self.context().record_command(
+                    page_id,
+                    envelope.command_id.clone(),
+                    crate::context::command_kind_name(&envelope.command),
+                );
             }
             self.context().invalidate_for(page_id, &envelope.command);
             for item in &evidence {

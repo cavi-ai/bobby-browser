@@ -28,6 +28,8 @@ struct ProposeBody<'a> {
     intent_kind: &'a str,
     stuck: &'a str,
     screenshot_png: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<crate::VisionPromptContext>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +151,7 @@ impl VisionAssist for HttpVisionAssist {
             intent_kind: &request.intent_kind,
             stuck: stuck_name(request.stuck),
             screenshot_png: BASE64.encode(request.screenshot_png),
+            context: request.context,
         };
         let mut call = self
             .client
@@ -345,6 +348,7 @@ mod tests {
                 intent_kind: "locate".into(),
                 screenshot_png: b"png".to_vec(),
                 stuck: StuckKind::TargetMissing,
+                context: None,
             })
             .await
             .unwrap();
