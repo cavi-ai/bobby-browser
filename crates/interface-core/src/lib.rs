@@ -30,8 +30,8 @@ pub use events::{
     MAX_EVENT_PAYLOAD_NODES,
 };
 pub use idempotency::{
-    canonical_sha256, IdempotencyPermit, IdempotencyReservation, IdempotencyStore, RetainedOutcome,
-    SessionCheckpointOutcome,
+    canonical_sha256, command_identity_sha256, IdempotencyPermit, IdempotencyReservation,
+    IdempotencyStore, RetainedOutcome, SessionCheckpointOutcome,
 };
 pub use session_ownership::{
     SessionOwnershipAuthority, SessionOwnershipRecordError, SessionOwnershipRecorder,

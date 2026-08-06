@@ -1752,7 +1752,18 @@ impl Server {
                         // pass workflowId back to stay in the same workflow,
                         // and the pair (commandId, attemptId) is what a
                         // Boundary command's pre-action checkpoint must name.
-                        if let Some(object) = value.as_object_mut() {
+                        //
+                        // Only when the outcome belongs to this envelope. An
+                        // idempotent replay returns the *original* attempt's
+                        // outcome, whose `commandId` is not this envelope's;
+                        // echoing this envelope's workflow and attempt ids
+                        // there would hand back a pair that never ran, and a
+                        // checkpoint naming it would fail the boundary gate.
+                        // The returned `commandId` stays the caller's handle.
+                        let is_this_attempt = value
+                            .get("commandId")
+                            .is_some_and(|id| *id == json!(envelope.command_id.clone()));
+                        if let Some(object) = value.as_object_mut().filter(|_| is_this_attempt) {
                             object.insert(
                                 "workflowId".to_owned(),
                                 json!(envelope.workflow_id.clone()),

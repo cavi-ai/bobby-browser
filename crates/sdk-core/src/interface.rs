@@ -6,9 +6,9 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use interface_core::{
-    canonical_sha256, AuthorizationGuard, CapabilityHandle, IdempotencyReservation,
-    IdempotencyStore, InterfaceResult, RuntimeInterface, SessionCheckpointOutcome,
-    SessionOwnershipRecorder,
+    canonical_sha256, command_identity_sha256, AuthorizationGuard, CapabilityHandle,
+    IdempotencyReservation, IdempotencyStore, InterfaceResult, RuntimeInterface,
+    SessionCheckpointOutcome, SessionOwnershipRecorder,
 };
 use types::{
     Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
@@ -198,14 +198,18 @@ impl AuthenticatedRuntime {
                 .submit_with_vision_grant(envelope, vision_capability_ok, one_shot_vision_consent)
                 .await);
         };
-        // Consent changes what the same command may do, so it is part of the
-        // idempotency identity: a denial must not replay into an approved retry,
-        // nor an approved result into a later ordinary submission.
-        let digest = if one_shot_vision_consent {
-            canonical_sha256(&(&envelope, true))?
-        } else {
-            canonical_sha256(&envelope)?
-        };
+        // Identity is what the command does, not which attempt is doing it:
+        // `command_id`, `attempt_id`, and `deadline` are minted per attempt, so
+        // digesting the whole envelope meant a retry never matched its own
+        // first try. Consent is part of the identity because it changes what
+        // the same command may do.
+        let digest = command_identity_sha256(
+            envelope.schema_version,
+            &envelope.session_id,
+            &envelope.page_id,
+            &envelope.command,
+            one_shot_vision_consent,
+        )?;
         let reservation = self
             .idempotency
             .reserve(

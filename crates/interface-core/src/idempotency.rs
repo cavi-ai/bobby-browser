@@ -512,6 +512,47 @@ fn canonicalize(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Digest of what a command *does*, ignoring which attempt is doing it.
+///
+/// `canonical_sha256` over a whole `CommandEnvelope` cannot be used for this:
+/// `command_id`, `attempt_id`, and `deadline` are minted per attempt, so a
+/// retry never matched its own first try and every retry took the conflict
+/// branch instead of replaying. Over MCP that made idempotent retry
+/// unreachable outright -- the gateway mints a fresh deadline on every
+/// dispatch and the caller cannot pin one.
+///
+/// What stays in the identity is what changes the effect: which session and
+/// page it runs against, the envelope schema, and the command itself.
+/// `consent` is carried because a one-shot vision grant changes what the same
+/// command may do -- a denial must not replay into an approved retry, nor the
+/// reverse.
+///
+/// `workflow_id` is excluded for the same reason as the ids: the gateway mints
+/// it per call (`workflow_id.unwrap_or_default()`) whenever the caller does not
+/// pin one, so including it would leave retry broken for every agent that does
+/// not thread a workflow by hand -- which is the common case and the one the
+/// bug actually bites.
+///
+/// Reservations are already scoped to `(principal, key)`, so the key remains
+/// the caller's own assertion of "this is the same request". Same key with a
+/// different command still conflicts. That is the property worth keeping; only
+/// the false conflicts go away.
+pub fn command_identity_sha256(
+    schema_version: u16,
+    session_id: &impl Serialize,
+    page_id: &impl Serialize,
+    command: &impl Serialize,
+    consent: bool,
+) -> Result<[u8; 32], InterfaceError> {
+    canonical_sha256(&serde_json::json!({
+        "schemaVersion": schema_version,
+        "sessionId": serde_json::to_value(session_id).map_err(|_| canonicalization_error())?,
+        "pageId": serde_json::to_value(page_id).map_err(|_| canonicalization_error())?,
+        "command": serde_json::to_value(command).map_err(|_| canonicalization_error())?,
+        "consent": consent,
+    }))
+}
+
 fn canonicalization_error() -> InterfaceError {
     InterfaceError {
         code: InterfaceErrorCode::InvalidRequest,

@@ -3368,3 +3368,84 @@ async fn context_neighbors_is_gated_on_context_read() {
         "context_neighbors must be visible with context:read: {names:?}"
     );
 }
+
+/// Idempotent retry has to actually replay over MCP.
+///
+/// The digest used to cover the whole `CommandEnvelope`, including `deadline`
+/// and the per-attempt `commandId`/`attemptId`. The gateway mints all three
+/// fresh on every dispatch and gives the caller no way to pin a deadline, so a
+/// retry could never match its own first try: every retry took the conflict
+/// branch. An agent that timed out and retried the way the tool told it to got
+/// `idempotencyConflict` on a command that may already have landed.
+#[tokio::test]
+async fn a_retry_under_one_idempotency_key_replays_instead_of_dispatching_again() {
+    let runtime = Arc::new(authenticated_with_intents().await);
+    let server = Server::new(runtime.clone());
+    initialize(&server).await;
+
+    let session_id = SessionId::new().0.to_string();
+    let page_id = types::PageId::new().0.to_string();
+    let locate = |id: u64, purpose: &str| {
+        request(
+            id,
+            "tools/call",
+            json!({
+                "name":"intent_locate",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":purpose,
+                    "idempotencyKey":"retry-after-timeout"
+                }
+            }),
+        )
+    };
+
+    let first = server
+        .handle_message(locate(80, "the search box"))
+        .await
+        .unwrap();
+    assert!(first["error"].is_null(), "{first}");
+    let dispatches_after_first = runtime.submit_dispatch_count();
+
+    let retry = server
+        .handle_message(locate(81, "the search box"))
+        .await
+        .unwrap();
+    assert!(retry["error"].is_null(), "retry was rejected: {retry}");
+    assert_eq!(
+        retry["result"]["structuredContent"]["commandId"],
+        first["result"]["structuredContent"]["commandId"],
+        "the retry ran a new command instead of replaying the first"
+    );
+    assert_eq!(
+        retry["result"]["structuredContent"]["status"],
+        first["result"]["structuredContent"]["status"],
+        "the retry returned a different outcome"
+    );
+    // A replay is the original attempt's outcome, so this call's workflow and
+    // attempt ids must not be stamped onto it.
+    assert!(
+        retry["result"]["structuredContent"]["attemptId"].is_null(),
+        "a replay claimed an attempt id that never ran: {retry}"
+    );
+    assert_eq!(
+        runtime.submit_dispatch_count(),
+        dispatches_after_first,
+        "the retry dispatched a second time instead of replaying"
+    );
+
+    // The safety property survives: the same key over a different command is
+    // still a conflict, because identity covers the command itself.
+    let conflict = server
+        .handle_message(locate(82, "the login button"))
+        .await
+        .unwrap();
+    let code = conflict["error"]["data"]["interfaceError"]["code"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        code, "idempotencyConflict",
+        "a different command under the same key must still conflict: {conflict}"
+    );
+}
