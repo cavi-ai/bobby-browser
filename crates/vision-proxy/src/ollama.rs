@@ -268,13 +268,12 @@ struct ChatChoiceMessage {
 /// - `VISION_OLLAMA_MODEL` (optional, defaults to `llava:7b`)
 /// - `VISION_OLLAMA_BASE_URL` (optional, defaults to `http://127.0.0.1:11434`)
 pub fn ollama_upstream_from_env() -> Result<OllamaUpstream, OllamaConfigError> {
-    let model = std::env::var("VISION_OLLAMA_MODEL")
-        .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let model = std::env::var("VISION_OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
     if model.is_empty() {
         return Err(OllamaConfigError::MissingModel);
     }
-    let base_url = std::env::var("VISION_OLLAMA_BASE_URL")
-        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    let base_url =
+        std::env::var("VISION_OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
     Ok(OllamaUpstream::new(model, base_url))
 }
 

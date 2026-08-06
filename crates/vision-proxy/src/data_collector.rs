@@ -68,6 +68,10 @@ pub struct VisionTrainingExample {
 }
 
 impl VisionTrainingExample {
+    // A flat training record: every argument is one of the struct's own
+    // fields, so the arity is the record's width rather than a signature
+    // that wants splitting.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         screenshot_png_b64: String,
         input: &ProposeInput,
@@ -143,7 +147,6 @@ impl VisionTrainingExample {
 pub struct VisionDataCollector {
     config: DataCollectorConfig,
     buffer: Arc<Mutex<Vec<VisionTrainingExample>>>,
-    output_file: Option<PathBuf>,
 }
 
 impl VisionDataCollector {
@@ -156,7 +159,6 @@ impl VisionDataCollector {
         Self {
             config,
             buffer: Arc::new(Mutex::new(Vec::new())),
-            output_file: None,
         }
     }
 
@@ -165,6 +167,9 @@ impl VisionDataCollector {
     }
 
     /// Log a vision proposal for training data collection.
+    // Mirrors `VisionTrainingExample::new`'s flat record, one argument per
+    // field.
+    #[allow(clippy::too_many_arguments)]
     pub fn log_proposal(
         &self,
         screenshot_png_b64: String,
@@ -226,9 +231,7 @@ impl VisionDataCollector {
             writer
                 .write_all(json.as_bytes())
                 .expect("failed to write training data");
-            writer
-                .write_all(b"\n")
-                .expect("failed to write newline");
+            writer.write_all(b"\n").expect("failed to write newline");
         }
 
         writer.flush().expect("failed to flush training data");
@@ -237,7 +240,10 @@ impl VisionDataCollector {
     /// Get collection statistics.
     pub fn stats(&self) -> (usize, usize) {
         let buffer = self.buffer.lock().unwrap();
-        (buffer.len(), buffer.iter().filter(|e| e.success == Some(true)).count())
+        (
+            buffer.len(),
+            buffer.iter().filter(|e| e.success == Some(true)).count(),
+        )
     }
 }
 
