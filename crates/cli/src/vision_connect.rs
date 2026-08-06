@@ -111,7 +111,10 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
     )
     .map_err(|error| anyhow!("{error}"))?;
 
-    println!("Wrote vision settings to {}", config_path.display());
+    println!(
+        "Wrote vision provider settings and [nodes.vision] to {}",
+        config_path.display()
+    );
     print_env_hints(&resolved)?;
 
     if !opts.yes {

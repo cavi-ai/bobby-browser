@@ -36,6 +36,24 @@ cargo build --release -p bobby-browser
 ./target/release/bobby install --host claude --skill --yes
 ```
 
+### Homebrew (macOS / Linux)
+
+From a checkout (ships `bobby`, `mcp-gateway`, and `acp-gateway`):
+
+```bash
+brew install --formula ./Formula/bobby-browser.rb
+```
+
+Once published under a tap:
+
+```bash
+brew install cavi-ai/bobby-browser/bobby-browser
+```
+
+Release archives are three binaries on purpose: the CLI plus the two stdio
+gateways agents spawn. Prefer MCP Explore (`BOBBY_MCP_TOOLSET=explore` or
+`toolset_select`) so `tools/list` stays small.
+
 `bobby install` merges into an existing Claude Code, Zed, or VS Code MCP config
 rather than replacing it, and writes no secrets into host config — the host
 points at `bobby mcp-stdio`, which loads the credential itself.
