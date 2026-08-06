@@ -152,6 +152,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
     std::fs::write(&resume, b"Ada Lovelace").unwrap();
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

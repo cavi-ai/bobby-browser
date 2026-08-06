@@ -78,13 +78,25 @@ async fn run() -> anyhow::Result<()> {
         handle.clone(),
         recorder,
     ));
-    Server::production(
+    let mut server = Server::production(
         authenticated,
         EventStore::new(config.interface.max_event_retention),
         resources,
-    )
-    .serve(tokio::io::stdin(), tokio::io::stdout())
-    .await?;
+    );
+    if let Some(configured) = config.mcp.startup_toolset.as_deref() {
+        // A typo here is worth failing on: config is edited deliberately, and
+        // silently serving the full surface would look like the setting worked.
+        let toolset = mcp_gateway::Toolset::parse(configured.trim()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid [mcp] startup_toolset {configured:?}: \
+                 expected one of full, explore, act, intent, verify"
+            )
+        })?;
+        server = server.with_startup_toolset(toolset);
+    }
+    server
+        .serve(tokio::io::stdin(), tokio::io::stdout())
+        .await?;
     Ok(())
 }
 

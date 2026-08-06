@@ -37,6 +37,92 @@ pub struct AccessibilityTarget {
 pub struct ContextAnswer {
     pub target: AccessibilityTarget,
     pub confidence: f32,
+    /// Whether the answer was observed live this session (stamped with the
+    /// page's generation) or remembered from a prior session's persisted
+    /// context. Additive; absent means a live generation-0 answer.
+    #[serde(default)]
+    pub observed_at: ContextObservedAt,
+    /// How the underlying record entered the graph. Absent for live answers
+    /// (always direct observation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ContextAnswerSource>,
+}
+
+impl Default for ContextObservedAt {
+    fn default() -> Self {
+        Self::Generation { generation: 0 }
+    }
+}
+
+/// Provenance of a [`ContextAnswer`]: live-observed under a page generation,
+/// or remembered from the persisted per-profile context store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ContextObservedAt {
+    Generation { generation: u64 },
+    Persisted,
+}
+
+/// How a remembered control record entered the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextAnswerSource {
+    Observed,
+    VisionPromoted,
+}
+
+/// The remembered form structure around a located control (`context_neighbors`).
+/// Structure only: roles, names, ordinals, and per-intent counters — never
+/// values, page text, or timestamps finer than a day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextNeighbors {
+    pub answer: ContextAnswer,
+    /// Key of the enclosing form within the remembered page.
+    pub form: String,
+    /// Pattern of the remembered page the form belongs to.
+    pub page_pattern: String,
+    pub controls: Vec<ContextNeighborControl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextNeighborControl {
+    pub role: String,
+    pub accessible_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<usize>,
+    /// Per-intent-kind counters, keyed by intent kind.
+    pub intents: std::collections::BTreeMap<String, ContextNeighborStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextNeighborStats {
+    pub success_count: u64,
+    pub failure_count: u64,
+    /// Days since the Unix epoch of the last verified success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_day: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ContextAnswerSource>,
+}
+
+/// One remembered site's structure: page pattern → form key → controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextSiteView {
+    pub site_key: String,
+    pub pages: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Vec<ContextNeighborControl>>,
+    >,
 }
 
 /// One node in an `accessibilitySnapshot` result tree.

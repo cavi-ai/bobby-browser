@@ -29,6 +29,7 @@ tags:
   - name: sessions
   - name: pages
   - name: forms
+  - name: context
   - name: commands
   - name: recovery
   - name: events
@@ -251,6 +252,96 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/context/ask:
+    get:
+      operationId: contextAsk
+      tags: [context]
+      summary: Ask where a control is
+      description: >-
+        Requires `context:read`. Same answer contract as MCP `context_ask`:
+        a bound target and confidence, or `null` when the context does not
+        know. Answers are marked live (generation) or remembered (persisted).
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: pageId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: description
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: ContextAnswer or null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer:
+                    anyOf:
+                      - $ref: "#/components/schemas/ContextAnswer"
+                      - type: "null"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/context/site/{key}:
+    get:
+      operationId: getContextSite
+      tags: [context]
+      summary: Remembered structure of one site
+      description: >-
+        Requires `context:read`. Returns the remembered page patterns, forms,
+        and controls for a site key (`scheme://registrable-domain`), or
+        `null` for an unknown site.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: ContextSiteView or null
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  site:
+                    anyOf:
+                      - $ref: "#/components/schemas/ContextSiteView"
+                      - type: "null"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/commands:
@@ -907,6 +998,7 @@ components:
         - intent:execute
         - vision:assist
         - artifact:read
+        - context:read
         - artifact:capture
         - recovery:read
         - recovery:write
@@ -916,6 +1008,56 @@ components:
         - authority:admin
         - browser:fingerprint
         - browser:humanize
+    ContextAnswer:
+      type: object
+      required: [target, confidence]
+      properties:
+        target:
+          type: object
+          properties:
+            role: { type: string }
+            accessibleName: { type: string }
+            ordinal: { type: integer }
+        confidence: { type: number }
+        observedAt:
+          type: object
+          description: generation (live) or persisted (remembered)
+        source:
+          type: string
+          enum: [observed, vision-promoted]
+    ContextNeighborStats:
+      type: object
+      properties:
+        successCount: { type: integer }
+        failureCount: { type: integer }
+        lastVerifiedDay: { type: integer }
+        source:
+          type: string
+          enum: [observed, vision-promoted]
+    ContextNeighborControl:
+      type: object
+      required: [role, accessibleName, intents]
+      properties:
+        role: { type: string }
+        accessibleName: { type: string }
+        ordinal: { type: integer }
+        intents:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ContextNeighborStats"
+    ContextSiteView:
+      type: object
+      required: [siteKey, pages]
+      properties:
+        siteKey: { type: string }
+        pages:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: array
+              items:
+                $ref: "#/components/schemas/ContextNeighborControl"
     ArtifactId:
       type: string
       minLength: 1

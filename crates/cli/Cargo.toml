@@ -30,6 +30,7 @@ getrandom.workspace = true
 hex.workspace = true
 artifact-store = { path = "../artifact-store", version = "0.6.0" }
 auth-broker = { path = "../auth-broker", version = "0.6.0" }
+context-store = { path = "../context-store", version = "0.6.0" }
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true

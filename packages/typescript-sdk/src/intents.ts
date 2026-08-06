@@ -58,6 +58,7 @@ export function assertIntentPurpose(purpose: string): void {
 function defaultHints(): IntentHints {
   return {
     role: null,
+    accessibleName: null,
     nearText: null,
     ordinal: null,
     framePath: [],

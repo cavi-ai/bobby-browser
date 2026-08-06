@@ -840,6 +840,22 @@ variant; `IntentCommand::class` fixes its recovery behavior.
   is never treated as needing a checkpoint, so it is unconditionally
   `Reconciliable`.
 
+## Targeting an intent
+
+Pass an `a11y_snapshot` node's `target` object straight into `hints`. It
+carries `{role, accessibleName, ordinal}` and every one of those is an
+`IntentHints` field, so no remapping is needed and `ordinal` keeps duplicate
+role/name pairs apart.
+
+`accessibleName` matches the control's accessible name exactly and is the
+same hint as `nearText: {"kind":"exact","value":...}`. Use `nearText` when
+you need `contains` or `regex` matching instead. Setting `accessibleName`
+and an exact `nearText` to two different values is refused
+(`intentCompileFailed`) rather than resolved to one of them -- send one name.
+
+With no name hint at all, the intent falls back to matching on `purpose`,
+which is looser and more likely to go ambiguous.
+
 ## When to reach for an intent instead of a primitive
 
 Intents resolve a target from a described purpose and verify their own

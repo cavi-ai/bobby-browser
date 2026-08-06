@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use context_store::{
     day_since_epoch, site_key, ContextStore, ControlContext, IntentStats, RecordSource,
 };
-use types::{Evidence, IntentResolutionPath, TargetSpec};
+use types::{ContextAnswer, ContextAnswerSource, Evidence, IntentResolutionPath, TargetSpec};
 
 /// Form key used until form membership is observed structurally. Schema v1
 /// keeps every promoted control in one page-level form rather than guessing
@@ -111,6 +111,126 @@ impl ContextPromotion {
         self.store.upsert_site(&site, site_context).await;
     }
 
+    /// Answers a control question from the persisted store alone — the
+    /// cold-start path. The same matching ladder as the hot graph (exact
+    /// 1.0, role+name 0.9, token-overlap fuzzy ≤0.8, floor and tie-refusal
+    /// shared) runs over remembered controls. Answers are marked
+    /// `Persisted` with the record's source; unknown sites answer `None`,
+    /// exactly like an unobserved page.
+    pub async fn ask(&self, page_url: Option<&str>, description: &str) -> Option<ContextAnswer> {
+        let url = page_url?;
+        let site = site_key(url)?;
+        let needle = description.trim().to_lowercase();
+        if needle.is_empty() {
+            return None;
+        }
+        let site_context = self.store.site(&site).await?;
+        // Tie-refusal makes iteration order irrelevant: two same-score
+        // controls answer `None` wherever they were remembered.
+        let controls = site_context
+            .pages
+            .values()
+            .flat_map(|page| page.forms.values())
+            .flat_map(|form| form.controls.iter());
+        let mut best: Option<(f32, &context_store::ControlContext)> = None;
+        let mut tied = false;
+        for control in controls {
+            let Some(score) = score_remembered(&needle, control) else {
+                continue;
+            };
+            match &best {
+                Some((current, _)) if *current > score => {}
+                Some((current, _)) if (*current - score).abs() < f32::EPSILON => tied = true,
+                _ => {
+                    best = Some((score, control));
+                    tied = false;
+                }
+            }
+        }
+        let (confidence, control) = best?;
+        if tied || confidence < crate::CONTEXT_CONFIDENCE_FLOOR {
+            return None;
+        }
+        let source = control
+            .intents
+            .values()
+            .filter_map(|stats| stats.source)
+            .next()
+            .map(|source| match source {
+                RecordSource::Observed => ContextAnswerSource::Observed,
+                RecordSource::VisionPromoted => ContextAnswerSource::VisionPromoted,
+            });
+        Some(ContextAnswer {
+            target: types::AccessibilityTarget {
+                role: control.role.clone(),
+                accessible_name: control.accessible_name.clone(),
+                ordinal: control.ordinal.map(|ordinal| ordinal as usize),
+            },
+            confidence,
+            observed_at: types::ContextObservedAt::Persisted,
+            source,
+        })
+    }
+
+    /// The remembered structure of one whole site, or `None` when the
+    /// store has never seen it.
+    pub async fn site_view(&self, site: &str) -> Option<types::ContextSiteView> {
+        let site_context = self.store.site(site).await?;
+        Some(types::ContextSiteView {
+            site_key: site.to_string(),
+            pages: site_context
+                .pages
+                .iter()
+                .map(|(pattern, page)| {
+                    (
+                        pattern.clone(),
+                        page.forms
+                            .iter()
+                            .map(|(form, context)| {
+                                (
+                                    form.clone(),
+                                    context.controls.iter().map(control_view).collect(),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// The remembered form structure around a located control: the answer
+    /// plus the enclosing form's controls with their per-intent counters.
+    /// `None` when the store cannot locate the control, exactly like `ask`.
+    pub async fn neighbors(
+        &self,
+        page_url: Option<&str>,
+        description: &str,
+    ) -> Option<types::ContextNeighbors> {
+        let url = page_url?;
+        let site = site_key(url)?;
+        let answer = self.ask(page_url, description).await?;
+        let site_context = self.store.site(&site).await?;
+        for (pattern, page) in &site_context.pages {
+            for (form_key, form) in &page.forms {
+                if !form.controls.iter().any(|control| {
+                    control.role == answer.target.role
+                        && control.accessible_name == answer.target.accessible_name
+                        && control.ordinal.map(|ordinal| ordinal as usize) == answer.target.ordinal
+                }) {
+                    continue;
+                }
+                return Some(types::ContextNeighbors {
+                    answer,
+                    form: form_key.clone(),
+                    page_pattern: pattern.clone(),
+                    controls: form.controls.iter().map(control_view).collect(),
+                });
+            }
+        }
+        None
+    }
+
     /// Flushes buffered writes; failures stay session-only (the store keeps
     /// them dirty) and are reported once here, never to the command path.
     pub async fn flush(&self) {
@@ -122,6 +242,44 @@ impl ContextPromotion {
             );
         }
     }
+}
+
+fn control_view(control: &context_store::ControlContext) -> types::ContextNeighborControl {
+    types::ContextNeighborControl {
+        role: control.role.clone(),
+        accessible_name: control.accessible_name.clone(),
+        ordinal: control.ordinal.map(|ordinal| ordinal as usize),
+        intents: control
+            .intents
+            .iter()
+            .map(|(kind, stats)| {
+                (
+                    kind.clone(),
+                    types::ContextNeighborStats {
+                        success_count: stats.success_count,
+                        failure_count: stats.failure_count,
+                        last_verified_day: stats.last_verified_day,
+                        source: stats.source.map(|source| match source {
+                            RecordSource::Observed => ContextAnswerSource::Observed,
+                            RecordSource::VisionPromoted => ContextAnswerSource::VisionPromoted,
+                        }),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn score_remembered(needle: &str, control: &context_store::ControlContext) -> Option<f32> {
+    let name = control.accessible_name.trim().to_lowercase();
+    if name == needle {
+        return Some(1.0);
+    }
+    let role = control.role.trim().to_lowercase();
+    if format!("{role} {name}") == needle {
+        return Some(0.9);
+    }
+    crate::context::fuzzy_score(needle, &name)
 }
 
 fn apply_outcome(stats: &mut IntentStats, success: bool, source: RecordSource) {

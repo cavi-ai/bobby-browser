@@ -46,6 +46,23 @@ impl Toolset {
         }
     }
 
+    /// Startup phase from `BOBBY_MCP_TOOLSET`. `None` when unset, so a
+    /// configured value can supply the fallback. An unparseable value is
+    /// ignored rather than fatal: this only selects what `tools/list`
+    /// advertises, and failing a connection over a display preference would
+    /// be worse than starting on the full surface.
+    pub fn from_env() -> Option<Self> {
+        let raw = std::env::var("BOBBY_MCP_TOOLSET").ok()?;
+        let parsed = Self::parse(raw.trim());
+        if parsed.is_none() {
+            tracing::warn!(
+                value = %raw,
+                "ignoring BOBBY_MCP_TOOLSET: expected one of full, explore, act, intent, verify"
+            );
+        }
+        parsed
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",
@@ -111,6 +128,7 @@ const EXPLORE: &[&str] = &[
     "inspect",
     "screenshot",
     "context_ask",
+    "context_neighbors",
     "navigate",
     "wait_for",
     "network_log",
@@ -153,6 +171,7 @@ const INTENT: &[&str] = &[
     "a11y_snapshot",
     "form_snapshot",
     "context_ask",
+    "context_neighbors",
 ];
 
 const VERIFY: &[&str] = &[
@@ -165,6 +184,7 @@ const VERIFY: &[&str] = &[
     "form_snapshot",
     "screenshot",
     "context_ask",
+    "context_neighbors",
     "pdf",
 ];
 
@@ -180,6 +200,7 @@ mod tests {
         "click",
         "command_execute",
         "context_ask",
+        "context_neighbors",
         "control_action",
         "cookie_delete",
         "cookie_get",

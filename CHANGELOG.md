@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Release candidate. No version bump yet.
+
+- `context_ask` falls back to the persisted per-profile store, with `source` of `observed`, `persisted`, or `visionPromoted` on every answer.
+- `context_neighbors` returns remembered form structure around a control.
+- `context:read` capability, over MCP and `/v1`.
+- `bobby context list` and `bobby context forget <site>`; `bobby doctor` reports store size; retention sweeps on open.
+- Release-gate canary asserts no typed values or credentials reach the context store.
+- `IntentHints.accessibleName`: an `a11y_snapshot` node's `target` passes into any `intent_*` tool verbatim. Equivalent to an exact `nearText`; both set to different values is refused as `intentCompileFailed`.
+- `[mcp] startup_toolset`, overridden by `BOBBY_MCP_TOOLSET`: `full` (default), `explore`, `act`, `intent`, `verify`. Sets the phase at connect. `tools/list` is 127,732 bytes on `full`, 42,253 on `explore`.
+- The `tools/list` byte-budget gate measures all 21 capabilities, not the 15 it had listed. `Capability::ALL` is the single source.
+
 ## 0.6.0 - 2026-08-05
 - Add outbound ACP vision delegation: a workflow harness performs the vision work over ACP and bobby stores no provider credentials. Bounded packet and result validation, isolated child-session lifecycle, image capability negotiation, and harness-advertised authentication. `bobby vision connect --backend acp` writes the config and `bobby doctor` covers it; direct providers are unchanged.
 - An isolated ACP vision harness that requests interactive permission fails closed — the request is cancelled and the child session closed, so it cannot produce an accepted result after asking for authority the parent session did not grant.

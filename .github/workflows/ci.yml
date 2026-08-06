@@ -191,6 +191,8 @@ jobs:
           --test agentic_interaction
           --test browser_vertical_slice
           --test checkpoint_recovery
+          --test context_exit
+          --test context_privacy
           --test intent_dismiss_obstruction_workflow
           --test intent_extract_workflow
           --test intent_follow_workflow

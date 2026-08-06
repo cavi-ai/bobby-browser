@@ -526,6 +526,7 @@ fn every_capability_round_trips_its_wire_string_through_from_str() {
         Capability::IntentExecute,
         Capability::VisionAssist,
         Capability::ArtifactRead,
+        Capability::ContextRead,
         Capability::ArtifactCapture,
         Capability::RecoveryRead,
         Capability::RecoveryWrite,
@@ -798,6 +799,7 @@ fn follow_runtime_command_envelope_golden_json() {
                         "purpose": "Details",
                         "hints": {
                             "role": null,
+                            "accessibleName": null,
                             "nearText": null,
                             "ordinal": null,
                             "framePath": [],
@@ -845,6 +847,7 @@ fn dismiss_obstruction_intent_timeout_ms_defaults_when_omitted() {
         "purpose": "Cookie notice close button",
         "hints": {
             "role": null,
+            "accessibleName": null,
             "nearText": null,
             "ordinal": null,
             "framePath": [],
@@ -898,6 +901,7 @@ fn dismiss_obstruction_runtime_command_envelope_golden_json() {
                         "purpose": "Cookie notice close button",
                         "hints": {
                             "role": null,
+                            "accessibleName": null,
                             "nearText": null,
                             "ordinal": null,
                             "framePath": [],
@@ -1007,6 +1011,7 @@ fn extract_runtime_command_envelope_golden_json() {
                             "purpose": "Display name",
                             "hints": {
                                 "role": null,
+                                "accessibleName": null,
                                 "nearText": null,
                                 "ordinal": null,
                                 "framePath": [],
@@ -1132,6 +1137,7 @@ fn locate_runtime_command_envelope_golden_json() {
                         "purpose": "Continue",
                         "hints": {
                             "role": null,
+                            "accessibleName": null,
                             "nearText": null,
                             "ordinal": null,
                             "framePath": [],

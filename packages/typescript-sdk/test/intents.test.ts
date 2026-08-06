@@ -69,6 +69,7 @@ test("locateRuntimeCommand matches Rust golden nested wire shape", () => {
         purpose: "Continue",
         hints: {
           role: null,
+          accessibleName: null,
           nearText: null,
           ordinal: null,
           framePath: [],
@@ -98,6 +99,7 @@ test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
         purpose: "Email",
         hints: {
           role: null,
+          accessibleName: null,
           nearText: null,
           ordinal: null,
           framePath: [],
@@ -171,6 +173,7 @@ test("followRuntimeCommand matches Rust golden nested wire shape", () => {
         purpose: "Details",
         hints: {
           role: null,
+          accessibleName: null,
           nearText: null,
           ordinal: null,
           framePath: [],
@@ -202,6 +205,7 @@ test("followEnvelope forwards boundary:true verbatim", () => {
         purpose: "Sign out",
         hints: {
           role: null,
+          accessibleName: null,
           nearText: null,
           ordinal: null,
           framePath: [],
@@ -228,6 +232,7 @@ test("dismissObstructionRuntimeCommand matches Rust golden nested wire shape", (
         purpose: "Cookie notice close button",
         hints: {
           role: null,
+          accessibleName: null,
           nearText: null,
           ordinal: null,
           framePath: [],
@@ -252,6 +257,7 @@ test("dismissObstructionEnvelope forwards an explicit timeoutMs verbatim", () =>
         purpose: "Cookie notice close button",
         hints: {
           role: null,
+          accessibleName: null,
           nearText: null,
           ordinal: null,
           framePath: [],
@@ -284,6 +290,7 @@ test("extractRuntimeCommand matches Rust golden nested wire shape", () => {
             purpose: "Display name",
             hints: {
               role: null,
+              accessibleName: null,
               nearText: null,
               ordinal: null,
               framePath: [],
@@ -297,6 +304,7 @@ test("extractRuntimeCommand matches Rust golden nested wire shape", () => {
             purpose: "Profile link",
             hints: {
               role: null,
+              accessibleName: null,
               nearText: null,
               ordinal: null,
               framePath: [],
@@ -356,6 +364,7 @@ test("extractEnvelope builds a full CommandEnvelope with an attribute field", ()
             purpose: "User id",
             hints: {
               role: null,
+              accessibleName: null,
               nearText: null,
               ordinal: null,
               framePath: [],

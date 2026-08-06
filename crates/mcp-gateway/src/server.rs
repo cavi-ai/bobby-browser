@@ -116,8 +116,22 @@ impl Server {
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             shutting_down: AtomicBool::new(false),
-            toolset: std::sync::Mutex::new(crate::toolset::Toolset::default()),
+            toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
         }
+    }
+
+    /// Start on `toolset` unless `BOBBY_MCP_TOOLSET` already chose one, so
+    /// the environment stays the operator's last word over the config file.
+    /// Narrowing only changes what `tools/list` advertises; every tool stays
+    /// callable and every capability gate stays in force.
+    pub fn with_startup_toolset(self, toolset: crate::toolset::Toolset) -> Self {
+        if crate::toolset::Toolset::from_env().is_none() {
+            *self
+                .toolset
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = toolset;
+        }
+        self
     }
 
     /// This principal's outbound notification fan-out. A transport subscribes
@@ -498,6 +512,7 @@ impl Server {
             "checkpoint_save",
             "click",
             "context_ask",
+            "context_neighbors",
             "cookie_delete",
             "cookie_get",
             "cookie_set",
@@ -1314,6 +1329,17 @@ impl Server {
                     // be indistinguishable from a broken call.
                     .and_then(|answer| to_json(json!({"answer": answer})))
             }
+            "context_neighbors" => {
+                let input: ContextNeighborsArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                self.runtime
+                    .context_neighbors(context, input.session_id, input.page_id, input.description)
+                    .await
+                    // Like context_ask: `None` is an answer, not a failure.
+                    .and_then(|neighbors| to_json(json!({"neighbors": neighbors})))
+            }
             "form_snapshot" => {
                 let input: FormSnapshotArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
@@ -2077,6 +2103,14 @@ struct ContextAskArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextNeighborsArgs {
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    description: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ToolsetSelectArgs {
     toolset: String,
 }
@@ -2675,6 +2709,7 @@ fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
         ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
         "context_ask" => Some(&[types::Capability::PageRead]),
+        "context_neighbors" => Some(&[types::Capability::ContextRead]),
         // Grants nothing, so it needs nothing beyond an authenticated
         // connection. A capability gate here could strand a principal in a
         // phase it lacked the capability to leave.
@@ -2723,6 +2758,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
         | "intent_wait_for_state" => Some(types::InterfaceOperation::SubmitCommand),
         "events_read" => Some(types::InterfaceOperation::SubscribeEvents),
         "context_ask" => Some(types::InterfaceOperation::ReadPage),
+        "context_neighbors" => Some(types::InterfaceOperation::ReadContext),
         "form_snapshot" => Some(types::InterfaceOperation::ReadPage),
         "page_open" => Some(types::InterfaceOperation::OpenPage),
         "runtime_info" => Some(types::InterfaceOperation::RuntimeInfo),
@@ -2737,6 +2773,7 @@ fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
 fn tool_description(name: &str) -> &'static str {
     match name {
         "context_ask" => "Ask the retained page context where a described control is, instead of pulling a whole accessibility tree into your context. Requires page:read. Returns a bound target and a confidence score, or nothing. On no answer, take an a11y_snapshot -- the context is invalidated by every command that may have changed the page.",
+        "context_neighbors" => "Show the remembered form structure around a described control: its form, sibling controls, and per-intent success counters, marked as remembered rather than live-observed. Requires context:read. Returns nothing for an unknown site or control.",
         "toolset_select" => "Narrow tools/list to one phase: explore, act, intent, verify, or full. Requires no capability. Emits notifications/tools/list_changed, so re-read tools/list after calling it. Hidden tools stay callable; this changes what is advertised, not what is permitted.",
         "runtime_info" => "Runtime version, granted capabilities, active session count, uptime, and credential expiry. Requires session:read.",
         "session_list" => "List browser sessions visible to this principal, each with its profile and open-page count. Requires session:read.",

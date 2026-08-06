@@ -54,6 +54,14 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId", "description"],
         ),
+        "context_neighbors" => (
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "description": string(1, 256)
+            }),
+            vec!["sessionId", "pageId", "description"],
+        ),
         "toolset_select" => (
             json!({
                 "toolset": {"type":"string","enum":["full","explore","act","intent","verify"]}
@@ -924,6 +932,7 @@ fn intent_hints() -> Value {
     object(
         json!({
             "role":nullable(string(0, 256)),
+            "accessibleName":nullable(string(0, 256)),
             "nearText":nullable(json!({"$ref":"#/$defs/TextMatch"})),
             "ordinal":nullable(json!({"type":"integer","minimum":0,"maximum":1000000})),
             "framePath":array(json!({"$ref":"#/$defs/TargetSpec"}), 16),

@@ -17,23 +17,7 @@ use types::{Capability, PrincipalId};
 use uuid::uuid;
 
 fn all_capabilities() -> Vec<Capability> {
-    vec![
-        Capability::SessionRead,
-        Capability::SessionWrite,
-        Capability::PageRead,
-        Capability::PageWrite,
-        Capability::BrowserMutate,
-        Capability::FileUpload,
-        Capability::FileDownload,
-        Capability::JavascriptEvaluate,
-        Capability::IntentExecute,
-        Capability::VisionAssist,
-        Capability::ArtifactRead,
-        Capability::ArtifactCapture,
-        Capability::RecoveryRead,
-        Capability::RecoveryWrite,
-        Capability::AuthorityAdmin,
-    ]
+    Capability::ALL.to_vec()
 }
 
 async fn server() -> Server {

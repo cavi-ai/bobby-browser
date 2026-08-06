@@ -19,6 +19,7 @@ Wire strings (camelCase JSON uses these exact values):
 | Intent execute | `intent:execute` |
 | Vision assist | `vision:assist` |
 | Artifact read / capture | `artifact:read` / `artifact:capture` |
+| Context read | `context:read` |
 | Recovery read / write | `recovery:read` / `recovery:write` |
 | Job submit / read / cancel | `job:submit` / `job:read` / `job:cancel` |
 | Authority admin | `authority:admin` |
@@ -43,6 +44,7 @@ From `InterfaceOperation::required` (HTTP broker and MCP operations map to these
 | RecoverWorkflow | `POST /v1/recovery/{id}` / `workflow_recover` | `recovery:write` |
 | SubscribeEvents | `GET /v1/events` / `events_read` | `session:read` |
 | ReadArtifact | `GET /v1/artifacts/{id}` | `artifact:read` |
+| ReadContext | `GET /v1/context/ask`, `GET /v1/context/site/{key}` / `context_neighbors` | `context:read` |
 | IssuePrincipal | `POST /v1/principals` | `authority:admin` |
 | RevokePrincipal | `DELETE /v1/principals/{id}` | `authority:admin` |
 | SubmitJob | `POST /v1/jobs` | `job:submit` |

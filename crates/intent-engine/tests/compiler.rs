@@ -327,3 +327,99 @@ fn compile_wait_for_state_is_wait_only() {
         }
     ));
 }
+
+#[test]
+fn compile_fill_accepts_a_snapshot_target_accessible_name_verbatim() {
+    // An `a11y_snapshot` node's `target` is `{role, accessibleName, ordinal}`.
+    // Pasting it into `hints` used to drop the name and resolve on role plus
+    // ordinal alone, which silently targets the wrong control.
+    let plan = compile_intent(&IntentCommand::Fill(FillIntent {
+        purpose: "enter the applicant email".into(),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            accessible_name: Some("Email address".into()),
+            ..IntentHints::default()
+        },
+        value: FillValue::Text {
+            text: "ada@example.test".into(),
+            clear_first: true,
+        },
+    }))
+    .expect("compile");
+    let IntentPlan::Fill { target, .. } = plan else {
+        panic!("expected Fill plan");
+    };
+    assert_eq!(target.role.as_deref(), Some("textbox"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Email address"));
+    assert_eq!(target.text, None);
+}
+
+#[test]
+fn compile_target_treats_accessible_name_and_exact_near_text_as_one_hint() {
+    let compile = |hints: IntentHints| {
+        let plan = compile_intent(&IntentCommand::Locate(LocateIntent {
+            purpose: "find the email field".into(),
+            hints,
+        }))
+        .expect("compile");
+        let IntentPlan::Locate { target } = plan else {
+            panic!("expected Locate plan");
+        };
+        target
+    };
+
+    let from_accessible_name = compile(IntentHints {
+        role: Some("textbox".into()),
+        accessible_name: Some("Email address".into()),
+        ..IntentHints::default()
+    });
+    let from_near_text = compile(IntentHints {
+        role: Some("textbox".into()),
+        near_text: Some(TextMatch::Exact("Email address".into())),
+        ..IntentHints::default()
+    });
+    let from_both = compile(IntentHints {
+        role: Some("textbox".into()),
+        accessible_name: Some("Email address".into()),
+        near_text: Some(TextMatch::Exact("Email address".into())),
+        ..IntentHints::default()
+    });
+
+    assert_eq!(
+        from_accessible_name.accessible_name,
+        from_near_text.accessible_name
+    );
+    assert_eq!(from_both.accessible_name, from_near_text.accessible_name);
+}
+
+#[test]
+fn compile_target_refuses_two_different_names_rather_than_guessing() {
+    let error = compile_intent(&IntentCommand::Locate(LocateIntent {
+        purpose: "find the email field".into(),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            accessible_name: Some("Email address".into()),
+            near_text: Some(TextMatch::Exact("Home phone".into())),
+            ..IntentHints::default()
+        },
+    }))
+    .expect_err("conflicting names must not compile");
+    assert_eq!(error, CompileError::ConflictingNameHints);
+}
+
+#[test]
+fn compile_target_keeps_a_non_exact_near_text_alongside_no_accessible_name() {
+    let plan = compile_intent(&IntentCommand::Locate(LocateIntent {
+        purpose: "find the banner".into(),
+        hints: IntentHints {
+            near_text: Some(TextMatch::Contains("Accept".into())),
+            ..IntentHints::default()
+        },
+    }))
+    .expect("compile");
+    let IntentPlan::Locate { target } = plan else {
+        panic!("expected Locate plan");
+    };
+    assert_eq!(target.text, Some(TextMatch::Contains("Accept".into())));
+    assert_eq!(target.accessible_name, None);
+}

@@ -87,6 +87,7 @@ fn extraction<'a>(evidence: &'a [Evidence], field_name: &str) -> &'a Evidence {
 async fn build_runtime(root: &std::path::Path) -> RuntimeService {
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
         http: config::HttpConfig {
             allow_loopback: true,
             ..config::HttpConfig::default()

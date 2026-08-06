@@ -59,6 +59,49 @@ A source that is present but malformed is always an error, never skipped.
 | `checkpoints_dir` | `./data/storage/checkpoints` | Journal checkpoints |
 | `authority_path` | `./data/storage/authority.json` | Authority storage |
 
+## `[context]`
+
+Durable shared context graph (remembered form structure per site). Only
+runtimes whose engine selection carries a durable profile identity (Firefox
+companion enrollment) open the store; Chromium sessions read and write
+nothing.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `dir` | `<config-dir>/bobby-browser/context` (filled by `bobby serve`) | Store root; the profile id is appended as a subdirectory. Unset disables promotion |
+| `ttl_days` | `90` | Days a control record is kept without a verified success; swept at store open |
+
+## `[mcp]`
+
+Presentation of the MCP tool surface. Nothing here is an enforcement
+boundary — capability gates remain the only one.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `startup_toolset` | unset (full surface) | Phase a connection starts in: `full`, `explore`, `act`, `intent`, `verify`. `BOBBY_MCP_TOOLSET` overrides it |
+
+An agent downloads all of `tools/list` during the handshake, before it can
+call `toolset_select` — so a phase chosen after connecting cannot buy back
+bytes already paid for. Starting narrow can:
+
+| Phase | `tools/list` |
+|---|---|
+| `full` | ~127 KB |
+| `explore` | ~42 KB |
+| `verify` | ~48 KB |
+| `act` | ~51 KB |
+| `intent` | ~74 KB |
+
+Narrowing changes only what is *advertised*. Hidden tools stay callable, and
+every phase keeps session/page lifecycle plus `toolset_select`, so an agent
+can always widen or clean up. An unparseable `BOBBY_MCP_TOOLSET` is ignored
+with a warning; an unparseable `startup_toolset` in config fails startup.
+
+```toml
+[mcp]
+startup_toolset = "intent"
+```
+
 ## `[http]` (outbound)
 
 Controls egress from the runtime (downloads, fetches), not the broker listen
