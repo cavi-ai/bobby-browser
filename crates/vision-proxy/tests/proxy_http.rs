@@ -277,6 +277,9 @@ async fn http_vision_assist_contract_over_bound_proxy() {
         bind: addr,
         path: "/vision".to_string(),
         bearer_token: "contract-token".to_string(),
+        // Unused here: this test drives `router` with an explicit upstream
+        // trait object rather than letting `serve` build one from the kind.
+        upstream_kind: vision_proxy::UpstreamKind::OpenAi,
     };
     let state = AppState {
         path: config.path.clone(),
