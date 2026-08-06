@@ -797,7 +797,12 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }),
     });
 
-    for host in [HostKind::Claude, HostKind::Zed, HostKind::Vscode, HostKind::Acp] {
+    for host in [
+        HostKind::Claude,
+        HostKind::Zed,
+        HostKind::Vscode,
+        HostKind::Acp,
+    ] {
         let selected = hosts.contains(&host);
         let default_on = matches!(host, HostKind::Claude);
         let root = project_root.clone();

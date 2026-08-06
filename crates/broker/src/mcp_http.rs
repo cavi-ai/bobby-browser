@@ -66,9 +66,9 @@ impl McpServers {
             state.mcp_resources.clone(),
         );
         // Same in-process scheduler as POST /v1/jobs (handlers already registered).
-        server = server.with_jobs(Arc::new(mcp_gateway::InProcessJobPort::new(
-            Arc::clone(&state.scheduler),
-        )));
+        server = server.with_jobs(Arc::new(mcp_gateway::InProcessJobPort::new(Arc::clone(
+            &state.scheduler,
+        ))));
         let server = Arc::new(server);
         let replaced = entries.insert(principal, (handle, server.clone()));
         if let Some((_, replaced)) = replaced {

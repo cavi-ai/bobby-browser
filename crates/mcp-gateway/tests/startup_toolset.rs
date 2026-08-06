@@ -87,10 +87,9 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
 
     // Config only: the configured phase applies at connect, before the agent
     // has spent a round trip on `toolset_select`.
-    let configured = tool_names(
-        &initialized_server(|server| server.with_startup_toolset(Toolset::Act)).await,
-    )
-    .await;
+    let configured =
+        tool_names(&initialized_server(|server| server.with_startup_toolset(Toolset::Act)).await)
+            .await;
     assert!(
         configured.contains(&"click".to_owned()),
         "act advertises mutating primitives"
@@ -108,10 +107,9 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
         "act should advertise more than the explore default"
     );
 
-    let full = tool_names(
-        &initialized_server(|server| server.with_startup_toolset(Toolset::Full)).await,
-    )
-    .await;
+    let full =
+        tool_names(&initialized_server(|server| server.with_startup_toolset(Toolset::Full)).await)
+            .await;
     assert!(
         full.contains(&"intent_fill".to_owned()) && full.contains(&"click".to_owned()),
         "full carries both intent and act tools"

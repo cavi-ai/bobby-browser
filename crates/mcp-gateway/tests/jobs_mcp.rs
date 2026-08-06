@@ -86,8 +86,7 @@ async fn job_submit_status_and_cancel_round_trip() {
         .await
         .unwrap();
     assert_eq!(
-        status["result"]["structuredContent"]["name"],
-        "echo",
+        status["result"]["structuredContent"]["name"], "echo",
         "{status}"
     );
 
@@ -99,8 +98,7 @@ async fn job_submit_status_and_cancel_round_trip() {
         .await
         .unwrap();
     assert_eq!(
-        cancelled["result"]["structuredContent"]["cancelled"],
-        true,
+        cancelled["result"]["structuredContent"]["cancelled"], true,
         "{cancelled}"
     );
 }

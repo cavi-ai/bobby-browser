@@ -78,7 +78,7 @@ boundary — capability gates remain the only one.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `startup_toolset` | unset (full surface) | Phase a connection starts in: `full`, `explore`, `act`, `intent`, `verify`. `BOBBY_MCP_TOOLSET` overrides it |
+| `startup_toolset` | unset (`explore`) | Phase a connection starts in: `full`, `explore`, `act`, `intent`, `verify`. `BOBBY_MCP_TOOLSET` overrides it |
 
 An agent downloads all of `tools/list` during the handshake, before it can
 call `toolset_select` — so a phase chosen after connecting cannot buy back

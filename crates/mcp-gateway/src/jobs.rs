@@ -14,18 +14,27 @@ use task_scheduler::{
 };
 use types::PrincipalId;
 
+/// One `job_submit` request, less the owner.
+///
+/// A struct rather than a parameter list: the six fields travel together from
+/// the tool call to the scheduler config, and as loose arguments they were one
+/// over clippy's `too_many_arguments` bound.
+pub struct JobSubmission {
+    pub name: String,
+    pub payload: Value,
+    pub priority: JobPriorityWire,
+    pub max_retries: u32,
+    pub timeout_ms: Option<u64>,
+    pub correlation_id: Option<String>,
+}
+
 /// Submit / read / cancel jobs for one MCP connection's principal.
 #[async_trait]
 pub trait JobPort: Send + Sync {
     async fn submit(
         &self,
         owner: &PrincipalId,
-        name: String,
-        payload: Value,
-        priority: JobPriorityWire,
-        max_retries: u32,
-        timeout_ms: Option<u64>,
-        correlation_id: Option<String>,
+        request: JobSubmission,
     ) -> Result<JobSubmitWire, JobPortError>;
 
     async fn status(
@@ -257,13 +266,16 @@ impl JobPort for InProcessJobPort {
     async fn submit(
         &self,
         owner: &PrincipalId,
-        name: String,
-        payload: Value,
-        priority: JobPriorityWire,
-        max_retries: u32,
-        timeout_ms: Option<u64>,
-        correlation_id: Option<String>,
+        request: JobSubmission,
     ) -> Result<JobSubmitWire, JobPortError> {
+        let JobSubmission {
+            name,
+            payload,
+            priority,
+            max_retries,
+            timeout_ms,
+            correlation_id,
+        } = request;
         if name.trim().is_empty() {
             return Err(JobPortError::InvalidName);
         }
