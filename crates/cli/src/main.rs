@@ -6,14 +6,12 @@ mod vision_connect;
 mod vision_login;
 
 use anyhow::{Context, Result};
+use auth_broker::{AuthCapabilities, AuthDriver, AuthError, AuthProfileId, AuthStrategy};
 use companion_core::{
     run_native_host_with_enroll, EnrollFinalize, EnrollHostError, NativeConnectRequest,
     NativeHostConfig, NativeHostEnroll,
 };
-use config::{
-    ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionAuthKind,
-    VisionConfig,
-};
+use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig, VisionConfig};
 use firefox_companion::read_bidi_url_from_profile_dir;
 #[cfg(test)]
 use firefox_companion::selection::write_enroll_defaults;
@@ -1023,48 +1021,89 @@ fn check_vision_upstream_key(vision: &VisionConfig) -> Option<DoctorCheck> {
     }
 }
 
-fn executable_available(command: &str) -> bool {
-    let path = Path::new(command);
-    if path.components().count() > 1 {
-        return path.is_file();
+fn vision_auth_discovery_check(
+    configured: AuthStrategy,
+    discovered: Result<AuthCapabilities, AuthError>,
+) -> DoctorCheck {
+    match discovered {
+        Ok(capabilities) => {
+            let advertised = capabilities
+                .strategies()
+                .map(|strategy| format!("{strategy:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            DoctorCheck {
+                status: if capabilities.supports(configured) {
+                    DoctorStatus::Ok
+                } else {
+                    DoctorStatus::Warn
+                },
+                name: "vision-auth-path".into(),
+                detail: format!(
+                    "configured {configured:?}; harness advertises: {advertised}; {}",
+                    if capabilities.supports(configured) {
+                        "authentication path is supported"
+                    } else {
+                        "authentication is misconfigured"
+                    }
+                ),
+            }
+        }
+        Err(error) => DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "vision-auth-path".into(),
+            detail: format!("could not discover harness authentication methods: {error}"),
+        },
     }
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|directory| directory.join(command).is_file())
-    })
 }
 
-fn vision_auth_kind_label(kind: VisionAuthKind) -> &'static str {
-    match kind {
-        VisionAuthKind::Advertised => "advertised",
-        VisionAuthKind::OAuthAuthorizationCode => "oauth-authorization-code",
-        VisionAuthKind::OAuthDeviceCode => "oauth-device-code",
-        VisionAuthKind::Environment => "environment",
-        VisionAuthKind::ExistingSession => "existing-session",
-        VisionAuthKind::None => "none",
-    }
-}
-
-fn vision_auth_path_detail(auth: VisionAuthKind) -> String {
-    let label = vision_auth_kind_label(auth);
-    let mut detail = format!(
-        "{label}: Bobby calls harness authenticate via auth-broker (no Keychain access); \
-         credentials remain in the harness; unmatched harness methods fail closed at runtime"
-    );
-    if matches!(
-        auth,
-        VisionAuthKind::OAuthAuthorizationCode | VisionAuthKind::OAuthDeviceCode
-    ) {
-        detail.push_str(
-            "; multi-step OAuth continue is not productized — establish the harness login first",
-        );
-    }
-    detail
-}
-
-fn check_vision_acp(vision: &VisionConfig) -> Vec<DoctorCheck> {
-    let Some(config::VisionBackendSelection::Acp { name, profile }) = vision.selected_backend()
+fn check_vision_acp(config: &AppConfig) -> Vec<DoctorCheck> {
+    let Some(config::VisionBackendSelection::Acp { name, profile }) =
+        config.vision.selected_backend()
     else {
         return Vec::new();
+    };
+    let registry = node_registry::NodeRegistry::from_config(config);
+    let configured = registry
+        .auth_strategy(name)
+        .unwrap_or_else(|_| node_registry::vision_auth_strategy(profile.auth));
+    let discovered = registry.auth_driver(name).and_then(|driver| {
+        let profile = AuthProfileId::new(name.to_owned()).map_err(|error| {
+            node_registry::NodeError::Unreachable {
+                name: name.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("doctor auth runtime builds")
+                        .block_on(
+                            driver
+                                .with_timeout(Duration::from_secs(5))
+                                .discover(&profile),
+                        )
+                })
+                .join()
+                .unwrap_or_else(|_| Err(AuthError::Transport("discovery thread panicked".into())))
+        })
+        .map_err(|error| node_registry::NodeError::Unreachable {
+            name: name.to_owned(),
+            reason: error.to_string(),
+        })
+    });
+    let (reachable, auth_check) = match discovered {
+        Ok(capabilities) => (
+            true,
+            vision_auth_discovery_check(configured, Ok(capabilities)),
+        ),
+        Err(error) => (
+            false,
+            vision_auth_discovery_check(configured, Err(AuthError::Transport(error.to_string()))),
+        ),
     };
     vec![
         DoctorCheck {
@@ -1073,26 +1112,19 @@ fn check_vision_acp(vision: &VisionConfig) -> Vec<DoctorCheck> {
             detail: format!("ACP profile {name:?} selected"),
         },
         DoctorCheck {
-            status: if executable_available(&profile.command) {
+            status: if reachable {
                 DoctorStatus::Ok
             } else {
                 DoctorStatus::Warn
             },
             name: "vision-acp-reachability".into(),
-            detail: if executable_available(&profile.command) {
-                format!("ACP harness executable {:?} is available", profile.command)
+            detail: if reachable {
+                format!("ACP harness {:?} initialized successfully", profile.command)
             } else {
-                format!(
-                    "ACP harness executable {:?} was not found on PATH",
-                    profile.command
-                )
+                format!("ACP harness {:?} was not launchable", profile.command)
             },
         },
-        DoctorCheck {
-            status: DoctorStatus::Ok,
-            name: "vision-auth-path".into(),
-            detail: vision_auth_path_detail(profile.auth),
-        },
+        auth_check,
     ]
 }
 
@@ -1129,7 +1161,7 @@ fn run_doctor(
     };
 
     if let Some(config) = &config {
-        for check in check_vision_acp(&config.vision) {
+        for check in check_vision_acp(config) {
             push_doctor_check(&mut report, check);
         }
         if let Some(check) = check_vision_provider(&config.vision) {
@@ -3167,7 +3199,7 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
 
     #[test]
     fn doctor_acp_checks_are_separate_and_do_not_call_a_model() {
-        let vision = AppConfig::from_toml_str(
+        let config = AppConfig::from_toml_str(
             r#"
 [vision]
 backend = "acp"
@@ -3177,25 +3209,25 @@ command = "definitely-not-a-real-acp-harness"
 auth = "oauth-device-code"
 "#,
         )
-        .unwrap()
-        .vision;
-        let checks = check_vision_acp(&vision);
+        .unwrap();
+        let checks = check_vision_acp(&config);
         assert_eq!(checks.len(), 3);
         assert_eq!(checks[0].name, "vision-routing");
         assert_eq!(checks[1].name, "vision-acp-reachability");
         assert_eq!(checks[2].name, "vision-auth-path");
-        assert!(checks[2].detail.contains("auth-broker"));
-        assert!(checks[2]
-            .detail
-            .contains("multi-step OAuth continue is not productized"));
+        assert!(checks[2].detail.contains("could not discover"));
     }
 
     #[test]
-    fn vision_auth_path_detail_mentions_fail_closed_without_oauth_caveat() {
-        let detail = vision_auth_path_detail(VisionAuthKind::Advertised);
-        assert!(detail.contains("advertised"));
-        assert!(detail.contains("fail closed"));
-        assert!(!detail.contains("multi-step OAuth continue"));
+    fn doctor_auth_path_warns_when_configured_strategy_is_not_advertised() {
+        let check = vision_auth_discovery_check(
+            AuthStrategy::OAuthDeviceCode,
+            Ok(AuthCapabilities::new([AuthStrategy::Advertised])),
+        );
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("OAuthDeviceCode"));
+        assert!(check.detail.contains("Advertised"));
+        assert!(check.detail.contains("misconfigured"));
     }
 
     #[test]
