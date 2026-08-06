@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install bobby from the latest (or $BOBBY_VERSION) GitHub Release binary.
+# Install bobby (+ mcp-gateway, acp-gateway) from the latest (or $BOBBY_VERSION)
+# GitHub Release archive.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
 # Optional env:
@@ -61,15 +62,25 @@ echo "install.sh: fetching ${URL}"
 curl -fsSL -o "${tmpdir}/${ASSET}" "$URL"
 tar -xzf "${tmpdir}/${ASSET}" -C "$tmpdir"
 
-src="${tmpdir}/${STAGE}/bobby"
-if [[ ! -f "$src" ]]; then
+src_dir="${tmpdir}/${STAGE}"
+if [[ ! -f "${src_dir}/bobby" ]]; then
   echo "install.sh: archive missing ${STAGE}/bobby" >&2
   exit 1
 fi
 
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$src" "${INSTALL_DIR}/bobby"
+install -m 755 "${src_dir}/bobby" "${INSTALL_DIR}/bobby"
 echo "install.sh: installed ${INSTALL_DIR}/bobby"
+
+for bin in mcp-gateway acp-gateway; do
+  if [[ -f "${src_dir}/${bin}" ]]; then
+    install -m 755 "${src_dir}/${bin}" "${INSTALL_DIR}/${bin}"
+    echo "install.sh: installed ${INSTALL_DIR}/${bin}"
+  else
+    echo "install.sh: warn: archive missing ${bin} (older release?); MCP/ACP hosts need it beside bobby" >&2
+  fi
+done
+
 if ! command -v bobby >/dev/null 2>&1; then
   echo "install.sh: add ${INSTALL_DIR} to PATH, then run: bobby doctor" >&2
 else

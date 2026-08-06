@@ -120,28 +120,17 @@ fn resolve_sibling_or_path(command: &str) -> Result<PathBuf> {
     ))
 }
 
-/// Absolute path to `acp-gateway` for host config fragments.
-fn static_acp_server_entry() -> Result<(String, Vec<String>)> {
-    let gateway = match INSTALLED_CLI.with(|slot| slot.borrow().clone()) {
-        Some(bobby) => {
-            let sibling = bobby
-                .parent()
-                .map(|dir| dir.join(ACP_GATEWAY_COMMAND))
-                .filter(|path| path.is_file());
-            match sibling {
-                Some(path) => path,
-                None => resolve_acp_gateway()?,
-            }
-        }
-        None => resolve_acp_gateway()?,
-    };
-    Ok((
-        gateway
-            .to_str()
-            .ok_or_else(|| anyhow!("acp-gateway path is not valid UTF-8"))?
-            .to_owned(),
-        Vec::new(),
-    ))
+/// Absolute path to a sidecar binary next to bobby or on PATH, if present.
+pub fn find_sidecar_binary(command: &str) -> Option<PathBuf> {
+    resolve_sibling_or_path(command).ok()
+}
+
+pub fn mcp_gateway_command() -> &'static str {
+    GATEWAY_COMMAND
+}
+
+pub fn acp_gateway_command() -> &'static str {
+    ACP_GATEWAY_COMMAND
 }
 
 struct JsonRpcChild {
@@ -332,10 +321,11 @@ thread_local! {
     static INSTALLED_CLI: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The MCP server entry an agent host launches: this same binary, absolute,
-/// running `mcp-stdio`, which loads the bootstrap credential itself. No env
-/// wiring in the host config, no secrets in any file the host reads.
-fn static_server_entry() -> Result<(String, Vec<String>)> {
+/// The MCP / ACP host entry an agent launches: this same binary, absolute,
+/// running `mcp-stdio` or `acp-stdio`, which loads the bootstrap credential
+/// itself. No env wiring in the host config, no secrets in any file the host
+/// reads.
+fn static_cli_entry(subcommand: &str) -> Result<(String, Vec<String>)> {
     let exe = match INSTALLED_CLI.with(|slot| slot.borrow().clone()) {
         Some(path) => path,
         None => std::env::current_exe().context("current executable unknown")?,
@@ -344,8 +334,16 @@ fn static_server_entry() -> Result<(String, Vec<String>)> {
         exe.to_str()
             .ok_or_else(|| anyhow!("executable path is not valid UTF-8"))?
             .to_owned(),
-        vec!["mcp-stdio".to_owned()],
+        vec![subcommand.to_owned()],
     ))
+}
+
+fn static_server_entry() -> Result<(String, Vec<String>)> {
+    static_cli_entry("mcp-stdio")
+}
+
+fn static_acp_host_entry() -> Result<(String, Vec<String>)> {
+    static_cli_entry("acp-stdio")
 }
 
 /// The host config file `kind` reads, rooted at the current project for
@@ -394,15 +392,11 @@ pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf>
             )
         }
         HostKind::Acp => {
-            // ACP hosts launch `acp-gateway` directly with bootstrap env
-            // placeholders — no `bobby mcp-stdio`-style loader.
-            let (command, args) = static_acp_server_entry()?;
+            // Same zero-wiring shape as MCP: bobby acp-stdio loads bootstrap
+            // and execs acp-gateway. No secrets in the host config file.
+            let (command, args) = static_acp_host_entry()?;
             (
-                serde_json::json!({
-                    "command": command,
-                    "args": args,
-                    "env": bootstrap_env_placeholders(),
-                }),
+                serde_json::json!({"command": command, "args": args}),
                 "agentServers",
             )
         }
@@ -547,6 +541,28 @@ pub fn run_mcp_stdio_with_sidecar(
     apply_config_env(config_path);
     load_bootstrap_into_env(bootstrap_path)?;
     let gateway = resolve_gateway()?;
+    spawn_gateway_inherited_stdio(&gateway)
+}
+
+/// `bobby acp-stdio`: ACP-host entrypoint. Loads bootstrap and execs
+/// `acp-gateway` the same way `mcp-stdio` launches `mcp-gateway`.
+pub fn exec_acp_stdio(bootstrap_path: &Path, config_path: &Path) -> Result<()> {
+    apply_config_env(config_path);
+    load_bootstrap_into_env(bootstrap_path)?;
+    let gateway = resolve_acp_gateway()?;
+    exec_gateway(&gateway)
+}
+
+/// Like [`exec_acp_stdio`], but stays resident so a vision sidecar can be
+/// torn down when the gateway exits.
+pub fn run_acp_stdio_with_sidecar(
+    bootstrap_path: &Path,
+    config_path: &Path,
+    _vision_child: crate::vision_child::ManagedVisionProxy,
+) -> Result<()> {
+    apply_config_env(config_path);
+    load_bootstrap_into_env(bootstrap_path)?;
+    let gateway = resolve_acp_gateway()?;
     spawn_gateway_inherited_stdio(&gateway)
 }
 
@@ -787,7 +803,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         let root = project_root.clone();
         let label = match host {
             HostKind::Acp => {
-                "Acp: merge the acp-gateway entry into .acp.json (bootstrap env placeholders)"
+                "Acp: merge bobby acp-stdio into .acp.json (no bootstrap env in the file)"
                     .to_owned()
             }
             _ => format!("{host:?}: merge the MCP server entry into its config"),
@@ -1011,24 +1027,7 @@ mod install_tests {
     }
 
     #[test]
-    fn acp_merge_writes_agent_servers_with_bootstrap_placeholders() {
-        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
-        let bin = tempfile::tempdir().unwrap();
-        let gateway = bin.path().join(ACP_GATEWAY_COMMAND);
-        std::fs::write(&gateway, b"#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&gateway, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let previous = std::env::var_os("PATH");
-        let mut paths = vec![bin.path().to_path_buf()];
-        if let Some(existing) = &previous {
-            paths.extend(std::env::split_paths(existing));
-        }
-        let joined = std::env::join_paths(paths).unwrap();
-        unsafe { std::env::set_var("PATH", joined) };
-
+    fn acp_merge_writes_bobby_acp_stdio_without_bootstrap_env() {
         let root = tempfile::tempdir().unwrap();
         let path = merge_host_config(HostKind::Acp, root.path()).unwrap();
         assert!(path.ends_with(".acp.json"));
@@ -1036,23 +1035,12 @@ mod install_tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let server = &written["agentServers"]["bobby-browser"];
         let command = server["command"].as_str().unwrap();
-        assert!(
-            command.ends_with(ACP_GATEWAY_COMMAND),
-            "expected acp-gateway path, got {command}"
-        );
-        assert!(server["args"].as_array().unwrap().is_empty());
-        assert_eq!(
-            server["env"]["AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN"],
-            "${AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN}"
-        );
-        // No mcp-stdio loader — ACP launches the gateway with bootstrap env.
+        assert!(!command.is_empty(), "command must be set");
+        assert_eq!(server["args"][0].as_str().unwrap(), "acp-stdio");
+        assert!(server.get("env").is_none() || server["env"].is_null());
         let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN"));
         assert!(!text.contains("mcp-stdio"));
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var("PATH", value) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
     }
 
     #[test]

@@ -33,11 +33,13 @@ Never claim an action worked without its evidence.
    firefox-start` if using the launchd agent), then **Pair** from the toolbar
    popup. That writes `browser-selection.json`. CLI
    `bobby enroll-firefox-profile` is for CI/scripting only.
-3. `bobby doctor` validates the setup, including an MCP handshake
-   (`initialize` + `tools/list`) against the gateway.
+3. `bobby doctor` validates the setup, including sibling gateway presence
+   (`mcp-gateway` / `acp-gateway`) and an MCP handshake (`initialize` +
+   `tools/list`) against the gateway.
 
 Your host should spawn `bobby mcp-stdio` (loads the credential itself). Prefer
-that over raw `mcp-gateway` + env placeholders.
+that over raw `mcp-gateway` + env placeholders. ACP hosts use `bobby acp-stdio`
+the same way.
 
 ## How the runtime is wired
 
