@@ -1297,6 +1297,7 @@ fn wait_evidence_includes_excluded_classes_when_present() {
         elapsed_ms: 60,
         observations: 3,
         excluded_classes: vec!["urlSubstring:beacon".into(), "websocket".into()],
+        observed: None,
     };
     let value = serde_json::to_value(&evidence).unwrap();
     assert_eq!(value["kind"], "wait");
@@ -1314,9 +1315,35 @@ fn wait_evidence_includes_excluded_classes_when_present() {
         elapsed_ms: 1,
         observations: 1,
         excluded_classes: Vec::new(),
+        observed: None,
     };
     let value = serde_json::to_value(&without).unwrap();
     assert!(value.get("excludedClasses").is_none());
+    // Additive: an absent observation must not appear on the wire, so an
+    // existing client parsing wait evidence sees exactly what it saw before.
+    assert!(value.get("observed").is_none());
+}
+
+/// A satisfied wait reports what it read.
+///
+/// The poll already reads the value to decide whether it is satisfied. It was
+/// discarded, so an agent verifying a submit paid a second round trip
+/// snapshotting the page to learn what it had just confirmed.
+#[test]
+fn wait_evidence_carries_the_value_the_condition_matched_on() {
+    let evidence = Evidence::Wait {
+        condition: WaitCondition::Url {
+            matcher: TextMatch::Contains("/confirmed".into()),
+        },
+        elapsed_ms: 42,
+        observations: 2,
+        excluded_classes: Vec::new(),
+        observed: Some("https://example.com/order/confirmed".into()),
+    };
+    let value = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(value["observed"], "https://example.com/order/confirmed");
+    let round: Evidence = serde_json::from_value(value).unwrap();
+    assert_eq!(round, evidence);
 }
 
 #[test]

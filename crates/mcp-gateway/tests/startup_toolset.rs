@@ -15,7 +15,7 @@ use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
 use mcp_gateway::{Server, Toolset};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
-use serde_json::{json, Value};
+use serde_json::json;
 use types::{Capability, PrincipalId};
 use uuid::uuid;
 

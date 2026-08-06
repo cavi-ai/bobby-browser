@@ -215,6 +215,24 @@ impl RecoveryCoordinator {
         Ok(self.load_checkpoint(workflow_id).await?.session_id)
     }
 
+    /// Recoverable workflows for a session, newest first, capped at `limit`.
+    ///
+    /// The entry point for an agent that lost its `workflowId`.
+    pub async fn workflows_for_session(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<WorkflowId>, RecoveryError> {
+        Ok(self
+            .store
+            .list_for_session(session_id, limit)
+            .await
+            .map_err(|_| RecoveryError::WorkersUnavailable)?
+            .into_iter()
+            .map(|checkpoint| checkpoint.workflow_id)
+            .collect())
+    }
+
     pub async fn recover_for_session(
         &self,
         workflow_id: &WorkflowId,

@@ -75,14 +75,19 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
 
 1. **Checkpoint before boundaries.** `intent_submit_and_verify` and
    `intent_follow` with `boundary: true` are Boundary commands: refused
-   without a matching checkpoint saved *first*. Pin two UUIDs yourself, pass
-   them as `commandId`/`attemptId` to both `checkpoint_save`
+   without a matching checkpoint saved *first*. Set `autoCheckpoint: true`
+   and the runtime mints it inside the same call, returning its
+   `checkpointId` — one call instead of three. Do it by hand only when you
+   need to author the checkpoint's `invariants` or `replayableInputs`: pin
+   two UUIDs, pass them as `commandId`/`attemptId` to both `checkpoint_save`
    (`boundaryCommandId`/`attemptId` in the checkpoint) and the Boundary
    call, and put commands you already ran in `evidenceRefs` — never
    hand-authored evidence.
 2. **Reuse the `workflowId`.** Every outcome echoes `workflowId`,
    `commandId`, and `attemptId`; pass `workflowId` back so
-   `checkpoint_save` / `workflow_recover` see the whole flow.
+   `checkpoint_save` / `workflow_recover` see the whole flow. Lost it to a
+   restart or a compaction? `recovery_status` with `sessionId` instead of
+   `workflowId` lists that session's recoverable workflows, newest first.
 3. **Failed commands set `isError: true`.** A tool result whose
    `structuredContent.status` is not `completed` is a failure — read the
    `error.code` and repair via `bobby://failure-taxonomy`; do not continue

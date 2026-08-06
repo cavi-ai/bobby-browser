@@ -17,6 +17,8 @@ const MAX_EXCLUDED_CLASSES: usize = 64;
 // Output-only: bounds for definitions reachable solely from `structuredContent`,
 // never from a tool argument.
 const MAX_RECOVERY_RECEIPTS: usize = 64;
+/// Cap on workflows a single `recovery_status` discovery answers with.
+pub(crate) const MAX_RECOVERABLE_WORKFLOWS: usize = 32;
 
 pub(crate) fn validate_tool_arguments(
     name: &str,
@@ -325,7 +327,10 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             intent_required(&["purpose", "fields"]),
         ),
         "intent_submit_and_verify" => (
-            intent_properties(json!({"expectedState":{"$ref":"#/$defs/WaitForCommand"}})),
+            intent_properties(json!({
+                "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+                "autoCheckpoint":{"type":"boolean"}
+            })),
             intent_required(&["purpose", "expectedState"]),
         ),
         // The only intent with no purpose/hints of its own.
@@ -339,7 +344,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "intent_follow" => (
             intent_properties(json!({
                 "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
-                "boundary":{"type":"boolean"}
+                "boundary":{"type":"boolean"},
+                "autoCheckpoint":{"type":"boolean"}
             })),
             intent_required(&["purpose", "expectedDestination"]),
         ),
@@ -368,7 +374,18 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["checkpoint"],
         ),
         "workflow_recover" => (json!({"workflowId":id()}), vec!["workflowId"]),
-        "recovery_status" => (json!({"workflowId":id()}), vec!["workflowId"]),
+        // Either key: `workflowId` for a known workflow, or `sessionId` to
+        // discover the recoverable workflows of a session. Neither is required
+        // here because exactly-one-of is not expressible in the subset this
+        // validator implements; the handler enforces it and names the failure.
+        "recovery_status" => (
+            json!({
+                "workflowId":id(),
+                "sessionId":id(),
+                "limit":{"type":"integer","minimum":1,"maximum":MAX_RECOVERABLE_WORKFLOWS}
+            }),
+            vec![],
+        ),
         "events_read" => (
             json!({
                 "cursor":{"type":"integer","minimum":0},
@@ -500,9 +517,13 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
                 // `RecoveryReceipt` also carries a `CommandOutcome`, a
                 // `SkillOutcome`, and a `SkillDecision`; kept generic here
                 // for the same reason as `CheckpointRecord.recoveryReceipts`.
-                "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS)
+                "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
+                // Present instead of the three above when the caller asked by
+                // `sessionId`. Nothing is required because the two branches
+                // share no field.
+                "workflows":array(id(), MAX_RECOVERABLE_WORKFLOWS)
             }),
-            &["workflowId", "checkpoint", "receipts"],
+            &[],
         ),
         "events_read" => object(
             json!({
@@ -1415,7 +1436,8 @@ fn evidence_variants() -> Vec<Value> {
                 "condition":{"$ref":"#/$defs/WaitCondition"},
                 "elapsedMs":{"type":"integer","minimum":0},
                 "observations":{"type":"integer","minimum":0},
-                "excludedClasses":array(string(1, MAX_STRING_BYTES), MAX_EXCLUDED_CLASSES)
+                "excludedClasses":array(string(1, MAX_STRING_BYTES), MAX_EXCLUDED_CLASSES),
+                "observed":string(0, types::MAX_WAIT_OBSERVED_CHARS)
             }),
             &["condition", "elapsedMs", "observations"],
         ),

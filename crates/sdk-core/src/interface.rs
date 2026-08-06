@@ -6,9 +6,9 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use interface_core::{
-    canonical_sha256, AuthorizationGuard, CapabilityHandle, IdempotencyReservation,
-    IdempotencyStore, InterfaceResult, RuntimeInterface, SessionCheckpointOutcome,
-    SessionOwnershipRecorder,
+    canonical_sha256, command_identity_sha256, AuthorizationGuard, CapabilityHandle,
+    IdempotencyReservation, IdempotencyStore, InterfaceResult, RuntimeInterface,
+    SessionCheckpointOutcome, SessionOwnershipRecorder,
 };
 use types::{
     Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
@@ -198,14 +198,18 @@ impl AuthenticatedRuntime {
                 .submit_with_vision_grant(envelope, vision_capability_ok, one_shot_vision_consent)
                 .await);
         };
-        // Consent changes what the same command may do, so it is part of the
-        // idempotency identity: a denial must not replay into an approved retry,
-        // nor an approved result into a later ordinary submission.
-        let digest = if one_shot_vision_consent {
-            canonical_sha256(&(&envelope, true))?
-        } else {
-            canonical_sha256(&envelope)?
-        };
+        // Identity is what the command does, not which attempt is doing it:
+        // `command_id`, `attempt_id`, and `deadline` are minted per attempt, so
+        // digesting the whole envelope meant a retry never matched its own
+        // first try. Consent is part of the identity because it changes what
+        // the same command may do.
+        let digest = command_identity_sha256(
+            envelope.schema_version,
+            &envelope.session_id,
+            &envelope.page_id,
+            &envelope.command,
+            one_shot_vision_consent,
+        )?;
         let reservation = self
             .idempotency
             .reserve(
@@ -492,6 +496,30 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.submit_authorized(ctx, envelope, false).await
     }
 
+    async fn submit_with_auto_checkpoint(
+        &self,
+        ctx: RequestContext,
+        envelope: CommandEnvelope,
+    ) -> InterfaceResult<(CommandOutcome, types::CheckpointId)> {
+        // Both gates the manual sequence passes: writing a checkpoint and
+        // running the command. Sugar must not widen authority.
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        self.authorize_submit(&ctx, &envelope.command, false)?;
+        self.require_owned_session(&ctx, &envelope.session_id)?;
+        let vision_capability_ok = self
+            .authorization
+            .capability_handle()
+            .capabilities()
+            .contains(Capability::VisionAssist)
+            && ctx.capabilities.contains(Capability::VisionAssist);
+        self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
+        self.inner
+            .submit_with_auto_checkpoint(envelope, vision_capability_ok, false)
+            .await
+            .map_err(|error| map_runtime_error(&ctx, error))
+    }
+
     async fn checkpoint(
         &self,
         ctx: RequestContext,
@@ -616,6 +644,25 @@ impl RuntimeInterface for AuthenticatedRuntime {
                 ),
                 _ => internal_error(&ctx),
             })
+    }
+
+    async fn workflows_for_session(
+        &self,
+        ctx: RequestContext,
+        session: types::SessionId,
+        limit: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>> {
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::ReadCheckpoint)?;
+        // A checkpoint records its session but no principal, so ownership is
+        // enforced here against the same registry the single-workflow path
+        // uses. A session the caller does not own answers as absence, matching
+        // `recovery_status`.
+        self.require_owned_session(&ctx, &session)?;
+        self.inner
+            .workflows_for_session(&session, limit)
+            .await
+            .map_err(|_| internal_error(&ctx))
     }
 
     async fn recover(

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use checkpoint_store::CheckpointStore;
 use chrono::{Duration, Utc};
 use interface_core::{
-    canonical_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyPermit,
+    command_identity_sha256, Authority, AuthorityStore, CapabilityHandle, IdempotencyPermit,
     IdempotencyReservation, IdempotencyStore, RuntimeInterface, SessionOwnershipAuthority,
     SessionOwnershipRecorder, SessionOwnershipRegistry,
 };
@@ -321,7 +321,14 @@ async fn hold_reservation(
             context.principal_id.clone(),
             context.idempotency_key.clone().unwrap(),
             types::InterfaceOperation::SubmitCommand,
-            canonical_sha256(request).unwrap(),
+            command_identity_sha256(
+                request.schema_version,
+                &request.session_id,
+                &request.page_id,
+                &request.command,
+                false,
+            )
+            .unwrap(),
             Utc::now(),
             context.deadline,
             context.correlation_id.clone(),
@@ -357,7 +364,14 @@ async fn assert_reservation_released(
                 context.principal_id.clone(),
                 context.idempotency_key.clone().unwrap(),
                 types::InterfaceOperation::SubmitCommand,
-                canonical_sha256(request).unwrap(),
+                command_identity_sha256(
+                    request.schema_version,
+                    &request.session_id,
+                    &request.page_id,
+                    &request.command,
+                    false,
+                )
+                .unwrap(),
                 Utc::now(),
                 Utc::now() + Duration::seconds(1),
                 context.correlation_id.clone(),

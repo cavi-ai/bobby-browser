@@ -71,6 +71,26 @@ fn scan_for_canary(dir: &Path) -> Vec<PathBuf> {
     hits
 }
 
+/// Every `.json` under `root`, at any depth.
+fn json_files_under(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chromium"]
 async fn typed_values_never_reach_the_context_store() {
@@ -197,16 +217,15 @@ async fn typed_values_never_reach_the_context_store() {
     .await
     .unwrap();
 
-    let sites_dir = context_dir.join("canary-profile");
-    let site_files: Vec<PathBuf> = std::fs::read_dir(&sites_dir)
-        .unwrap_or_else(|_| panic!("context store was never written at {}", sites_dir.display()))
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
-        .collect();
+    // Walk the whole store, rather than naming a profile directory: the store
+    // hex-encodes the profile component, so `canary-profile` is never a
+    // literal path. Walking is also what this canary is for -- every byte
+    // under the root gets scanned, including any file a future layout adds.
+    let site_files: Vec<PathBuf> = json_files_under(&context_dir);
     assert!(
         !site_files.is_empty(),
-        "no site context persisted; the canary scan would be vacuous"
+        "context store was never written under {}; the canary scan would be vacuous",
+        context_dir.display()
     );
     let persisted: String = site_files
         .iter()

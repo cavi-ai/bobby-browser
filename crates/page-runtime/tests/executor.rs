@@ -225,6 +225,7 @@ impl BrowserWorker for FakeWorker {
             elapsed_ms: 1,
             observations: 1,
             excluded_classes: Vec::new(),
+            observed: None,
         }])
     }
     async fn close(&self) -> Result<(), CommandError> {

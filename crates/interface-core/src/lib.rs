@@ -30,8 +30,8 @@ pub use events::{
     MAX_EVENT_PAYLOAD_NODES,
 };
 pub use idempotency::{
-    canonical_sha256, IdempotencyPermit, IdempotencyReservation, IdempotencyStore, RetainedOutcome,
-    SessionCheckpointOutcome,
+    canonical_sha256, command_identity_sha256, IdempotencyPermit, IdempotencyReservation,
+    IdempotencyStore, RetainedOutcome, SessionCheckpointOutcome,
 };
 pub use session_ownership::{
     SessionOwnershipAuthority, SessionOwnershipRecordError, SessionOwnershipRecorder,
@@ -193,6 +193,28 @@ pub trait RuntimeInterface: Send + Sync {
         ctx: RequestContext,
         workflow: WorkflowId,
     ) -> InterfaceResult<types::RecoveryStatus>;
+    /// Runs a Boundary command after minting its pre-action checkpoint.
+    ///
+    /// Collapses pin-ids -> `checkpoint_save` -> submit into one call. The
+    /// gateway cannot author a checkpoint itself: it has no access to live
+    /// page state. Returns the outcome and the id of the checkpoint that was
+    /// saved, so the caller can still name it to `workflow_recover`.
+    async fn submit_with_auto_checkpoint(
+        &self,
+        ctx: RequestContext,
+        envelope: types::CommandEnvelope,
+    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)>;
+    /// Recoverable workflows for a session the caller owns, newest first.
+    ///
+    /// `recovery_status` and `recover` are keyed by `workflowId` alone, so an
+    /// agent that was compacted or restarted -- and lost the id it minted --
+    /// could not reach its own in-flight workflow at all. Bounded by `limit`.
+    async fn workflows_for_session(
+        &self,
+        ctx: RequestContext,
+        session: types::SessionId,
+        limit: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>>;
 }
 
 /// Capability and identity checks for one authenticated principal.
