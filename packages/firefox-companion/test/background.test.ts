@@ -229,9 +229,9 @@ test("discovery is not a grant and only an explicit UUID grant can route", async
   ]);
 });
 
-test("a grant for a second attachment preserves the first attachment's leases", async () => {
+test("observation remains usable through twelve actions when a second worker session starts", async () => {
   const transport = new FakeTransport();
-  const routed: unknown[] = [];
+  const routed: DiscoveredTarget[] = [];
   const background = new CompanionBackground({
     transport,
     discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
@@ -247,45 +247,63 @@ test("a grant for a second attachment preserves the first attachment's leases", 
   await pair(background);
   await grant(background, [{ tabId: 9, frameId: 4 }]);
 
-  await background.receive({
-    kind: "grant",
-    input: {
-      protocolVersion: 1,
-      attachmentId: "5d0f8d76-5bb2-4b5d-9f2c-0d3f2c0f8a11",
-      profileId: CONNECT_OPTIONS.profileId,
-      expiresAtUnixMs: 61_000,
-      pages: [
-        {
-          targetId: targetId(9, 4),
-          pageId: "6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b",
-        },
-      ],
-    },
-  });
-
-  const action = (attachmentId: string, pageId: string, commandId: string) =>
+  const secondAttachmentId = "5d0f8d76-5bb2-4b5d-9f2c-0d3f2c0f8a11";
+  const secondPageId = "6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b";
+  const observe = (attachmentId: string, observedPageId: string, actionNumber: number) =>
     background.receive({
       kind: "action",
       input: {
         protocolVersion: 1,
         attachmentId,
-        commandId,
-        pageId,
+        commandId: `command-${actionNumber}`,
+        pageId: observedPageId,
         operation: "observe",
         input: {},
         deadlineUnixMs: 60_000,
       },
     });
-  await action(ATTACHMENT_ID, pageId(9, 4), "11111111-1111-4111-8111-111111111111");
-  await action(
-    "5d0f8d76-5bb2-4b5d-9f2c-0d3f2c0f8a11",
-    "6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b",
-    "22222222-2222-4222-8222-222222222222",
+
+  for (let actionNumber = 1; actionNumber <= 5; actionNumber += 1) {
+    await observe(ATTACHMENT_ID, pageId(9, 4), actionNumber);
+  }
+
+  await background.receive({
+    kind: "grant",
+    input: {
+      protocolVersion: 1,
+      attachmentId: secondAttachmentId,
+      profileId: CONNECT_OPTIONS.profileId,
+      expiresAtUnixMs: 61_000,
+      pages: [
+        {
+          targetId: targetId(9, 4),
+          pageId: secondPageId,
+        },
+      ],
+    },
+  });
+
+  for (let actionNumber = 6; actionNumber <= 12; actionNumber += 1) {
+    const useOriginalSession = actionNumber % 2 === 0;
+    await observe(
+      useOriginalSession ? ATTACHMENT_ID : secondAttachmentId,
+      useOriginalSession ? pageId(9, 4) : secondPageId,
+      actionNumber,
+    );
+  }
+
+  assert.equal(routed.length, 12);
+  assert.deepEqual(new Set(routed.map(({ tabId, frameId }) => `${tabId}:${frameId}`)), new Set(["9:4"]));
+  assert.equal(
+    transport.sent.filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "actionCompleted",
+    ).length,
+    12,
   );
-  assert.deepEqual(routed, [
-    { tabId: 9, frameId: 4 },
-    { tabId: 9, frameId: 4 },
-  ]);
 });
 
 test("manifest installs content receivers in subframes and newly opened blank contexts", async () => {
