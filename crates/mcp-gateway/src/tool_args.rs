@@ -444,4 +444,3 @@ pub(crate) struct PromptGetArgs {
     #[serde(default, rename = "_meta")]
     pub(crate) _meta: Option<Value>,
 }
-

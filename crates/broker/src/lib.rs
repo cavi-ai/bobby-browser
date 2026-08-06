@@ -35,8 +35,8 @@ use types::{CommandEnvelope, CommandOutcome, Evidence, PrincipalId, SessionId};
 
 pub use auth::{EnrolledAuthority, StartupCredential, StartupCredentialError};
 pub use cdp::CdpListen;
-pub use jobs::BUILTIN_JOB_HANDLERS;
 use jobs::JobSubmitOutcome;
+pub use jobs::BUILTIN_JOB_HANDLERS;
 
 type RuntimeBinder = dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static;
 

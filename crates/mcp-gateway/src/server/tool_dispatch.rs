@@ -993,6 +993,5 @@ impl Server {
             Ok(value) => self.tool_success(id, value).await,
             Err(interface_error) => interface_error_response(id, interface_error),
         }
-
     }
 }
