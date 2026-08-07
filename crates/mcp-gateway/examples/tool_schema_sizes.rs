@@ -22,7 +22,10 @@ async fn list_for(toolset: Toolset) -> (usize, Vec<(String, usize)>) {
         )
         .await
         .expect("issue");
-    let handle = authority.verify(&token.expose_once()).await.expect("verify");
+    let handle = authority
+        .verify(&token.expose_once())
+        .await
+        .expect("verify");
     let (jobs, _sched) = InProcessJobPort::memory();
     let server = Server::new(Arc::new(AuthenticatedRuntime::new(
         RuntimeService::default(),
