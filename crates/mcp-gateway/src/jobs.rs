@@ -181,6 +181,7 @@ fn register_builtin_handlers(scheduler: &mut JobScheduler) {
     scheduler.register_handler("sleep".to_string(), Arc::new(SleepHandler));
     scheduler.register_handler("http_probe".to_string(), Arc::new(HttpProbeHandler));
     scheduler.register_handler("http_wait".to_string(), Arc::new(HttpWaitHandler));
+    scheduler.register_handler("http_fetch".to_string(), Arc::new(HttpFetchHandler));
 }
 
 struct EchoHandler;
@@ -280,6 +281,40 @@ impl JobHandler for HttpWaitHandler {
             timeout_ms,
             interval_ms,
             probe_timeout_ms,
+            network_engine::NetworkPolicy::default(),
+        )
+        .await
+    }
+}
+
+struct HttpFetchHandler;
+
+#[async_trait]
+impl JobHandler for HttpFetchHandler {
+    async fn execute(&self, job: &Job) -> Result<Value, String> {
+        let url = job
+            .payload
+            .get("url")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "http_fetch requires payload.url".to_owned())?;
+        let timeout_ms = job
+            .payload
+            .get("timeoutMs")
+            .and_then(|value| value.as_u64());
+        let max_body_bytes = job
+            .payload
+            .get("maxBodyBytes")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize);
+        let contains = job
+            .payload
+            .get("contains")
+            .and_then(|value| value.as_str());
+        network_engine::http_fetch(
+            url,
+            timeout_ms,
+            max_body_bytes,
+            contains,
             network_engine::NetworkPolicy::default(),
         )
         .await

@@ -196,3 +196,47 @@ async fn http_wait_to_loopback_fails_closed() {
     }
     panic!("http_wait loopback job did not finish");
 }
+
+#[tokio::test]
+async fn http_fetch_to_loopback_fails_closed() {
+    let server = server_with_jobs().await;
+    let submitted = server
+        .handle_message(json!({
+            "jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"job_submit","arguments":{
+                "name":"http_fetch",
+                "payload":{"url":"http://127.0.0.1:9/","timeoutMs":1000,"maxBodyBytes":256},
+                "maxRetries": 0
+            }}
+        }))
+        .await
+        .unwrap();
+    assert!(
+        submitted["result"]["isError"] != true,
+        "submit failed: {submitted}"
+    );
+    let job_id = submitted["result"]["structuredContent"]["jobId"]
+        .as_str()
+        .expect("jobId")
+        .to_owned();
+    for _ in 0..50 {
+        let status = server
+            .handle_message(json!({
+                "jsonrpc":"2.0","id":8,"method":"tools/call",
+                "params":{"name":"job_status","arguments":{"jobId":job_id}}
+            }))
+            .await
+            .unwrap();
+        let st = status["result"]["structuredContent"]["status"]
+            .as_str()
+            .unwrap_or("");
+        if st == "failed" {
+            return;
+        }
+        if st == "completed" {
+            panic!("http_fetch to loopback must fail closed: {status}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("http_fetch loopback job did not finish");
+}
