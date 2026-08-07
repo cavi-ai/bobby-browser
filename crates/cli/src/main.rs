@@ -3,6 +3,7 @@ mod doctor;
 mod jobs_client;
 mod onboarding;
 mod vision_child;
+mod vision_collect;
 mod vision_connect;
 mod vision_login;
 
@@ -333,6 +334,18 @@ enum VisionCommands {
     Connect(VisionConnectArgs),
     /// Establish or verify the configured ACP harness login
     Login(VisionLoginArgs),
+    /// Collect training data from gauntlet runs
+    Collect {
+        /// Output directory (default: data/vision/)
+        #[arg(long, default_value = "data/vision/")]
+        output: String,
+        /// Number of examples to collect per journey (default: 100)
+        #[arg(long, default_value_t = 100)]
+        examples: usize,
+        /// Specific journey to collect (default: all)
+        #[arg(long)]
+        journey: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -565,6 +578,9 @@ pub async fn run() -> Result<()> {
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
             VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
+            VisionCommands::Collect { output, examples, journey } => {
+                vision_collect::run_collect(output, examples, journey)?;
+            }
         },
         CliCommand::VisionConnect(args) => vision_connect::connect(args.into())?,
         CliCommand::VisionProxy {
