@@ -373,6 +373,11 @@ fn encode_component(value: &str) -> String {
     hex::encode(value.as_bytes())
 }
 
+/// Attempts to claim the lockfile before reporting contention.
+const LOCK_CLAIM_ATTEMPTS: u32 = 5;
+/// Pause between claim attempts.
+const LOCK_CLAIM_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
 struct Lockfile {
     _file: std::fs::File,
 }
@@ -416,10 +421,27 @@ impl Lockfile {
             }
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         }
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(ContextStoreError::AlreadyLocked),
-            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        // A lock released moments ago is not always claimable on the very next
+        // attempt: `bobby context forget` opens, drops, and reopens the store
+        // in one process, and on Linux that hand-off loses the race often
+        // enough to fail a test run every time. Retry briefly.
+        //
+        // This does not soften real contention. A running bobby holds the lock
+        // for its whole lifetime, so it still fails after the last attempt --
+        // the window only covers a close that has just happened.
+        let mut attempt = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) if attempt < LOCK_CLAIM_ATTEMPTS - 1 => {
+                    attempt += 1;
+                    tokio::time::sleep(LOCK_CLAIM_BACKOFF).await;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(ContextStoreError::AlreadyLocked)
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
         }
     }
 }
