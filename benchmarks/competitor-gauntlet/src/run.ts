@@ -212,8 +212,18 @@ async function main() {
   const taskId = arg("task");
   const runs = Number(arg("runs", "1"));
   const timeboxMs = Number(arg("timebox-seconds", "480")) * 1000;
-  if (!toolName || !runners[toolName]) {
-    console.error(`--tool required, one of: ${Object.keys(runners).join(", ")}`);
+  if (!toolName) {
+    console.error(
+      `--tool required. Benchmark bobby with --tool bobby. The full competitor gamut runs ONLY when explicitly called: --tool all. One of: ${Object.keys(runners).join(", ")}, all`,
+    );
+    process.exit(2);
+  }
+  const toolNames =
+    toolName === "all"
+      ? Object.keys(runners)
+      : toolName.split(",").filter((name) => runners[name]);
+  if (toolNames.length === 0) {
+    console.error(`unknown --tool ${toolName}`);
     process.exit(2);
   }
   const selected = taskId ? tasks.filter((t: any) => t.id === taskId) : tasks;
@@ -223,35 +233,37 @@ async function main() {
   }
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(path.join(resultsDir, "transcripts"), { recursive: true });
-  const runner = runners[toolName];
 
-  for (const task of selected) {
-    for (let run = 1; run <= runs; run += 1) {
-      const seed = `cg-${toolName}-${task.id}-${run}-${Date.now()}`;
-      const server = await startServer(seed);
-      const parsed = new URL(server.url);
-      const entryUrl = `${server.base}${task.entry}${parsed.search}`;
-      const workDir = await mkdtemp(path.join(tmpdir(), `cg-${toolName}-`));
-      const downloadsDir = path.join(workDir, "downloads");
-      mkdirSync(downloadsDir, { recursive: true });
+  for (const tool of toolNames) {
+    const runner = runners[tool];
 
-      const mcpConfig = { mcpServers: runner.mcpServers };
-      // Prefer the repo's own release build for the bobby runner — the
-      // benchmark should measure this checkout, not a stale installed binary.
-      const repoBobby = path.join(repoRoot, "target/release/bobby");
-      const bobbyCommand =
-        process.env.BOBBY_MCP_COMMAND ??
-        (exists(repoBobby) ? repoBobby : "bobby");
-      for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
-        serverConfig.command = serverConfig.command.replace(
-          "${BOBBY_MCP_COMMAND}",
-          bobbyCommand,
+    for (const task of selected) {
+      for (let run = 1; run <= runs; run += 1) {
+        const seed = `cg-${tool}-${task.id}-${run}-${Date.now()}`;
+        const server = await startServer(seed);
+        const parsed = new URL(server.url);
+        const entryUrl = `${server.base}${task.entry}${parsed.search}`;
+        const workDir = await mkdtemp(path.join(tmpdir(), `cg-${tool}-`));
+        const downloadsDir = path.join(workDir, "downloads");
+        mkdirSync(downloadsDir, { recursive: true });
+
+        const mcpConfig = { mcpServers: runner.mcpServers };
+        // Prefer the repo's own release build for the bobby runner — the
+        // benchmark should measure this checkout, not a stale installed binary.
+        const repoBobby = path.join(repoRoot, "target/release/bobby");
+        const bobbyCommand =
+          process.env.BOBBY_MCP_COMMAND ??
+          (exists(repoBobby) ? repoBobby : "bobby");
+        for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
+          serverConfig.command = serverConfig.command.replace(
+            "${BOBBY_MCP_COMMAND}",
+            bobbyCommand,
+          );
+        }
+        writeFileSync(
+          path.join(workDir, ".mcp.json"),
+          JSON.stringify(mcpConfig, null, 2),
         );
-      }
-      writeFileSync(
-        path.join(workDir, ".mcp.json"),
-        JSON.stringify(mcpConfig, null, 2),
-      );
 
       const prompt =
         task.prompt
@@ -280,7 +292,7 @@ async function main() {
       writeFileSync(transcriptFile, JSON.stringify(events, null, 2));
       const record = {
         seed,
-        tool: toolName,
+        tool,
         task: task.id,
         run,
         at: new Date().toISOString(),
@@ -301,10 +313,11 @@ async function main() {
         JSON.stringify(record) + "\n",
       );
       console.log(
-        `${record.pass ? "PASS" : "FAIL"} ${toolName}/${task.id}#${run} ` +
+        `${record.pass ? "PASS" : "FAIL"} ${tool}/${task.id}#${run} ` +
           `${(wallMs / 1000).toFixed(1)}s calls=${summary.toolCalls} errors=${summary.toolErrors} ` +
           `${outcome.failures.join("; ")}`,
       );
+      }
     }
   }
 }

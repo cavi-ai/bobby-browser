@@ -1156,7 +1156,29 @@ fn selector_evidence(page_id: &PageId, selector: &str) -> Evidence {
 }
 
 fn cdp_error(error: chromiumoxide::error::CdpError) -> CommandError {
-    target_error(ErrorCode::BrowserCommandFailed, error)
+    let message = error.to_string();
+    // A resolved node id expires when the page re-renders; that is a stale
+    // target, not a driver fault — agents repair it with a fresh snapshot.
+    if message.contains("Could not find node with given id") {
+        return CommandError {
+            code: ErrorCode::TargetNotFound,
+            message: "resolved node is stale (page re-rendered); take a fresh snapshot and re-resolve the target".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+    }
+    // The page's CDP target died (crash or close). Hammering the dead pipe
+    // produced the cascade of identical driver errors seen in benchmark
+    // runs; say what happened and what to check instead.
+    if message.contains("receiver is gone") || message.contains("session closed") {
+        return CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "the browser target is gone (crashed or closed); re-list pages or recover the session before retrying".into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        };
+    }
+    target_error(ErrorCode::BrowserCommandFailed, message)
 }
 
 fn target_error(code: ErrorCode, message: impl std::fmt::Display) -> CommandError {
