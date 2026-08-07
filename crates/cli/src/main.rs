@@ -39,7 +39,9 @@ use vision_child::{
     decide_vision_child, enforce_force_on_spawn, ManagedVisionProxy, VisionChildDecision,
     VisionSpawnPolicy,
 };
-use vision_proxy::{serve as serve_vision_proxy, OpenAiUpstream, OllamaUpstream, ProxyConfig, UpstreamKind};
+use vision_proxy::{
+    serve as serve_vision_proxy, OllamaUpstream, OpenAiUpstream, ProxyConfig, UpstreamKind,
+};
 
 #[derive(Clone)]
 pub struct NativeHostInstallConfig {
@@ -576,7 +578,16 @@ pub async fn run() -> Result<()> {
             ollama_base_url,
             api_key_env,
         } => {
-            run_vision_proxy(bind, path, upstream, model, openai_base_url, ollama_base_url, api_key_env).await?;
+            run_vision_proxy(
+                bind,
+                path,
+                upstream,
+                model,
+                openai_base_url,
+                ollama_base_url,
+                api_key_env,
+            )
+            .await?;
         }
     }
 
@@ -775,17 +786,17 @@ async fn run_vision_proxy(
             };
             Arc::new(OpenAiUpstream::new(api_key, model, openai_base_url))
         }
-        "ollama" => {
-            Arc::new(OllamaUpstream::new(model, ollama_base_url))
+        "ollama" => Arc::new(OllamaUpstream::new(model, ollama_base_url)),
+        _other => {
+            anyhow::bail!("unsupported upstream {upstream:?}; expected \"openai\" or \"ollama\"")
         }
-        _other => anyhow::bail!("unsupported upstream {upstream:?}; expected \"openai\" or \"ollama\""),
     };
 
     let config = ProxyConfig {
         bind,
         path,
         bearer_token,
-        upstream_kind: UpstreamKind::OpenAi,  // Default, not used when upstream is trait object
+        upstream_kind: UpstreamKind::OpenAi, // Default, not used when upstream is trait object
     };
 
     serve_vision_proxy(config, upstream)
