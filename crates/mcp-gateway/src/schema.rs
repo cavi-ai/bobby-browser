@@ -658,45 +658,87 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
     schema
 }
 
-/// `tools/list` outputSchema. Identical to [`tool_output_schema`] except:
-/// `form_snapshot`, whose nested `FormControl*` `$defs` dominate the entry —
-/// advertised as opaque form/control objects while wire types stay unchanged;
-/// `workflow_recover`, whose `RecoveryDecision` union is advertised as a
-/// status-tag projection (fields enforced by the runtime, full shape in
-/// `bobby://failure-taxonomy`); and every entry drops the constant `$schema`
-/// URL (see [`advertised_tool_schema`]).
+/// `tools/list` outputSchema. Identical to [`tool_output_schema`] except
+/// advertise-only collapses for tools whose nested `$defs` dominate the entry
+/// (`form_snapshot`, `workflow_recover`, `recovery_status`, `page_open`,
+/// `session_create`, `session_list`, `checkpoint_save`); wire types stay
+/// unchanged. Every entry also drops the constant `$schema` URL (see
+/// [`advertised_tool_schema`]).
 pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
-    if name == "workflow_recover" {
-        let mut schema = output_ref("RecoveryDecision");
-        let mut patched = definitions();
-        let patched = patched.as_object_mut().expect("definitions is an object");
-        patched.insert(
-            "RecoveryDecision".to_owned(),
-            json!({"oneOf": recovery_decision_tags()}),
-        );
-        let defs = reachable_definitions_from(&schema, patched);
-        if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
-            schema["$defs"] = defs;
+    match name {
+        "workflow_recover" => {
+            let mut schema = output_ref("RecoveryDecision");
+            let mut patched = definitions();
+            let patched = patched.as_object_mut().expect("definitions is an object");
+            patched.insert(
+                "RecoveryDecision".to_owned(),
+                json!({"oneOf": recovery_decision_tags()}),
+            );
+            let defs = reachable_definitions_from(&schema, patched);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
         }
-        return schema;
+        "form_snapshot" => {
+            let mut schema = output_ref("FormSnapshot");
+            let mut patched = definitions();
+            let patched = patched.as_object_mut().expect("definitions is an object");
+            patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
+            let defs = reachable_definitions_from(&schema, patched);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
+        "session_create" | "checkpoint_save" => {
+            // Opaque object: SessionState / CheckpointRecord pull large nested
+            // defs into tools/list; validation still uses the full schema.
+            json!({"type":"object"})
+        }
+        "session_list" => object(
+            json!({"sessions":array(json!({"type":"object"}), MAX_COLLECTION_ITEMS)}),
+            &["sessions"],
+        ),
+        "recovery_status" => object(
+            json!({
+                "workflowId":id(),
+                "checkpoint":json!({"type":"object"}),
+                "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
+                "workflows":array(json!({"type":"object"}), MAX_RECOVERABLE_WORKFLOWS)
+            }),
+            &[],
+        ),
+        "page_open" => object(
+            json!({
+                "id":id(),
+                "session_id":id(),
+                "url":nullable(string(0, MAX_URL_BYTES)),
+                "mode":{"type":"string","enum":["Document","Interactive","Render"]},
+                "ready_state":string(0, 256),
+                "pending_requests":{"type":"integer","minimum":0},
+                "navigationOutcome":json!({"type":"object"}),
+                "cleanupOutcome":json!({"type":"object"}),
+                "pageClosed":{"type":"boolean"}
+            }),
+            &[
+                "id",
+                "session_id",
+                "url",
+                "mode",
+                "ready_state",
+                "pending_requests",
+            ],
+        ),
+        _ => {
+            let mut schema = tool_output_schema(name);
+            schema
+                .as_object_mut()
+                .expect("output schema is an object")
+                .remove("$schema");
+            schema
+        }
     }
-    if name != "form_snapshot" {
-        let mut schema = tool_output_schema(name);
-        schema
-            .as_object_mut()
-            .expect("output schema is an object")
-            .remove("$schema");
-        return schema;
-    }
-    let mut schema = output_ref("FormSnapshot");
-    let mut patched = definitions();
-    let patched = patched.as_object_mut().expect("definitions is an object");
-    patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
-    let defs = reachable_definitions_from(&schema, patched);
-    if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
-        schema["$defs"] = defs;
-    }
-    schema
 }
 
 /// Advertise-only FormSnapshot: keep top-level keys, collapse nested controls.

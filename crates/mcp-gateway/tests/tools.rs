@@ -3092,6 +3092,35 @@ async fn initialize_advertises_that_the_tool_list_can_change() {
 }
 
 #[tokio::test]
+async fn initialize_carries_agent_instructions() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"test","version":"1"}
+            }),
+        ))
+        .await
+        .expect("initialize returns a response");
+    let instructions = response["result"]["instructions"]
+        .as_str()
+        .expect("instructions");
+    assert_eq!(instructions, mcp_gateway::INITIALIZE_INSTRUCTIONS);
+    assert!(
+        instructions.len() <= 500,
+        "instructions too long: {}",
+        instructions.len()
+    );
+    assert!(instructions.contains("toolset_select"), "{instructions}");
+    assert!(instructions.contains("error.repair"), "{instructions}");
+    assert!(instructions.contains("autoCheckpoint"), "{instructions}");
+}
+
+#[tokio::test]
 async fn a_capability_change_tells_subscribed_clients_to_relist_tools() {
     let events = EventStore::new(64);
     let server = notify_fixture(NOTIFY_PRINCIPAL_A, events).await;
