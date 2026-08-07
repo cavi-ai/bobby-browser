@@ -222,9 +222,9 @@ agent that only needs part of the surface can narrow it with `toolset_select`:
 | Phase | Contains | Payload |
 |---|---|---|
 | `explore` | read the page, navigate, wait (default) | ~28 KB |
-| `act` | raw primitives, `command_execute`, and job tools | ~43 KB |
+| `act` | raw primitives, `command_execute`, and job tools | ~44 KB |
 | `intent` | the `intent_*` family and `extract_structured` | ~46 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~36 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~37 KB |
 | `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~88 KB |
 
 Session and page lifecycle, `runtime_info`, and `toolset_select` itself appear
