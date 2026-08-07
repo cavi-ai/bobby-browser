@@ -1,0 +1,19 @@
+{
+  "name": "@cavi-ai/competitor-gauntlet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run": "node --import tsx src/run.ts",
+    "score": "node --import tsx src/score.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.2",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  }
+}

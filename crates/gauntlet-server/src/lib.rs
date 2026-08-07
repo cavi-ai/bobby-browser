@@ -285,6 +285,11 @@ impl ScenarioServer {
             .route("/api/reports/latest", get(latest_report))
             .route("/api/reports/{id}", get(report_state))
             .route("/api/reports/{id}/download", get(download_report))
+            // Tool-neutral verification surface for out-of-process drivers
+            // (the competitor gauntlet): the same state `snapshot()` and
+            // `request_log()` expose in-process, as JSON over HTTP.
+            .route("/__gauntlet/snapshot", get(gauntlet_snapshot))
+            .route("/__gauntlet/request-log", get(gauntlet_request_log))
             .fallback(get(static_file))
             .with_state(Arc::clone(&state));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -319,22 +324,7 @@ impl ScenarioServer {
 
     pub async fn snapshot(&self) -> ScenarioSnapshot {
         let state = self.state.inner.lock().await;
-        ScenarioSnapshot {
-            atlas_priority: state.atlas_priority.clone(),
-            priority_updates: state.priority_updates,
-            onboarding_records: state.onboarding_records,
-            onboarding: state.onboarding.clone(),
-            uploaded_sha256: state
-                .uploaded
-                .as_ref()
-                .map(|bytes| hex::encode(Sha256::digest(bytes))),
-            uploaded_customer_id: state.uploaded_customer_id.clone(),
-            uploaded_filename: state.uploaded_filename.clone(),
-            uploaded_media_type: state.uploaded_media_type.clone(),
-            preview_confirmations: state.preview_confirmations,
-            authorization_grants: state.authorization_grants,
-            report_generations: state.report_generations,
-        }
+        snapshot_of(&state)
     }
 
     pub async fn request_log(&self) -> Vec<String> {
@@ -779,11 +769,39 @@ fn bytes_response(
         .expect("static response")
 }
 
+fn snapshot_of(state: &RunState) -> ScenarioSnapshot {
+    ScenarioSnapshot {
+        atlas_priority: state.atlas_priority.clone(),
+        priority_updates: state.priority_updates,
+        onboarding_records: state.onboarding_records,
+        onboarding: state.onboarding.clone(),
+        uploaded_sha256: state
+            .uploaded
+            .as_ref()
+            .map(|bytes| hex::encode(Sha256::digest(bytes))),
+        uploaded_customer_id: state.uploaded_customer_id.clone(),
+        uploaded_filename: state.uploaded_filename.clone(),
+        uploaded_media_type: state.uploaded_media_type.clone(),
+        preview_confirmations: state.preview_confirmations,
+        authorization_grants: state.authorization_grants,
+        report_generations: state.report_generations,
+    }
+}
+
+async fn gauntlet_snapshot(State(state): State<Arc<SharedState>>) -> Json<ScenarioSnapshot> {
+    let state = state.inner.lock().await;
+    Json(snapshot_of(&state))
+}
+
+async fn gauntlet_request_log(State(state): State<Arc<SharedState>>) -> Json<Vec<String>> {
+    Json(state.inner.lock().await.requests.clone())
+}
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("runtime-tests is nested beneath repository root")
+        .expect("gauntlet-server is nested beneath repository root")
         .to_path_buf()
 }
 

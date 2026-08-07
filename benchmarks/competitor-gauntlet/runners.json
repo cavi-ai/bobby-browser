@@ -1,0 +1,37 @@
+{
+  "bobby": {
+    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability)",
+    "mcpServers": {
+      "bobby": {
+        "command": "${BOBBY_MCP_COMMAND}",
+        "args": ["mcp-stdio"],
+        "env": {
+          "AUTOMATION_RUNTIME_BROWSER_SELECTION": "{\"preference\":{\"mode\":\"exact\",\"engine\":\"chromium\"}}"
+        }
+      }
+    }
+  },
+  "playwright-mcp": {
+    "description": "Microsoft @playwright/mcp",
+    "mcpServers": {
+      "playwright": {
+        "command": "npx",
+        "args": ["-y", "@playwright/mcp@latest"]
+      }
+    }
+  },
+  "chrome-devtools-mcp": {
+    "description": "Google chrome-devtools-mcp",
+    "mcpServers": {
+      "chrome-devtools": {
+        "command": "npx",
+        "args": ["-y", "chrome-devtools-mcp@latest"]
+      }
+    }
+  },
+  "raw-playwright": {
+    "description": "No agent tooling: bash + the playwright library only",
+    "mcpServers": {},
+    "promptSuffix": "You have no browser tools. Drive the browser by writing Node scripts that import the 'playwright' package (it is installed in {{harnessDir}}; run scripts with node from that directory, e.g. chromium.launch()) and running them with the Bash tool."
+  }
+}

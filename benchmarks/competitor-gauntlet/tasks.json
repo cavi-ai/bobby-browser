@@ -1,0 +1,53 @@
+[
+  {
+    "id": "customer-update",
+    "entry": "/customers",
+    "prompt": "Open {{url}} in the browser. Search for the customer 'Atlas', open the Atlas Labs customer page, set the customer priority to 'high', and save. Wait until the page confirms 'Priority saved'.",
+    "assert": [
+      { "path": "atlas_priority", "eq": "high" },
+      { "path": "priority_updates", "eq": 1 }
+    ]
+  },
+  {
+    "id": "onboarding",
+    "entry": "/onboarding",
+    "prompt": "Open {{url}} and complete the customer onboarding form: full name 'Maya Chen', work email 'maya@atlas.example', company name 'Atlas Labs', postal code '02110', plan 'growth', billing cycle 'annual'. Submit the form. If the server rejects the postal code, change only the postal code to '10001' and submit again, preserving every other value you already entered. The task is done when the form confirms success.",
+    "assert": [
+      { "path": "onboarding_records", "eq": 1 },
+      { "path": "onboarding.fullName", "eq": "Maya Chen" },
+      { "path": "onboarding.email", "eq": "maya@atlas.example" },
+      { "path": "onboarding.companyName", "eq": "Atlas Labs" },
+      { "path": "onboarding.postalCode", "eq": "10001" },
+      { "path": "onboarding.plan", "eq": "growth" },
+      { "path": "onboarding.billingCycle", "eq": "annual" }
+    ]
+  },
+  {
+    "id": "documents",
+    "entry": "/customers/cus_atlas/documents",
+    "prompt": "Open {{url}}. Upload the file {{fixture}} as the customer document, submit the upload, wait for the document preview to appear, and confirm the preview inside it.",
+    "assert": [
+      { "path": "uploaded_customer_id", "eq": "cus_atlas" },
+      { "path": "uploaded_filename", "eq": "approved-upload.txt" },
+      { "path": "uploaded_media_type", "eq": "text/plain" },
+      { "path": "uploaded_sha256", "eqFixtureSha256": true },
+      { "path": "preview_confirmations", "eq": 1 }
+    ]
+  },
+  {
+    "id": "authorization",
+    "entry": "/integrations",
+    "prompt": "Open {{url}}. Click 'Connect Ledger Cloud', complete the authorization in the window that opens (choose Authorize), and return to the integrations page. If a notification-preferences prompt appears afterwards, dismiss it. The task is done when the integration shows as connected.",
+    "assert": [{ "path": "authorization_grants", "eq": 1 }]
+  },
+  {
+    "id": "report-recovery",
+    "entry": "/reports",
+    "prompt": "Open {{url}}. Generate the operations report, wait until it is ready, and download the file 'atlas-operations.csv' into the directory {{downloads}}.",
+    "assert": [{ "path": "report_generations", "eq": 1 }],
+    "download": {
+      "file": "atlas-operations.csv",
+      "content": "customer,priority\nAtlas Labs,high\n"
+    }
+  }
+]
