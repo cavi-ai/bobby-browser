@@ -23,6 +23,7 @@ mod server;
 mod tool_args;
 mod tool_meta;
 pub mod toolset;
+mod workflow_handles;
 
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
