@@ -52,11 +52,9 @@ The formula is named for the project, not the binary, so it matches the crate
 and the npm package and stays viable for a homebrew-core submission, where
 `bobby` alone would be too generic.
 
-From a checkout instead of the tap:
-
-```bash
-brew install --formula ./Formula/bobby-browser.rb
-```
+Homebrew rejects a formula outside a tap, so there is no
+`brew install --formula ./Formula/...` path; use the tap, or take the binaries
+straight from the [release assets](https://github.com/cavi-ai/bobby-browser/releases/latest).
 
 Release archives are three binaries on purpose: the CLI plus the two stdio
 gateways agents spawn. Prefer MCP Explore (`BOBBY_MCP_TOOLSET=explore` or
