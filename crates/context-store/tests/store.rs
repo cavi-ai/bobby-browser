@@ -250,3 +250,47 @@ fn serialized_envelope_carries_no_values_or_exact_timestamps() {
         );
     }
 }
+
+/// A closed store releases its lockfile for the next open in the same process.
+///
+/// `bobby context forget` opens the store, drops it, and opens it again to
+/// confirm the removal took. That handoff is the whole reason the command
+/// works, and nothing pinned it.
+#[tokio::test]
+async fn a_dropped_store_releases_its_lock_for_the_next_open() {
+    let root = tempfile::tempdir().unwrap();
+    let (first, _) = match ContextStore::open(root.path(), "profile-a").await {
+        Ok(opened) => opened,
+        Err(error) => panic!("first open must claim the lock: {error}"),
+    };
+    drop(first);
+
+    let (second, _) = match ContextStore::open(root.path(), "profile-a").await {
+        Ok(opened) => opened,
+        Err(error) => panic!("a dropped store must release its lock: {error}"),
+    };
+    drop(second);
+
+    // And again, so the release is not a one-shot.
+    let (third, _) = match ContextStore::open(root.path(), "profile-a").await {
+        Ok(opened) => opened,
+        Err(error) => panic!("the lock must stay reusable: {error}"),
+    };
+    drop(third);
+}
+
+/// A live store still refuses a second writer.
+#[tokio::test]
+async fn a_live_store_still_refuses_a_second_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let (held, _) = ContextStore::open(root.path(), "profile-a").await.unwrap();
+    let error = match ContextStore::open(root.path(), "profile-a").await {
+        Ok(_) => panic!("a second writer must be refused while the first is live"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, ContextStoreError::AlreadyLocked),
+        "expected contention, got {error}"
+    );
+    drop(held);
+}

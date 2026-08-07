@@ -38,6 +38,11 @@ use crate::tool_args::*;
 use crate::tool_meta::{required_capabilities, required_operation, tool_description};
 use crate::ArtifactResources;
 
+mod dispatch_intents;
+mod dispatch_lifecycle;
+mod dispatch_page_ops;
+mod dispatch_primitives;
+mod dispatch_workflow;
 mod tool_dispatch;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
