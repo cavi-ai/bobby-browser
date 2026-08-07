@@ -45,11 +45,15 @@ Not on homebrew-core yet. From a checkout (ships `bobby`, `mcp-gateway`, and
 brew install --formula ./Formula/bobby-browser.rb
 ```
 
-Once published under a tap:
+From the tap:
 
 ```bash
-brew install cavi-ai/bobby-browser/bobby-browser
+brew tap cavi-ai/tap
+brew install cavi-ai/tap/bobby-browser
 ```
+
+The tap lives in `cavi-ai/homebrew-tap`; brew addresses it as `cavi-ai/tap`,
+which is why the install line is not `cavi-ai/bobby-browser/bobby-browser`.
 
 Future homebrew-core checklist (when ready to submit upstream): formula name
 `bobby-browser`; bottle the three binaries; livecheck against GitHub Releases;
