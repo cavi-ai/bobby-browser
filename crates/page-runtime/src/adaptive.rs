@@ -377,7 +377,25 @@ impl AdaptivePageEngine {
             .and_then(|page| page.url.as_deref())
             .unwrap_or_default();
         match direct.eligibility.classify(command, page_url) {
-            EligibilityDecision::Denied(error) => Err(error.into()),
+            EligibilityDecision::Denied(error) => {
+                if matches!(command, PrimitiveCommand::Inspect(_)) {
+                    // The direct-HTTP path is a read optimization over a page
+                    // the browser already has open. A network-policy denial
+                    // there (e.g. loopback) must degrade to the browser, not
+                    // fail a DOM read with a network error code. Downloads
+                    // keep the hard denial: that denial is the boundary.
+                    browser_execute(
+                        envelope,
+                        lease,
+                        ExecutionPath::ChromiumFallback,
+                        ExecutionReason::PolicyRequired,
+                        0,
+                    )
+                    .await
+                } else {
+                    Err(error.into())
+                }
+            }
             EligibilityDecision::Chromium(reason) => {
                 browser_execute(envelope, lease, ExecutionPath::Chromium, reason, 0).await
             }
@@ -387,7 +405,25 @@ impl AdaptivePageEngine {
                 let version = snapshot.version;
                 let candidate = match command {
                     PrimitiveCommand::Inspect(command) => {
-                        direct.executor.inspect(&snapshot, command).await?
+                        match direct.executor.inspect(&snapshot, command).await {
+                            Ok(candidate) => candidate,
+                            // A network-policy denial (e.g. loopback) fires at
+                            // fetch time, after eligibility already routed the
+                            // read here. Degrade to the browser — which has
+                            // the page open — instead of failing a DOM read
+                            // with a network error code.
+                            Err(error) if error.code == ErrorCode::NetworkPolicyDenied => {
+                                return browser_execute(
+                                    envelope,
+                                    lease,
+                                    ExecutionPath::ChromiumFallback,
+                                    ExecutionReason::PolicyRequired,
+                                    version,
+                                )
+                                .await;
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
                     }
                     PrimitiveCommand::DownloadUrl(command) => {
                         direct.executor.download(&snapshot, command).await?

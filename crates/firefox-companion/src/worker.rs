@@ -1731,6 +1731,42 @@ impl FirefoxCompanionWorker {
         }
     }
 
+    /// Select one option by value or label and return the committed option
+    /// value, so post-action verification compares values against values
+    /// even when the caller named the option by its label.
+    async fn select_option_committed(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+        value: &str,
+    ) -> Result<String, CommandError> {
+        let context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &context, "", Some(target))
+            .await?;
+        let selector = serde_json::to_string(&selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let value_json = serde_json::to_string(value)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let response = self.transport.send("script.evaluate", json!({
+            "expression": format!("(()=>{{const el=document.querySelector({selector});if(!(el instanceof HTMLSelectElement)||el.multiple)return null;const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...el.options].filter(option=>option.value===wanted);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(matches.length!==1||matches[0].disabled)return null;el.value=matches[0].value;el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return el.value}})()"),
+            "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+            "awaitPromise": false,
+            "resultOwnership": "none",
+        })).await?;
+        response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox select action was rejected (missing, ambiguous, or disabled option)",
+                    false,
+                )
+            })
+    }
+
     async fn evaluate_control_script(
         &self,
         page_id: &PageId,
@@ -2791,8 +2827,9 @@ impl BrowserWorker for FirefoxCompanionWorker {
             )
         })?;
         worker_pool::validate_control_action(&control, &command.action)?;
+        let mut committed: Option<Vec<String>> = None;
         match &command.action {
-            ControlAction::SetText { value } | ControlAction::SelectOne { value } => {
+            ControlAction::SetText { value } => {
                 self.type_text(
                     page_id,
                     &TypeTextCommand {
@@ -2804,6 +2841,12 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     },
                 )
                 .await?;
+            }
+            ControlAction::SelectOne { value } => {
+                committed = Some(vec![
+                    self.select_option_committed(page_id, &target, value)
+                        .await?,
+                ]);
             }
             ControlAction::SetChecked { checked } => {
                 self.type_text(
@@ -2842,7 +2885,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 .await?;
             }
             ControlAction::SelectMany { values } => {
-                self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;for(const value of requested)if([...el.options].filter(option=>option.value===value&&!option.disabled).length!==1)return false;for(const option of el.options)option.selected=requested.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
+                self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;const norm=s=>s.trim().toLowerCase();const wanted=new Map();for(const value of requested){{const byValue=[...el.options].filter(option=>option.value===value);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(value)||norm(option.textContent)===norm(value));if(matches.length!==1||matches[0].disabled)return false;wanted.set(matches[0].value,true)}}for(const option of el.options)option.selected=wanted.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
             }
             ControlAction::Clear => {
                 self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if('checked'in el)el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
@@ -2872,7 +2915,12 @@ impl BrowserWorker for FirefoxCompanionWorker {
         })?;
         Ok(vec![
             Evidence::ControlAction {
-                action: worker_pool::control_action_evidence(&control, &command.action, false)?,
+                action: worker_pool::control_action_evidence(
+                    &control,
+                    &command.action,
+                    false,
+                    committed.as_deref(),
+                )?,
             },
             self.evidence(InteractionPath::EngineNative),
         ])
@@ -3627,7 +3675,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let value_json = serde_json::to_string(&command.value)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let selection = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const options=[...element.options].filter(option=>option.value==={value_json});if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value={value_json};element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value==={value_json}?'selected':'missing';}})()"),
+            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...element.options].filter(option=>option.value===wanted);const options=byValue.length?byValue:[...element.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value=options[0].value;element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value===options[0].value?'selected':'missing';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -3845,6 +3893,73 @@ impl BrowserWorker for FirefoxCompanionWorker {
                         }
                         Err(error) => return Err(error),
                     }
+                }
+                WaitCondition::Text { target, matcher }
+                | WaitCondition::Value { target, matcher } => {
+                    let is_value = matches!(command.condition, WaitCondition::Value { .. });
+                    let context = self.context(page_id).await?;
+                    let resolved = self
+                        .resolve_input_target(page_id, &context, "", Some(target))
+                        .await;
+                    match resolved {
+                        Ok((context, selector)) => {
+                            let selector = serde_json::to_string(&selector).map_err(|error| {
+                                driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
+                            })?;
+                            let read = if is_value {
+                                format!("document.querySelector({selector})?.value ?? ''")
+                            } else {
+                                format!("document.querySelector({selector})?.innerText ?? ''")
+                            };
+                            let response = self.transport.send("script.evaluate", json!({
+                                "expression": read,
+                                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                                "awaitPromise": false,
+                                "resultOwnership": "none",
+                            })).await?;
+                            let value = response
+                                .pointer("/result/value")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                            (
+                                bounded_text_matches(matcher, &value)?,
+                                Some(bound_observed(&value)),
+                            )
+                        }
+                        Err(error) if error.code == ErrorCode::TargetNotFound => (false, None),
+                        Err(error) => return Err(error),
+                    }
+                }
+                WaitCondition::Document { ready } => {
+                    let context = self.context(page_id).await?;
+                    let response = self
+                        .transport
+                        .send(
+                            "script.evaluate",
+                            json!({
+                                "expression": "document.readyState",
+                                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                                "awaitPromise": false,
+                                "resultOwnership": "none",
+                            }),
+                        )
+                        .await?;
+                    let state = response
+                        .pointer("/result/value")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    (
+                        match ready {
+                            types::WaitUntil::Commit => true,
+                            types::WaitUntil::DomContentLoaded | types::WaitUntil::Interactive => {
+                                state == "interactive" || state == "complete"
+                            }
+                            types::WaitUntil::NetworkIdle => state == "complete",
+                        },
+                        Some(bound_observed(&state)),
+                    )
                 }
                 _ => {
                     return Err(driver_error(

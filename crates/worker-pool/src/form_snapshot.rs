@@ -508,10 +508,16 @@ pub fn validate_control_action(
     Ok(())
 }
 
+/// `committed`: the option values the driver actually selected, when the
+/// action resolved them — selection requests may name an option by *label*
+/// (snapshots surface labels), while the post-action snapshot state carries
+/// option *values*, so verifying against the requested string false-fails
+/// whenever the two differ.
 pub fn control_action_evidence(
     control: &FormControl,
     action: &ControlAction,
     node_replaced: bool,
+    committed: Option<&[String]>,
 ) -> Result<ControlActionEvidence, CommandError> {
     validate_control_action(control, action)?;
     let matched = match (action, &control.state) {
@@ -526,10 +532,21 @@ pub fn control_action_evidence(
             checked == actual
         }
         (ControlAction::SelectOne { value }, FormControlState::Selection { values }) => {
-            values.len() == 1 && values[0] == *value
+            match committed {
+                Some(committed) => values == committed,
+                None => values.len() == 1 && values[0] == *value,
+            }
         }
         (ControlAction::SelectMany { values }, FormControlState::Selection { values: actual }) => {
-            values.iter().collect::<BTreeSet<_>>() == actual.iter().collect::<BTreeSet<_>>()
+            match committed {
+                Some(committed) => {
+                    committed.iter().collect::<BTreeSet<_>>()
+                        == actual.iter().collect::<BTreeSet<_>>()
+                }
+                None => {
+                    values.iter().collect::<BTreeSet<_>>() == actual.iter().collect::<BTreeSet<_>>()
+                }
+            }
         }
         (ControlAction::SetFiles { paths }, FormControlState::Files { count }) => {
             paths.len() == *count
@@ -803,7 +820,7 @@ mod tests {
 
         let action = ControlAction::SetChecked { checked: true };
         validate_control_action(control, &action).unwrap();
-        let evidence = control_action_evidence(control, &action, false).unwrap();
+        let evidence = control_action_evidence(control, &action, false, None).unwrap();
         assert_eq!(evidence.operation, FormControlOperation::SetChecked);
         assert_eq!(evidence.state, FormControlState::Checked { checked: true });
         assert!(!evidence.node_replaced);
@@ -818,7 +835,8 @@ mod tests {
         assert!(control_action_evidence(
             control,
             &ControlAction::SetChecked { checked: false },
-            false
+            false,
+            None
         )
         .is_err());
         for operation in &control.supported_operations {
@@ -861,11 +879,57 @@ mod tests {
                 value: "never-retained".into(),
             },
             false,
+            None,
         )
         .unwrap();
         assert_eq!(evidence.state, FormControlState::Redacted { present: true });
         assert!(!serde_json::to_string(&evidence)
             .unwrap()
             .contains("never-retained"));
+    }
+
+    /// A SelectOne requested by label must verify against the committed
+    /// option value, not the requested label string.
+    #[test]
+    fn select_by_label_verifies_against_the_committed_value() {
+        let mut select = raw_control("priority", "Customer priority");
+        select.tag = "select".into();
+        select.input_type = None;
+        select.options = vec![
+            RawFormOption {
+                value: "normal".into(),
+                label: "Normal".into(),
+                disabled: false,
+                selected: false,
+                group_label: None,
+            },
+            RawFormOption {
+                value: "high".into(),
+                label: "High".into(),
+                disabled: false,
+                selected: true,
+                group_label: None,
+            },
+        ];
+        let snapshot = normalize_form_snapshot(
+            PageId::new(),
+            RawFormSnapshot {
+                forms: Vec::new(),
+                groups: Vec::new(),
+                controls: vec![select],
+                truncated: false,
+            },
+            512,
+        )
+        .unwrap();
+        let control = &snapshot.unowned_controls[0];
+        let action = ControlAction::SelectOne {
+            value: "High".into(),
+        };
+        assert!(
+            control_action_evidence(control, &action, false, None).is_err(),
+            "requested label must not be compared against option values"
+        );
+        control_action_evidence(control, &action, false, Some(&["high".into()])).unwrap();
     }
 }

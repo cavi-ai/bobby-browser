@@ -134,7 +134,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "session_list" => "List browser sessions visible to this principal, each with its profile and open-page count. Requires session:read.",
         "page_list" => "List open pages in an owned session, each with its id, URL, and title. Requires browser:mutate.",
         "inspect" => "Read a page's text, optionally scoped to one element by selector or target, with HTML on request. Requires browser:mutate.",
-        "a11y_snapshot" => "Capture a compact accessibility tree for a page, capped at 2048 nodes, with command-ready targets on actionable nodes. Requires browser:mutate. Start here: pass a node's target into an intent_* tool rather than guessing a selector.",
+        "a11y_snapshot" => "Capture a compact accessibility tree for a page, capped at 2048 nodes, with command-ready targets on actionable nodes. Requires browser:mutate. Start here: pass a node's target into an intent_* tool rather than guessing a selector. In the default explore phase the mutation and intent tools are hidden from tools/list -- call toolset_select act, intent, or full first.",
         "form_snapshot" => "Read a bounded, engine-neutral inventory of a page's form controls without exposing selectors or sensitive values. Requires page:read.",
         "screenshot" => "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
         "events_read" => "Read retained events after a cursor. Requires session:read. It blocks until a newer event or deadline; notifications/bobby/event pushes the same frames. On failure, resume from the last cursor.",

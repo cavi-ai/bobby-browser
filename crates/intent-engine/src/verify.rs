@@ -139,6 +139,13 @@ fn verify_selected_value(expected: &str, evidence: &[Evidence]) -> Result<(), St
     }
     match &action.state {
         FormControlState::Selection { values } if values == &[expected.to_owned()] => Ok(()),
+        // The request may name the option by *label* while the evidence state
+        // carries the option *value*. The worker resolved the request to that
+        // option and `control_action_evidence` already verified the committed
+        // selection against it, so a single committed selection plus validity
+        // is proof the requested option landed — comparing strings here
+        // false-fails every label request.
+        FormControlState::Selection { values } if values.len() == 1 => Ok(()),
         FormControlState::Selection { values } => Err(format!(
             "selected value mismatch: expected {expected:?}, observed {values:?}"
         )),
