@@ -1029,6 +1029,16 @@ capped at 15000. Returns status metadata only — no response body.
 {"name":"http_probe","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":5000}}
 ```
 
+## http_wait
+
+Poll with `http_probe` until success or the wait budget expires.
+`timeoutMs` defaults to 30000 (cap 60000). `intervalMs` defaults to 1000
+(cap 10000). Optional `probeTimeoutMs` per attempt. Same SSRF policy.
+
+```json
+{"name":"http_wait","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":30000,"intervalMs":1000}}
+```
+
 `bobby doctor` reports the same handler names under `job-handlers`.
 "#;
 
@@ -1057,7 +1067,7 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
         (
             JOB_HANDLERS_URI,
             "Job handlers",
-            "Built-in scheduler handlers (echo, sleep, http_probe), payloads, and when to use jobs vs intents.",
+            "Built-in scheduler handlers (echo, sleep, http_probe, http_wait), payloads, and when to use jobs vs intents.",
         ),
     ]
 }

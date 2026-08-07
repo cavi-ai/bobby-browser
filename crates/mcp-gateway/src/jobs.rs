@@ -161,7 +161,7 @@ impl InProcessJobPort {
         Self { scheduler }
     }
 
-    /// Memory scheduler with echo/sleep/http_probe handlers; caller must `spawn` `run()`.
+    /// Memory scheduler with built-in handlers; caller must `spawn` `run()`.
     pub fn memory() -> (Self, Arc<JobScheduler>) {
         let mut scheduler = JobScheduler::new(task_scheduler::SchedulerConfig::default());
         register_builtin_handlers(&mut scheduler);
@@ -180,6 +180,7 @@ fn register_builtin_handlers(scheduler: &mut JobScheduler) {
     scheduler.register_handler("echo".to_string(), Arc::new(EchoHandler));
     scheduler.register_handler("sleep".to_string(), Arc::new(SleepHandler));
     scheduler.register_handler("http_probe".to_string(), Arc::new(HttpProbeHandler));
+    scheduler.register_handler("http_wait".to_string(), Arc::new(HttpWaitHandler));
 }
 
 struct EchoHandler;
@@ -235,6 +236,50 @@ impl JobHandler for HttpProbeHandler {
             url,
             method,
             timeout_ms,
+            network_engine::NetworkPolicy::default(),
+        )
+        .await
+    }
+}
+
+struct HttpWaitHandler;
+
+#[async_trait]
+impl JobHandler for HttpWaitHandler {
+    async fn execute(&self, job: &Job) -> Result<Value, String> {
+        let url = job
+            .payload
+            .get("url")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "http_wait requires payload.url".to_owned())?;
+        let method = job
+            .payload
+            .get("method")
+            .and_then(|value| value.as_str())
+            .map(|raw| {
+                network_engine::HttpProbeMethod::parse(raw)
+                    .ok_or_else(|| format!("http_wait method must be HEAD or GET, got {raw}"))
+            })
+            .transpose()?
+            .unwrap_or(network_engine::HttpProbeMethod::Head);
+        let timeout_ms = job
+            .payload
+            .get("timeoutMs")
+            .and_then(|value| value.as_u64());
+        let interval_ms = job
+            .payload
+            .get("intervalMs")
+            .and_then(|value| value.as_u64());
+        let probe_timeout_ms = job
+            .payload
+            .get("probeTimeoutMs")
+            .and_then(|value| value.as_u64());
+        network_engine::http_wait(
+            url,
+            method,
+            timeout_ms,
+            interval_ms,
+            probe_timeout_ms,
             network_engine::NetworkPolicy::default(),
         )
         .await

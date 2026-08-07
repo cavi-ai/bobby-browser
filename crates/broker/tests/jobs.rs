@@ -74,6 +74,35 @@ async fn submit_http_probe_to_loopback_fails_closed() {
 }
 
 #[tokio::test]
+async fn submit_http_wait_to_loopback_fails_closed() {
+    let (app, _, admin) = app_with_admin(8).await;
+    let body = json!({
+        "name": "http_wait",
+        "payload": {
+            "url": "http://127.0.0.1:9/",
+            "method": "HEAD",
+            "timeoutMs": 200,
+            "intervalMs": 50,
+            "probeTimeoutMs": 50
+        },
+        "maxRetries": 0
+    });
+    let req = context_headers(Request::post("/v1/jobs"), &admin)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let job_id = created["jobId"].as_str().unwrap();
+
+    let job = wait_completed(&app, &admin, job_id).await;
+    assert_eq!(job["status"], "failed");
+    assert_eq!(job["name"], "http_wait");
+}
+
+#[tokio::test]
 async fn cancel_pending_job() {
     let (app, _, admin) = app_with_admin(8).await;
     let body = json!({ "name": "sleep", "payload": {"ms": 5000}, "maxRetries": 0 });
