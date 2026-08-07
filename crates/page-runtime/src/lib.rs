@@ -316,6 +316,22 @@ impl PageRuntime {
         self.inner.write().await.remove(page_id);
     }
 
+    /// Remove every registered page owned by `session_id` under one registry
+    /// write lock. Session metadata is not authoritative for reclamation: a
+    /// failed or interrupted page-registration update can leave it stale.
+    pub async fn remove_session_pages(&self, session_id: &SessionId) -> Vec<PageId> {
+        let mut pages = self.inner.write().await;
+        let mut removed = Vec::new();
+        pages.retain(|page_id, page| {
+            let keep = &page.session_id != session_id;
+            if !keep {
+                removed.push(page_id.clone());
+            }
+            keep
+        });
+        removed
+    }
+
     pub async fn get(&self, id: &PageId) -> Result<PageState, RuntimeError> {
         self.inner
             .read()

@@ -98,6 +98,13 @@ Read these resources first; they always match the build:
 Three prompts encode the standard flows: `fill_and_submit_form`,
 `extract_from_page`, `recover_workflow`.
 
+When the workflow foundation is advertised, prefer `workflow_start` over
+manual `session_create` + `page_open`, then prefer `workflow_observe` for
+retained-first compact context. Keep the returned `workflowHandle` for ordinary
+page work. Keep the explicit `sessionId`, `pageId`, and `workflowId` for
+lifecycle, checkpoint, recovery, and audit calls; they are the repair path if
+the handle stops resolving.
+
 ## Rules that bite
 
 1. **Checkpoint before boundaries.** `intent_submit_and_verify` and
@@ -134,6 +141,12 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
 7. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
    come back as digest-verified artifacts (`artifact://<id>` via
    `artifact:read`). The `bobby://` docs are readable by any principal.
+8. **Handles expire with the server generation.** Any accepted reinitialize or
+   new server generation invalidates existing workflow handles. Repair with
+   explicit IDs, then start a fresh workflow binding if needed. Streamable HTTP
+   clients using the same principal share initialization and generation state,
+   so coordinate reinitialization; one logical client's initialize resets the
+   shared lifecycle and every handle for that principal.
 
 ## Error handling
 

@@ -1,3 +1,7 @@
+//! Shared test helpers. Compiled into every integration binary, so a
+//! helper only some binaries use reads as dead in the others.
+#![allow(dead_code)]
+
 //! Shared live-runtime harness for gateway integration tests.
 //!
 //! `RuntimeService::default()` has no journal, no worker pool, and no
@@ -8,26 +12,60 @@
 //! evidence per command kind, so tests assert actual outcomes.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
-use interface_core::CapabilityHandle;
-use mcp_gateway::Server;
+use interface_core::{CapabilityHandle, EventStore, InterfaceResult, RuntimeInterface};
+use mcp_gateway::{ArtifactResources, Server};
 use page_runtime::{PageRuntime, RecoveryCoordinator};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use tempfile::TempDir;
 use types::{
-    ClickCommand, CommandError, Evidence, InspectCommand, ListPagesCommand, NavigateCommand,
-    PageEvidence, PageId, SessionId, TypeTextCommand, WorkerId,
+    AccessibilitySnapshotCommand, ClickCommand, ClosePageCommand, CommandError, ErrorCode,
+    ErrorLayer, Evidence, InspectCommand, ListPagesCommand, NavigateCommand, PageEvidence, PageId,
+    SessionId, TypeTextCommand, WorkerId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
-use workflow_journal::JsonlJournal;
+use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan, JsonlJournal};
 
 /// A fake worker that returns the evidence variant each command verifies
 /// against, so outcomes reach `completed` instead of failing verification.
 pub struct LiveWorker {
     id: WorkerId,
     profile: PathBuf,
+    probe: Arc<LiveProbe>,
+    open_mode: LiveOpenMode,
+    block_delete: bool,
+}
+
+#[derive(Clone, Copy)]
+enum LiveOpenMode {
+    Succeed,
+    Block,
+    Fail,
+}
+
+#[derive(Default)]
+pub struct LiveProbe {
+    pub accessibility_calls: AtomicUsize,
+    pub form_calls: AtomicUsize,
+    pub accessibility_failures_remaining: AtomicUsize,
+    pub form_failures_remaining: AtomicUsize,
+    pub last_accessibility_max_nodes: AtomicUsize,
+    pub last_form_max_controls: AtomicUsize,
+    pub accessibility_restarts_remaining: AtomicUsize,
+    pub open_entered: tokio::sync::Notify,
+    pub open_release: tokio::sync::Notify,
+    pub navigation_entered: tokio::sync::Notify,
+    pub navigation_release: tokio::sync::Notify,
+    pub delete_entered: tokio::sync::Notify,
+    pub delete_release: tokio::sync::Notify,
+    pub worker_closes: AtomicUsize,
+    pub delete_failures_remaining: AtomicUsize,
+    pub opened_page: std::sync::Mutex<Option<PageId>>,
 }
 
 #[async_trait::async_trait]
@@ -40,7 +78,26 @@ impl BrowserWorker for LiveWorker {
         &self.profile
     }
 
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
+        *self
+            .probe
+            .opened_page
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(page_id);
+        self.probe.open_entered.notify_one();
+        match self.open_mode {
+            LiveOpenMode::Succeed => {}
+            LiveOpenMode::Block => self.probe.open_release.notified().await,
+            LiveOpenMode::Fail => {
+                self.probe.open_release.notified().await;
+                return Err(CommandError {
+                    code: ErrorCode::BrowserCommandFailed,
+                    message: "injected live-harness page-open failure".into(),
+                    layer: ErrorLayer::Driver,
+                    retryable: false,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -49,6 +106,24 @@ impl BrowserWorker for LiveWorker {
         _: &PageId,
         command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        self.probe.navigation_entered.notify_one();
+        if matches!(
+            command.url.as_str(),
+            "https://live-harness.test/block" | "https://live-harness.test/block-fail"
+        ) {
+            self.probe.navigation_release.notified().await;
+        }
+        if matches!(
+            command.url.as_str(),
+            "https://live-harness.test/fail" | "https://live-harness.test/block-fail"
+        ) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected live-harness navigation failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
         Ok(vec![Evidence::Navigation {
             url: command.url.clone(),
             title: "live-harness".into(),
@@ -101,6 +176,110 @@ impl BrowserWorker for LiveWorker {
         }])
     }
 
+    async fn close_page_command(
+        &self,
+        command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Page {
+            page_id: command.page_id.clone(),
+            url: "https://live-harness.test/".into(),
+            title: "live-harness".into(),
+        }])
+    }
+
+    async fn network_log(
+        &self,
+        _: &PageId,
+        _: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::HarArtifact {
+            artifact_id: "live-harness-har".into(),
+            media_type: "application/json".into(),
+            bytes: 2,
+            sha256: "a".repeat(64),
+            entries: 0,
+        }])
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.probe
+            .accessibility_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.probe.last_accessibility_max_nodes.store(
+            command.max_nodes.map_or(0, |value| value as usize),
+            Ordering::SeqCst,
+        );
+        if self
+            .probe
+            .accessibility_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected live-harness accessibility failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        Ok(vec![Evidence::AccessibilitySnapshot {
+            page_id: page_id.clone(),
+            nodes: vec![types::AccessibilityNode {
+                role: Some("textbox".into()),
+                name: Some("Email address".into()),
+                target: Some(types::AccessibilityTarget {
+                    role: "textbox".into(),
+                    accessible_name: "Email address".into(),
+                    ordinal: Some(1),
+                }),
+                ..types::AccessibilityNode::default()
+            }],
+            truncated: false,
+        }])
+    }
+
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.probe.form_calls.fetch_add(1, Ordering::SeqCst);
+        self.probe.last_form_max_controls.store(
+            max_controls.map_or(0, |value| value as usize),
+            Ordering::SeqCst,
+        );
+        if self
+            .probe
+            .form_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected live-harness form snapshot failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        Ok(vec![Evidence::FormSnapshot {
+            snapshot: types::FormSnapshot {
+                schema_version: types::FORM_SNAPSHOT_SCHEMA_VERSION,
+                page_id: page_id.clone(),
+                forms: Vec::new(),
+                unowned_controls: Vec::new(),
+                truncated: false,
+            },
+        }])
+    }
+
     async fn collect_candidates(
         &self,
         _: &PageId,
@@ -113,11 +292,208 @@ impl BrowserWorker for LiveWorker {
     }
 
     async fn close(&self) -> Result<(), CommandError> {
+        self.probe.worker_closes.fetch_add(1, Ordering::SeqCst);
+        self.probe.delete_entered.notify_one();
+        if self.block_delete {
+            self.probe.delete_release.notified().await;
+        }
+        if self
+            .probe
+            .delete_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected live-harness session deletion failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         Ok(())
     }
 }
 
-pub struct LiveFactory;
+pub struct LiveFactory {
+    probe: Arc<LiveProbe>,
+    open_mode: LiveOpenMode,
+    block_delete: bool,
+}
+
+struct RestartingRuntime {
+    inner: Arc<AuthenticatedRuntime>,
+    probe: Arc<LiveProbe>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeInterface for RestartingRuntime {
+    async fn runtime_info(
+        &self,
+        ctx: types::RequestContext,
+    ) -> InterfaceResult<types::RuntimeInfo> {
+        self.inner.runtime_info(ctx).await
+    }
+
+    async fn authorize_operation(
+        &self,
+        ctx: types::RequestContext,
+        operation: types::InterfaceOperation,
+    ) -> InterfaceResult<()> {
+        self.inner.authorize_operation(ctx, operation).await
+    }
+
+    async fn list_sessions(
+        &self,
+        ctx: types::RequestContext,
+    ) -> InterfaceResult<Vec<types::SessionState>> {
+        self.inner.list_sessions(ctx).await
+    }
+
+    async fn delete_session(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+    ) -> InterfaceResult<()> {
+        self.inner.delete_session(ctx, session).await
+    }
+
+    async fn create_session(
+        &self,
+        ctx: types::RequestContext,
+        request: types::CreateSessionRequest,
+    ) -> InterfaceResult<types::SessionState> {
+        self.inner.create_session(ctx, request).await
+    }
+
+    async fn open_page(
+        &self,
+        ctx: types::RequestContext,
+        request: types::OpenPageRequest,
+    ) -> InterfaceResult<types::PageState> {
+        self.inner.open_page(ctx, request).await
+    }
+
+    async fn context_ask(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        page: PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextAnswer>> {
+        self.inner
+            .context_ask(ctx, session, page, description)
+            .await
+    }
+
+    async fn context_neighbors(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        page: PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextNeighbors>> {
+        self.inner
+            .context_neighbors(ctx, session, page, description)
+            .await
+    }
+
+    async fn form_snapshot(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        page: PageId,
+        max_controls: Option<u32>,
+    ) -> InterfaceResult<types::FormSnapshot> {
+        self.inner
+            .form_snapshot(ctx, session, page, max_controls)
+            .await
+    }
+
+    async fn submit(
+        &self,
+        ctx: types::RequestContext,
+        envelope: types::CommandEnvelope,
+    ) -> InterfaceResult<types::CommandOutcome> {
+        let restart = matches!(
+            envelope.command,
+            types::RuntimeCommand::Primitive(types::PrimitiveCommand::AccessibilitySnapshot(_))
+        ) && self
+            .probe
+            .accessibility_restarts_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        let outcome = self.inner.submit(ctx, envelope.clone()).await?;
+        if !restart {
+            return Ok(outcome);
+        }
+        match outcome {
+            types::CommandOutcome::Completed { evidence, .. } => {
+                Ok(types::CommandOutcome::Restarted {
+                    command_id: envelope.command_id,
+                    prior_attempt_id: types::AttemptId::new(),
+                    attempt_id: envelope.attempt_id,
+                    reason: "injected live-harness restart".into(),
+                    evidence,
+                })
+            }
+            outcome => Ok(outcome),
+        }
+    }
+
+    async fn checkpoint(
+        &self,
+        ctx: types::RequestContext,
+        checkpoint: types::WorkflowCheckpoint,
+        evidence: Vec<Evidence>,
+    ) -> InterfaceResult<types::WorkflowCheckpoint> {
+        self.inner.checkpoint(ctx, checkpoint, evidence).await
+    }
+
+    async fn resolve_command_evidence(
+        &self,
+        ctx: types::RequestContext,
+        command_ids: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        self.inner.resolve_command_evidence(ctx, command_ids).await
+    }
+
+    async fn recover(
+        &self,
+        ctx: types::RequestContext,
+        workflow: types::WorkflowId,
+    ) -> InterfaceResult<types::RecoveryDecision> {
+        self.inner.recover(ctx, workflow).await
+    }
+
+    async fn recovery_status(
+        &self,
+        ctx: types::RequestContext,
+        workflow: types::WorkflowId,
+    ) -> InterfaceResult<types::RecoveryStatus> {
+        self.inner.recovery_status(ctx, workflow).await
+    }
+
+    async fn submit_with_auto_checkpoint(
+        &self,
+        ctx: types::RequestContext,
+        envelope: types::CommandEnvelope,
+    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+        self.inner.submit_with_auto_checkpoint(ctx, envelope).await
+    }
+
+    async fn workflows_for_session(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        limit: usize,
+    ) -> InterfaceResult<Vec<types::WorkflowId>> {
+        self.inner.workflows_for_session(ctx, session, limit).await
+    }
+}
 
 #[async_trait::async_trait]
 impl WorkerFactory for LiveFactory {
@@ -125,6 +501,9 @@ impl WorkerFactory for LiveFactory {
         Ok(Arc::new(LiveWorker {
             id: WorkerId::new(),
             profile: PathBuf::from(format!("/profiles/{}", session_id.0)),
+            probe: Arc::clone(&self.probe),
+            open_mode: self.open_mode,
+            block_delete: self.block_delete,
         }))
     }
 }
@@ -133,19 +512,106 @@ impl WorkerFactory for LiveFactory {
 /// command writes and the tempdir holding it (dropped when the caller drops
 /// it).
 pub struct LiveServer {
-    pub server: Server,
-    pub journal: Arc<JsonlJournal>,
+    pub server: Arc<Server>,
+    pub journal: Arc<LiveJournal>,
+    pub probe: Arc<LiveProbe>,
+    pub runtime: RuntimeService,
+    pub handle: CapabilityHandle,
     _root: TempDir,
 }
 
+impl LiveServer {
+    pub fn accessibility_calls(&self) -> usize {
+        self.probe.accessibility_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn form_calls(&self) -> usize {
+        self.probe.form_calls.load(Ordering::SeqCst)
+    }
+}
+
+pub struct LiveJournal {
+    inner: JsonlJournal,
+    records: tokio::sync::Mutex<Vec<JournalRecord>>,
+}
+
+impl LiveJournal {
+    pub async fn records(&self) -> Vec<JournalRecord> {
+        self.records.lock().await.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandJournal for LiveJournal {
+    async fn append(&self, record: JournalRecord) -> Result<(), JournalError> {
+        self.inner.append(record.clone()).await?;
+        self.records.lock().await.push(record);
+        Ok(())
+    }
+
+    async fn history(&self, id: types::CommandId) -> Result<JournalScan, JournalError> {
+        self.inner.history(id).await
+    }
+}
+
 pub async fn live_server(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false).await
+}
+
+pub async fn live_server_restarting_accessibility(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, true).await
+}
+
+pub async fn live_server_blocking_open(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Block, false, 0, false).await
+}
+
+pub async fn live_server_failing_open(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Fail, false, 0, false).await
+}
+
+pub async fn live_server_failing_open_and_delete_once(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Fail, false, 1, false).await
+}
+
+pub async fn live_server_blocking_delete(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 0, false).await
+}
+
+pub async fn live_server_failing_delete_once(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 1, false).await
+}
+
+pub async fn live_server_blocking_failing_delete_once(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 1, false).await
+}
+
+async fn live_server_with_modes(
+    handle: CapabilityHandle,
+    open_mode: LiveOpenMode,
+    block_delete: bool,
+    delete_failures: usize,
+    restart_accessibility: bool,
+) -> LiveServer {
     let root = tempfile::tempdir().expect("harness tempdir");
-    let journal = Arc::new(
-        JsonlJournal::open(root.path().join("journal.jsonl"))
+    let journal = Arc::new(LiveJournal {
+        inner: JsonlJournal::open(root.path().join("journal.jsonl"))
             .await
             .expect("harness journal opens"),
-    );
-    let workers = Arc::new(WorkerPool::new(4, Arc::new(LiveFactory)));
+        records: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let probe = Arc::new(LiveProbe::default());
+    probe
+        .delete_failures_remaining
+        .store(delete_failures, Ordering::SeqCst);
+    let workers = Arc::new(WorkerPool::new(
+        4,
+        Arc::new(LiveFactory {
+            probe: Arc::clone(&probe),
+            open_mode,
+            block_delete,
+        }),
+    ));
     let checkpoints = checkpoint_store::CheckpointStore::open(root.path().join("checkpoints"))
         .await
         .expect("harness checkpoint store opens");
@@ -154,9 +620,30 @@ pub async fn live_server(handle: CapabilityHandle) -> LiveServer {
         PageRuntime::new(journal.clone(), workers),
         RecoveryCoordinator::new(checkpoints),
     );
+    let authenticated = Arc::new(AuthenticatedRuntime::new(runtime.clone(), handle.clone()));
+    let interface: Arc<dyn RuntimeInterface> = if restart_accessibility {
+        probe
+            .accessibility_restarts_remaining
+            .store(1, Ordering::SeqCst);
+        Arc::new(RestartingRuntime {
+            inner: authenticated,
+            probe: Arc::clone(&probe),
+        })
+    } else {
+        authenticated
+    };
+    let server = Arc::new(Server::for_interface(
+        interface,
+        handle.clone(),
+        EventStore::new(16_384),
+        ArtifactResources::default(),
+    ));
     LiveServer {
-        server: Server::new(Arc::new(AuthenticatedRuntime::new(runtime, handle))),
+        server,
         journal,
+        probe,
+        runtime,
+        handle,
         _root: root,
     }
 }

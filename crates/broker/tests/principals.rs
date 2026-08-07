@@ -379,9 +379,12 @@ async fn idempotent_command_replay_persists_and_is_scoped_per_principal() {
     let key = "shared-idempotency-key-across-principals";
     let envelope = inspect_envelope(session_a.clone());
 
-    // Non-retryable validation failure; the idempotency store retains it for replay.
+    // The envelope names a page that was never opened, which the executor answers
+    // as absence rather than naming what does not exist. Non-retryable either
+    // way, so the idempotency store retains it for replay.
     let (status1, body1) = submit_command(&app, &bearer_a, &envelope, key).await;
-    assert_eq!(status1, StatusCode::UNPROCESSABLE_ENTITY, "{body1}");
+    assert_eq!(status1, StatusCode::NOT_FOUND, "{body1}");
+    assert_eq!(body1["error"]["code"], "notFound", "{body1}");
 
     // Same key, same canonical digest: the stored outcome is returned verbatim.
     let (status2, body2) = submit_command(&app, &bearer_a, &envelope, key).await;
@@ -398,7 +401,7 @@ async fn idempotent_command_replay_persists_and_is_scoped_per_principal() {
     // Keyspace is per principal: B reusing the same key string cannot collide with A.
     let envelope_b = inspect_envelope(session_b);
     let (status4, body4) = submit_command(&app, &bearer_b, &envelope_b, key).await;
-    assert_eq!(status4, StatusCode::UNPROCESSABLE_ENTITY, "{body4}");
+    assert_eq!(status4, StatusCode::NOT_FOUND, "{body4}");
 }
 
 /// A `PrimitiveCommand::UploadFiles` envelope. Uploads move files across the host/browser

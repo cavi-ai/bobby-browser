@@ -83,10 +83,16 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                self.runtime
-                    .delete_session(context, input.session_id)
+                let session_id = input.session_id;
+                let result = self
+                    .runtime
+                    .delete_session(context, session_id.clone())
                     .await
-                    .and_then(|()| to_json(json!({"closed": true})))
+                    .and_then(|()| to_json(json!({"closed": true})));
+                if result.is_ok() {
+                    self.workflow_handles.remove_session(&session_id);
+                }
+                result
             }
             "page_open" => {
                 let input: PageOpenArgs = match bounded_parse(call.arguments) {

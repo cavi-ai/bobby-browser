@@ -478,10 +478,7 @@ impl PageRuntime {
             .page_id
             .as_ref()
             .ok_or_else(|| validation_error("pageId is required for page commands"))?;
-        let page = self
-            .get(page_id)
-            .await
-            .map_err(|_| validation_error("page does not exist"))?;
+        let page = self.get(page_id).await.map_err(|_| missing_page_error())?;
         if page.session_id != envelope.session_id {
             return Err(validation_error("page does not belong to session"));
         }
@@ -1020,6 +1017,15 @@ fn validation_error(message: impl Into<String>) -> CommandError {
     CommandError {
         code: ErrorCode::InvalidRequest,
         message: message.into(),
+        layer: ErrorLayer::Workflow,
+        retryable: false,
+    }
+}
+
+fn missing_page_error() -> CommandError {
+    CommandError {
+        code: ErrorCode::NotFound,
+        message: "runtime resource was not found".into(),
         layer: ErrorLayer::Workflow,
         retryable: false,
     }

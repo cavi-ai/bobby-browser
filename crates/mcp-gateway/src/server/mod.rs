@@ -31,13 +31,15 @@ use crate::protocol::{
 };
 use crate::resources::{static_resource_body, static_resources};
 use crate::schema::{
-    advertised_tool_output_schema, advertised_tool_schema, validate_tool_arguments,
-    MAX_RECOVERABLE_WORKFLOWS,
+    advertised_tool_output_schema, advertised_tool_schema_for_capabilities,
+    validate_tool_arguments, MAX_RECOVERABLE_WORKFLOWS,
 };
 use crate::tool_args::*;
 use crate::tool_meta::{required_capabilities, required_operation, tool_description};
+use crate::workflow_handles::{WorkflowHandleError, WorkflowHandles};
 use crate::ArtifactResources;
 
+mod dispatch_agent_workflow;
 mod dispatch_intents;
 mod dispatch_lifecycle;
 mod dispatch_page_ops;
@@ -80,6 +82,7 @@ pub struct Server {
     lifecycle: Mutex<Lifecycle>,
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
+    workflow_handles: Arc<WorkflowHandles>,
     shutting_down: AtomicBool,
     /// The phase this connection's `tools/list` is scoped to. Per connection,
     /// not per principal: two agents on the same bearer can be in different
@@ -129,6 +132,7 @@ impl Server {
             lifecycle: Mutex::new(Lifecycle::AwaitingInitialize),
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
+            workflow_handles: Arc::new(WorkflowHandles::new()),
             shutting_down: AtomicBool::new(false),
             toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
             jobs: None,
@@ -232,6 +236,7 @@ impl Server {
             // reconnect. The reset clears stale cancellation state; in-flight
             // work from the previous session runs to completion.
             self.pending_cancellations.lock().await.clear();
+            self.workflow_handles.reset();
             *lifecycle = Lifecycle::AwaitingInitializedNotification;
             return id.map(|id| {
                 success(
@@ -314,6 +319,7 @@ impl Server {
             cancelled.notify_one();
         }
         let response = tokio::select! {
+            biased;
             response = self.dispatch_request(id.clone(), method, params) => response,
             () = cancelled.notified() => error(
                 id,
@@ -577,6 +583,8 @@ impl Server {
             "type_text",
             "upload_files",
             "wait_for",
+            "workflow_start",
+            "workflow_observe",
             "workflow_recover",
         ] {
             if crate::jobs::is_job_tool(name) && self.jobs.is_none() {
@@ -590,18 +598,7 @@ impl Server {
                 .iter()
                 .all(|capability| capabilities.contains(*capability))
             {
-                let mut input_schema = advertised_tool_schema(name);
-                if name == "session_create" {
-                    let policy = &mut input_schema["properties"]["executionPolicy"]["properties"];
-                    if let Some(policy) = policy.as_object_mut() {
-                        if !capabilities.contains(types::Capability::BrowserFingerprint) {
-                            policy.remove("fingerprint");
-                        }
-                        if !capabilities.contains(types::Capability::BrowserHumanize) {
-                            policy.remove("humanize");
-                        }
-                    }
-                }
+                let input_schema = advertised_tool_schema_for_capabilities(name, &capabilities);
                 tools.push(json!({
                     "name": name,
                     "title": tool_title(name),
@@ -788,7 +785,7 @@ impl Server {
         if let Err(interface_error) = self.authorization.validate(&identity_context) {
             return interface_error_response(id, interface_error);
         }
-        let call: ToolCall = match bounded_parse(params) {
+        let mut call: ToolCall = match bounded_parse(params) {
             Ok(call) => call,
             Err(()) => return invalid_params_reason(id, "malformedArguments"),
         };
@@ -825,6 +822,23 @@ impl Server {
         if let Err(interface_error) = self.authorization.authorize(&context, operation) {
             return interface_error_response(id, interface_error);
         }
+        call.arguments = match self
+            .workflow_handles
+            .normalize_arguments(&call.name, &call.arguments)
+        {
+            Ok(arguments) => arguments,
+            Err(WorkflowHandleError::BindingConflict) => {
+                return invalid_params_reason(id, "workflowBindingConflict")
+            }
+            Err(
+                WorkflowHandleError::Unknown
+                | WorkflowHandleError::Malformed
+                | WorkflowHandleError::GenerationChanged,
+            ) => return invalid_params_reason(id, "unknownWorkflowHandle"),
+            Err(WorkflowHandleError::CapacityExhausted | WorkflowHandleError::SupervisorLost) => {
+                return invalid_params_reason(id, "unknownWorkflowHandle")
+            }
+        };
         if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
             return invalid_params(id, Some(violation));
         }

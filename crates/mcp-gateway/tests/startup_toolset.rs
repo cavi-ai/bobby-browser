@@ -74,6 +74,7 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
     // Unset: explore — small first tools/list; widen with toolset_select.
     unsafe { std::env::remove_var("BOBBY_MCP_TOOLSET") };
     let default_names = tool_names(&initialized_server(|server| server).await).await;
+    assert_workflow_controls("explore", &default_names);
     assert!(
         !default_names.contains(&"click".to_owned())
             && !default_names.contains(&"intent_fill".to_owned()),
@@ -90,6 +91,7 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
     let configured =
         tool_names(&initialized_server(|server| server.with_startup_toolset(Toolset::Act)).await)
             .await;
+    assert_workflow_controls("act", &configured);
     assert!(
         configured.contains(&"click".to_owned()),
         "act advertises mutating primitives"
@@ -110,6 +112,7 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
     let full =
         tool_names(&initialized_server(|server| server.with_startup_toolset(Toolset::Full)).await)
             .await;
+    assert_workflow_controls("full", &full);
     assert!(
         full.contains(&"intent_fill".to_owned()) && full.contains(&"click".to_owned()),
         "full carries both intent and act tools"
@@ -118,6 +121,7 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
     // Env only.
     unsafe { std::env::set_var("BOBBY_MCP_TOOLSET", "verify") };
     let from_env = tool_names(&initialized_server(|server| server).await).await;
+    assert_workflow_controls("verify", &from_env);
     assert!(
         from_env.contains(&"checkpoint_save".to_owned())
             && !from_env.contains(&"intent_fill".to_owned()),
@@ -131,6 +135,17 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
     .await;
     assert_eq!(both, from_env, "config must not override BOBBY_MCP_TOOLSET");
 
+    unsafe { std::env::remove_var("BOBBY_MCP_TOOLSET") };
+    let intent = tool_names(
+        &initialized_server(|server| server.with_startup_toolset(Toolset::Intent)).await,
+    )
+    .await;
+    assert_workflow_controls("intent", &intent);
+    assert!(
+        intent.contains(&"checkpoint_save".to_owned()),
+        "intent startup must advertise checkpoint_save: {intent:?}"
+    );
+
     // An unparseable value falls back to the default explore surface rather
     // than failing the connection -- this selects a view, not a permission.
     unsafe { std::env::set_var("BOBBY_MCP_TOOLSET", "not-a-phase") };
@@ -141,6 +156,15 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
     );
 
     unsafe { std::env::remove_var("BOBBY_MCP_TOOLSET") };
+}
+
+fn assert_workflow_controls(phase: &str, names: &[String]) {
+    for tool in ["workflow_start", "workflow_observe"] {
+        assert!(
+            names.iter().any(|name| name == tool),
+            "{phase} startup omitted {tool}: {names:?}"
+        );
+    }
 }
 
 /// Hiding a tool must never be mistaken for revoking it: capability gates are

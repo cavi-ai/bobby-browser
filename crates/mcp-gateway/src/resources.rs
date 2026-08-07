@@ -19,6 +19,26 @@ pub struct ArtifactResources {
     artifact_store: Option<ArtifactStore>,
     downloads_root: Option<PathBuf>,
     max_download_bytes: usize,
+    #[cfg(test)]
+    list_test_gate: Option<Arc<ArtifactListTestGate>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ArtifactListTestGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl ArtifactListTestGate {
+    pub(crate) async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
 }
 
 impl Default for ArtifactResources {
@@ -30,6 +50,8 @@ impl Default for ArtifactResources {
             artifact_store: None,
             downloads_root: None,
             max_download_bytes: 1,
+            #[cfg(test)]
+            list_test_gate: None,
         }
     }
 }
@@ -44,7 +66,15 @@ impl ArtifactResources {
             artifact_store: None,
             downloads_root: None,
             max_download_bytes: 1,
+            #[cfg(test)]
+            list_test_gate: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_list_test_gate(mut self, gate: Arc<ArtifactListTestGate>) -> Self {
+        self.list_test_gate = Some(gate);
+        self
     }
 
     pub fn production(
@@ -259,6 +289,11 @@ impl ArtifactResources {
     }
 
     pub(crate) async fn list(&self) -> Vec<String> {
+        #[cfg(test)]
+        if let Some(gate) = &self.list_test_gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         self.entries.read().await.keys().cloned().collect()
     }
 
@@ -438,7 +473,8 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   Gates `runtime_info`, `session_list`, `events_read`.
 - `session:write` -- create and close sessions. Gates `session_create`,
   `session_close`.
-- `page:read` -- read a page's form-control inventory. Gates `form_snapshot`.
+- `page:read` -- read retained page context or a page's form-control inventory.
+  Gates `context_ask` and `form_snapshot`.
 - `page:write` -- open a page in an owned session. Gates `page_open`.
   `page_open` also requires `browser:mutate`, checked only at call time, when
   the same call navigates the new page to a URL.
@@ -496,6 +532,12 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   `required_capabilities`.
 - `recovery:read` -- gates `recovery_status`.
 - `recovery:write` -- gates `checkpoint_save`, `workflow_recover`.
+- `workflow_start` is statically gated by `session:read`, `session:write`, and
+  `page:write`; supplying `url` adds a dynamic `browser:mutate` check before
+  session creation. `workflow_observe` is statically gated by
+  `browser:mutate`; `includeForms: true` adds a dynamic `page:read` check.
+  A retained `goal` answer is used only when `page:read` is already held and
+  otherwise falls back to the live accessibility observation.
 - `authority:admin` -- not required by any tool in this gateway. It guards
   principal issuance and revocation, which are not exposed as MCP tools.
 - `browser:fingerprint` -- required at `session_create` time to set
@@ -772,6 +814,52 @@ resubmit" -- never reconciliation.
   deadline inside that window and resubmit.
 - `invalidIdempotencyKey` -- the supplied `idempotencyKey` is not a well-formed
   key. Repair: send a valid key, or omit the field entirely.
+- `workflowBindingConflict` -- a handle-capable tool supplied
+  `workflowHandle` together with one or more explicit scope IDs. Repair: use
+  the handle alone for ordinary page work, or omit it and send the complete
+  explicit ID set.
+- `unknownWorkflowHandle` -- the handle is malformed, unknown, evicted, or
+  belongs to an earlier server generation. Repair: use retained explicit IDs
+  to inspect or close the workflow resources, then call `workflow_start` for
+  a new handle when needed.
+
+`workflowGenerationChanged` is different: it is a structured
+`workflow_start` failure reason, not an `-32602` protocol rejection. It means
+the server generation changed while startup was in flight; inspect
+`session_list`, clean up or resume any returned session by explicit ID, and
+start again only after reconciling that state.
+
+## Workflow handles and server generations
+
+`workflow_start` creates a session and page, optionally navigates it, and
+returns an opaque handle binding that session, page, and workflow. The handle
+is a server-generation-scoped convenience, never authority: normal ownership,
+capability, and operation checks still run after substitution. The V1
+allowlist accepts a handle only on the advertised page-work tools; lifecycle,
+checkpoint, and recovery tools keep explicit IDs as the audit and repair path.
+
+One server generation holds at most 64 committed bindings in an LRU plus 64
+concurrent startup reservations. A failed start does not evict a live handle.
+The 65th successful committed binding evicts the least recently used old
+handle. Successful `page_close` and `session_close` calls reclaim their local
+bindings immediately. Before every start, the server authoritatively
+reconciles bindings whose sessions were closed through another interface.
+Session `page_ids` are not page-liveness truth: a page closed elsewhere
+produces the ordinary per-command `notFound`, and its stale binding is
+eventually reclaimed by the bounded committed-handle LRU.
+
+An accepted `initialize` creates a new generation and invalidates all handles.
+Stdio normally has one `Server` per process. **Streamable HTTP currently
+caches one `Server` per principal, so logical clients using the same principal
+share its generation and lifecycle. Any accepted initialize resets every
+shared handle and returns that shared lifecycle to awaiting-initialized until
+a fresh `notifications/initialized`.** Coordinate initialization, or use
+distinct principals when isolation is required, until the transport has a
+separate session key.
+
+If a `workflow_start` response may have been lost, do not retry blindly:
+first call `session_list`, then close or resume the newly created session.
+Explicit session/page/workflow IDs remain the recovery and audit path.
 
 ## Pushed events, and what a gap frame means
 

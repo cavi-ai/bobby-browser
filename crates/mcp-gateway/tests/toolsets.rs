@@ -211,6 +211,31 @@ async fn selecting_a_phase_changes_what_is_advertised() {
     );
 }
 
+#[tokio::test]
+async fn every_phase_advertises_workflow_controls_and_intent_can_checkpoint() {
+    let server = server().await;
+    for phase in Toolset::ALL {
+        select(&server, phase).await;
+        let names = list_tools(&server)
+            .await
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        for workflow_tool in ["workflow_start", "workflow_observe"] {
+            assert!(
+                names.iter().any(|name| name == workflow_tool),
+                "{phase} startup catalog omitted {workflow_tool}: {names:?}"
+            );
+        }
+        if phase == Toolset::Intent {
+            assert!(
+                names.iter().any(|name| name == "checkpoint_save"),
+                "intent omitted checkpoint_save: {names:?}"
+            );
+        }
+    }
+}
+
 /// Narrowing hides a tool; it must not deny it. Enforcement belongs to the
 /// capability gates alone.
 #[tokio::test]

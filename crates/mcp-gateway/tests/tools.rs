@@ -1774,19 +1774,24 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .iter()
         .find(|tool| tool["name"] == "navigate")
         .unwrap();
-    assert_eq!(
-        navigate["inputSchema"]["required"],
-        json!(["sessionId", "pageId", "url"])
-    );
+    assert_eq!(navigate["inputSchema"]["required"], json!(["url"]));
+    assert!(navigate["inputSchema"]["oneOf"]
+        .as_array()
+        .expect("navigate scope branches")
+        .iter()
+        .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])));
     let click = listed["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .find(|tool| tool["name"] == "click")
         .unwrap();
-    assert_eq!(
-        click["inputSchema"]["required"],
-        json!(["sessionId", "pageId"]),
+    assert!(
+        click["inputSchema"]["oneOf"]
+            .as_array()
+            .expect("click scope branches")
+            .iter()
+            .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])),
         "semantic snapshot targets must not require a legacy CSS selector"
     );
     let type_text = listed["result"]["tools"]
@@ -1795,20 +1800,25 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .iter()
         .find(|tool| tool["name"] == "type_text")
         .unwrap();
-    assert_eq!(
-        type_text["inputSchema"]["required"],
-        json!(["sessionId", "pageId", "value"]),
-        "semantic snapshot targets must not require a legacy CSS selector"
-    );
+    assert_eq!(type_text["inputSchema"]["required"], json!(["value"]));
+    assert!(type_text["inputSchema"]["oneOf"]
+        .as_array()
+        .expect("type_text scope branches")
+        .iter()
+        .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])));
     let upload_files = listed["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .find(|tool| tool["name"] == "upload_files")
         .unwrap();
-    assert_eq!(
-        upload_files["inputSchema"]["required"],
-        json!(["sessionId", "pageId", "paths"]),
+    assert_eq!(upload_files["inputSchema"]["required"], json!(["paths"]));
+    assert!(
+        upload_files["inputSchema"]["oneOf"]
+            .as_array()
+            .expect("upload_files scope branches")
+            .iter()
+            .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])),
         "semantic snapshot targets must not require a legacy CSS selector"
     );
 
@@ -1873,10 +1883,12 @@ async fn form_snapshot_is_a_read_only_page_tool() {
         .iter()
         .find(|tool| tool["name"] == "form_snapshot")
         .expect("page readers can discover form_snapshot");
-    assert_eq!(
-        snapshot["inputSchema"]["required"],
-        json!(["sessionId", "pageId"])
-    );
+    assert_eq!(snapshot["inputSchema"]["required"], json!([]));
+    assert!(snapshot["inputSchema"]["oneOf"]
+        .as_array()
+        .expect("form_snapshot scope branches")
+        .iter()
+        .any(|branch| branch["required"] == json!(["sessionId", "pageId"])));
     // Sorted before comparing: `serde_json::Map` iterates sorted by default and in
     // insertion order under `preserve_order`, which any crate in the graph can
     // enable. The assertion is about which properties exist, not their order.
@@ -1889,7 +1901,13 @@ async fn form_snapshot_is_a_read_only_page_tool() {
     properties.sort();
     assert_eq!(
         properties,
-        vec!["maxControls", "pageId", "sessionId", "workflowId"]
+        vec![
+            "maxControls",
+            "pageId",
+            "sessionId",
+            "workflowHandle",
+            "workflowId"
+        ]
     );
     assert_eq!(
         snapshot["inputSchema"]["properties"]["maxControls"],
@@ -3368,10 +3386,11 @@ async fn download_url_requires_and_threads_a_page_id() {
         .find(|tool| tool["name"] == "download_url")
         .expect("download_url is advertised");
     assert!(
-        tool["inputSchema"]["required"]
+        tool["inputSchema"]["oneOf"]
             .as_array()
-            .unwrap()
-            .contains(&json!("pageId")),
+            .expect("download_url scope branches")
+            .iter()
+            .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])),
         "download_url must advertise pageId as required: {tool}"
     );
 
