@@ -40,4 +40,19 @@ The command prints the isolated onboarding URL and keeps the scenario server run
 
 The training ground intentionally includes no CAPTCHA solver or bypass. An automation agent must pause for legitimate completion of the challenge, then continue the workflow.
 
+## Standalone scenario server
+
+Out-of-process drivers (benchmarks, third-party tooling) can run the same
+seeded scenario without the test harness:
+
+```bash
+cargo run -p gauntlet-server -- --seed demo
+```
+
+The binary prints the onboarding URL and serves until Ctrl-C. Drivers verify
+outcomes over `GET /__gauntlet/snapshot` (run-scoped effect counts, onboarding
+record, upload digests) and `GET /__gauntlet/request-log` — the same state the
+in-process assertions use, so verification stays server-authoritative and
+tool-neutral.
+
 Each run uses isolated seeded server state. Passing requires the relevant UI state plus authoritative server counts, file digests, and runtime journal evidence; application-private scorecards are not accepted. Evidence bundles are written under `target/modern-gauntlet-artifacts/<journey>/<run-id>/` and CI uploads that directory when the gate fails.

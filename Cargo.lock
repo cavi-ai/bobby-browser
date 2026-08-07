@@ -1658,6 +1658,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gauntlet-server"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3234,6 +3248,7 @@ dependencies = [
  "fingerprinting",
  "firefox-companion",
  "futures-util",
+ "gauntlet-server",
  "hex",
  "intent-engine",
  "interface-conformance",

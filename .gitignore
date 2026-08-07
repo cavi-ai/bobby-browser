@@ -58,3 +58,4 @@ opencode.jsonc
 # Test-run artifacts: the scheduler journal a broker fixture opens on start.
 crates/interface-conformance/data/
 crates/cli/data/
+/benchmarks/results/

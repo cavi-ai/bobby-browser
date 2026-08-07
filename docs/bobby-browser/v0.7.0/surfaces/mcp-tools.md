@@ -50,7 +50,7 @@ Tools are advertised only when the principal holds the required capability.
 | `intent_wait_for_state` | `browser:mutate` + `intent:execute` | Wait for a described page state (Replayable) |
 | `job_cancel` | `job:cancel` | Cancel one owned job by id |
 | `job_status` | `job:read` | Read one owned job by id |
-| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe`; advertised in full/act/verify) |
+| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe` / `http_wait` / `http_fetch`; advertised in full/act/verify) |
 | `navigate` | `browser:mutate` | Navigate a page to a URL |
 | `network_log` | `browser:mutate` | Dump recorded network log as HAR |
 | `page_activate` | `browser:mutate` | Bring a page to the front |
@@ -284,7 +284,10 @@ Tools that return structured content declare an `outputSchema` (always
 `type: object`), so a client can validate or render results without
 reverse-engineering evidence shapes. A command whose outcome status is not
 `completed` returns with MCP `isError: true` — check it before continuing a
-flow.
+flow. Failures carry a machine-readable repair hint: command-layer failures
+set `error.repair`, RPC-layer rejections set `error.data.repair`, each
+`{action, doc}` with `doc` pointing into `bobby://failure-taxonomy`. A
+`needsReconciliation` outcome always carries the never-retry repair.
 
 ## Resources
 
@@ -343,7 +346,11 @@ compare hand-bounded `kind` variant sets to schemars output from the
 ## Lifecycle notes
 
 - `runtime_info` reports `credentialExpiresAt` for the calling principal;
-  `bobby doctor` warns under 7 days remaining
+  `bobby doctor` warns under 7 days remaining. Its `capabilities` list names
+  configured runtime features: `vision-assist` and `vision-provider` appear
+  only when vision is wired — check them before vision-dependent tools,
+  since `visionAssistFailed` with no provider configured never succeeds on
+  retry
 - Token rotate / revoke → re-`initialize` on the MCP session for that principal
 - Stdio startup uses the four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables, not
   `AUTOMATION_RUNTIME_TOKEN` alone
@@ -357,16 +364,16 @@ compare hand-bounded `kind` variant sets to schemars output from the
 
 ## Toolset phases
 
-For a principal holding every capability with a job port attached, the current
-catalog sizes are:
+`tools/list` for a principal holding every capability is ~88,000 bytes. An
+agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | observation, lifecycle setup, and navigation; no action or intent tools (default) | 43,979 bytes |
-| `act` | raw primitives, `command_execute`, and job tools | 68,042 bytes |
-| `intent` | the `intent_*` family, `extract_structured`, and `checkpoint_save` | 73,009 bytes |
-| `verify` | evidence, checkpoints, recovery, job tools | 54,062 bytes |
-| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | 129,936 bytes (1,136 bytes below the 131,072-byte budget) |
+| `explore` | read the page, navigate, wait (default) | ~28 KB |
+| `act` | raw primitives, `command_execute`, and job tools | ~44 KB |
+| `intent` | the `intent_*` family and `extract_structured` | ~46 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~37 KB |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~88 KB |
 
 Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
 `workflow_observe` appear in every phase. This includes servers configured to
