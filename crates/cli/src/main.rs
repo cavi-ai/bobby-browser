@@ -826,6 +826,9 @@ async fn run_context(command: ContextCommands) -> Result<()> {
                     context_store::ContextStoreError::AlreadyLocked => anyhow::anyhow!(
                         "context store is held by a running bobby process; stop it first"
                     ),
+                    context_store::ContextStoreError::LockUnusable(reason) => {
+                        anyhow::anyhow!("context store lockfile is unusable: {reason}")
+                    }
                     other => anyhow::anyhow!("{other}"),
                 })?;
             for skipped in &report.skipped {
@@ -855,6 +858,9 @@ async fn run_context(command: ContextCommands) -> Result<()> {
                     context_store::ContextStoreError::AlreadyLocked => anyhow::anyhow!(
                         "context store is held by a running bobby process; stop it first"
                     ),
+                    context_store::ContextStoreError::LockUnusable(reason) => {
+                        anyhow::anyhow!("context store lockfile is unusable: {reason}")
+                    }
                     other => anyhow::anyhow!("{other}"),
                 })?;
             store.forget(&site).await?;
