@@ -466,6 +466,12 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 /// with no named tool are documented in `bobby://primitives`.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     let mut schema = tool_schema(name);
+    // The draft URL is constant and MCP does not require it per tool; the
+    // validation schema keeps it. ~80 bytes x 47 tools of pure connect fat.
+    schema
+        .as_object_mut()
+        .expect("tool schema is an object")
+        .remove("$schema");
     let mut patched = definitions();
     let patched = patched.as_object_mut().expect("definitions is an object");
     apply_advertised_input_patches(patched);
@@ -819,29 +825,123 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
     schema
 }
 
-/// `tools/list` outputSchema. Large nested values are advertised as opaque
-/// objects where their full wire schemas would otherwise dominate the connect
-/// budget; [`tool_output_schema`] remains the strict validation authority.
+/// `tools/list` outputSchema. Identical to [`tool_output_schema`] except
+/// advertise-only collapses for tools whose nested `$defs` dominate the entry
+/// (`form_snapshot`, `workflow_recover`, `recovery_status`, `page_open`,
+/// `session_create`, `session_list`, `checkpoint_save`); wire types stay
+/// unchanged. Every entry also drops the constant `$schema` URL (see
+/// [`advertised_tool_schema`]).
 pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
-    if name == "workflow_start" {
-        return advertised_workflow_start_output_schema();
+    match name {
+        "workflow_recover" => {
+            let mut schema = output_ref("RecoveryDecision");
+            let mut patched = definitions();
+            let patched = patched.as_object_mut().expect("definitions is an object");
+            patched.insert(
+                "RecoveryDecision".to_owned(),
+                json!({"oneOf": recovery_decision_tags()}),
+            );
+            let defs = reachable_definitions_from(&schema, patched);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
+        "form_snapshot" => {
+            let mut schema = output_ref("FormSnapshot");
+            let mut patched = definitions();
+            let patched = patched.as_object_mut().expect("definitions is an object");
+            patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
+            let defs = reachable_definitions_from(&schema, patched);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
+        "session_create" | "checkpoint_save" => {
+            // Opaque object: SessionState / CheckpointRecord pull large nested
+            // defs into tools/list; validation still uses the full schema.
+            json!({"type":"object"})
+        }
+        "session_list" => object(
+            json!({"sessions":array(json!({"type":"object"}), MAX_COLLECTION_ITEMS)}),
+            &["sessions"],
+        ),
+        "recovery_status" => {
+            let mut schema = object(
+                json!({
+                    "workflowId":id(),
+                    "checkpoint":json!({"type":"object"}),
+                    "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
+                    "workflows":array(json!({"type":"object"}), MAX_RECOVERABLE_WORKFLOWS)
+                }),
+                &[],
+            );
+            // Carries the definition `id()` points at, as `page_open` does.
+            let defs = reachable_definitions(&schema);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
+        "page_open" => {
+            let mut schema = object(
+                json!({
+                    "id":id(),
+                    "session_id":id(),
+                    "url":nullable(string(0, MAX_URL_BYTES)),
+                    "mode":{"type":"string","enum":["Document","Interactive","Render"]},
+                    "ready_state":string(0, 256),
+                    "pending_requests":{"type":"integer","minimum":0},
+                    "navigationOutcome":json!({"type":"object"}),
+                    "cleanupOutcome":json!({"type":"object"}),
+                    "pageClosed":{"type":"boolean"}
+                }),
+                &[
+                    "id",
+                    "session_id",
+                    "url",
+                    "mode",
+                    "ready_state",
+                    "pending_requests",
+                ],
+            );
+            // `id()` is a `$ref`, so this arm has to carry the definition it
+            // points at. Returning the object bare left `#/$defs/Id` dangling.
+            let defs = reachable_definitions(&schema);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
+        // Workflow handles (this branch): the start schema is authored
+        // directly, and observe carries the same FormSnapshot collapse
+        // form_snapshot uses.
+        "workflow_start" => advertised_workflow_start_output_schema(),
+        "workflow_observe" => {
+            let mut schema = tool_output_schema(name);
+            let mut seed = schema.clone();
+            seed.as_object_mut()
+                .expect("output schemas are objects")
+                .remove("$defs");
+            let mut patched = definitions();
+            let patched = patched.as_object_mut().expect("definitions is an object");
+            patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
+            let defs = reachable_definitions_from(&seed, patched);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
+        _ => {
+            let mut schema = tool_output_schema(name);
+            schema
+                .as_object_mut()
+                .expect("output schema is an object")
+                .remove("$schema");
+            schema
+        }
     }
-    if name != "form_snapshot" && name != "workflow_observe" {
-        return tool_output_schema(name);
-    }
-    let mut schema = tool_output_schema(name);
-    let mut seed = schema.clone();
-    seed.as_object_mut()
-        .expect("output schemas are objects")
-        .remove("$defs");
-    let mut patched = definitions();
-    let patched = patched.as_object_mut().expect("definitions is an object");
-    patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
-    let defs = reachable_definitions_from(&seed, patched);
-    if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
-        schema["$defs"] = defs;
-    }
-    schema
 }
 
 /// Exact advertise-only workflow-start result. The three closed wire branches
@@ -2182,6 +2282,27 @@ fn evidence_variant_tags() -> Vec<Value> {
                 "type":"object",
                 "properties":{"kind":{"const":kind}},
                 "required":["kind"]
+            })
+        })
+        .collect()
+}
+
+/// Status-tag projection of [`recovery_decisions()`] for the advertised
+/// `workflow_recover` output schema, mirroring [`evidence_variant_tags`]:
+/// the fully-fielded union plus its reachable `Evidence` tags costs ~3.3 KB
+/// on a single tool entry. Derived, not hand-written, so it cannot drift.
+fn recovery_decision_tags() -> Vec<Value> {
+    recovery_decisions()
+        .into_iter()
+        .map(|variant| {
+            let status = variant["properties"]["status"]["const"]
+                .as_str()
+                .expect("recovery decision pins a status const")
+                .to_owned();
+            json!({
+                "type":"object",
+                "properties":{"status":{"const":status}},
+                "required":["status"]
             })
         })
         .collect()

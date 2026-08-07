@@ -12,7 +12,7 @@ use serde_json::json;
 use types::{Capability, PrincipalId};
 use uuid::uuid;
 
-async fn list_for(toolset: Toolset) -> (usize, Vec<(String, usize)>) {
+async fn list_for(toolset: Toolset) -> (usize, Vec<(String, usize)>, Vec<serde_json::Value>) {
     let authority = AuthorityStore::with_capacity(8);
     let token = authority
         .issue(
@@ -60,7 +60,7 @@ async fn list_for(toolset: Toolset) -> (usize, Vec<(String, usize)>) {
         .collect();
     rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
     let tools_bytes = serde_json::to_vec(tools).expect("ser").len();
-    (tools_bytes, rows)
+    (tools_bytes, rows, tools.clone())
 }
 
 #[tokio::main]
@@ -72,7 +72,7 @@ async fn main() {
         Toolset::Act,
         Toolset::Intent,
     ] {
-        let (frame, rows) = list_for(phase).await;
+        let (frame, rows, tools) = list_for(phase).await;
         println!(
             "{}\t{}\t{}\theadroom={}",
             phase.as_str(),
@@ -83,6 +83,27 @@ async fn main() {
         if phase == Toolset::Full {
             for (n, b) in rows.iter().take(12) {
                 println!("  {n}\t{b}");
+            }
+            println!("  -- composition (name\\tdesc\\tinput\\toutput\\tannotations\\texamples\\tother) --");
+            for t in tools.iter() {
+                let len = |v: &serde_json::Value| serde_json::to_vec(v).expect("ser").len();
+                let total = len(t);
+                let desc = t.get("description").map_or(0, len);
+                let input = t.get("inputSchema").map_or(0, len);
+                let output = t.get("outputSchema").map_or(0, len);
+                let ann = t.get("annotations").map_or(0, len);
+                let ex = t.get("examples").map_or(0, len);
+                let other = total.saturating_sub(desc + input + output + ann + ex);
+                println!(
+                    "  {}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    t["name"].as_str().unwrap_or(""),
+                    desc,
+                    input,
+                    output,
+                    ann,
+                    ex,
+                    other
+                );
             }
             let jobs: usize = rows
                 .iter()

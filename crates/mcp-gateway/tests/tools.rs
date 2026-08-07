@@ -221,6 +221,19 @@ async fn page_open_with_url_requires_browser_mutate_before_opening_a_page() {
         denied["error"]["data"]["interfaceError"]["requiredCapability"],
         json!("browser:mutate")
     );
+    // RPC-layer failures carry the machine-readable repair hint next to the
+    // interface error, so an agent can act without reading the taxonomy first.
+    assert_eq!(
+        denied["error"]["data"]["repair"]["doc"],
+        json!("bobby://failure-taxonomy")
+    );
+    assert!(
+        denied["error"]["data"]["repair"]["action"]
+            .as_str()
+            .unwrap()
+            .contains("requiredCapability"),
+        "{denied}"
+    );
 }
 
 #[tokio::test]
@@ -502,15 +515,11 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     // `recoveryReceipts` above, which keeps the `Evidence` union (and
     // `RecoveryDecision`/`RecoveryRecord`) out of this tool's reachable `$defs`.
     //
-    // `workflow_recover`'s output schema is the only place `Evidence` is reachable,
-    // so the variant-for-variant match against `crates/types/src/outcomes.rs` is
-    // asserted there: a schema missing a variant would reject a real recovered
-    // evidence item with `INVALID_PARAMS`.
-    let recover_schema = tools
-        .iter()
-        .find(|tool| tool["name"] == "workflow_recover")
-        .unwrap();
-    let evidence_variants = recover_schema["outputSchema"]["$defs"]["Evidence"]["oneOf"]
+    // `workflow_recover`'s advertised output now projects `RecoveryDecision`
+    // to status tags, so the tag-only `Evidence` projection no longer appears
+    // in `tools/list` at all; it lives on the un-advertised output schema.
+    let recover_schema = mcp_gateway::output_schema_for_test("workflow_recover");
+    let evidence_variants = recover_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
     assert_eq!(evidence_variants.len(), 27, "{evidence_variants:?}");
@@ -1191,6 +1200,25 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
     assert_eq!(record["resolutionPath"], "deterministic", "{response}");
     assert_eq!(record["candidates"], json!([]), "{response}");
     assert_eq!(record["verification"], "targetNotFound", "{response}");
+    // Command-layer failures carry the machine-readable repair hint on the
+    // error itself; the fake DOM denies vision assist, whose repair is the
+    // deterministic fallback.
+    assert_eq!(
+        content["error"]["code"],
+        json!("visionAssistDenied"),
+        "{response}"
+    );
+    assert!(
+        content["error"]["repair"]["action"]
+            .as_str()
+            .unwrap()
+            .contains("deterministic tool"),
+        "{response}"
+    );
+    assert_eq!(
+        content["error"]["repair"]["doc"],
+        json!("bobby://failure-taxonomy")
+    );
 }
 
 #[tokio::test]
@@ -3079,6 +3107,35 @@ async fn initialize_advertises_that_the_tool_list_can_change() {
         response["result"]["capabilities"]["tools"]["listChanged"], true,
         "{response}"
     );
+}
+
+#[tokio::test]
+async fn initialize_carries_agent_instructions() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let response = server
+        .handle_message(request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion":"2025-11-25",
+                "capabilities":{},
+                "clientInfo":{"name":"test","version":"1"}
+            }),
+        ))
+        .await
+        .expect("initialize returns a response");
+    let instructions = response["result"]["instructions"]
+        .as_str()
+        .expect("instructions");
+    assert_eq!(instructions, mcp_gateway::INITIALIZE_INSTRUCTIONS);
+    assert!(
+        instructions.len() <= 500,
+        "instructions too long: {}",
+        instructions.len()
+    );
+    assert!(instructions.contains("toolset_select"), "{instructions}");
+    assert!(instructions.contains("error.repair"), "{instructions}");
+    assert!(instructions.contains("autoCheckpoint"), "{instructions}");
 }
 
 #[tokio::test]

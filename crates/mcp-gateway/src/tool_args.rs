@@ -335,6 +335,12 @@ pub(crate) struct FormSnapshotArgs {
     pub(crate) page_id: types::PageId,
     #[serde(default)]
     pub(crate) max_controls: Option<u32>,
+    /// Accepted and advertised, but not yet threaded anywhere:
+    /// `RuntimeInterface::form_snapshot` takes no workflow, so the dispatcher
+    /// has nowhere to pass it. Kept deserializable so a caller that sends it is
+    /// not rejected by `deny_unknown_fields`, which is the only reason this is
+    /// not simply removed.
+    #[allow(dead_code)]
     #[serde(default)]
     pub(crate) workflow_id: Option<types::WorkflowId>,
 }

@@ -2837,6 +2837,8 @@ endpoint_url = "http://127.0.0.1:9100/vision"
         assert!(jobs.detail.contains("echo"));
         assert!(jobs.detail.contains("sleep"));
         assert!(jobs.detail.contains("http_probe"));
+        assert!(jobs.detail.contains("http_wait"));
+        assert!(jobs.detail.contains("http_fetch"));
     }
 
     #[test]

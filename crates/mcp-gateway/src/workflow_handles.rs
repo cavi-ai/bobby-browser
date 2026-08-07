@@ -265,18 +265,14 @@ impl WorkflowHandles {
             .collect::<HashSet<_>>();
         let visible_session_ids = sessions
             .iter()
-            .filter_map(|session| {
-                bound_session_ids
-                    .contains(&session.id)
-                    .then(|| session.id.clone())
-            })
+            .filter(|session| bound_session_ids.contains(&session.id))
+            .map(|session| session.id.clone())
             .collect::<HashSet<_>>();
         let removed_handles = state
             .bindings
             .iter()
-            .filter_map(|(handle, binding)| {
-                (!visible_session_ids.contains(&binding.session_id)).then(|| handle.clone())
-            })
+            .filter(|(_, binding)| !visible_session_ids.contains(&binding.session_id))
+            .map(|(handle, _)| handle.clone())
             .collect::<BTreeSet<_>>();
         if removed_handles.is_empty() {
             return 0;
@@ -293,7 +289,8 @@ impl WorkflowHandles {
         let removed_handles = state
             .bindings
             .iter()
-            .filter_map(|(handle, binding)| predicate(binding).then(|| handle.clone()))
+            .filter(|(_, binding)| predicate(binding))
+            .map(|(handle, _)| handle.clone())
             .collect::<BTreeSet<_>>();
         if removed_handles.is_empty() {
             return 0;

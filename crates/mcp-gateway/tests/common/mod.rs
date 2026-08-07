@@ -1,3 +1,7 @@
+//! Shared test helpers. Compiled into every integration binary, so a
+//! helper only some binaries use reads as dead in the others.
+#![allow(dead_code)]
+
 //! Shared live-runtime harness for gateway integration tests.
 //!
 //! `RuntimeService::default()` has no journal, no worker pool, and no

@@ -567,7 +567,11 @@ vocabulary:
 
 Repair actions below are the general pattern for each code; where a specific
 tool's own description gives a more precise repair, that tool description
-wins for that tool.
+wins for that tool. Failures also carry the general repair inline:
+command-layer failures set `error.repair` and RPC-layer rejections set
+`error.data.repair`, each `{action, doc}` pointing back here. A
+`needsReconciliation` outcome always carries the never-retry repair,
+whatever its error code.
 
 ## RPC-layer rejections
 
@@ -1117,6 +1121,33 @@ capped at 15000. Returns status metadata only — no response body.
 {"name":"http_probe","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":5000}}
 ```
 
+## http_wait
+
+Poll until success or the wait budget expires. Without `contains`, each attempt
+is `http_probe` (status only). With `contains`, each attempt is `http_fetch`
+(GET + truncated body) and success requires the substring.
+`timeoutMs` defaults to 30000 (cap 60000). `intervalMs` defaults to 1000
+(cap 10000). Optional `probeTimeoutMs` / `maxBodyBytes` per attempt.
+
+```json
+{"name":"http_wait","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":30000,"intervalMs":1000}}
+```
+
+```json
+{"name":"http_wait","payload":{"url":"https://example.com/health","timeoutMs":30000,"intervalMs":1000,"contains":"\"ready\":true"}}
+```
+
+## http_fetch
+
+GET a URL and return a truncated UTF-8 body (default 4096 bytes, cap 16384)
+plus status metadata. Same SSRF policy as `http_probe`. Optional `contains`
+must appear in the body for `ok`. Use this instead of opening a browser
+session to inspect health JSON or small API responses.
+
+```json
+{"name":"http_fetch","payload":{"url":"https://example.com/health","timeoutMs":5000,"maxBodyBytes":4096,"contains":"\"ready\":true"}}
+```
+
 `bobby doctor` reports the same handler names under `job-handlers`.
 "#;
 
@@ -1145,7 +1176,7 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
         (
             JOB_HANDLERS_URI,
             "Job handlers",
-            "Built-in scheduler handlers (echo, sleep, http_probe), payloads, and when to use jobs vs intents.",
+            "Built-in scheduler handlers (echo, sleep, http_probe, http_wait, http_fetch), payloads, and when to use jobs vs intents.",
         ),
     ]
 }

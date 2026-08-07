@@ -1543,6 +1543,7 @@ mod tests {
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
+        let delete_context_count = runtime.delete_contexts.lock().await.len();
         let events = events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1562,7 +1563,7 @@ mod tests {
         assert!(rendered.contains("workflow_start detached cleanup failed"));
         assert!(!rendered.contains("secret-profile"));
         assert!(!rendered.contains("secret-url"));
-        assert_eq!(runtime.delete_contexts.lock().await.len(), 1);
+        assert_eq!(delete_context_count, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1699,6 +1700,7 @@ mod tests {
         .await
         .expect("cleanup-reply owner emitted a cancellation warning");
         supervisor.await.unwrap();
+        let delete_context_count = runtime.delete_contexts.lock().await.len();
         let events = events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1713,7 +1715,7 @@ mod tests {
         assert!(rendered.contains("workflow_start detached cleanup failed"));
         assert!(!rendered.contains("secret-profile"));
         assert!(!rendered.contains("secret-url"));
-        assert_eq!(runtime.delete_contexts.lock().await.len(), 1);
+        assert_eq!(delete_context_count, 1);
         assert_eq!(
             registry.resolve(&uncommitted_handle),
             Err(WorkflowHandleError::Unknown)
@@ -1863,6 +1865,7 @@ mod tests {
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
+        let delete_context_count = runtime.delete_contexts.lock().await.len();
         let events = events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1877,6 +1880,6 @@ mod tests {
         assert!(rendered.contains("workflow_start detached cleanup failed"));
         assert!(!rendered.contains("secret-profile"));
         assert!(!rendered.contains("secret-url"));
-        assert_eq!(runtime.delete_contexts.lock().await.len(), 1);
+        assert_eq!(delete_context_count, 1);
     }
 }

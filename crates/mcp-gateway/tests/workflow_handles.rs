@@ -97,8 +97,7 @@ async fn assert_navigation_terminal(live: &common::LiveServer, url: &str) {
             .expect("recorded navigation command");
     let last = records
         .iter()
-        .filter(|record| record.command_id == command_id)
-        .last()
+        .rfind(|record| record.command_id == command_id)
         .expect("navigation journal records");
     assert!(
         matches!(last.phase, CommandPhase::Completed | CommandPhase::Failed),

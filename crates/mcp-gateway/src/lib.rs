@@ -17,6 +17,7 @@ pub mod notify;
 mod prompts;
 /// JSON-RPC frame limits and error codes shared by transports.
 pub mod protocol;
+mod repair;
 mod resources;
 mod schema;
 mod server;
@@ -25,9 +26,26 @@ mod tool_meta;
 pub mod toolset;
 mod workflow_handles;
 
+/// Short agent tip returned on MCP `initialize` (`instructions`).
+///
+/// Kept under ~500 characters so it does not push connect payloads.
+pub const INITIALIZE_INSTRUCTIONS: &str = "\
+Startup tools/list is explore. Call toolset_select (act|intent|verify|full) \
+then re-read tools/list when you need more. Failures carry error.repair \
+{action,doc} — follow action. Boundary intents: autoCheckpoint defaults true. \
+Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
+
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
     schema::tool_schema(name)
+}
+
+/// Exposes the un-advertised `tool_output_schema` (tag-only `Evidence`
+/// projection intact) so drift guards can inspect the projection without
+/// forcing it into the advertised `tools/list` payload.
+#[doc(hidden)]
+pub fn output_schema_for_test(name: &str) -> serde_json::Value {
+    schema::tool_output_schema(name)
 }
 
 /// Exposes the full, unpatched `definitions()` table (the source of truth
