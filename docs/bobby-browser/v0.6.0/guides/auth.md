@@ -72,7 +72,7 @@ Error bodies are JSON `{ "error": InterfaceError }` with camelCase fields
 
 ## Mint a scoped principal
 
-Requires `authority:admin` on the caller (bootstrap defaults include it).
+Requires `authority:admin` on the caller (`bobby init --preset unrestricted`).
 
 ```bash
 DEADLINE=$(date -u -v+2M +"%Y-%m-%dT%H:%M:%S.000Z" 2>/dev/null \

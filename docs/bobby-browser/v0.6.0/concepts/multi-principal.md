@@ -25,8 +25,10 @@ runtime with a durable-profile engine can read it, and principals without it
 are denied on every surface. It contains structure and counters only — never
 typed values or page content.
 
-The bootstrap credential typically holds `authority:admin` (default `bobby init`
-capability set) and is the only principal that can mint or revoke other tokens:
+The bootstrap credential holds `authority:admin` only when minted with
+`--preset unrestricted` (or a marker-less legacy file healed as unrestricted).
+Default `bobby init` is the **agent** floor and cannot mint or revoke principals.
+With admin, the bootstrap is the only principal that can mint or revoke other tokens:
 
 - `POST /v1/principals` issues a scoped bearer (returned once in the response body)
 - `DELETE /v1/principals/{id}` revokes a principal immediately
