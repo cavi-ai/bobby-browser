@@ -33,6 +33,17 @@ struct WorkflowHandleState {
     bindings: BTreeMap<String, WorkflowBinding>,
     lru: VecDeque<String>,
     reservations: BTreeSet<String>,
+    #[cfg(test)]
+    test_hooks: WorkflowHandleTestHooks,
+}
+
+/// Test-only critical-section controls used to make the reset/publication
+/// interleavings observable without changing the release build's behavior.
+#[cfg(test)]
+#[derive(Default)]
+struct WorkflowHandleTestHooks {
+    before_publish: Option<Arc<dyn Fn() + Send + Sync>>,
+    before_reset: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 pub(crate) struct WorkflowHandles {
@@ -90,6 +101,10 @@ impl WorkflowHandles {
             .expect("workflow handle generation overflow");
         state.bindings.clear();
         state.lru.clear();
+        #[cfg(test)]
+        if let Some(hook) = &state.test_hooks.before_reset {
+            hook();
+        }
     }
 
     pub(crate) fn resolve(&self, handle: &str) -> Result<WorkflowBinding, WorkflowHandleError> {
@@ -201,6 +216,10 @@ impl WorkflowHandleReservation {
         published_sender: oneshot::Sender<()>,
     ) -> Result<(), WorkflowHandleError> {
         let mut state = self.registry.lock_state();
+        #[cfg(test)]
+        if let Some(hook) = &state.test_hooks.before_publish {
+            hook();
+        }
         if state.generation != self.generation {
             state.reservations.remove(&self.handle);
             self.active = false;
@@ -270,7 +289,11 @@ fn is_well_formed_handle(handle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::{
+        collections::BTreeSet,
+        sync::{mpsc, Arc, Barrier},
+        thread,
+    };
 
     use chrono::Utc;
     use tokio::sync::oneshot;
@@ -623,15 +646,35 @@ mod tests {
         }
         let lru_before = lru(&registry);
 
-        let failed_start = registry.reserve().unwrap();
-        drop(failed_start);
+        let outstanding_start = registry.reserve().unwrap();
         assert!(handles
             .iter()
             .all(|handle| registry.resolve(handle).is_ok()));
         assert_eq!(lru(&registry), lru_before);
+        drop(outstanding_start);
 
         let reservation = registry.reserve().unwrap();
-        let binding = binding(
+        let expected = binding(
+            reservation.generation,
+            session_id(690),
+            page_id(691),
+            workflow_id(692),
+        );
+        let (new_handle, _) = publish(reservation, expected.clone());
+
+        assert_eq!(
+            registry.resolve(&handles[0]),
+            Err(WorkflowHandleError::Unknown)
+        );
+        assert_eq!(registry.resolve(&new_handle), Ok(expected));
+        let mut lru_after_success = lru_before[1..].to_vec();
+        lru_after_success.push(new_handle);
+        assert_eq!(lru(&registry), lru_after_success);
+        let mut current_handles = handles[1..].to_vec();
+        current_handles.push(lru_after_success.last().unwrap().clone());
+
+        let reservation = registry.reserve().unwrap();
+        let publish_binding = binding(
             reservation.generation,
             session_id(700),
             page_id(701),
@@ -641,11 +684,11 @@ mod tests {
         drop(receiver);
 
         assert_eq!(
-            reservation.publish_with_supervisor(binding, sender),
+            reservation.publish_with_supervisor(publish_binding, sender),
             Err(WorkflowHandleError::SupervisorLost)
         );
-        assert_eq!(lru(&registry), lru_before);
-        assert!(handles
+        assert_eq!(lru(&registry), lru_after_success);
+        assert!(current_handles
             .iter()
             .all(|handle| registry.resolve(handle).is_ok()));
     }
@@ -725,5 +768,91 @@ mod tests {
         );
         assert!(receiver.try_recv().is_err());
         assert_eq!(registry.resolve(&handle), Err(WorkflowHandleError::Unknown));
+    }
+
+    #[test]
+    fn publication_and_reset_serialize_in_both_mutex_orders() {
+        let publish_first = registry();
+        let reservation = publish_first.reserve().unwrap();
+        let handle = reservation.handle().to_owned();
+        let publish_binding = binding(
+            reservation.generation,
+            session_id(910),
+            page_id(911),
+            workflow_id(912),
+        );
+        let (publish_entered_tx, publish_entered_rx) = mpsc::channel();
+        let publish_release = Arc::new(Barrier::new(2));
+        {
+            let mut state = publish_first.lock_state();
+            let publish_release = Arc::clone(&publish_release);
+            state.test_hooks.before_publish = Some(Arc::new(move || {
+                publish_entered_tx.send(()).unwrap();
+                publish_release.wait();
+            }));
+        }
+        let (published_sender, mut published_receiver) = oneshot::channel();
+        let publisher = thread::spawn(move || {
+            reservation.publish_with_supervisor(publish_binding, published_sender)
+        });
+        publish_entered_rx.recv().unwrap();
+        let reset_registry = Arc::clone(&publish_first);
+        let (reset_started_tx, reset_started_rx) = mpsc::channel();
+        let resetter = thread::spawn(move || {
+            reset_started_tx.send(()).unwrap();
+            reset_registry.reset();
+        });
+        reset_started_rx.recv().unwrap();
+
+        publish_release.wait();
+        assert_eq!(publisher.join().unwrap(), Ok(()));
+        resetter.join().unwrap();
+        assert_eq!(published_receiver.try_recv(), Ok(()));
+        assert_eq!(
+            publish_first.resolve(&handle),
+            Err(WorkflowHandleError::Unknown)
+        );
+
+        let reset_first = registry();
+        let reservation = reset_first.reserve().unwrap();
+        let handle = reservation.handle().to_owned();
+        let reset_binding = binding(
+            reservation.generation,
+            session_id(920),
+            page_id(921),
+            workflow_id(922),
+        );
+        let (reset_entered_tx, reset_entered_rx) = mpsc::channel();
+        let reset_release = Arc::new(Barrier::new(2));
+        {
+            let mut state = reset_first.lock_state();
+            let reset_release = Arc::clone(&reset_release);
+            state.test_hooks.before_reset = Some(Arc::new(move || {
+                reset_entered_tx.send(()).unwrap();
+                reset_release.wait();
+            }));
+        }
+        let reset_registry = Arc::clone(&reset_first);
+        let resetter = thread::spawn(move || reset_registry.reset());
+        reset_entered_rx.recv().unwrap();
+        let (published_sender, mut published_receiver) = oneshot::channel();
+        let (publish_started_tx, publish_started_rx) = mpsc::channel();
+        let publisher = thread::spawn(move || {
+            publish_started_tx.send(()).unwrap();
+            reservation.publish_with_supervisor(reset_binding, published_sender)
+        });
+        publish_started_rx.recv().unwrap();
+
+        reset_release.wait();
+        resetter.join().unwrap();
+        assert_eq!(
+            publisher.join().unwrap(),
+            Err(WorkflowHandleError::GenerationChanged)
+        );
+        assert!(published_receiver.try_recv().is_err());
+        assert_eq!(
+            reset_first.resolve(&handle),
+            Err(WorkflowHandleError::Unknown)
+        );
     }
 }
