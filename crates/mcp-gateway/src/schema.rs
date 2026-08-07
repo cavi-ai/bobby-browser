@@ -700,36 +700,53 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
             json!({"sessions":array(json!({"type":"object"}), MAX_COLLECTION_ITEMS)}),
             &["sessions"],
         ),
-        "recovery_status" => object(
-            json!({
-                "workflowId":id(),
-                "checkpoint":json!({"type":"object"}),
-                "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
-                "workflows":array(json!({"type":"object"}), MAX_RECOVERABLE_WORKFLOWS)
-            }),
-            &[],
-        ),
-        "page_open" => object(
-            json!({
-                "id":id(),
-                "session_id":id(),
-                "url":nullable(string(0, MAX_URL_BYTES)),
-                "mode":{"type":"string","enum":["Document","Interactive","Render"]},
-                "ready_state":string(0, 256),
-                "pending_requests":{"type":"integer","minimum":0},
-                "navigationOutcome":json!({"type":"object"}),
-                "cleanupOutcome":json!({"type":"object"}),
-                "pageClosed":{"type":"boolean"}
-            }),
-            &[
-                "id",
-                "session_id",
-                "url",
-                "mode",
-                "ready_state",
-                "pending_requests",
-            ],
-        ),
+        "recovery_status" => {
+            let mut schema = object(
+                json!({
+                    "workflowId":id(),
+                    "checkpoint":json!({"type":"object"}),
+                    "receipts":array(json!({"type":"object"}), MAX_RECOVERY_RECEIPTS),
+                    "workflows":array(json!({"type":"object"}), MAX_RECOVERABLE_WORKFLOWS)
+                }),
+                &[],
+            );
+            // Carries the definition `id()` points at, as `page_open` does.
+            let defs = reachable_definitions(&schema);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
+        "page_open" => {
+            let mut schema = object(
+                json!({
+                    "id":id(),
+                    "session_id":id(),
+                    "url":nullable(string(0, MAX_URL_BYTES)),
+                    "mode":{"type":"string","enum":["Document","Interactive","Render"]},
+                    "ready_state":string(0, 256),
+                    "pending_requests":{"type":"integer","minimum":0},
+                    "navigationOutcome":json!({"type":"object"}),
+                    "cleanupOutcome":json!({"type":"object"}),
+                    "pageClosed":{"type":"boolean"}
+                }),
+                &[
+                    "id",
+                    "session_id",
+                    "url",
+                    "mode",
+                    "ready_state",
+                    "pending_requests",
+                ],
+            );
+            // `id()` is a `$ref`, so this arm has to carry the definition it
+            // points at. Returning the object bare left `#/$defs/Id` dangling.
+            let defs = reachable_definitions(&schema);
+            if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+                schema["$defs"] = defs;
+            }
+            schema
+        }
         _ => {
             let mut schema = tool_output_schema(name);
             schema
