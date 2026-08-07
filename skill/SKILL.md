@@ -15,8 +15,9 @@ Ghost / ZigZagZig recovery (Rust: `SkillGhost` / `SkillZigZagZig`) — those are
 in-process recovery strategies and are not MCP tools.
 
 Jobs: `job_submit` / `job_status` / `job_cancel` (needs `job:*` caps). They
-advertise after `toolset_select` → `verify`. Same contract as HTTP `/v1/jobs`.
-Built-in handlers today: `echo` (returns payload) and `sleep` (`payload.ms`).
+advertise in `full`, `act`, and `verify`. Same contract as HTTP `/v1/jobs`.
+Jobs are scheduler probes, not page intents — prefer `intent_*` for browser
+work; see `bobby://job-handlers`. Built-ins: `echo`, `sleep` (`payload.ms`).
 `bobby doctor` lists them under `job-handlers`.
 
 Release layout is three binaries (`bobby`, `mcp-gateway`, `acp-gateway`). Keep
@@ -87,6 +88,7 @@ Read these resources first; they always match the build:
 - `bobby://intents` — the eight intent tools and what each verifies.
 - `bobby://failure-taxonomy` — every error code and its repair action.
 - `bobby://primitives` — the flat browser tools.
+- `bobby://job-handlers` — builtin scheduler handlers vs intents.
 
 Three prompts encode the standard flows: `fill_and_submit_form`,
 `extract_from_page`, `recover_workflow`.

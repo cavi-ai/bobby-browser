@@ -2561,6 +2561,7 @@ async fn static_resources_are_listed_and_readable() {
         "bobby://failure-taxonomy",
         "bobby://intents",
         "bobby://primitives",
+        "bobby://job-handlers",
     ] {
         assert!(uris.contains(&expected.to_owned()), "{expected} not listed");
         let read = server
@@ -3259,6 +3260,7 @@ async fn static_resources_are_readable_without_artifact_read() {
         "bobby://failure-taxonomy",
         "bobby://intents",
         "bobby://primitives",
+        "bobby://job-handlers",
     ] {
         assert!(uris.contains(&expected.to_owned()), "{expected} not listed");
         let read = server
