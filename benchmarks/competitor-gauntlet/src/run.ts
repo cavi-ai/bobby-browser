@@ -13,7 +13,9 @@ import { fileURLToPath } from "node:url";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const repoRoot = path.resolve(harnessDir, "../..");
-const resultsDir = path.join(repoRoot, "benchmarks/results");
+const resultsDir =
+  process.env.GAUNTLET_RESULTS_DIR ??
+  path.join(repoRoot, "benchmarks/results");
 const fixturePath = path.join(
   repoRoot,
   "crates/runtime-tests/tests/fixtures/approved-upload.txt",
@@ -234,19 +236,69 @@ async function main() {
       const workDir = await mkdtemp(path.join(tmpdir(), `cg-${toolName}-`));
       const downloadsDir = path.join(workDir, "downloads");
       mkdirSync(downloadsDir, { recursive: true });
+      // Relative upload_roots in config resolve against the gateway cwd
+      // (the Claude workDir). Ensure the default root exists and stage the
+      // fixture inside it so upload_files does not policyDeny.
+      const uploadRoot = path.join(workDir, "data", "uploads");
+      mkdirSync(uploadRoot, { recursive: true });
+      const stagedFixture = path.join(uploadRoot, "approved-upload.txt");
+      writeFileSync(stagedFixture, readFileSync(fixturePath));
 
-      const mcpConfig = { mcpServers: runner.mcpServers };
+      const mcpConfig = { mcpServers: structuredClone(runner.mcpServers) };
       // Prefer the repo's own release build for the bobby runner — the
       // benchmark should measure this checkout, not a stale installed binary.
       const repoBobby = path.join(repoRoot, "target/release/bobby");
       const bobbyCommand =
         process.env.BOBBY_MCP_COMMAND ??
         (exists(repoBobby) ? repoBobby : "bobby");
-      for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
-        serverConfig.command = serverConfig.command.replace(
-          "${BOBBY_MCP_COMMAND}",
-          bobbyCommand,
+      // Per-run config: allow loopback (gauntlet-server is 127.0.0.1) and
+      // keep upload_roots relative to workDir. HttpConfig is partial-override
+      // safe (#[serde(default)]); still write a complete enough file that
+      // BOBBY_BROWSER_CONFIG never fails parse and drops MCP.
+      const gauntletConfigPath = path.join(workDir, "bobby-gauntlet.toml");
+      if (toolName === "bobby") {
+        writeFileSync(
+          gauntletConfigPath,
+          [
+            "[browser]",
+            'upload_roots = ["./data/uploads"]',
+            'downloads_dir = "./downloads"',
+            'artifacts_dir = "./artifacts"',
+            'profiles_dir = "./profiles"',
+            "headless = true",
+            "",
+            "[http]",
+            "allow_loopback = true",
+            "allow_private_network = false",
+            "max_redirects = 5",
+            "max_header_bytes = 65536",
+            "max_body_bytes = 8388608",
+            "max_download_bytes = 67108864",
+            "request_timeout_ms = 30000",
+            "max_concurrent_requests = 8",
+            "",
+            "[mcp]",
+            'startup_toolset = "full"',
+            "",
+          ].join("\n"),
         );
+      }
+      for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
+        if (typeof serverConfig.command === "string") {
+          serverConfig.command = serverConfig.command.replace(
+            "${BOBBY_MCP_COMMAND}",
+            bobbyCommand,
+          );
+        }
+        if (serverConfig.env) {
+          for (const [key, value] of Object.entries(serverConfig.env)) {
+            if (typeof value === "string") {
+              serverConfig.env[key] = value
+                .replace("${BOBBY_MCP_COMMAND}", bobbyCommand)
+                .replace("${BOBBY_GAUNTLET_CONFIG}", gauntletConfigPath);
+            }
+          }
+        }
       }
       writeFileSync(
         path.join(workDir, ".mcp.json"),
@@ -256,7 +308,10 @@ async function main() {
       const prompt =
         task.prompt
           .replace("{{url}}", entryUrl)
-          .replace("{{fixture}}", fixturePath)
+          .replace(
+            "{{fixture}}",
+            toolName === "bobby" ? stagedFixture : fixturePath,
+          )
           .replace("{{downloads}}", downloadsDir) +
         (runner.promptSuffix
           ? "\n\n" +

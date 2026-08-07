@@ -1328,4 +1328,26 @@ mod tests {
 
         assert_eq!(found, vec![BackendNodeId::new(10), BackendNodeId::new(20)]);
     }
+
+    #[test]
+    fn empty_target_fields_are_rejected_before_resolution() {
+        let err = validate_target_spec(&TargetSpec {
+            accessible_name: Some(String::new()),
+            role: Some("main".into()),
+            ..TargetSpec::default()
+        })
+        .expect_err("empty accessibleName must fail");
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(err.message.contains("accessibleName"));
+
+        let err = validate_target_spec(&TargetSpec {
+            frame_path: vec![Box::new(TargetSpec {
+                css: Some("   ".into()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        })
+        .expect_err("empty nested css must fail");
+        assert!(err.message.contains("css"));
+    }
 }

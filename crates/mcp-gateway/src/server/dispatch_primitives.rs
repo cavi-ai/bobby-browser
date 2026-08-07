@@ -11,6 +11,7 @@ pub(super) const TOOLS: &[&str] = &[
     "command_execute",
     "navigate",
     "click",
+    "click_and_wait_for_popup",
     "type_text",
     "inspect",
     "screenshot",
@@ -89,6 +90,28 @@ impl Server {
                 } else {
                     self.submit_envelope(context, envelope).await
                 }
+            }
+            "click_and_wait_for_popup" => {
+                let input: ClickAndWaitForPopupArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, envelope) = primitive_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    input.workflow_id,
+                    types::PrimitiveCommand::ClickAndWaitForPopup(
+                        types::ClickAndWaitForPopupCommand {
+                            selector: input.selector.unwrap_or_default(),
+                            target: input.target,
+                            timeout_ms: input
+                                .timeout_ms
+                                .unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
+                        },
+                    ),
+                );
+                self.submit_envelope(context, envelope).await
             }
             "type_text" => {
                 let input: TypeTextArgs = match bounded_parse(call.arguments) {

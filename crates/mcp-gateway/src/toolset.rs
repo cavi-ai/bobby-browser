@@ -152,6 +152,7 @@ const EXPLORE: &[&str] = &[
 /// its own envelope, and is absent from the other narrow phases.
 const ACT: &[&str] = &[
     "click",
+    "click_and_wait_for_popup",
     "type_text",
     "control_action",
     "upload_files",
@@ -211,6 +212,7 @@ pub const EVERY_TOOL: &[&str] = &[
     "a11y_snapshot",
     "checkpoint_save",
     "click",
+    "click_and_wait_for_popup",
     "command_execute",
     "context_ask",
     "context_neighbors",
@@ -340,6 +342,7 @@ mod tests {
     fn the_explore_phase_advertises_no_action_or_intent_tool() {
         for tool in [
             "click",
+            "click_and_wait_for_popup",
             "type_text",
             "control_action",
             "upload_files",

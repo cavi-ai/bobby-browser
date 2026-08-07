@@ -7,7 +7,7 @@ use types::{
     ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FillValue,
     FormControlTarget, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
     SemanticTargetSegment, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
-    WaitForCommand,
+    WaitCondition, WaitForCommand,
 };
 
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
@@ -106,6 +106,16 @@ pub trait IntentBrowser: Send + Sync {
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError>;
+
+    /// True when the page still shows client-side validation markers
+    /// (`[aria-invalid=true]`). Used after soft waits (e.g. networkQuiet) so
+    /// submit-and-verify does not report `completed` on a rejected form.
+    async fn validation_errors_visible(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<bool, CommandError> {
+        Ok(false)
+    }
 }
 
 pub struct IntentEngine;
@@ -637,7 +647,7 @@ async fn act_fill(
     intent_target: &TargetSpec,
     value: &FillValue,
 ) -> Result<Vec<Evidence>, CommandError> {
-    let (selector, target) = action_target(candidate);
+    let (selector, target) = action_target(candidate, intent_target);
     match value {
         // Worker-pool has no select API; Select is typed via TypeTextCommand.
         FillValue::Text { text, clear_first } => {
@@ -743,7 +753,7 @@ fn form_control_target(
     })
 }
 
-fn action_target(candidate: &Candidate) -> (String, TargetSpec) {
+fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, TargetSpec) {
     let selector = candidate.css.clone().unwrap_or_default();
     let target = TargetSpec {
         css: candidate.css.clone(),
@@ -752,6 +762,9 @@ fn action_target(candidate: &Candidate) -> (String, TargetSpec) {
         accessible_name: candidate.name.clone(),
         label: candidate.label.clone(),
         attributes: candidate.attributes.clone(),
+        frame_path: intent_target.frame_path.clone(),
+        shadow_path: intent_target.shadow_path.clone(),
+        ordinal: intent_target.ordinal,
         ..TargetSpec::default()
     };
     (selector, target)
@@ -880,7 +893,7 @@ async fn execute_submit_and_verify(
         best_match_authorized,
     };
 
-    let (selector, action_target) = action_target(&candidate);
+    let (selector, action_target) = action_target(&candidate, &target);
     let click = ClickCommand {
         selector,
         target: Some(action_target),
@@ -928,6 +941,62 @@ async fn execute_submit_and_verify(
             };
         }
     };
+
+    // Soft waits (networkQuiet alone) can succeed while the server rejected
+    // the submit and left aria-invalid markers on the form. That must not
+    // report status:completed — agents would skip the re-entry path.
+    if matches!(
+        expected_state.condition,
+        WaitCondition::NetworkQuiet { .. }
+    ) {
+        match browser.validation_errors_visible(page_id).await {
+            Ok(true) => {
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VerificationFailed,
+                        message: "submit wait was networkQuiet-only but the page still shows aria-invalid validation markers; strengthen expectedState or re-fill the rejected fields"
+                            .into(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence: {
+                        let mut evidence = vec![resolution];
+                        evidence.append(&mut click_evidence);
+                        evidence.append(&mut wait_evidence);
+                        evidence.push(intent_evidence(execution_record(
+                            "submitAndVerify",
+                            purpose,
+                            plan_summary,
+                            vec![candidate_evidence],
+                            None,
+                            "verifyFailed",
+                        )));
+                        evidence
+                    },
+                };
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error,
+                    evidence: {
+                        let mut evidence = vec![resolution];
+                        evidence.append(&mut click_evidence);
+                        evidence.append(&mut wait_evidence);
+                        evidence.push(intent_evidence(execution_record(
+                            "submitAndVerify",
+                            purpose,
+                            plan_summary,
+                            vec![candidate_evidence],
+                            None,
+                            "verifyFailed",
+                        )));
+                        evidence
+                    },
+                };
+            }
+        }
+    }
 
     let wait_elapsed_ms = wait_evidence.iter().find_map(|item| match item {
         Evidence::Wait { elapsed_ms, .. } => Some(*elapsed_ms),
@@ -1053,7 +1122,7 @@ async fn execute_follow(
         best_match_authorized,
     };
 
-    let (selector, action_target) = action_target(&candidate);
+    let (selector, action_target) = action_target(&candidate, &target);
     let click = ClickCommand {
         selector,
         target: Some(action_target),
@@ -1225,7 +1294,7 @@ async fn execute_dismiss_obstruction(
         best_match_authorized,
     };
 
-    let (selector, action_target) = action_target(&candidate);
+    let (selector, action_target) = action_target(&candidate, &target);
     let click = ClickCommand {
         selector,
         target: Some(action_target),

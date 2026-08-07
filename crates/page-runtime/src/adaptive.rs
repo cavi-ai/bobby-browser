@@ -172,6 +172,22 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         self.lease.worker().wait_for(page_id, command).await
     }
 
+    async fn validation_errors_visible(
+        &self,
+        page_id: &PageId,
+    ) -> Result<bool, CommandError> {
+        let probe = TargetSpec {
+            css: Some("[aria-invalid='true']".into()),
+            ..TargetSpec::default()
+        };
+        let candidates = self
+            .lease
+            .worker()
+            .collect_candidates(page_id, &probe)
+            .await?;
+        Ok(!candidates.is_empty())
+    }
+
     async fn capture_screenshot(
         &self,
         page_id: &PageId,

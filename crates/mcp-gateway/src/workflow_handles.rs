@@ -22,6 +22,7 @@ pub(crate) enum WorkflowScope {
 pub(crate) const WORKFLOW_SCOPE_TOOLS: &[(&str, WorkflowScope)] = &[
     ("a11y_snapshot", WorkflowScope::SessionPageWorkflow),
     ("click", WorkflowScope::SessionPageWorkflow),
+    ("click_and_wait_for_popup", WorkflowScope::SessionPageWorkflow),
     ("context_ask", WorkflowScope::SessionPage),
     ("context_neighbors", WorkflowScope::SessionPage),
     ("control_action", WorkflowScope::SessionPageWorkflow),

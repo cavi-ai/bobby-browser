@@ -336,6 +336,7 @@ impl AppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HttpConfig {
     pub allow_loopback: bool,
     pub allow_private_network: bool,
@@ -842,6 +843,21 @@ scheduler_journal_path = "s"
             serde_json::to_value(&config).unwrap(),
             serde_json::to_value(AppConfig::default()).unwrap()
         );
+    }
+
+    #[test]
+    fn partial_http_section_fills_missing_fields_from_defaults() {
+        let config = AppConfig::from_toml_str(
+            r#"
+[http]
+allow_loopback = true
+"#,
+        )
+        .expect("partial [http] must parse");
+        assert!(config.http.allow_loopback);
+        assert!(!config.http.allow_private_network);
+        assert_eq!(config.http.max_redirects, 5);
+        assert_eq!(config.http.request_timeout_ms, 30_000);
     }
 
     #[test]

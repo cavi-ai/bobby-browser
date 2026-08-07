@@ -2,13 +2,11 @@
 
 ## Unreleased
 
-- A plain `click` on an anchor with a `download` attribute now routes through the armed download capture on managed Chromium: the file lands in the session's downloads with `Download` evidence instead of vanishing with a bare `completed`.
-- `networkPolicyDenied` guidance names the loopback/private-destination cause and the `http.allow_loopback` / `http.allow_private_network` operator switches (repair hint, taxonomy, and `download_url` description); for page-offered files it points at clicking the link.
-- `upload_files` policy errors name the resolved absolute roots and the gateway working directory that relative roots resolve against.
-- Empty-string target fields (`css`, `role`, `accessibleName`, ...) are rejected as `invalidRequest` at resolution time on both engines, instead of polling unmatchable until a wait deadline.
-- Protocol-layer `-32602` rejections carry `error.data.repair` like every other failure.
-- `a11y_snapshot` drops `InlineTextBox` leaves, which duplicated their `StaticText` parents' text and dominated snapshot payload.
-- `bobby://intents` and the taxonomy state the frame boundary: intents resolve in the main frame only; iframe controls take primitives with a `framePath`.
+- `[http]` accepts partial overrides: missing fields fall back to defaults instead of failing TOML parse (gauntlet / agent hosts that only set `allow_loopback` no longer brick MCP startup).
+- Flat MCP tool `click_and_wait_for_popup` registers `window.open` targets so `page_list` can drive authorization popups without curling app source.
+- `intent` `action_target` preserves `framePath` / `shadowPath` from the intent target (iframe submits no longer discard the frame hop).
+- `intent_submit_and_verify` with a `networkQuiet`-only wait fails when `[aria-invalid=true]` markers remain, instead of reporting `completed` on a soft settle after a rejected submit.
+- Competitor gauntlet bobby runner starts on `BOBBY_MCP_TOOLSET=full`, stages upload fixtures under the gateway cwd, and allows loopback HTTP for scenario downloads.
 
 
 - `control_action` `selectOne`/`selectMany` and select fills accept an option's visible label as well as its value (trimmed, case-insensitive label fallback on both engines). Snapshots surface labels, so agents no longer guess underlying values. Verification compares the committed option values, ending false `verificationFailed` on label requests.
