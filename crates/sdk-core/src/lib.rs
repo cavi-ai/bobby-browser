@@ -47,6 +47,12 @@ pub struct RuntimeService {
     /// Nodes this runtime can reach. Empty by default, so a `RuntimeService`
     /// built without configuration resolves no node for any session.
     nodes: Arc<NodeRegistry>,
+    /// Feature flags reported on `runtime_info`'s capability list so a caller
+    /// can tell "no vision provider configured" apart from a transient vision
+    /// failure without shell access (`visionAssistDenied` vs
+    /// `visionAssistFailed` repairs diverge on exactly this).
+    vision_assist_configured: bool,
+    vision_provider_configured: bool,
 }
 
 struct InFlightGuard {
@@ -80,6 +86,8 @@ impl RuntimeService {
             pages,
             recovery: None,
             nodes: Arc::new(NodeRegistry::default()),
+            vision_assist_configured: false,
+            vision_provider_configured: false,
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -95,9 +103,17 @@ impl RuntimeService {
             pages,
             recovery: Some(recovery),
             nodes: Arc::new(NodeRegistry::default()),
+            vision_assist_configured: false,
+            vision_provider_configured: false,
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    fn with_vision_state(mut self, assist: bool, provider: bool) -> Self {
+        self.vision_assist_configured = assist;
+        self.vision_provider_configured = provider;
+        self
     }
 
     /// Installs the node registry a session's `visionNode` resolves against.
@@ -253,6 +269,8 @@ impl RuntimeService {
         let nodes = Arc::new(NodeRegistry::from_config(config));
         let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> =
             structured_extractor.or_else(|| nodes.http_structured_extractor());
+        let vision_assist_present = vision_assist.is_some();
+        let provider_present = provider.is_some();
         if let Some(assist) = vision_assist {
             adaptive = adaptive.with_vision_assist(assist);
         }
@@ -269,7 +287,9 @@ impl RuntimeService {
             pages = pages.with_execution_phase_observer(observer);
         }
         let sessions = SessionManager::new(workers);
-        Ok(Self::with_recovery(sessions, pages, recovery).with_nodes(nodes))
+        Ok(Self::with_recovery(sessions, pages, recovery)
+            .with_nodes(nodes)
+            .with_vision_state(vision_assist_present, provider_present))
     }
 
     pub async fn runtime_info(&self) -> RuntimeInfo {
@@ -281,6 +301,12 @@ impl RuntimeService {
         ];
         if self.recovery.is_some() {
             capabilities.push("checkpoint-recovery".to_string());
+        }
+        if self.vision_assist_configured {
+            capabilities.push("vision-assist".to_string());
+        }
+        if self.vision_provider_configured {
+            capabilities.push("vision-provider".to_string());
         }
         RuntimeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),

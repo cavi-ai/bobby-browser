@@ -136,7 +136,10 @@ Tools that return structured content declare an `outputSchema` (always
 `type: object`), so a client can validate or render results without
 reverse-engineering evidence shapes. A command whose outcome status is not
 `completed` returns with MCP `isError: true` — check it before continuing a
-flow.
+flow. Failures carry a machine-readable repair hint: command-layer failures
+set `error.repair`, RPC-layer rejections set `error.data.repair`, each
+`{action, doc}` with `doc` pointing into `bobby://failure-taxonomy`. A
+`needsReconciliation` outcome always carries the never-retry repair.
 
 ## Resources
 
@@ -195,7 +198,11 @@ compare hand-bounded `kind` variant sets to schemars output from the
 ## Lifecycle notes
 
 - `runtime_info` reports `credentialExpiresAt` for the calling principal;
-  `bobby doctor` warns under 7 days remaining
+  `bobby doctor` warns under 7 days remaining. Its `capabilities` list names
+  configured runtime features: `vision-assist` and `vision-provider` appear
+  only when vision is wired — check them before vision-dependent tools,
+  since `visionAssistFailed` with no provider configured never succeeds on
+  retry
 - Token rotate / revoke → re-`initialize` on the MCP session for that principal
 - Stdio startup uses the four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables, not
   `AUTOMATION_RUNTIME_TOKEN` alone
@@ -209,16 +216,16 @@ compare hand-bounded `kind` variant sets to schemars output from the
 
 ## Toolset phases
 
-`tools/list` for a principal holding every capability is ~130,000 bytes. An
+`tools/list` for a principal holding every capability is ~88,000 bytes. An
 agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page, navigate, wait (default) | ~30 KB |
-| `act` | raw primitives, `command_execute`, and job tools | ~45 KB |
-| `intent` | the `intent_*` family and `extract_structured` | ~48 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~41 KB |
-| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~95 KB |
+| `explore` | read the page, navigate, wait (default) | ~28 KB |
+| `act` | raw primitives, `command_execute`, and job tools | ~44 KB |
+| `intent` | the `intent_*` family and `extract_structured` | ~46 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~37 KB |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~88 KB |
 
 Session and page lifecycle, `runtime_info`, and `toolset_select` itself appear
 in every phase.

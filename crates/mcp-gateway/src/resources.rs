@@ -525,7 +525,11 @@ vocabulary:
 
 Repair actions below are the general pattern for each code; where a specific
 tool's own description gives a more precise repair, that tool description
-wins for that tool.
+wins for that tool. Failures also carry the general repair inline:
+command-layer failures set `error.repair` and RPC-layer rejections set
+`error.data.repair`, each `{action, doc}` pointing back here. A
+`needsReconciliation` outcome always carries the never-retry repair,
+whatever its error code.
 
 ## RPC-layer rejections
 

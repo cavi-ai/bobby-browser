@@ -832,6 +832,25 @@ impl Server {
 
     async fn tool_success(&self, id: Value, mut value: Value) -> Value {
         crate::resources::redact_mcp_download_paths(&mut value);
+        // Attach a machine-readable repair hint to failures before the value
+        // is frozen into `content` text, so both representations carry it.
+        // `needsReconciliation` always overrides the code's general repair:
+        // retrying that outcome can double-apply a side effect.
+        let status = value.get("status").and_then(Value::as_str);
+        let repair = if status == Some("needsReconciliation") {
+            Some(crate::repair::reconciliation_repair())
+        } else {
+            value
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .and_then(crate::repair::repair_for_code)
+        };
+        if let (Some(repair), Some(error)) = (repair, value.get_mut("error")) {
+            if error.is_object() {
+                error["repair"] = repair;
+            }
+        }
         let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned());
         let trusted = self
             .resources
@@ -1362,12 +1381,12 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
         None => format!("Runtime interface error: {code}"),
     };
     interface_error.message = "runtime interface request failed".to_owned();
-    let mut response = error(
-        id,
-        INTERFACE_ERROR,
-        "Runtime interface error",
-        Some(json!({"interfaceError":interface_error})),
-    );
+    let repair = crate::repair::repair_for_code(&code);
+    let mut data = json!({"interfaceError":interface_error});
+    if let Some(repair) = repair {
+        data["repair"] = repair;
+    }
+    let mut response = error(id, INTERFACE_ERROR, "Runtime interface error", Some(data));
     response["error"]["message"] = json!(diagnostic);
     response
 }

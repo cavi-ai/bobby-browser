@@ -136,7 +136,9 @@ Three prompts encode the standard flows: `fill_and_submit_form`,
 ## Error handling
 
 Always inspect `structuredContent` (status, error code, evidence) before the
-next mutating call.
+next mutating call. Failures carry `error.repair` (`{action, doc}`) — act on
+the action; the doc points into `bobby://failure-taxonomy` for the full entry.
+A `needsReconciliation` outcome always carries the never-retry repair.
 
 | Signal | Meaning | Repair |
 |---|---|---|

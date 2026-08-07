@@ -524,15 +524,16 @@ async fn output_schemas_carry_only_reachable_definitions() {
     }
 }
 
-/// Drift guard: `Evidence`'s hand-written union must advertise exactly the `kind` variants
+/// Drift guard: `Evidence`'s hand-written union must project exactly the `kind` variants
 /// `types::Evidence` serializes, no more and no fewer.
 ///
-/// `Evidence` is reachable only from `workflow_recover`'s output schema, never from an input
-/// or validation schema, and `schema_parity.rs`'s helpers only reach input schemas. So the
-/// guard lives here, next to `list_tools`, which reads the genuine advertised `outputSchema`.
+/// No advertised tool entry carries the `Evidence` projection anymore —
+/// `workflow_recover`, its last reach, now advertises a status-tag
+/// `RecoveryDecision` projection — so this reads the projection out of the
+/// un-advertised `tool_output_schema`, where it still lives.
 ///
-/// Limit: this compares `kind` tags only, because the advertised `Evidence` is itself a
-/// tag-only projection (`evidence_variant_tags` in `schema.rs`). Field-level drift within a
+/// Limit: this compares `kind` tags only, because the projection is itself
+/// tag-only (`evidence_variant_tags` in `schema.rs`). Field-level drift within a
 /// variant is caught by the `*_round_trips_through_*` tests below.
 #[tokio::test]
 async fn evidence_variants_match_the_wire_type() {
@@ -549,12 +550,8 @@ async fn evidence_variants_match_the_wire_type() {
         })
         .collect();
 
-    let tools = list_tools(all_capabilities()).await;
-    let tool = tools
-        .iter()
-        .find(|tool| tool["name"] == "workflow_recover")
-        .expect("workflow_recover is advertised");
-    let hand_written: BTreeSet<String> = tool["outputSchema"]["$defs"]["Evidence"]["oneOf"]
+    let output_schema = mcp_gateway::output_schema_for_test("workflow_recover");
+    let hand_written: BTreeSet<String> = output_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .expect("Evidence oneOf must be an array")
         .iter()
@@ -567,6 +564,48 @@ async fn evidence_variants_match_the_wire_type() {
         .collect();
 
     assert_eq!(generated, hand_written);
+}
+
+/// Drift guard for the advertised `workflow_recover` projection: its
+/// `RecoveryDecision` oneOf must name exactly the `status` tags
+/// `types::RecoveryDecision` serializes.
+#[tokio::test]
+async fn recovery_decision_tags_match_the_wire_type() {
+    let generated_schema = serde_json::to_value(schemars::schema_for!(RecoveryDecision)).unwrap();
+    let generated: BTreeSet<String> = generated_schema["oneOf"]
+        .as_array()
+        .expect("RecoveryDecision schema is a oneOf variant list")
+        .iter()
+        .map(|variant| {
+            variant["properties"]["status"]["const"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("RecoveryDecision variant must pin a status const: {variant}")
+                })
+                .to_owned()
+        })
+        .collect();
+
+    let tools = list_tools(all_capabilities()).await;
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "workflow_recover")
+        .expect("workflow_recover is advertised");
+    let advertised: BTreeSet<String> = tool["outputSchema"]["$defs"]["RecoveryDecision"]["oneOf"]
+        .as_array()
+        .expect("RecoveryDecision oneOf must be an array")
+        .iter()
+        .map(|variant| {
+            variant["properties"]["status"]["const"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!("RecoveryDecision variant must pin a status const: {variant}")
+                })
+                .to_owned()
+        })
+        .collect();
+
+    assert_eq!(generated, advertised);
 }
 
 // --- Round trips: output schemas must accept real responses -----------------

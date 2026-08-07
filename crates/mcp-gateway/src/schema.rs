@@ -426,6 +426,12 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 /// with no named tool are documented in `bobby://primitives`.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     let mut schema = tool_schema(name);
+    // The draft URL is constant and MCP does not require it per tool; the
+    // validation schema keeps it. ~80 bytes x 47 tools of pure connect fat.
+    schema
+        .as_object_mut()
+        .expect("tool schema is an object")
+        .remove("$schema");
     let mut patched = definitions();
     let patched = patched.as_object_mut().expect("definitions is an object");
     apply_advertised_input_patches(patched);
@@ -652,15 +658,37 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
     schema
 }
 
-/// `tools/list` outputSchema. Identical to [`tool_output_schema`] except
+/// `tools/list` outputSchema. Identical to [`tool_output_schema`] except:
 /// `form_snapshot`, whose nested `FormControl*` `$defs` dominate the entry —
-/// advertised as opaque form/control objects while wire types stay unchanged.
+/// advertised as opaque form/control objects while wire types stay unchanged;
+/// `workflow_recover`, whose `RecoveryDecision` union is advertised as a
+/// status-tag projection (fields enforced by the runtime, full shape in
+/// `bobby://failure-taxonomy`); and every entry drops the constant `$schema`
+/// URL (see [`advertised_tool_schema`]).
 pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
+    if name == "workflow_recover" {
+        let mut schema = output_ref("RecoveryDecision");
+        let mut patched = definitions();
+        let patched = patched.as_object_mut().expect("definitions is an object");
+        patched.insert(
+            "RecoveryDecision".to_owned(),
+            json!({"oneOf": recovery_decision_tags()}),
+        );
+        let defs = reachable_definitions_from(&schema, patched);
+        if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+            schema["$defs"] = defs;
+        }
+        return schema;
+    }
     if name != "form_snapshot" {
-        return tool_output_schema(name);
+        let mut schema = tool_output_schema(name);
+        schema
+            .as_object_mut()
+            .expect("output schema is an object")
+            .remove("$schema");
+        return schema;
     }
     let mut schema = output_ref("FormSnapshot");
-    schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
     let mut patched = definitions();
     let patched = patched.as_object_mut().expect("definitions is an object");
     patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
@@ -1787,6 +1815,27 @@ fn evidence_variant_tags() -> Vec<Value> {
                 "type":"object",
                 "properties":{"kind":{"const":kind}},
                 "required":["kind"]
+            })
+        })
+        .collect()
+}
+
+/// Status-tag projection of [`recovery_decisions()`] for the advertised
+/// `workflow_recover` output schema, mirroring [`evidence_variant_tags`]:
+/// the fully-fielded union plus its reachable `Evidence` tags costs ~3.3 KB
+/// on a single tool entry. Derived, not hand-written, so it cannot drift.
+fn recovery_decision_tags() -> Vec<Value> {
+    recovery_decisions()
+        .into_iter()
+        .map(|variant| {
+            let status = variant["properties"]["status"]["const"]
+                .as_str()
+                .expect("recovery decision pins a status const")
+                .to_owned();
+            json!({
+                "type":"object",
+                "properties":{"status":{"const":status}},
+                "required":["status"]
             })
         })
         .collect()

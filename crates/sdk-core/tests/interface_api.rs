@@ -390,6 +390,10 @@ async fn authenticated_runtime_implements_the_versioned_interface() {
 
     let info = api.runtime_info(read_context.clone()).await.unwrap();
     assert!(info.capabilities.contains(&"sdk".to_owned()));
+    // A runtime built without vision wiring must say so: the repair for
+    // `visionAssistFailed` diverges on exactly this signal.
+    assert!(!info.capabilities.contains(&"vision-assist".to_owned()));
+    assert!(!info.capabilities.contains(&"vision-provider".to_owned()));
     assert!(api.list_sessions(read_context).await.unwrap().is_empty());
 }
 
