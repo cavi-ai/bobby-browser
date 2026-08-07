@@ -246,7 +246,8 @@ impl Server {
                         "serverInfo": {
                             "name": "automation-runtime",
                             "version": env!("CARGO_PKG_VERSION")
-                        }
+                        },
+                        "instructions": crate::INITIALIZE_INSTRUCTIONS
                     }),
                 )
             });

@@ -19,7 +19,7 @@ advertise in `full`, `act`, and `verify`. Same contract as HTTP `/v1/jobs`.
 Jobs are scheduler probes, not page intents — prefer `intent_*` for browser
 work; see `bobby://job-handlers`. Built-ins: `echo`, `sleep` (`payload.ms`),
 `http_probe` (`payload.url`, optional `method`/`timeoutMs`),
-`http_wait` (`payload.url`, optional `timeoutMs`/`intervalMs`/`probeTimeoutMs`),
+`http_wait` (`payload.url`, optional `timeoutMs`/`intervalMs`/`probeTimeoutMs`; `contains` polls via `http_fetch` until the body matches),
 `http_fetch` (`payload.url` GET body; optional `contains`/`maxBodyBytes`/`timeoutMs`).
 `bobby doctor` lists them under `job-handlers`.
 
@@ -40,12 +40,14 @@ Never claim an action worked without its evidence.
    `--skill-openclaw`. Default `bobby init` / install mint the **agent**
    preset (no `authority:admin`; heal respects the marker). Operators who need
    to mint principals use `bobby init --preset unrestricted`.
-2. For the Firefox companion (persistent logins): `bobby install --companion`
+2. On MCP `initialize`, read `instructions`: startup `tools/list` is explore;
+   call `toolset_select` then re-list; follow `error.repair.action` on failures.
+3. For the Firefox companion (persistent logins): `bobby install --companion`
    or `make firefox`, start Firefox with `--remote-debugging-port` (`make
    firefox-start` if using the launchd agent), then **Pair** from the toolbar
    popup. That writes `browser-selection.json`. CLI
    `bobby enroll-firefox-profile` is for CI/scripting only.
-3. `bobby doctor` validates the setup, including sibling gateway presence
+4. `bobby doctor` validates the setup, including sibling gateway presence
    (`mcp-gateway` / `acp-gateway`), bootstrap preset, and an MCP handshake
    (`initialize` + `tools/list`) against the gateway. When `vision:assist` is
    held, doctor also reminds that sessions need

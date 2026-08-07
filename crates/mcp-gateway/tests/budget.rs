@@ -524,6 +524,42 @@ async fn output_schemas_carry_only_reachable_definitions() {
     }
 }
 
+/// Advertise-only collapses must not pull the fat nested records back into
+/// `tools/list` (validation schemas still expose them via `tool_output_schema`).
+#[tokio::test]
+async fn advertised_fat_outputs_do_not_pull_nested_record_defs() {
+    let banned = [
+        "SessionState",
+        "CheckpointRecord",
+        "CheckpointInvariant",
+        "PageState",
+    ];
+    for name in [
+        "recovery_status",
+        "page_open",
+        "session_create",
+        "session_list",
+        "checkpoint_save",
+    ] {
+        let tool = list_tools(all_capabilities())
+            .await
+            .into_iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"));
+        let body = serde_json::to_string(&tool["outputSchema"]).unwrap();
+        for def in banned {
+            assert!(
+                !body.contains(&format!("#/$defs/{def}")),
+                "{name} advertised output still references {def}: {body}"
+            );
+        }
+        assert_eq!(
+            tool["outputSchema"]["type"], "object",
+            "{name} must stay an object schema"
+        );
+    }
+}
+
 /// Drift guard: `Evidence`'s hand-written union must project exactly the `kind` variants
 /// `types::Evidence` serializes, no more and no fewer.
 ///
