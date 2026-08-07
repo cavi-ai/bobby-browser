@@ -131,6 +131,85 @@ pub async fn http_probe(
     overall
 }
 
+const DEFAULT_WAIT_TIMEOUT_MS: u64 = 30_000;
+const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_INTERVAL_MS: u64 = 1_000;
+const MAX_INTERVAL_MS: u64 = 10_000;
+
+/// Poll until a successful probe or the wait budget expires.
+///
+/// `timeout_ms` is the overall wait budget (default 30000, cap 60000).
+/// `interval_ms` is the delay between failed attempts (default 1000, cap 10000).
+/// `probe_timeout_ms` is forwarded to each [`http_probe`] attempt.
+pub async fn http_wait(
+    url: &str,
+    method: HttpProbeMethod,
+    timeout_ms: Option<u64>,
+    interval_ms: Option<u64>,
+    probe_timeout_ms: Option<u64>,
+    network: NetworkPolicy,
+) -> Result<serde_json::Value, String> {
+    let wait_ms = timeout_ms
+        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
+        .min(MAX_WAIT_TIMEOUT_MS);
+    let interval_ms = interval_ms
+        .unwrap_or(DEFAULT_INTERVAL_MS)
+        .clamp(50, MAX_INTERVAL_MS);
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(wait_ms);
+    let mut attempts = 0u64;
+    // Last non-success outcome from the most recent attempt.
+    #[allow(unused_assignments)]
+    let mut last_outcome: Option<Result<serde_json::Value, String>> = None;
+
+    loop {
+        attempts += 1;
+        match http_probe(url, method, probe_timeout_ms, network.clone()).await {
+            Ok(probe) => {
+                let ok = probe
+                    .get("ok")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                if ok {
+                    return Ok(json!({
+                        "ok": true,
+                        "attempts": attempts,
+                        "elapsedMs": started.elapsed().as_millis() as u64,
+                        "probe": probe,
+                    }));
+                }
+                last_outcome = Some(Ok(probe));
+            }
+            Err(error) => {
+                last_outcome = Some(Err(error));
+            }
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let sleep_for = Duration::from_millis(interval_ms).min(deadline - now);
+        tokio::time::sleep(sleep_for).await;
+    }
+
+    let mut detail = json!({
+        "ok": false,
+        "attempts": attempts,
+        "elapsedMs": started.elapsed().as_millis() as u64,
+        "timedOut": true,
+    });
+    match last_outcome {
+        Some(Ok(probe)) => detail["lastProbe"] = probe,
+        Some(Err(error)) => detail["lastError"] = json!(error),
+        None => {}
+    }
+    Err(format!(
+        "http_wait timed out after {wait_ms}ms: {}",
+        serde_json::to_string(&detail).unwrap_or_else(|_| "{}".to_owned())
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +246,23 @@ mod tests {
         .await
         .expect_err("ftp must fail");
         assert!(!err.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_rejects_loopback_by_default() {
+        let err = http_wait(
+            "http://127.0.0.1:9/",
+            HttpProbeMethod::Head,
+            Some(200),
+            Some(50),
+            Some(50),
+            NetworkPolicy::default(),
+        )
+        .await
+        .expect_err("loopback must be denied");
+        assert!(
+            err.to_lowercase().contains("timed out") || err.to_lowercase().contains("denied"),
+            "unexpected deny message: {err}"
+        );
     }
 }
