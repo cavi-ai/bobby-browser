@@ -19,7 +19,7 @@ advertise in `full`, `act`, and `verify`. Same contract as HTTP `/v1/jobs`.
 Jobs are scheduler probes, not page intents — prefer `intent_*` for browser
 work; see `bobby://job-handlers`. Built-ins: `echo`, `sleep` (`payload.ms`),
 `http_probe` (`payload.url`, optional `method`/`timeoutMs`),
-`http_wait` (`payload.url`, optional `timeoutMs`/`intervalMs`/`probeTimeoutMs`),
+`http_wait` (`payload.url`, optional `timeoutMs`/`intervalMs`/`probeTimeoutMs`; `contains` polls via `http_fetch` until the body matches),
 `http_fetch` (`payload.url` GET body; optional `contains`/`maxBodyBytes`/`timeoutMs`).
 `bobby doctor` lists them under `job-handlers`.
 

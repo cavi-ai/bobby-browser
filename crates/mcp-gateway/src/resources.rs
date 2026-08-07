@@ -1035,12 +1035,18 @@ capped at 15000. Returns status metadata only — no response body.
 
 ## http_wait
 
-Poll with `http_probe` until success or the wait budget expires.
+Poll until success or the wait budget expires. Without `contains`, each attempt
+is `http_probe` (status only). With `contains`, each attempt is `http_fetch`
+(GET + truncated body) and success requires the substring.
 `timeoutMs` defaults to 30000 (cap 60000). `intervalMs` defaults to 1000
-(cap 10000). Optional `probeTimeoutMs` per attempt. Same SSRF policy.
+(cap 10000). Optional `probeTimeoutMs` / `maxBodyBytes` per attempt.
 
 ```json
 {"name":"http_wait","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":30000,"intervalMs":1000}}
+```
+
+```json
+{"name":"http_wait","payload":{"url":"https://example.com/health","timeoutMs":30000,"intervalMs":1000,"contains":"\"ready\":true"}}
 ```
 
 ## http_fetch

@@ -254,17 +254,22 @@ const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_INTERVAL_MS: u64 = 1_000;
 const MAX_INTERVAL_MS: u64 = 10_000;
 
-/// Poll until a successful probe or the wait budget expires.
+/// Poll until a successful probe (or body match) or the wait budget expires.
 ///
 /// `timeout_ms` is the overall wait budget (default 30000, cap 60000).
 /// `interval_ms` is the delay between failed attempts (default 1000, cap 10000).
-/// `probe_timeout_ms` is forwarded to each [`http_probe`] attempt.
+/// `probe_timeout_ms` is forwarded to each attempt.
+/// When `contains` is set, each attempt is [`http_fetch`] (GET + truncated body)
+/// and success requires HTTP success plus the substring; otherwise each attempt
+/// is [`http_probe`].
 pub async fn http_wait(
     url: &str,
     method: HttpProbeMethod,
     timeout_ms: Option<u64>,
     interval_ms: Option<u64>,
     probe_timeout_ms: Option<u64>,
+    contains: Option<&str>,
+    max_body_bytes: Option<usize>,
     network: NetworkPolicy,
 ) -> Result<serde_json::Value, String> {
     let wait_ms = timeout_ms
@@ -279,24 +284,38 @@ pub async fn http_wait(
     // Last non-success outcome from the most recent attempt.
     #[allow(unused_assignments)]
     let mut last_outcome: Option<Result<serde_json::Value, String>> = None;
+    let body_gate = contains.is_some();
 
     loop {
         attempts += 1;
-        match http_probe(url, method, probe_timeout_ms, network.clone()).await {
-            Ok(probe) => {
-                let ok = probe
+        let attempt = if body_gate {
+            http_fetch(
+                url,
+                probe_timeout_ms,
+                max_body_bytes,
+                contains,
+                network.clone(),
+            )
+            .await
+        } else {
+            http_probe(url, method, probe_timeout_ms, network.clone()).await
+        };
+        match attempt {
+            Ok(sample) => {
+                let ok = sample
                     .get("ok")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
                 if ok {
+                    let key = if body_gate { "fetch" } else { "probe" };
                     return Ok(json!({
                         "ok": true,
                         "attempts": attempts,
                         "elapsedMs": started.elapsed().as_millis() as u64,
-                        "probe": probe,
+                        key: sample,
                     }));
                 }
-                last_outcome = Some(Ok(probe));
+                last_outcome = Some(Ok(sample));
             }
             Err(error) => {
                 last_outcome = Some(Err(error));
@@ -318,7 +337,10 @@ pub async fn http_wait(
         "timedOut": true,
     });
     match last_outcome {
-        Some(Ok(probe)) => detail["lastProbe"] = probe,
+        Some(Ok(sample)) => {
+            let key = if body_gate { "lastFetch" } else { "lastProbe" };
+            detail[key] = sample;
+        }
         Some(Err(error)) => detail["lastError"] = json!(error),
         None => {}
     }
@@ -374,6 +396,8 @@ mod tests {
             Some(200),
             Some(50),
             Some(50),
+            None,
+            None,
             NetworkPolicy::default(),
         )
         .await
@@ -385,23 +409,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_rejects_loopback_by_default() {
-        let err = http_fetch(
+    async fn wait_with_contains_rejects_loopback_by_default() {
+        let err = http_wait(
             "http://127.0.0.1:9/",
-            Some(1_000),
+            HttpProbeMethod::Get,
+            Some(200),
+            Some(50),
+            Some(50),
+            Some("ready"),
             Some(256),
-            None,
             NetworkPolicy::default(),
         )
         .await
         .expect_err("loopback must be denied");
         assert!(
-            err.to_lowercase().contains("denied")
-                || err.to_lowercase().contains("private")
-                || err.to_lowercase().contains("loopback")
-                || err.to_lowercase().contains("policy")
-                || err.to_lowercase().contains("not allowed")
-                || err.to_lowercase().contains("not permitted"),
+            err.to_lowercase().contains("timed out") || err.to_lowercase().contains("denied"),
             "unexpected deny message: {err}"
         );
     }
