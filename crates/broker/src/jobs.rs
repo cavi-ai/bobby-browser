@@ -137,15 +137,49 @@ impl JobHandler for HttpWaitHandler {
     }
 }
 
+/// Bounded GET with truncated body (SSRF-safe). Optional `contains` substring gate.
+pub struct HttpFetchHandler;
+
+#[async_trait]
+impl JobHandler for HttpFetchHandler {
+    async fn execute(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let url = job
+            .payload
+            .get("url")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "http_fetch requires payload.url".to_owned())?;
+        let timeout_ms = job
+            .payload
+            .get("timeoutMs")
+            .and_then(|value| value.as_u64());
+        let max_body_bytes = job
+            .payload
+            .get("maxBodyBytes")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize);
+        let contains = job.payload.get("contains").and_then(|value| value.as_str());
+        network_engine::http_fetch(
+            url,
+            timeout_ms,
+            max_body_bytes,
+            contains,
+            network_engine::NetworkPolicy::default(),
+        )
+        .await
+    }
+}
+
 pub fn register_builtin_handlers(scheduler: &mut JobScheduler) {
     scheduler.register_handler("echo".to_string(), Arc::new(EchoHandler));
     scheduler.register_handler("sleep".to_string(), Arc::new(SleepHandler));
     scheduler.register_handler("http_probe".to_string(), Arc::new(HttpProbeHandler));
     scheduler.register_handler("http_wait".to_string(), Arc::new(HttpWaitHandler));
+    scheduler.register_handler("http_fetch".to_string(), Arc::new(HttpFetchHandler));
 }
 
 /// Built-in handler names registered by [`register_builtin_handlers`].
-pub const BUILTIN_JOB_HANDLERS: &[&str] = &["echo", "sleep", "http_probe", "http_wait"];
+pub const BUILTIN_JOB_HANDLERS: &[&str] =
+    &["echo", "sleep", "http_probe", "http_wait", "http_fetch"];
 
 /// Build scheduler config from app storage + server drain settings.
 pub fn scheduler_config_from_app(config: &AppConfig) -> SchedulerConfig {

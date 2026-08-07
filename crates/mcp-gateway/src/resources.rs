@@ -1039,6 +1039,17 @@ Poll with `http_probe` until success or the wait budget expires.
 {"name":"http_wait","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":30000,"intervalMs":1000}}
 ```
 
+## http_fetch
+
+GET a URL and return a truncated UTF-8 body (default 4096 bytes, cap 16384)
+plus status metadata. Same SSRF policy as `http_probe`. Optional `contains`
+must appear in the body for `ok`. Use this instead of opening a browser
+session to inspect health JSON or small API responses.
+
+```json
+{"name":"http_fetch","payload":{"url":"https://example.com/health","timeoutMs":5000,"maxBodyBytes":4096,"contains":"\"ready\":true"}}
+```
+
 `bobby doctor` reports the same handler names under `job-handlers`.
 "#;
 
@@ -1067,7 +1078,7 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
         (
             JOB_HANDLERS_URI,
             "Job handlers",
-            "Built-in scheduler handlers (echo, sleep, http_probe, http_wait), payloads, and when to use jobs vs intents.",
+            "Built-in scheduler handlers (echo, sleep, http_probe, http_wait, http_fetch), payloads, and when to use jobs vs intents.",
         ),
     ]
 }

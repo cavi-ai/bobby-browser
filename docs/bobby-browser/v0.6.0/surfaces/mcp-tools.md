@@ -66,7 +66,7 @@ Tools are advertised only when the principal holds the required capability.
 | `cookie_set` | `browser:mutate` | Store cookies |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
-| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe` / `http_wait`; advertised in full/act/verify) |
+| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe` / `http_wait` / `http_fetch`; advertised in full/act/verify) |
 | `job_status` | `job:read` | Read one owned job by id |
 | `job_cancel` | `job:cancel` | Cancel one owned job by id |
 
