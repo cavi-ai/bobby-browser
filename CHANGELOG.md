@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- A plain `click` on an anchor with a `download` attribute now routes through the armed download capture on managed Chromium: the file lands in the session's downloads with `Download` evidence instead of vanishing with a bare `completed`.
+- `networkPolicyDenied` guidance names the loopback/private-destination cause and the `http.allow_loopback` / `http.allow_private_network` operator switches (repair hint, taxonomy, and `download_url` description); for page-offered files it points at clicking the link.
+- `upload_files` policy errors name the resolved absolute roots and the gateway working directory that relative roots resolve against.
+- Empty-string target fields (`css`, `role`, `accessibleName`, ...) are rejected as `invalidRequest` at resolution time on both engines, instead of polling unmatchable until a wait deadline.
+- Protocol-layer `-32602` rejections carry `error.data.repair` like every other failure.
+- `a11y_snapshot` drops `InlineTextBox` leaves, which duplicated their `StaticText` parents' text and dominated snapshot payload.
+- `bobby://intents` and the taxonomy state the frame boundary: intents resolve in the main frame only; iframe controls take primitives with a `framePath`.
+
+
 - `control_action` `selectOne`/`selectMany` and select fills accept an option's visible label as well as its value (trimmed, case-insensitive label fallback on both engines). Snapshots surface labels, so agents no longer guess underlying values. Verification compares the committed option values, ending false `verificationFailed` on label requests.
 - `inspect` denied by network policy (loopback page, non-http URL) degrades to the browser that already has the page open instead of failing a DOM read with `networkPolicyDenied`. `download_url` keeps the hard denial.
 - Firefox companion `wait_for` supports Text, Value, and Document conditions (Chromium parity). `networkQuiet` remains unsupported on Firefox.

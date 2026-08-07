@@ -833,6 +833,22 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
+        // A plain click on a download link otherwise vanishes: headless
+        // Chromium drops the file and the outcome carries no evidence.
+        // Route through the armed capture path so the file lands in the
+        // session's downloads with Download evidence.
+        if resolved.is_download_link(&page).await? {
+            return self
+                .click_and_wait_for_download(
+                    page_id,
+                    &ClickAndWaitForDownloadCommand {
+                        selector: command.selector.clone(),
+                        target: command.target.clone(),
+                        timeout_ms: 30_000,
+                    },
+                )
+                .await;
+        }
         let text = resolved.inner_text(&page).await.ok().flatten();
         if self.humanization_enabled() {
             self.humanized_click(&page, &resolved).await?;
@@ -2650,12 +2666,16 @@ fn compact_ax_tree(
         } else {
             raw_value
         };
+        // InlineTextBox leaves carry the same text as their StaticText
+        // parent — pure payload duplication. Skip them regardless of name.
+        if role.as_deref() == Some("InlineTextBox") {
+            return (!children.is_empty()).then_some(types::AccessibilityNode {
+                children,
+                ..types::AccessibilityNode::default()
+            });
+        }
         // Skip unlabeled generic wrappers; keep their children by re-parenting.
-        if matches!(
-            role.as_deref(),
-            None | Some("generic" | "InlineTextBox" | "none")
-        ) && name.is_none()
-        {
+        if matches!(role.as_deref(), None | Some("generic" | "none")) && name.is_none() {
             return (!children.is_empty()).then_some(types::AccessibilityNode {
                 children,
                 ..types::AccessibilityNode::default()

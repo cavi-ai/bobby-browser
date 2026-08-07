@@ -124,11 +124,17 @@ pub fn resolve_upload_paths(
     roots: &[PathBuf],
     paths: &[PathBuf],
 ) -> Result<Vec<PathBuf>, CommandError> {
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_owned());
     let roots = roots
         .iter()
         .map(|root| {
             std::fs::canonicalize(root).map_err(|error| {
-                policy_error(format!("invalid upload root {}: {error}", root.display()))
+                policy_error(format!(
+                    "invalid upload root {}: {error} (relative roots resolve against the gateway working directory {cwd})",
+                    root.display()
+                ))
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -146,8 +152,13 @@ pub fn resolve_upload_paths(
             }
             if !roots.iter().any(|root| canonical.starts_with(root)) {
                 return Err(policy_error(format!(
-                    "upload path is outside configured roots: {}",
-                    path.display()
+                    "upload path is outside configured roots: {} (roots: {})",
+                    path.display(),
+                    roots
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )));
             }
             Ok(canonical)

@@ -74,7 +74,7 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
         "screenshotCaptureFailed" => {
             "Retry; if it persists, the page, engine, or artifact store may be in a bad state."
         }
-        "networkPolicyDenied" => "Use a plain http(s) URL with no userinfo.",
+        "networkPolicyDenied" => "The URL failed network policy: non-http(s) scheme, embedded credentials, or a denied destination. Loopback and private addresses are denied unless the operator sets http.allow_loopback / http.allow_private_network in config. For a file the page already offers, prefer clicking its download link over download_url.",
         "httpResponseTooLarge" => {
             "Raise the byte limit within the configured range, or expect a smaller resource."
         }
@@ -120,6 +120,30 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
             "Match the client's interface version to the one runtime_info advertises."
         }
         "unsupportedOperation" => "Check the tool name against tools/list.",
+        _ => return None,
+    };
+    Some(repair(action))
+}
+
+/// Repair for a protocol-layer `-32602` rejection reason string.
+pub(crate) fn repair_for_protocol_reason(reason: &str) -> Option<Value> {
+    let action = match reason {
+        "schemaViolation" => {
+            "Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+        }
+        "malformedArguments" => {
+            "Re-read the tool's inputSchema and description; a bound checked outside the schema failed."
+        }
+        "deadlineOutOfRange" => {
+            "Set the envelope's deadline within the allowed window (not past, not over 300,000 ms out) and resubmit."
+        }
+        "invalidIdempotencyKey" => "Send a well-formed key, or omit the field; the call had no effect.",
+        "workflowBindingConflict" => {
+            "Use the workflowHandle alone for page work, or omit it and send the complete explicit ID set."
+        }
+        "unknownWorkflowHandle" => {
+            "The handle is malformed, unknown, or evicted; use explicit IDs to inspect or close the workflow's resources, then call workflow_start for a new handle."
+        }
         _ => return None,
     };
     Some(repair(action))

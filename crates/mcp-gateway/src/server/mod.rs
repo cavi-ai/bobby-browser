@@ -1336,11 +1336,15 @@ fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Val
 /// value, so they disclose nothing `tools/list` does not.
 fn invalid_params(id: Value, violation: Option<crate::schema::SchemaViolation>) -> Value {
     let data = violation.map(|violation| {
-        json!({
+        let mut data = json!({
             "reason":"schemaViolation",
             "pointer":violation.pointer,
             "constraint":violation.constraint
-        })
+        });
+        if let Some(repair) = crate::repair::repair_for_protocol_reason("schemaViolation") {
+            data["repair"] = repair;
+        }
+        data
     });
     error(id, INVALID_PARAMS, "Invalid params", data)
 }
@@ -1349,12 +1353,11 @@ fn invalid_params(id: Value, violation: Option<crate::schema::SchemaViolation>) 
 /// the schema but failed to deserialize, an expired deadline, a malformed
 /// idempotency key.
 fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
-    error(
-        id,
-        INVALID_PARAMS,
-        "Invalid params",
-        Some(json!({"reason":reason})),
-    )
+    let mut data = json!({"reason":reason});
+    if let Some(repair) = crate::repair::repair_for_protocol_reason(reason) {
+        data["repair"] = repair;
+    }
+    error(id, INVALID_PARAMS, "Invalid params", Some(data))
 }
 
 fn job_port_error_response(id: Value, port_error: crate::jobs::JobPortError) -> Value {
