@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `control_action` `selectOne`/`selectMany` and select fills accept an option's visible label as well as its value (trimmed, case-insensitive label fallback on both engines). Snapshots surface labels, so agents no longer guess underlying values. Verification compares the committed option values, ending false `verificationFailed` on label requests.
+- `inspect` denied by network policy (loopback page, non-http URL) degrades to the browser that already has the page open instead of failing a DOM read with `networkPolicyDenied`. `download_url` keeps the hard denial.
+- Firefox companion `wait_for` supports Text, Value, and Document conditions (Chromium parity). `networkQuiet` remains unsupported on Firefox.
+- The advertised `WaitCondition` schema names every `kind` tag, required field, and enum instead of an opaque object; agents no longer guess condition shapes.
+- `a11y_snapshot`'s description points at `toolset_select` for the mutation and intent phases hidden by the default `explore` phase.
+
+
 ## 0.7.0 - 2026-08-07
 
 - **Breaking (MCP surface):** `tools/list` now defaults to the `explore` phase instead of the full surface. An existing client that connects and does not call `toolset_select` sees the read/snapshot/navigate lifecycle only — no mutation, intent, checkpoint, or `command_execute` tools. `[mcp] startup_toolset`, overridden by `BOBBY_MCP_TOOLSET`, selects the phase at connect: `explore` (default), `act`, `intent`, `verify`, `full`. The first `tools/list` is ~42 KiB on `explore` against 128 KiB on `full`. Capability gates are unchanged and remain the only enforcement boundary; hidden tools stay callable.
