@@ -224,8 +224,7 @@ pub async fn http_fetch(
             let bytes = raw.len();
             let body = String::from_utf8_lossy(&raw).into_owned();
             let contains_matched = contains.map(|needle| body.contains(needle));
-            let ok = status.is_success()
-                && contains_matched.unwrap_or(true);
+            let ok = status.is_success() && contains_matched.unwrap_or(true);
             let mut result = json!({
                 "ok": ok,
                 "status": status.as_u16(),

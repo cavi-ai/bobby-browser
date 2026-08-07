@@ -157,10 +157,7 @@ impl JobHandler for HttpFetchHandler {
             .get("maxBodyBytes")
             .and_then(|value| value.as_u64())
             .map(|value| value as usize);
-        let contains = job
-            .payload
-            .get("contains")
-            .and_then(|value| value.as_str());
+        let contains = job.payload.get("contains").and_then(|value| value.as_str());
         network_engine::http_fetch(
             url,
             timeout_ms,
