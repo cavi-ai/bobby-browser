@@ -38,6 +38,15 @@ pub enum ContextStoreError {
     Serialization(#[from] serde_json::Error),
     #[error("context store is already open by another writer")]
     AlreadyLocked,
+    /// The lockfile could not be claimed for a reason that is not another
+    /// writer holding it: the path is not a regular file, or the path and the
+    /// opened descriptor disagree about which inode they are.
+    ///
+    /// Kept distinct from [`Self::AlreadyLocked`] because the CLI tells the
+    /// operator to stop a running bobby, which is wrong advice for every one
+    /// of these.
+    #[error("context store lockfile is unusable: {0}")]
+    LockUnusable(&'static str),
     #[error("unsupported context schema {actual}; expected {expected}")]
     UnsupportedSchema { actual: u16, expected: u16 },
 }
@@ -364,6 +373,11 @@ fn encode_component(value: &str) -> String {
     hex::encode(value.as_bytes())
 }
 
+/// Attempts to claim the lockfile before reporting contention.
+const LOCK_CLAIM_ATTEMPTS: u32 = 5;
+/// Pause between claim attempts.
+const LOCK_CLAIM_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
 struct Lockfile {
     _file: std::fs::File,
 }
@@ -373,7 +387,9 @@ impl Lockfile {
         let path = root.join(".context-store.lock");
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
             if !metadata.file_type().is_file() {
-                return Err(ContextStoreError::AlreadyLocked);
+                return Err(ContextStoreError::LockUnusable(
+                    "existing lock path is not a regular file",
+                ));
             }
         }
         let mut options = std::fs::OpenOptions::new();
@@ -389,7 +405,9 @@ impl Lockfile {
         let path_metadata = std::fs::symlink_metadata(&path)?;
         let file_metadata = file.metadata()?;
         if !path_metadata.file_type().is_file() || !file_metadata.file_type().is_file() {
-            return Err(ContextStoreError::AlreadyLocked);
+            return Err(ContextStoreError::LockUnusable(
+                "lock path or descriptor is not a regular file",
+            ));
         }
         #[cfg(unix)]
         {
@@ -397,14 +415,33 @@ impl Lockfile {
             if path_metadata.dev() != file_metadata.dev()
                 || path_metadata.ino() != file_metadata.ino()
             {
-                return Err(ContextStoreError::AlreadyLocked);
+                return Err(ContextStoreError::LockUnusable(
+                    "lock path and descriptor disagree about the inode",
+                ));
             }
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         }
-        match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(ContextStoreError::AlreadyLocked),
-            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        // A lock released moments ago is not always claimable on the very next
+        // attempt: `bobby context forget` opens, drops, and reopens the store
+        // in one process, and on Linux that hand-off loses the race often
+        // enough to fail a test run every time. Retry briefly.
+        //
+        // This does not soften real contention. A running bobby holds the lock
+        // for its whole lifetime, so it still fails after the last attempt --
+        // the window only covers a close that has just happened.
+        let mut attempt = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) if attempt < LOCK_CLAIM_ATTEMPTS - 1 => {
+                    attempt += 1;
+                    tokio::time::sleep(LOCK_CLAIM_BACKOFF).await;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(ContextStoreError::AlreadyLocked)
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
         }
     }
 }
