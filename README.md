@@ -38,27 +38,25 @@ cargo build --release -p bobby-browser
 
 ### Homebrew (macOS / Linux)
 
-Not on homebrew-core yet. From a checkout (ships `bobby`, `mcp-gateway`, and
-`acp-gateway`):
-
-```bash
-brew install --formula ./Formula/bobby-browser.rb
-```
-
-From the tap:
-
 ```bash
 brew tap cavi-ai/tap
 brew install cavi-ai/tap/bobby-browser
 ```
 
-The tap lives in `cavi-ai/homebrew-tap`; brew addresses it as `cavi-ai/tap`,
-which is why the install line is not `cavi-ai/bobby-browser/bobby-browser`.
+Installs `bobby`, `mcp-gateway`, and `acp-gateway`. The tap repository is
+[`cavi-ai/homebrew-tap`](https://github.com/cavi-ai/homebrew-tap); brew strips
+the `homebrew-` prefix and addresses it as `cavi-ai/tap`, so the formula is
+reached as `cavi-ai/tap/bobby-browser` rather than repeating the project name.
 
-Future homebrew-core checklist (when ready to submit upstream): formula name
-`bobby-browser`; bottle the three binaries; livecheck against GitHub Releases;
-CI builds `bobby` / `mcp-gateway` / `acp-gateway`; audit against Homebrew's
-accepted licenses and no network-at-install.
+The formula is named for the project, not the binary, so it matches the crate
+and the npm package and stays viable for a homebrew-core submission, where
+`bobby` alone would be too generic.
+
+From a checkout instead of the tap:
+
+```bash
+brew install --formula ./Formula/bobby-browser.rb
+```
 
 Release archives are three binaries on purpose: the CLI plus the two stdio
 gateways agents spawn. Prefer MCP Explore (`BOBBY_MCP_TOOLSET=explore` or
@@ -124,6 +122,8 @@ let _session = client
 # Ok(()) }
 ```
 
+[`bobby-browser-client` on crates.io](https://crates.io/crates/bobby-browser-client) ·
+[API docs on docs.rs](https://docs.rs/bobby-browser-client) ·
 [Crate book](docs/bobby-browser/source/pages/rust/index.md)
 
 ## Published artifacts
@@ -132,9 +132,10 @@ One version, one `v*` tag, three artifacts:
 
 | Artifact | Name |
 |---|---|
-| Binary | `bobby` — GitHub release assets |
+| Binary | [GitHub release assets](https://github.com/cavi-ai/bobby-browser/releases/latest) — `bobby`, `mcp-gateway`, `acp-gateway` |
+| Homebrew | [`cavi-ai/tap/bobby-browser`](https://github.com/cavi-ai/homebrew-tap) |
 | npm | [`@cavi-ai/bobby-browser`](https://www.npmjs.com/package/@cavi-ai/bobby-browser) |
-| crates.io | `bobby-browser-client` |
+| crates.io | [`bobby-browser-client`](https://crates.io/crates/bobby-browser-client) — [docs.rs](https://docs.rs/bobby-browser-client) |
 
 Everything else in `crates/` and `packages/` is implementation and is not
 published. `scripts/check-version-agreement.py` enforces this in CI.
