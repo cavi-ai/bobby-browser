@@ -4,6 +4,9 @@
 
 Release candidate. No version bump yet.
 
+- The Northstar scenario server is extracted from `runtime-tests` into a reusable `gauntlet-server` crate. It serves `GET /__gauntlet/snapshot` and `GET /__gauntlet/request-log` (the same state the in-process `snapshot()` / `request_log()` expose), and ships a `gauntlet-server` binary (`--seed`, `--level`) so out-of-process drivers can run and verify journeys over HTTP. The five release-gate journeys are unchanged.
+- `benchmarks/competitor-gauntlet/` is a benchmark harness that runs the five Northstar journeys against alternative agent browser tooling with a headless agent driver, recording wall time, tool calls, error counts, token usage, server-authoritative pass/fail, and a structured agent self-report per run. Results append to `benchmarks/results/runs.jsonl` (gitignored); `score` aggregates per tool.
+
 - MCP failures carry a machine-readable repair hint: command-layer failures set `error.repair`, RPC-layer rejections set `error.data.repair`, each `{action, doc}` pointing into `bobby://failure-taxonomy`. A `needsReconciliation` outcome always carries the never-retry repair, whatever its error code.
 - `runtime_info`'s `capabilities` list reports vision wiring: `vision-assist` and `vision-provider` appear only when configured, so an agent can tell an unconfigured provider apart from a transient vision failure without shell access.
 - `tools/list` advertise-only trim: the constant `$schema` URL is dropped from advertised input and output schemas, and `workflow_recover`'s `RecoveryDecision` is advertised as a status-tag projection (the same treatment `Evidence` already had). Validation schemas and `tools/call` are unchanged.
