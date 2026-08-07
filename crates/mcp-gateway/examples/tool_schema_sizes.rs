@@ -58,7 +58,7 @@ async fn list_for(toolset: Toolset) -> (usize, Vec<(String, usize)>) {
             )
         })
         .collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
     let tools_bytes = serde_json::to_vec(tools).expect("ser").len();
     (tools_bytes, rows)
 }
