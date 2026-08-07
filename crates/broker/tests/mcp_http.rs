@@ -174,6 +174,44 @@ async fn two_principals_get_independent_mcp_lifecycles() {
     );
 }
 
+/// Streamable HTTP currently caches one MCP `Server` per authenticated
+/// principal. Two logical clients using the same bearer therefore share the
+/// server generation and lifecycle state.
+#[tokio::test]
+async fn same_principal_reinitialize_resets_the_shared_mcp_lifecycle() {
+    let (app, _authority, admin_bearer) = app_with_admin(4).await;
+    let bearer = issue_bearer(&app, &admin_bearer, PRINCIPAL_A, &["session:read"]).await;
+
+    let (status, body) = post_mcp(&app, &bearer, initialize_request(1)).await;
+    assert_eq!(status, StatusCode::OK, "client A initialize: {body}");
+    let (status, body) = post_mcp(&app, &bearer, initialized_notification()).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "client A initialized: {body}");
+    let (status, body) = post_mcp(&app, &bearer, tools_list_request(2)).await;
+    assert_eq!(status, StatusCode::OK, "client A tools/list: {body}");
+    assert!(body["result"]["tools"].is_array(), "{body}");
+
+    let (status, body) = post_mcp(&app, &bearer, initialize_request(3)).await;
+    assert_eq!(status, StatusCode::OK, "client B reinitialize: {body}");
+    assert_eq!(body["result"]["protocolVersion"], "2025-11-25", "{body}");
+
+    let (status, body) = post_mcp(&app, &bearer, tools_list_request(4)).await;
+    assert_eq!(status, StatusCode::OK, "client A gated tools/list: {body}");
+    assert_eq!(
+        body["error"]["code"], -32002,
+        "same-principal reinitialize must return the shared lifecycle to awaiting-initialized: {body}"
+    );
+
+    let (status, body) = post_mcp(&app, &bearer, initialized_notification()).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "fresh initialized: {body}");
+    let (status, body) = post_mcp(&app, &bearer, tools_list_request(5)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "tools/list after initialized: {body}"
+    );
+    assert!(body["result"]["tools"].is_array(), "{body}");
+}
+
 #[tokio::test]
 async fn mcp_respects_per_principal_quota() {
     let (app, _authority, admin_bearer) = app_with_admin_and_quota(16, 1).await;

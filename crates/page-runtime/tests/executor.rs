@@ -523,6 +523,40 @@ fn driver_failure() -> CommandError {
 }
 
 #[tokio::test]
+async fn missing_registered_page_is_not_found_while_other_page_validation_stays_invalid_request() {
+    let (runtime, session, page, _) = runtime(DriverMode::Succeed, None).await;
+
+    let missing = runtime
+        .execute(envelope(session.clone(), PageId::new(), navigate()))
+        .await;
+    assert!(matches!(
+        missing,
+        CommandOutcome::Failed { error, .. }
+            if error.code == ErrorCode::NotFound
+                && error.layer == ErrorLayer::Workflow
+                && !error.retryable
+    ));
+
+    let wrong_session = runtime
+        .execute(envelope(SessionId::new(), page.clone(), navigate()))
+        .await;
+    assert!(matches!(
+        wrong_session,
+        CommandOutcome::Failed { error, .. }
+            if error.code == ErrorCode::InvalidRequest
+    ));
+
+    let mut missing_page_id = envelope(session, page, navigate());
+    missing_page_id.page_id = None;
+    let missing_page_id = runtime.execute(missing_page_id).await;
+    assert!(matches!(
+        missing_page_id,
+        CommandOutcome::Failed { error, .. }
+            if error.code == ErrorCode::InvalidRequest
+    ));
+}
+
+#[tokio::test]
 async fn raw_css_select_type_text_verifies_the_exact_option_value() {
     let (runtime, session, page, events) = runtime(DriverMode::Succeed, None).await;
     let outcome = runtime

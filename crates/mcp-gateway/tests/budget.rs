@@ -261,6 +261,7 @@ const READ_ONLY: &[&str] = &[
     "intent_wait_for_state",
     "intent_extract",
     "job_status",
+    "workflow_observe",
 ];
 
 const DESTRUCTIVE: &[&str] = &[
@@ -281,6 +282,7 @@ const OPEN_WORLD: &[&str] = &[
     "command_execute",
     // Navigates when given a URL.
     "page_open",
+    "workflow_start",
     // Can carry the page to a new destination (verified by expected* guards).
     "click",
     "intent_follow",
@@ -364,6 +366,16 @@ async fn a_read_only_tool_is_never_also_destructive() {
             "{} is both read-only and destructive",
             tool["name"]
         );
+    }
+}
+
+#[test]
+fn workflow_annotation_truth_table_stays_pinned() {
+    assert!(READ_ONLY.contains(&"workflow_observe"));
+    assert!(OPEN_WORLD.contains(&"workflow_start"));
+    for tool in ["workflow_start", "workflow_observe"] {
+        assert!(!DESTRUCTIVE.contains(&tool), "{tool} became destructive");
+        assert!(!IDEMPOTENT.contains(&tool), "{tool} became idempotent");
     }
 }
 

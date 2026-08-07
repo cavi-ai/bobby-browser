@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- MCP adds `workflow_start` and `workflow_observe` in every toolset phase, with `checkpoint_save` also advertised in Intent. Handles substitute only the documented page-work scope, remain capability-checked, and expire on accepted reinitialize/server-generation change; explicit IDs remain compatible for lifecycle and recovery.
+- Workflow handle state is bounded to 64 committed LRU bindings plus 64 concurrent reservations. Starts reconcile sessions closed through other interfaces; successful close calls reclaim local bindings, while externally closed pages return ordinary `notFound` until LRU reclamation.
+- Streamable HTTP logical clients using the same authenticated principal share one cached MCP server lifecycle and generation. An accepted initialize resets their shared handles and requires a fresh initialized notification; distinct principals remain isolated.
+
 ## 0.7.0 - 2026-08-06
 
 - Ollama joins the direct vision backends. `bobby vision-proxy --ollama --ollama-base-url` and `bobby vision connect --provider ollama` normalize a local model's output to the `VisionProposal` schema, and a provider on port 11434 is detected from config. No credentials leave the machine.

@@ -22,53 +22,55 @@ Tools are advertised only when the principal holds the required capability.
 
 | Tool | Required capability | Purpose |
 |---|---|---|
-| `runtime_info` | `session:read` | Runtime capability and health information |
-| `session_create` | `session:write` | Create a browser session |
-| `session_close` | `session:write` | Close a session and release its worker |
-| `session_list` | `session:read` | List sessions visible to the principal |
-| `page_open` | `page:write` (+ `browser:mutate` when `url` is supplied) | Open a page in an owned session and optionally navigate it |
-| `page_list` | `browser:mutate` | List pages in an owned session |
-| `page_close` | `browser:mutate` | Close a page in an owned session |
-| `page_activate` | `browser:mutate` | Bring a page to the front |
 | `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree with bounded form-control state, sensitive-value redaction, and command-ready semantic targets (`maxNodes` optional, 1…2048; default 256) |
-| `form_snapshot` | `page:read` | Read the canonical bounded form inventory with sensitive-value redaction and no selectors, DOM IDs, or raw HTML (`maxControls` optional, 1…512; default 512) |
-| `navigate` | `browser:mutate` | Navigate a page to a URL |
-| `click` | `browser:mutate` | Click an element |
-| `type_text` | `browser:mutate` | Type text (optional `expectedUrl` page guard) |
-| `inspect` | `browser:mutate` | Read page state, optionally element-scoped |
-| `screenshot` | `browser:mutate` | Capture a screenshot artifact |
-| `wait_for` | `browser:mutate` | Wait for a page condition |
-| `download_url` | `browser:mutate` + `file:download` | Download a URL with digest evidence |
-| `upload_files` | `browser:mutate` + `file:upload` | Set files on a file input |
-| `evaluate_javascript` | `browser:mutate` + `javascript:evaluate` | Evaluate JavaScript (also session-policy gated) |
-| `extract_structured` | `browser:mutate` + `vision:assist` | Schema-shaped JSON extraction via the configured vision provider (also session `executionPolicy.visionAssist` + `[vision]`) |
-| `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
-| `control_action` | `browser:mutate` | Perform one typed native action against a semantic form-control target (Reconciliable) |
-| `intent_locate` | `browser:mutate` + `intent:execute` | Locate an element by described purpose (Replayable) |
-| `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable) |
-| `intent_complete_form` | `browser:mutate` + `intent:execute` | Apply an ordered list of named fields as one intent; never submits (Reconciliable) |
-| `intent_submit_and_verify` | `browser:mutate` + `intent:execute` | Submit and verify the expected state (Boundary) |
-| `intent_wait_for_state` | `browser:mutate` + `intent:execute` | Wait for a described page state (Replayable) |
-| `intent_follow` | `browser:mutate` + `intent:execute` | Activate a link/control and verify the destination (Boundary when `boundary: true`) |
-| `intent_dismiss_obstruction` | `browser:mutate` + `intent:execute` | Dismiss a popup, overlay, or cookie banner (Reconciliable) |
-| `intent_extract` | `browser:mutate` + `intent:execute` | Read named fields without mutating (Replayable) |
-| `events_read` | `session:read` | Read retained events after a cursor |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
+| `click` | `browser:mutate` | Click an element |
+| `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
 | `context_ask` | `page:read` | Ask the retained page context where a described control is |
 | `context_neighbors` | `context:read` | Show remembered form structure around a described control (siblings, success counters) |
-| `toolset_select` | none | Narrow `tools/list` to one phase |
-| `recovery_status` | `recovery:read` | Read a workflow checkpoint and recovery receipts |
-| `cookie_get` | `browser:mutate` | Read cookies (all origins or filtered) |
-| `pdf` | `browser:mutate` | Print the page to a PDF artifact |
-| `dialog` | `browser:mutate` | Accept or dismiss the next JS dialog |
-| `emulate` | `browser:mutate` | Viewport + geolocation overrides |
-| `network_log` | `browser:mutate` | Dump recorded network log as HAR |
-| `cookie_set` | `browser:mutate` | Store cookies |
+| `control_action` | `browser:mutate` | Perform one typed native action against a semantic form-control target (Reconciliable) |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
-| `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
-| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe`; advertised in full/act/verify) |
-| `job_status` | `job:read` | Read one owned job by id |
+| `cookie_get` | `browser:mutate` | Read cookies (all origins or filtered) |
+| `cookie_set` | `browser:mutate` | Store cookies |
+| `dialog` | `browser:mutate` | Accept or dismiss the next JS dialog |
+| `download_url` | `browser:mutate` + `file:download` | Download a URL with digest evidence |
+| `emulate` | `browser:mutate` | Viewport + geolocation overrides |
+| `evaluate_javascript` | `browser:mutate` + `javascript:evaluate` | Evaluate JavaScript (also session-policy gated) |
+| `events_read` | `session:read` | Read retained events after a cursor |
+| `extract_structured` | `browser:mutate` + `vision:assist` | Schema-shaped JSON extraction via the configured vision provider (also session `executionPolicy.visionAssist` + `[vision]`) |
+| `form_snapshot` | `page:read` | Read the canonical bounded form inventory with sensitive-value redaction and no selectors, DOM IDs, or raw HTML (`maxControls` optional, 1…512; default 512) |
+| `inspect` | `browser:mutate` | Read page state, optionally element-scoped |
+| `intent_complete_form` | `browser:mutate` + `intent:execute` | Apply an ordered list of named fields as one intent; never submits (Reconciliable) |
+| `intent_dismiss_obstruction` | `browser:mutate` + `intent:execute` | Dismiss a popup, overlay, or cookie banner (Reconciliable) |
+| `intent_extract` | `browser:mutate` + `intent:execute` | Read named fields without mutating (Replayable) |
+| `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable) |
+| `intent_follow` | `browser:mutate` + `intent:execute` | Activate a link/control and verify the destination (Boundary when `boundary: true`) |
+| `intent_locate` | `browser:mutate` + `intent:execute` | Locate an element by described purpose (Replayable) |
+| `intent_submit_and_verify` | `browser:mutate` + `intent:execute` | Submit and verify the expected state (Boundary) |
+| `intent_wait_for_state` | `browser:mutate` + `intent:execute` | Wait for a described page state (Replayable) |
 | `job_cancel` | `job:cancel` | Cancel one owned job by id |
+| `job_status` | `job:read` | Read one owned job by id |
+| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe`; advertised in full/act/verify) |
+| `navigate` | `browser:mutate` | Navigate a page to a URL |
+| `network_log` | `browser:mutate` | Dump recorded network log as HAR |
+| `page_activate` | `browser:mutate` | Bring a page to the front |
+| `page_close` | `browser:mutate` | Close a page in an owned session |
+| `page_list` | `browser:mutate` | List pages in an owned session |
+| `page_open` | `page:write` (+ `browser:mutate` when `url` is supplied) | Open a page in an owned session and optionally navigate it |
+| `pdf` | `browser:mutate` | Print the page to a PDF artifact |
+| `recovery_status` | `recovery:read` | Read a workflow checkpoint and recovery receipts |
+| `runtime_info` | `session:read` | Runtime capability and health information |
+| `screenshot` | `browser:mutate` | Capture a screenshot artifact |
+| `session_close` | `session:write` | Close a session and release its worker |
+| `session_create` | `session:write` | Create a browser session |
+| `session_list` | `session:read` | List sessions visible to the principal |
+| `toolset_select` | none | Narrow `tools/list` to one phase |
+| `type_text` | `browser:mutate` | Type text (optional `expectedUrl` page guard) |
+| `upload_files` | `browser:mutate` + `file:upload` | Set files on a file input |
+| `wait_for` | `browser:mutate` | Wait for a page condition |
+| `workflow_observe` | `browser:mutate` (+ `page:read` when `includeForms` is true) | Read retained-first compact context, falling back to a live accessibility observation |
+| `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
+| `workflow_start` | `session:read` + `session:write` + `page:write` (+ `browser:mutate` when `url` is supplied) | Create and bind a session, page, and workflow in one lifecycle-safe call |
 
 The flat browser tools (`navigate` … `evaluate_javascript` /
 `extract_structured`, plus `page_activate` / `a11y_snapshot`) and the
@@ -97,12 +99,150 @@ hatch for anything the named tools do not cover. Skills are **not** MCP tools.
 
 ## Workflow continuity
 
-Every envelope-minting tool takes an optional `workflowId` and returns the
-`workflowId` it used alongside the outcome. Omit it and the server mints one;
-pass a returned value back to keep subsequent commands in the same workflow.
-This is what makes `checkpoint_save`, `recovery_status`, and
-`workflow_recover` reachable without hand-building envelopes.
+Prefer `workflow_start` over separate `session_create` + `page_open` calls. It
+creates the session and page, optionally navigates, and publishes the binding
+only after setup succeeds:
 
+```json
+{
+  "name": "workflow_start",
+  "arguments": {"profile": "default", "url": "https://example.com"}
+}
+```
+
+A successful `structuredContent` includes `status: "completed"`, an opaque
+`workflowHandle`, `sessionId`, `pageId`, `workflowId`, the session and page
+states, and `navigationOutcome` (null when no URL was supplied). A terminal
+startup failure returns `workflowHandle: null`, cleanup state, and one of
+`pageOpenFailed`, `navigationFailed`, `workflowGenerationChanged`, or
+`workflowSupervisorLost`. A `pageOpenFailed` result has null `pageId` and
+`page`; later failures retain both. In every failure, inspect `pageClosed`,
+`sessionDeleted`, and `cleanupErrorCode`. If the response itself may have been
+lost, do not blindly retry: call `session_list` first, then close or resume the
+session that the first call may have created.
+
+Example result without initial navigation:
+
+```json
+{
+  "structuredContent": {
+    "status": "completed",
+    "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+    "sessionId": "10000000-0000-4000-8000-000000000001",
+    "pageId": "10000000-0000-4000-8000-000000000002",
+    "workflowId": "10000000-0000-4000-8000-000000000003",
+    "session": {
+      "id": "10000000-0000-4000-8000-000000000001",
+      "profile": "default",
+      "proxy": null,
+      "page_ids": ["10000000-0000-4000-8000-000000000002"],
+      "created_at": "2026-08-07T12:00:00Z",
+      "last_used_at": "2026-08-07T12:00:00Z",
+      "execution_policy": {
+        "javascriptEvaluation": false,
+        "visionAssist": false,
+        "fingerprint": false,
+        "humanize": false
+      }
+    },
+    "page": {
+      "id": "10000000-0000-4000-8000-000000000002",
+      "session_id": "10000000-0000-4000-8000-000000000001",
+      "url": null,
+      "mode": "Interactive",
+      "ready_state": "complete",
+      "pending_requests": 0
+    },
+    "navigationOutcome": null
+  }
+}
+```
+
+Use `workflow_observe` for compact retained-first context:
+
+```json
+{
+  "name": "workflow_observe",
+  "arguments": {
+    "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+    "goal": "Where is the checkout button?",
+    "includeForms": true,
+    "maxNodes": 256,
+    "maxControls": 128
+  }
+}
+```
+
+Its `structuredContent` reports `source: "retained"` when a `page:read`
+context answer is available; otherwise it reports `source: "live"` with a
+fresh accessibility `observationOutcome`. `includeForms: true` dynamically
+requires `page:read` and adds `formSnapshot`; the base tool statically requires
+`browser:mutate`.
+
+Example live result without forms:
+
+```json
+{
+  "structuredContent": {
+    "status": "completed",
+    "source": "live",
+    "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+    "sessionId": "10000000-0000-4000-8000-000000000001",
+    "pageId": "10000000-0000-4000-8000-000000000002",
+    "workflowId": "10000000-0000-4000-8000-000000000003",
+    "retainedAnswer": null,
+    "observationOutcome": {
+      "status": "completed",
+      "commandId": "10000000-0000-4000-8000-000000000004",
+      "workflowId": "10000000-0000-4000-8000-000000000003"
+    },
+    "formSnapshot": null
+  }
+}
+```
+
+The handle can replace the explicit scope fields on this exact V1 allowlist:
+`a11y_snapshot`, `click`, `context_ask`, `context_neighbors`,
+`control_action`, `cookie_delete`, `cookie_get`, `cookie_set`, `dialog`,
+`download_url`, `emulate`, `evaluate_javascript`, `extract_structured`,
+`form_snapshot`, `inspect`, `intent_complete_form`,
+`intent_dismiss_obstruction`, `intent_extract`, `intent_fill`,
+`intent_follow`, `intent_locate`, `intent_submit_and_verify`,
+`intent_wait_for_state`, `navigate`, `network_log`, `page_activate`,
+`page_close`, `pdf`, `screenshot`, `type_text`, `upload_files`, and `wait_for`.
+Each of these still accepts its complete explicit-ID form for compatibility.
+Do not mix a handle with explicit scope fields: that is
+`workflowBindingConflict`. A malformed, expired, unknown, or evicted handle is
+`unknownWorkflowHandle`.
+
+Handles are convenience bindings, not authority. Capability, operation, and
+ownership checks still run, and explicit IDs remain the audit/repair path for
+session/page lifecycle, checkpoints, and recovery. Successful `page_close` or
+`session_close` automatically evicts matching local handles.
+
+The handle registry is bounded to **64 committed LRU bindings plus 64
+concurrent reservations**. A failed start never evicts a live handle; the 65th
+successful committed binding evicts the least recently used old handle.
+Before each start, the server authoritatively removes bindings for sessions
+closed through another interface. A session's recorded `page_ids` are not
+page-liveness truth: if only its page was closed elsewhere, the next page call
+returns ordinary `notFound`, and the bounded committed-handle LRU eventually
+reclaims that stale binding.
+
+An accepted `initialize` starts a new server generation and invalidates every
+handle from the previous one. Stdio normally has one server per process.
+
+> **Important — shared HTTP generation.** Streamable HTTP currently caches one
+> MCP `Server` per authenticated principal. Logical clients using the same
+> principal share initialization and generation state: any accepted
+> `initialize` resets all shared handles and returns the shared lifecycle to
+> awaiting-initialized until a fresh `notifications/initialized`. Coordinate
+> reinitialization, or use distinct principals when isolation is required,
+> until the transport has a separate session key.
+
+Every envelope-minting tool also accepts explicit `sessionId`, `pageId`, and an
+optional `workflowId`, and returns the workflow ID it used. Omit `workflowId`
+to mint one; pass it back to keep later commands in the same workflow.
 `intent_*` tools also accept an optional `idempotencyKey`.
 
 ## Rejected arguments
@@ -115,6 +255,14 @@ A `-32602` response carries `data` describing what failed:
 | `malformedArguments` | — | Cleared the schema but failed to deserialize |
 | `deadlineOutOfRange` | — | `command_execute` envelope deadline is past, or more than five minutes in the future |
 | `invalidIdempotencyKey` | — | Key is not 1–128 printable ASCII characters |
+| `workflowBindingConflict` | — | A handle-capable call mixed `workflowHandle` with explicit scope IDs; use one form only |
+| `unknownWorkflowHandle` | — | Handle is malformed, unknown, evicted, or from an earlier server generation; repair with explicit IDs |
+
+`pageOpenFailed`, `navigationFailed`, `workflowGenerationChanged`, and
+`workflowSupervisorLost` are not protocol-layer rejections. They are the four
+structured `workflow_start` terminal failure reasons; inspect the cleanup
+fields and reconcile the returned/lost session with `session_list` and
+explicit IDs before starting again.
 
 `pointer` and `constraint` describe the published schema, never the submitted
 value. Example: a `session_create` call with no `profile` returns
@@ -209,19 +357,20 @@ compare hand-bounded `kind` variant sets to schemars output from the
 
 ## Toolset phases
 
-`tools/list` for a principal holding every capability is ~130,000 bytes. An
-agent that only needs part of the surface can narrow it with `toolset_select`:
+For a principal holding every capability with a job port attached, the current
+catalog sizes are:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page, navigate, wait (default) | ~30 KB |
-| `act` | raw primitives, `command_execute`, and job tools | ~45 KB |
-| `intent` | the `intent_*` family and `extract_structured` | ~48 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~41 KB |
-| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~95 KB |
+| `explore` | observation, lifecycle setup, and navigation; no action or intent tools (default) | 43,979 bytes |
+| `act` | raw primitives, `command_execute`, and job tools | 68,042 bytes |
+| `intent` | the `intent_*` family, `extract_structured`, and `checkpoint_save` | 73,009 bytes |
+| `verify` | evidence, checkpoints, recovery, job tools | 54,062 bytes |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | 129,936 bytes (1,136 bytes below the 131,072-byte budget) |
 
-Session and page lifecycle, `runtime_info`, and `toolset_select` itself appear
-in every phase.
+Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
+`workflow_observe` appear in every phase. This includes servers configured to
+start directly in `act`, `intent`, or `verify`.
 
 Selecting a phase emits `notifications/tools/list_changed`; re-read
 `tools/list` after calling it. Selecting the phase already in effect emits

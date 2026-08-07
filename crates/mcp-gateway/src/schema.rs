@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::{json, Map, Value};
 
 use crate::protocol::MAX_EVENT_LIMIT;
+use crate::workflow_handles::{workflow_scope_for_tool, WorkflowScope};
 
 pub(crate) const MAX_EVIDENCE_ITEMS: usize = 128;
 const MAX_COLLECTION_ITEMS: usize = 128;
@@ -14,6 +15,7 @@ const MAX_NETWORK_IGNORE_SUBSTRINGS: usize = 32;
 const MAX_NETWORK_IGNORE_SUBSTRING_BYTES: usize = 512;
 const MAX_NETWORK_IGNORE_RESOURCE_TYPES: usize = 32;
 const MAX_EXCLUDED_CLASSES: usize = 64;
+pub(crate) const MAX_WORKFLOW_GOAL_SCALARS: usize = 256;
 // Output-only: bounds for definitions reachable solely from `structuredContent`,
 // never from a tool argument.
 const MAX_RECOVERY_RECEIPTS: usize = 64;
@@ -47,6 +49,37 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 )
             }),
             vec!["profile"],
+        ),
+        "workflow_start" => (
+            json!({
+                "profile": string(1, 128),
+                "proxy": nullable(string(0, 2048)),
+                "executionPolicy": object(
+                    json!({
+                        "javascriptEvaluation":{"type":"boolean"},
+                        "visionAssist":{"type":"boolean"},
+                        "fingerprint":{"type":"boolean"},
+                        "humanize":{"type":"boolean"},
+                        "visionNode":string(1, 128)
+                    }),
+                    &[]
+                ),
+                "url": string(1, MAX_URL_BYTES)
+            }),
+            vec!["profile"],
+        ),
+        "workflow_observe" => (
+            json!({
+                "workflowHandle": workflow_handle(),
+                // `validate_string` is intentionally byte-oriented. Four bytes per
+                // scalar prevents it from rejecting a valid 256-scalar UTF-8 goal;
+                // the observe parser applies the scalar limit before registry lookup.
+                "goal": string(0, MAX_WORKFLOW_GOAL_SCALARS * 4),
+                "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
+                "includeForms": {"type":"boolean"},
+                "maxControls": {"type":"integer","minimum":1,"maximum":512}
+            }),
+            vec!["workflowHandle"],
         ),
         "context_ask" => (
             json!({
@@ -126,6 +159,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "network_log" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "clear": {"type":"boolean"}
@@ -134,6 +168,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "emulate" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "viewport": nullable(object(
@@ -154,6 +189,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "dialog" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "action": {"type":"string","enum":["accept","dismiss"]},
@@ -163,6 +199,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "pdf" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "landscape": {"type":"boolean"},
@@ -174,6 +211,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "cookie_get" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "urls": array(string(1, MAX_URL_BYTES), 64)
@@ -182,6 +220,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "cookie_set" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "cookies": array(json!({"$ref":"#/$defs/SetCookieParam"}), 128)
@@ -190,6 +229,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "cookie_delete" => (
             json!({
+                "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
                 "urls": array(string(1, MAX_URL_BYTES), 64),
@@ -429,6 +469,9 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     let mut patched = definitions();
     let patched = patched.as_object_mut().expect("definitions is an object");
     apply_advertised_input_patches(patched);
+    if workflow_scope_for_tool(name).is_some() {
+        patched.insert("H".to_owned(), workflow_handle());
+    }
     if name == "command_execute" {
         if let Some(command_envelope) = patched.get_mut("CommandEnvelope") {
             command_envelope["properties"]["command"] = json!({
@@ -438,12 +481,107 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
             });
         }
     }
+    if name == "workflow_observe" {
+        schema["properties"]["goal"]["maxLength"] = json!(MAX_WORKFLOW_GOAL_SCALARS);
+    }
+    if name == "workflow_start" {
+        schema["properties"]["proxy"] = json!({"type":["string","null"],"maxLength":2048});
+        schema["properties"]["executionPolicy"]
+            .as_object_mut()
+            .expect("execution policy is an object schema")
+            .remove("required");
+    }
+    apply_workflow_scope_advertisement(name, &mut schema);
     let seed = json!({"properties": schema["properties"], "required": schema["required"]});
-    schema["$defs"] = reachable_definitions_from(&seed, patched);
+    let defs = reachable_definitions_from(&seed, patched);
+    if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+        schema["$defs"] = defs;
+    } else {
+        schema
+            .as_object_mut()
+            .expect("tool schemas are objects")
+            .remove("$defs");
+    }
     if let Some(example) = tool_argument_example(name) {
         schema["examples"] = json!([example]);
     }
     schema
+}
+
+/// Capability-sensitive advertising for the two session-creation contracts.
+/// Validation stays independent of what an individual principal can see.
+pub(crate) fn advertised_tool_schema_for_capabilities(
+    name: &str,
+    capabilities: &types::CapabilitySet,
+) -> Value {
+    let mut schema = advertised_tool_schema(name);
+    if matches!(name, "session_create" | "workflow_start") {
+        let policy = &mut schema["properties"]["executionPolicy"]["properties"];
+        if let Some(policy) = policy.as_object_mut() {
+            if !capabilities.contains(types::Capability::BrowserFingerprint) {
+                policy.remove("fingerprint");
+            }
+            if !capabilities.contains(types::Capability::BrowserHumanize) {
+                policy.remove("humanize");
+            }
+        }
+    }
+    schema
+}
+
+/// Adds the handle alternative only to the advertised schema. The dispatcher
+/// continues to validate normalized explicit ids against `tool_schema`.
+fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
+    let Some(scope) = workflow_scope_for_tool(name) else {
+        return;
+    };
+    let business_properties = schema["properties"]
+        .as_object()
+        .expect("tool schemas have object properties")
+        .clone();
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("tool schemas have object properties");
+    properties.insert("workflowHandle".to_owned(), json!({"$ref":"#/$defs/H"}));
+
+    let required = schema["required"]
+        .as_array_mut()
+        .expect("tool schemas have required arrays");
+    required.retain(|field| field != "sessionId" && field != "pageId");
+
+    let explicit_required = match scope {
+        WorkflowScope::SessionPage => json!(["sessionId", "pageId"]),
+        WorkflowScope::SessionPageWorkflow => json!(["sessionId", "pageId", "workflowId"]),
+    };
+    let mut handle_properties = business_properties.clone();
+    handle_properties.insert("workflowHandle".to_owned(), json!({"$ref":"#/$defs/H"}));
+    handle_properties.insert("sessionId".to_owned(), Value::Bool(false));
+    handle_properties.insert("pageId".to_owned(), Value::Bool(false));
+    handle_properties.insert("workflowId".to_owned(), Value::Bool(false));
+
+    let mut explicit_properties = business_properties;
+    explicit_properties.insert("workflowHandle".to_owned(), Value::Bool(false));
+    schema["oneOf"] = json!([
+        {
+            "required":["workflowHandle"],
+            "properties":handle_properties
+        },
+        {
+            "required":explicit_required,
+            "properties":explicit_properties
+        }
+    ]);
+}
+
+/// Advertised workflow-handle shape. Runtime lookup intentionally uses the
+/// allocation-free parser in `workflow_handles.rs`, not a JSON Schema pattern.
+fn workflow_handle() -> Value {
+    json!({
+        "type":"string",
+        "minLength":35,
+        "maxLength":35,
+        "description":"wf_ + 32 lowercase hex."
+    })
 }
 
 /// Opaque / property-preserving stand-ins for the largest input `$defs`. Used
@@ -501,6 +639,10 @@ fn tool_argument_example(name: &str) -> Option<Value> {
             "sessionId": session,
             "url": "https://example.test/"
         }),
+        "workflow_start" => json!({"profile":"default"}),
+        "workflow_observe" => json!({
+            "workflowHandle":"wf_0123456789abcdef0123456789abcdef"
+        }),
         _ => return None,
     })
 }
@@ -536,6 +678,31 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
             &["sessions"],
         ),
         "session_create" => output_ref("SessionState"),
+        "workflow_start" => workflow_start_output_schema(),
+        "workflow_observe" => object(
+            json!({
+                "status":string(1, 32),
+                "source":string(1, 128),
+                "workflowHandle":workflow_handle(),
+                "sessionId":id(),
+                "pageId":id(),
+                "workflowId":id(),
+                "retainedAnswer":nullable(json!({"type":"object"})),
+                "observationOutcome":workflow_observation_outcome_schema(),
+                "formSnapshot":nullable(json!({"$ref":"#/$defs/FormSnapshot"}))
+            }),
+            &[
+                "status",
+                "source",
+                "workflowHandle",
+                "sessionId",
+                "pageId",
+                "workflowId",
+                "retainedAnswer",
+                "observationOutcome",
+                "formSnapshot",
+            ],
+        ),
         "session_close" => object(
             json!({"closed":{"type":"boolean","const":true}}),
             &["closed"],
@@ -652,23 +819,251 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
     schema
 }
 
-/// `tools/list` outputSchema. Identical to [`tool_output_schema`] except
-/// `form_snapshot`, whose nested `FormControl*` `$defs` dominate the entry —
-/// advertised as opaque form/control objects while wire types stay unchanged.
+/// `tools/list` outputSchema. Large nested values are advertised as opaque
+/// objects where their full wire schemas would otherwise dominate the connect
+/// budget; [`tool_output_schema`] remains the strict validation authority.
 pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
-    if name != "form_snapshot" {
+    if name == "workflow_start" {
+        return advertised_workflow_start_output_schema();
+    }
+    if name != "form_snapshot" && name != "workflow_observe" {
         return tool_output_schema(name);
     }
-    let mut schema = output_ref("FormSnapshot");
-    schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
+    let mut schema = tool_output_schema(name);
+    let mut seed = schema.clone();
+    seed.as_object_mut()
+        .expect("output schemas are objects")
+        .remove("$defs");
     let mut patched = definitions();
     let patched = patched.as_object_mut().expect("definitions is an object");
     patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
-    let defs = reachable_definitions_from(&schema, patched);
+    let defs = reachable_definitions_from(&seed, patched);
     if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
         schema["$defs"] = defs;
     }
     schema
+}
+
+/// Exact advertise-only workflow-start result. The three closed wire branches
+/// are unchanged from [`workflow_start_output_schema`], but repeated nested
+/// session/page/navigation schemas and failure fields are shared through local
+/// definitions so the public catalog does not duplicate them per branch.
+fn advertised_workflow_start_output_schema() -> Value {
+    let all_defs = definitions();
+    let id_def = all_defs["Id"].clone();
+    let mut session_def = all_defs["SessionState"].clone();
+    let mut navigation_def = object(command_outcome_properties(), &["status", "commandId"]);
+    navigation_def["type"] = json!(["object", "null"]);
+    let mut page_def = page_state();
+    rewrite_local_id_refs(&mut session_def);
+    rewrite_local_id_refs(&mut navigation_def);
+    rewrite_local_id_refs(&mut page_def);
+    let mut handle = workflow_handle();
+    handle
+        .as_object_mut()
+        .expect("workflow handle schema is an object")
+        .remove("description");
+
+    let success = object(
+        json!({
+            "status":{"const":"completed"},
+            "workflowHandle":handle,
+            "sessionId":{"$ref":"#/$defs/I"},
+            "pageId":{"$ref":"#/$defs/I"},
+            "workflowId":{"$ref":"#/$defs/I"},
+            "session":{"$ref":"#/$defs/S"},
+            "page":{"$ref":"#/$defs/P"},
+            "navigationOutcome":{"$ref":"#/$defs/N"}
+        }),
+        &[
+            "status",
+            "workflowHandle",
+            "sessionId",
+            "pageId",
+            "workflowId",
+            "session",
+            "page",
+            "navigationOutcome",
+        ],
+    );
+    // Deliberately open only as a shared applicator. Each concrete failure
+    // branch below closes the union with `unevaluatedProperties:false` after
+    // adding its page/reason fields.
+    let failure_base = json!({
+        "type":"object",
+        "properties":{
+            "status":{"const":"failed"},
+            "workflowHandle":{"type":"null"},
+            "sessionId":{"$ref":"#/$defs/I"},
+            "workflowId":{"$ref":"#/$defs/I"},
+            "session":{"oneOf":[{"$ref":"#/$defs/S"},{"type":"null"}]},
+            "navigationOutcome":{"$ref":"#/$defs/N"},
+            "pageClosed":{"type":"boolean"},
+            "sessionDeleted":{"type":"boolean"},
+            "cleanupErrorCode":{"type":["string","null"],"minLength":1,"maxLength":128}
+        },
+        "required":["status","workflowHandle","sessionId","workflowId","session","navigationOutcome","pageClosed","sessionDeleted","cleanupErrorCode"]
+    });
+    let page_open_failed = json!({
+        "$ref":"#/$defs/F",
+        "properties":{
+            "pageId":{"type":"null"},
+            "page":{"type":"null"},
+            "reason":{"const":"pageOpenFailed"}
+        },
+        "required":["pageId","page","reason"],
+        "unevaluatedProperties":false
+    });
+    let later_failure = json!({
+        "$ref":"#/$defs/F",
+        "properties":{
+            "pageId":{"$ref":"#/$defs/I"},
+            "page":{"$ref":"#/$defs/P"},
+            "reason":{"enum":["navigationFailed","workflowGenerationChanged","workflowSupervisorLost"]}
+        },
+        "required":["pageId","page","reason"],
+        "unevaluatedProperties":false
+    });
+    json!({
+        "$schema":"https://json-schema.org/draft/2020-12/schema",
+        "type":"object",
+        "oneOf":[
+            {"$ref":"#/$defs/C"},
+            {"$ref":"#/$defs/O"},
+            {"$ref":"#/$defs/L"}
+        ],
+        "$defs":{
+            "I":id_def,
+            "S":session_def,
+            "N":navigation_def,
+            "P":page_def,
+            "F":failure_base,
+            "C":success,
+            "O":page_open_failed,
+            "L":later_failure
+        }
+    })
+}
+
+fn rewrite_local_id_refs(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if fields.get("$ref").and_then(Value::as_str) == Some("#/$defs/Id") {
+                fields.insert("$ref".into(), json!("#/$defs/I"));
+            }
+            for value in fields.values_mut() {
+                rewrite_local_id_refs(value);
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(rewrite_local_id_refs),
+        _ => {}
+    }
+}
+
+fn workflow_start_output_schema() -> Value {
+    let navigation_outcome = nullable(object(
+        command_outcome_properties(),
+        &["status", "commandId"],
+    ));
+    let stable_failure = json!({
+        "workflowHandle":{"type":"null"},
+        "sessionId":id(),
+        "workflowId":id(),
+        "session":nullable(json!({"$ref":"#/$defs/SessionState"})),
+        "navigationOutcome":navigation_outcome,
+        "reason":{"type":"string","enum":["pageOpenFailed","navigationFailed","workflowGenerationChanged","workflowSupervisorLost"]},
+        "pageClosed":{"type":"boolean"},
+        "sessionDeleted":{"type":"boolean"},
+        "cleanupErrorCode":nullable(string(1, 128))
+    });
+    let success = status_fields(
+        "completed",
+        json!({
+            "workflowHandle":workflow_handle(),
+            "sessionId":id(),
+            "pageId":id(),
+            "workflowId":id(),
+            "session":{"$ref":"#/$defs/SessionState"},
+            "page":page_state(),
+            "navigationOutcome":navigation_outcome
+        }),
+        &[
+            "workflowHandle",
+            "sessionId",
+            "pageId",
+            "workflowId",
+            "session",
+            "page",
+            "navigationOutcome",
+        ],
+    );
+    let page_open_failed = status_fields(
+        "failed",
+        merge_values(
+            stable_failure.clone(),
+            json!({
+                "pageId":{"type":"null"},
+                "page":{"type":"null"},
+                "reason":{"const":"pageOpenFailed"}
+            }),
+        ),
+        &[
+            "workflowHandle",
+            "sessionId",
+            "workflowId",
+            "session",
+            "pageId",
+            "page",
+            "navigationOutcome",
+            "reason",
+            "pageClosed",
+            "sessionDeleted",
+            "cleanupErrorCode",
+        ],
+    );
+    let later_failure = status_fields(
+        "failed",
+        merge_values(
+            stable_failure,
+            json!({
+                "pageId":id(),
+                "page":page_state(),
+                "reason":{"type":"string","enum":["navigationFailed","workflowGenerationChanged","workflowSupervisorLost"]}
+            }),
+        ),
+        &[
+            "workflowHandle",
+            "sessionId",
+            "workflowId",
+            "session",
+            "pageId",
+            "page",
+            "navigationOutcome",
+            "reason",
+            "pageClosed",
+            "sessionDeleted",
+            "cleanupErrorCode",
+        ],
+    );
+    json!({"type":"object","oneOf":[success,page_open_failed,later_failure]})
+}
+
+fn workflow_observation_outcome_schema() -> Value {
+    let mut properties = command_outcome_properties();
+    merge_properties(&mut properties, json!({"workflowId":id()}));
+    nullable(object(properties, &["status", "commandId", "workflowId"]))
+}
+
+fn merge_values(mut left: Value, right: Value) -> Value {
+    left.as_object_mut()
+        .expect("schema fragments are objects")
+        .extend(
+            right
+                .as_object()
+                .expect("schema fragments are objects")
+                .clone(),
+        );
+    left
 }
 
 /// Advertise-only FormSnapshot: keep top-level keys, collapse nested controls.
@@ -2031,6 +2426,199 @@ fn form_control_target() -> Value {
             "shadowPath",
         ],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::annotations::{tool_annotations, tool_title};
+    use crate::tool_meta::{
+        required_capabilities, required_operation, tool_description, WORKFLOW_OBSERVE_OPERATION,
+        WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES, WORKFLOW_START_OPERATION,
+        WORKFLOW_START_REQUIRED_CAPABILITIES,
+    };
+    use crate::workflow_handles::WORKFLOW_SCOPE_TOOLS;
+
+    #[test]
+    fn workflow_contract_schemas_bound_inputs_and_define_object_outputs() {
+        let start = tool_schema("workflow_start");
+        assert_eq!(start["required"], json!(["profile"]));
+        assert_eq!(start["properties"]["url"]["maxLength"], MAX_URL_BYTES);
+
+        let observe = tool_schema("workflow_observe");
+        assert_eq!(observe["required"], json!(["workflowHandle"]));
+        assert_eq!(observe["properties"]["goal"]["maxLength"], 1024);
+        assert_eq!(observe["properties"]["maxNodes"]["maximum"], 2048);
+        assert_eq!(observe["properties"]["maxControls"]["maximum"], 512);
+
+        for name in ["workflow_start", "workflow_observe"] {
+            assert!(tool_title(name) != "Untitled tool", "{name}");
+            assert_ne!(tool_description(name), "Runtime operation.", "{name}");
+            assert!(tool_annotations(name).is_object(), "{name}");
+            assert!(tool_schema(name).is_object(), "{name}");
+            assert_eq!(tool_output_schema(name)["type"], "object", "{name}");
+            jsonschema::validator_for(&tool_schema(name)).expect("input schema compiles");
+            jsonschema::validator_for(&tool_output_schema(name)).expect("output schema compiles");
+        }
+        assert_eq!(
+            required_capabilities("workflow_start"),
+            Some(WORKFLOW_START_REQUIRED_CAPABILITIES)
+        );
+        assert_eq!(
+            required_operation("workflow_start"),
+            Some(WORKFLOW_START_OPERATION)
+        );
+        assert_eq!(
+            required_capabilities("workflow_observe"),
+            Some(WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES)
+        );
+        assert_eq!(
+            required_operation("workflow_observe"),
+            Some(WORKFLOW_OBSERVE_OPERATION)
+        );
+
+        assert_eq!(
+            tool_annotations("workflow_start"),
+            json!({
+                "readOnlyHint":false,
+                "destructiveHint":false,
+                "idempotentHint":false,
+                "openWorldHint":true,
+            })
+        );
+        assert_eq!(
+            tool_annotations("workflow_observe"),
+            json!({
+                "readOnlyHint":true,
+                "destructiveHint":false,
+                "idempotentHint":false,
+                "openWorldHint":false,
+            })
+        );
+        let advertised_observe = advertised_tool_output_schema("workflow_observe");
+        assert_eq!(
+            advertised_observe["$defs"]["FormSnapshot"]["properties"]["forms"]["items"],
+            json!({"type":"object"}),
+        );
+        assert_eq!(
+            WORKFLOW_START_REQUIRED_CAPABILITIES,
+            [
+                types::Capability::SessionRead,
+                types::Capability::SessionWrite,
+                types::Capability::PageWrite,
+            ]
+        );
+        assert_eq!(
+            WORKFLOW_START_OPERATION,
+            types::InterfaceOperation::CreateSession
+        );
+        assert_eq!(
+            WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES,
+            [types::Capability::BrowserMutate]
+        );
+        assert_eq!(
+            WORKFLOW_OBSERVE_OPERATION,
+            types::InterfaceOperation::SubmitCommand
+        );
+    }
+
+    #[test]
+    fn workflow_observe_goal_uses_unicode_scalar_advertising_semantics() {
+        let advertised = advertised_tool_schema("workflow_observe");
+        let validator = jsonschema::validator_for(&advertised).expect("valid advertised schema");
+        let accepted = json!({
+            "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
+            "goal":"é".repeat(MAX_WORKFLOW_GOAL_SCALARS)
+        });
+        let rejected = json!({
+            "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
+            "goal":"é".repeat(MAX_WORKFLOW_GOAL_SCALARS + 1)
+        });
+        assert!(validator.is_valid(&accepted));
+        assert!(!validator.is_valid(&rejected));
+        assert!(validate_tool_arguments("workflow_observe", &accepted).is_ok());
+    }
+
+    #[test]
+    fn workflow_scope_allowlist_is_sorted_and_exactly_matches_advertised_handle_schemas() {
+        let expected = WORKFLOW_SCOPE_TOOLS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert!(expected.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            expected.len(),
+            expected.iter().collect::<BTreeSet<_>>().len()
+        );
+
+        let observed = crate::toolset::EVERY_TOOL
+            .iter()
+            .filter(|name| {
+                advertised_tool_schema(name)["oneOf"]
+                    .as_array()
+                    .is_some_and(|branches| {
+                        branches.iter().any(|branch| {
+                            branch["required"] == json!(["workflowHandle"])
+                                && branch["properties"]["sessionId"] == Value::Bool(false)
+                                && branch["properties"]["pageId"] == Value::Bool(false)
+                        })
+                    })
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            observed.into_iter().collect::<Vec<_>>(),
+            expected,
+            "workflowHandle advertising must exactly match the normalization table"
+        );
+    }
+
+    #[test]
+    fn workflow_scope_branches_repeat_business_properties_and_keep_parent_requirements() {
+        for (name, business_property) in [
+            ("navigate", "url"),
+            ("intent_fill", "value"),
+            ("wait_for", "condition"),
+        ] {
+            let schema = advertised_tool_schema(name);
+            let expected = schema["properties"][business_property].clone();
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .expect("required array")
+                    .contains(&json!(business_property)),
+                "{name} keeps {business_property} required at the parent"
+            );
+            for branch in schema["oneOf"].as_array().expect("scope branches") {
+                assert_eq!(
+                    branch["properties"][business_property], expected,
+                    "{name} branch carries {business_property}'s full schema"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_creation_policy_visibility_is_shared_by_deferred_workflow_start() {
+        let unprivileged = types::CapabilitySet::new([]);
+        let privileged = types::CapabilitySet::new([
+            types::Capability::BrowserFingerprint,
+            types::Capability::BrowserHumanize,
+        ]);
+        for name in ["session_create", "workflow_start"] {
+            let hidden = advertised_tool_schema_for_capabilities(name, &unprivileged);
+            let hidden = &hidden["properties"]["executionPolicy"]["properties"];
+            assert!(hidden.get("fingerprint").is_none(), "{name}");
+            assert!(hidden.get("humanize").is_none(), "{name}");
+
+            let shown = advertised_tool_schema_for_capabilities(name, &privileged);
+            let shown = &shown["properties"]["executionPolicy"]["properties"];
+            assert!(shown.get("fingerprint").is_some(), "{name}");
+            assert!(shown.get("humanize").is_some(), "{name}");
+        }
+    }
 }
 
 /// Must match `types::FormControlState`'s `tag = "kind"` serde output.

@@ -8,7 +8,8 @@
 //!
 //! Phases follow the runtime's working loop:
 //!
-//! - [`Toolset::Explore`]: open sessions and pages, read the page. No mutation.
+//! - [`Toolset::Explore`]: observation, lifecycle setup, and navigation; no
+//!   action or intent tools.
 //! - [`Toolset::Act`]: the primitives that change the page.
 //! - [`Toolset::Intent`]: the `intent_*` family.
 //! - [`Toolset::Verify`]: evidence, checkpoints, recovery.
@@ -28,7 +29,8 @@ use std::fmt;
 pub enum Toolset {
     /// Everything the principal's capabilities allow.
     Full,
-    /// Default: read/snapshot/navigate lifecycle without mutation tools.
+    /// Default: observation, lifecycle setup, and navigation; no action or
+    /// intent tools.
     #[default]
     Explore,
     Act,
@@ -117,8 +119,8 @@ impl fmt::Display for Toolset {
     }
 }
 
-/// Present in every phase: session and page lifecycle, plus `toolset_select`
-/// so a narrowed agent can always leave its phase.
+/// Present in every phase: session/page lifecycle, workflow setup/observation,
+/// and `toolset_select` so a narrowed agent can always leave its phase.
 const ALWAYS: &[&str] = &[
     "runtime_info",
     "session_create",
@@ -129,6 +131,8 @@ const ALWAYS: &[&str] = &[
     "page_close",
     "page_activate",
     "toolset_select",
+    "workflow_observe",
+    "workflow_start",
 ];
 
 const EXPLORE: &[&str] = &[
@@ -166,6 +170,7 @@ const ACT: &[&str] = &[
 ];
 
 const INTENT: &[&str] = &[
+    "checkpoint_save",
     "intent_locate",
     "intent_fill",
     "intent_complete_form",
@@ -249,13 +254,14 @@ pub const EVERY_TOOL: &[&str] = &[
     "type_text",
     "upload_files",
     "wait_for",
+    "workflow_observe",
     "workflow_recover",
+    "workflow_start",
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     #[test]
     fn full_advertises_everything_including_jobs() {
@@ -311,20 +317,27 @@ mod tests {
         }
     }
 
-    /// Lifecycle is phase-independent: a session opened in one phase must be
-    /// closable without switching phase first.
+    /// Lifecycle and workflow setup/observation are phase-independent.
     #[test]
-    fn every_phase_advertises_session_and_page_lifecycle() {
+    fn every_phase_advertises_lifecycle_and_workflow_controls() {
         for phase in Toolset::ALL {
-            for tool in ["session_create", "session_close", "page_open", "page_close"] {
+            for tool in [
+                "session_create",
+                "session_close",
+                "page_open",
+                "page_close",
+                "workflow_start",
+                "workflow_observe",
+            ] {
                 assert!(phase.advertises(tool), "{phase} does not advertise {tool}");
             }
         }
     }
 
-    /// A mutating tool must not appear in the read-only phase.
+    /// Explore permits observation, lifecycle setup, and navigation, but no
+    /// page action or intent tool.
     #[test]
-    fn the_explore_phase_advertises_no_mutating_tool() {
+    fn the_explore_phase_advertises_no_action_or_intent_tool() {
         for tool in [
             "click",
             "type_text",
@@ -341,6 +354,11 @@ mod tests {
                 "explore advertises the mutating tool {tool}"
             );
         }
+    }
+
+    #[test]
+    fn intent_advertises_checkpoint_save() {
+        assert!(Toolset::Intent.advertises("checkpoint_save"));
     }
 
     /// The two mutating phases must not overlap: each names one driving style.
@@ -379,12 +397,26 @@ mod tests {
         }
     }
 
-    /// Docs table in `mcp-tools.md` must name exactly [`EVERY_TOOL`].
+    #[test]
+    fn every_tool_is_sorted_and_contains_every_workflow_scope_tool() {
+        assert!(
+            EVERY_TOOL.windows(2).all(|pair| pair[0] < pair[1]),
+            "EVERY_TOOL must stay sorted and unique"
+        );
+        for (tool, _) in crate::workflow_handles::WORKFLOW_SCOPE_TOOLS {
+            assert!(
+                EVERY_TOOL.binary_search(tool).is_ok(),
+                "workflow-scoped tool {tool} is not registered in EVERY_TOOL"
+            );
+        }
+    }
+
+    /// The sorted docs table in `mcp-tools.md` must name exactly [`EVERY_TOOL`].
     #[test]
     fn mcp_tools_docs_match_every_tool() {
         const DOCS: &str =
             include_str!("../../../docs/bobby-browser/source/pages/surfaces/mcp-tools.md");
-        let mut documented = BTreeSet::new();
+        let mut documented = Vec::new();
         let mut in_tools = false;
         for line in DOCS.lines() {
             if line.starts_with("## Tools") {
@@ -408,16 +440,16 @@ mod tests {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
             {
-                documented.insert(name.to_owned());
+                documented.push(name.to_owned());
             }
         }
-        let expected: BTreeSet<_> = EVERY_TOOL.iter().map(|s| (*s).to_owned()).collect();
+        let expected = EVERY_TOOL
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
         assert_eq!(
-            documented,
-            expected,
-            "docs tool table drifted from EVERY_TOOL\nonly in docs: {:?}\nonly in EVERY_TOOL: {:?}",
-            documented.difference(&expected).collect::<Vec<_>>(),
-            expected.difference(&documented).collect::<Vec<_>>()
+            documented, expected,
+            "the source docs tool table must exactly match sorted EVERY_TOOL"
         );
     }
 }

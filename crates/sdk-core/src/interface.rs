@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -325,7 +328,12 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .delete(&session)
             .await
             .map_err(|error| map_runtime_error(&ctx, error))?;
-        self.inner.pages.context().forget_all(&pages);
+        let mut pages = pages.into_iter().collect::<HashSet<_>>();
+        pages.extend(self.inner.pages.remove_session_pages(&session).await);
+        self.inner
+            .pages
+            .context()
+            .forget_all(&pages.into_iter().collect::<Vec<_>>());
         // Session close is the flush point for durable context promotion;
         // flush failures stay session-only and never fail the close.
         if let Some(promotion) = self.inner.pages.context_promotion() {

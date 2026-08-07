@@ -1939,6 +1939,41 @@ async fn delete_session_releases_the_session_worker_and_ownership() {
 }
 
 #[tokio::test]
+async fn delete_session_reclaims_page_runtime_entries_missing_from_session_state() {
+    let (runtime, _, _) = runtime_with_workers(false);
+    let (api, context, _, _) = session_owned_runtime(runtime.clone(), 4).await;
+    let session = api
+        .create_session(context.clone(), request_profile("delete-stale-page"))
+        .await
+        .unwrap();
+
+    // Register directly in PageRuntime so SessionState.page_ids is
+    // intentionally stale. Authenticated deletion must use the page registry
+    // itself as the reclamation authority.
+    let stale_page = runtime
+        .pages
+        .open(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await;
+    assert!(runtime
+        .sessions
+        .get(&session.id)
+        .await
+        .unwrap()
+        .page_ids
+        .is_empty());
+    assert!(runtime.pages.get(&stale_page.id).await.is_ok());
+
+    api.delete_session(context, session.id).await.unwrap();
+
+    assert!(matches!(
+        runtime.pages.get(&stale_page.id).await,
+        Err(types::RuntimeError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
 async fn delete_session_rejects_another_principals_session_as_not_found() {
     let (runtime, _, _) = runtime_with_workers(false);
     let (api, context, _, recorder) = session_owned_runtime(runtime.clone(), 4).await;

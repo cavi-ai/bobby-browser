@@ -52,19 +52,29 @@ impl Server {
                 self.submit_envelope(context, envelope).await
             }
             "page_close" => {
-                let input: FormSnapshotArgs = match bounded_parse(call.arguments) {
+                let input: PageCloseArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let session_id = input.session_id;
                 let page_id = input.page_id;
                 let (context, envelope) = primitive_envelope(
                     context,
-                    input.session_id,
+                    session_id.clone(),
                     Some(page_id.clone()),
                     input.workflow_id,
-                    types::PrimitiveCommand::ClosePage(types::ClosePageCommand { page_id }),
+                    types::PrimitiveCommand::ClosePage(types::ClosePageCommand {
+                        page_id: page_id.clone(),
+                    }),
                 );
-                self.submit_envelope(context, envelope).await
+                let result = self.submit_envelope(context, envelope).await;
+                if result
+                    .as_ref()
+                    .is_ok_and(|outcome| outcome["status"] == "completed")
+                {
+                    self.workflow_handles.remove_page(&session_id, &page_id);
+                }
+                result
             }
             "page_activate" => {
                 let input: PageCloseArgs = match bounded_parse(call.arguments) {
@@ -168,7 +178,7 @@ impl Server {
                     context,
                     input.session_id,
                     Some(input.page_id),
-                    None,
+                    input.workflow_id,
                     types::RuntimeCommand::Primitive(types::PrimitiveCommand::NetworkLog(
                         types::NetworkLogCommand {
                             clear: input.clear.unwrap_or(true),
@@ -186,7 +196,7 @@ impl Server {
                     context,
                     input.session_id,
                     Some(input.page_id),
-                    None,
+                    input.workflow_id,
                     types::RuntimeCommand::Primitive(types::PrimitiveCommand::Emulate(
                         types::EmulateCommand {
                             viewport: input.viewport,
@@ -206,7 +216,7 @@ impl Server {
                     context,
                     input.session_id,
                     Some(input.page_id),
-                    None,
+                    input.workflow_id,
                     types::RuntimeCommand::Primitive(types::PrimitiveCommand::HandleDialog(
                         types::HandleDialogCommand {
                             action: input.action,
@@ -225,7 +235,7 @@ impl Server {
                     context,
                     input.session_id,
                     Some(input.page_id),
-                    None,
+                    input.workflow_id,
                     types::RuntimeCommand::Primitive(types::PrimitiveCommand::PrintToPdf(
                         types::PrintToPdfCommand {
                             landscape: input.landscape,
@@ -246,7 +256,7 @@ impl Server {
                     context,
                     input.session_id,
                     Some(input.page_id),
-                    None,
+                    input.workflow_id,
                     types::RuntimeCommand::Primitive(types::PrimitiveCommand::GetCookies(
                         types::GetCookiesCommand { urls: input.urls },
                     )),
@@ -262,7 +272,7 @@ impl Server {
                     context,
                     input.session_id,
                     Some(input.page_id),
-                    None,
+                    input.workflow_id,
                     types::RuntimeCommand::Primitive(types::PrimitiveCommand::SetCookies(
                         types::SetCookiesCommand {
                             cookies: input.cookies,
@@ -280,7 +290,7 @@ impl Server {
                     context,
                     input.session_id,
                     Some(input.page_id),
-                    None,
+                    input.workflow_id,
                     types::RuntimeCommand::Primitive(types::PrimitiveCommand::DeleteCookies(
                         types::DeleteCookiesCommand {
                             urls: input.urls,

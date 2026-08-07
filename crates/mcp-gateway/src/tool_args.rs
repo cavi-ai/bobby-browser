@@ -33,6 +33,42 @@ pub(crate) struct SessionCreateArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WorkflowStartArgs {
+    pub(crate) profile: String,
+    #[serde(default)]
+    pub(crate) proxy: Option<String>,
+    #[serde(default)]
+    pub(crate) execution_policy: types::ExecutionPolicy,
+    #[serde(default)]
+    pub(crate) url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct WorkflowObserveArgs {
+    pub(crate) workflow_handle: String,
+    #[serde(default)]
+    pub(crate) goal: Option<String>,
+    #[serde(default)]
+    pub(crate) max_nodes: Option<u32>,
+    #[serde(default)]
+    pub(crate) include_forms: bool,
+    #[serde(default)]
+    pub(crate) max_controls: Option<u32>,
+}
+
+impl WorkflowObserveArgs {
+    /// JSON Schema string lengths are Unicode scalar counts, unlike the
+    /// gateway's byte-oriented internal string validator.
+    pub(crate) fn goal_within_scalar_bound(&self) -> bool {
+        self.goal
+            .as_ref()
+            .is_none_or(|goal| goal.chars().count() <= crate::schema::MAX_WORKFLOW_GOAL_SCALARS)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PageOpenArgs {
     pub(crate) session_id: types::SessionId,
     #[serde(default)]
@@ -326,6 +362,8 @@ pub(crate) struct NetworkLogArgs {
     pub(crate) page_id: types::PageId,
     #[serde(default)]
     pub(crate) clear: Option<bool>,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -339,6 +377,8 @@ pub(crate) struct EmulateArgs {
     pub(crate) geolocation: Option<types::GeolocationCoordinates>,
     #[serde(default)]
     pub(crate) mobile: Option<bool>,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -349,6 +389,8 @@ pub(crate) struct DialogArgs {
     pub(crate) action: types::DialogAction,
     #[serde(default)]
     pub(crate) timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -364,6 +406,8 @@ pub(crate) struct PdfArgs {
     pub(crate) scale: Option<f64>,
     #[serde(default)]
     pub(crate) page_ranges: Option<String>,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -373,6 +417,8 @@ pub(crate) struct CookieGetArgs {
     pub(crate) page_id: types::PageId,
     #[serde(default)]
     pub(crate) urls: Vec<String>,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -381,6 +427,8 @@ pub(crate) struct CookieSetArgs {
     pub(crate) session_id: types::SessionId,
     pub(crate) page_id: types::PageId,
     pub(crate) cookies: Vec<types::SetCookieParam>,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -392,6 +440,8 @@ pub(crate) struct CookieDeleteArgs {
     pub(crate) urls: Vec<String>,
     #[serde(default)]
     pub(crate) names: Vec<String>,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 
 #[derive(Deserialize)]
@@ -443,4 +493,22 @@ pub(crate) struct PromptGetArgs {
     pub(crate) arguments: Value,
     #[serde(default, rename = "_meta")]
     pub(crate) _meta: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkflowObserveArgs;
+
+    #[test]
+    fn workflow_observe_goal_limit_counts_unicode_scalars_not_utf8_bytes() {
+        let parse = |goal| {
+            serde_json::from_value::<WorkflowObserveArgs>(serde_json::json!({
+                "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
+                "goal":goal,
+            }))
+            .expect("observe arguments parse")
+        };
+        assert!(parse("é".repeat(256)).goal_within_scalar_bound());
+        assert!(!parse("é".repeat(257)).goal_within_scalar_bound());
+    }
 }

@@ -26,6 +26,7 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "intent_wait_for_state"
             | "intent_extract"
             | "job_status"
+            | "workflow_observe"
     );
     let destructive = matches!(
         name,
@@ -60,6 +61,7 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "extract_structured"
             | "command_execute"
             | "page_open"
+            | "workflow_start"
             | "click"
             | "intent_follow"
             | "intent_submit_and_verify"
@@ -126,6 +128,8 @@ pub(crate) fn tool_title(name: &str) -> &'static str {
         "upload_files" => "Upload files",
         "wait_for" => "Wait for condition",
         "workflow_recover" => "Recover workflow",
+        "workflow_start" => "Start retained workflow",
+        "workflow_observe" => "Observe retained workflow",
         _ => "Untitled tool",
     }
 }

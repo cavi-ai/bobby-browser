@@ -63,6 +63,8 @@ accepted licenses and no network-at-install.
 Release archives are three binaries on purpose: the CLI plus the two stdio
 gateways agents spawn. Prefer MCP Explore (`BOBBY_MCP_TOOLSET=explore` or
 `toolset_select`) so `tools/list` stays small.
+Use `workflow_start` and `workflow_observe` for lifecycle-safe setup and
+retained-first compact context in every MCP phase.
 
 `bobby install` merges into an existing Claude Code, Zed, or VS Code MCP config
 rather than replacing it, and writes no secrets into host config — the host

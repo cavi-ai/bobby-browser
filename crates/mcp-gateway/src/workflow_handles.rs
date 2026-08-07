@@ -3,11 +3,69 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use serde_json::Value;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 pub(crate) const MAX_WORKFLOW_HANDLES: usize = 64;
 pub(crate) const MAX_WORKFLOW_RESERVATIONS: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkflowScope {
+    SessionPage,
+    SessionPageWorkflow,
+}
+
+/// Tools whose advertised scope can be replaced by a retained workflow handle.
+/// Keep this literal table sorted: later call-time normalization uses this same
+/// allowlist, so a tool can never advertise a handle form it cannot accept.
+pub(crate) const WORKFLOW_SCOPE_TOOLS: &[(&str, WorkflowScope)] = &[
+    ("a11y_snapshot", WorkflowScope::SessionPageWorkflow),
+    ("click", WorkflowScope::SessionPageWorkflow),
+    ("context_ask", WorkflowScope::SessionPage),
+    ("context_neighbors", WorkflowScope::SessionPage),
+    ("control_action", WorkflowScope::SessionPageWorkflow),
+    ("cookie_delete", WorkflowScope::SessionPageWorkflow),
+    ("cookie_get", WorkflowScope::SessionPageWorkflow),
+    ("cookie_set", WorkflowScope::SessionPageWorkflow),
+    ("dialog", WorkflowScope::SessionPageWorkflow),
+    ("download_url", WorkflowScope::SessionPageWorkflow),
+    ("emulate", WorkflowScope::SessionPageWorkflow),
+    ("evaluate_javascript", WorkflowScope::SessionPageWorkflow),
+    ("extract_structured", WorkflowScope::SessionPageWorkflow),
+    ("form_snapshot", WorkflowScope::SessionPage),
+    ("inspect", WorkflowScope::SessionPageWorkflow),
+    ("intent_complete_form", WorkflowScope::SessionPageWorkflow),
+    (
+        "intent_dismiss_obstruction",
+        WorkflowScope::SessionPageWorkflow,
+    ),
+    ("intent_extract", WorkflowScope::SessionPageWorkflow),
+    ("intent_fill", WorkflowScope::SessionPageWorkflow),
+    ("intent_follow", WorkflowScope::SessionPageWorkflow),
+    ("intent_locate", WorkflowScope::SessionPageWorkflow),
+    (
+        "intent_submit_and_verify",
+        WorkflowScope::SessionPageWorkflow,
+    ),
+    ("intent_wait_for_state", WorkflowScope::SessionPageWorkflow),
+    ("navigate", WorkflowScope::SessionPageWorkflow),
+    ("network_log", WorkflowScope::SessionPageWorkflow),
+    ("page_activate", WorkflowScope::SessionPageWorkflow),
+    ("page_close", WorkflowScope::SessionPageWorkflow),
+    ("pdf", WorkflowScope::SessionPageWorkflow),
+    ("screenshot", WorkflowScope::SessionPageWorkflow),
+    ("type_text", WorkflowScope::SessionPageWorkflow),
+    ("upload_files", WorkflowScope::SessionPageWorkflow),
+    ("wait_for", WorkflowScope::SessionPageWorkflow),
+];
+
+pub(crate) fn workflow_scope_for_tool(name: &str) -> Option<WorkflowScope> {
+    WORKFLOW_SCOPE_TOOLS
+        .binary_search_by_key(&name, |(tool, _)| *tool)
+        .ok()
+        .map(|index| WORKFLOW_SCOPE_TOOLS[index].1)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkflowBinding {
@@ -108,7 +166,7 @@ impl WorkflowHandles {
     }
 
     pub(crate) fn resolve(&self, handle: &str) -> Result<WorkflowBinding, WorkflowHandleError> {
-        if !is_well_formed_handle(handle) {
+        if !parse_workflow_handle(handle) {
             return Err(WorkflowHandleError::Malformed);
         }
 
@@ -126,6 +184,59 @@ impl WorkflowHandles {
         state.lru.remove(position);
         state.lru.push_back(handle.to_owned());
         Ok(binding)
+    }
+
+    /// Replaces the advertised opaque workflow scope with its retained ids.
+    ///
+    /// Only tools in `WORKFLOW_SCOPE_TOOLS` opt into this transformation. All
+    /// other calls stay untouched so their existing schema remains the sole
+    /// source of rejection for an unexpected `workflowHandle` field.
+    pub(crate) fn normalize_arguments(
+        &self,
+        tool: &str,
+        arguments: &Value,
+    ) -> Result<Value, WorkflowHandleError> {
+        let Some(scope) = workflow_scope_for_tool(tool) else {
+            return Ok(arguments.clone());
+        };
+        let Some(object) = arguments.as_object() else {
+            return Ok(arguments.clone());
+        };
+        let Some(handle) = object.get("workflowHandle") else {
+            return Ok(arguments.clone());
+        };
+
+        if ["sessionId", "pageId", "workflowId"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+        {
+            return Err(WorkflowHandleError::BindingConflict);
+        }
+
+        let handle = handle.as_str().ok_or(WorkflowHandleError::Unknown)?;
+        let binding = self.resolve(handle).map_err(|error| match error {
+            WorkflowHandleError::BindingConflict => WorkflowHandleError::BindingConflict,
+            WorkflowHandleError::CapacityExhausted
+            | WorkflowHandleError::GenerationChanged
+            | WorkflowHandleError::SupervisorLost
+            | WorkflowHandleError::Unknown
+            | WorkflowHandleError::Malformed => WorkflowHandleError::Unknown,
+        })?;
+
+        let mut normalized = object.clone();
+        normalized.remove("workflowHandle");
+        normalized.insert(
+            "sessionId".to_owned(),
+            serde_json::json!(binding.session_id),
+        );
+        normalized.insert("pageId".to_owned(), serde_json::json!(binding.page_id));
+        if scope == WorkflowScope::SessionPageWorkflow {
+            normalized.insert(
+                "workflowId".to_owned(),
+                serde_json::json!(binding.workflow_id),
+            );
+        }
+        Ok(Value::Object(normalized))
     }
 
     pub(crate) fn remove_session(&self, session_id: &types::SessionId) -> usize {
@@ -210,6 +321,10 @@ impl WorkflowHandleReservation {
         self.registry.lock_state().generation == self.generation
     }
 
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub(crate) fn publish_with_supervisor(
         mut self,
         binding: WorkflowBinding,
@@ -281,10 +396,16 @@ impl Drop for WorkflowHandleReservation {
     }
 }
 
-fn is_well_formed_handle(handle: &str) -> bool {
+/// Allocation-free validation for the opaque workflow-handle wire form.
+///
+/// Callers intentionally collapse malformed and unknown handles into the same
+/// public response, so this helper exposes no information about registry state.
+pub(crate) fn parse_workflow_handle(handle: &str) -> bool {
     handle.len() == 35
         && handle.starts_with("wf_")
-        && handle[3..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        && handle[3..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]
@@ -296,6 +417,7 @@ mod tests {
     };
 
     use chrono::Utc;
+    use serde_json::json;
     use tokio::sync::oneshot;
 
     use super::*;
@@ -368,6 +490,121 @@ mod tests {
     }
 
     #[test]
+    fn normalize_arguments_substitutes_the_exact_retained_scope_for_every_allowlisted_tool() {
+        let registry = registry();
+        let reservation = registry.reserve().unwrap();
+        let expected = binding(
+            reservation.generation,
+            session_id(1),
+            page_id(2),
+            workflow_id(3),
+        );
+        let (handle, _) = publish(reservation, expected.clone());
+
+        for (tool, scope) in WORKFLOW_SCOPE_TOOLS {
+            let normalized = registry
+                .normalize_arguments(tool, &json!({"workflowHandle": handle}))
+                .unwrap_or_else(|error| panic!("{tool}: {error:?}"));
+            assert_eq!(normalized["sessionId"], json!(expected.session_id));
+            assert_eq!(normalized["pageId"], json!(expected.page_id));
+            assert_eq!(normalized.get("workflowHandle"), None);
+            assert_eq!(
+                normalized.get("workflowId"),
+                matches!(scope, WorkflowScope::SessionPageWorkflow)
+                    .then(|| json!(expected.workflow_id))
+                    .as_ref(),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_arguments_rejects_mixed_handle_and_explicit_scope_before_validation() {
+        let registry = registry();
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(generation, session_id(1), page_id(2), workflow_id(3)),
+        );
+
+        for explicit_scope in [
+            json!({"sessionId": session_id(4)}),
+            json!({"pageId": page_id(5)}),
+            json!({"workflowId": workflow_id(6)}),
+        ] {
+            let mut arguments = serde_json::Map::new();
+            arguments.insert("workflowHandle".to_owned(), json!(handle));
+            arguments.extend(explicit_scope.as_object().unwrap().clone());
+            assert_eq!(
+                registry.normalize_arguments("navigate", &json!(arguments)),
+                Err(WorkflowHandleError::BindingConflict)
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_arguments_collapses_unknown_reset_and_malformed_handles_to_unknown() {
+        let registry = registry();
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (reset_handle, _) = publish(
+            reservation,
+            binding(generation, session_id(1), page_id(2), workflow_id(3)),
+        );
+        registry.reset();
+
+        for handle in [
+            "wf_ffffffffffffffffffffffffffffffff",
+            reset_handle.as_str(),
+            "wf_0123456789abcdef0123456789abcde",
+            "xx_0123456789abcdef0123456789abcdef",
+            "wf_0123456789abcdef0123456789abcdeF",
+            "wf_0123456789abcdef0123456789abcdeg",
+        ] {
+            assert_eq!(
+                registry.normalize_arguments("navigate", &json!({"workflowHandle": handle})),
+                Err(WorkflowHandleError::Unknown),
+                "{handle}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_arguments_leaves_explicit_and_non_allowlisted_calls_unchanged() {
+        let registry = registry();
+        let explicit = json!({
+            "sessionId": session_id(1),
+            "pageId": page_id(2),
+            "workflowId": workflow_id(3),
+            "url": "https://example.test/"
+        });
+        assert_eq!(
+            registry.normalize_arguments("navigate", &explicit),
+            Ok(explicit.clone())
+        );
+
+        let not_allowlisted = json!({"workflowHandle":"wf_0123456789abcdef0123456789abcdef"});
+        assert_eq!(
+            registry.normalize_arguments("session_create", &not_allowlisted),
+            Ok(not_allowlisted)
+        );
+    }
+
+    #[test]
+    fn workflow_scope_tools_are_the_sorted_unique_normalization_set() {
+        let names = WORKFLOW_SCOPE_TOOLS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(names.len(), names.iter().collect::<BTreeSet<_>>().len());
+        assert!(names
+            .iter()
+            .all(|name| workflow_scope_for_tool(name).is_some()));
+    }
+
+    #[test]
     fn reservation_commits_an_opaque_handle_to_its_exact_binding() {
         let registry = registry();
         let reservation = registry.reserve().unwrap();
@@ -384,6 +621,21 @@ mod tests {
         assert_eq!(handle.len(), 35);
         assert_eq!(registry.resolve(&handle), Ok(expected));
         assert_eq!(published.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn handle_parser_accepts_only_the_lowercase_wire_form() {
+        assert!(parse_workflow_handle("wf_0123456789abcdef0123456789abcdef"));
+        for malformed in [
+            "wf_0123456789abcdef0123456789abcde",
+            "wf_0123456789abcdef0123456789abcdef0",
+            "wf_0123456789abcdef0123456789abcdeF",
+            "wf_0123456789abcdef0123456789abcdeg",
+            "xx_0123456789abcdef0123456789abcdef",
+            "wf_0123456789abcdef0123456789abcdefé",
+        ] {
+            assert!(!parse_workflow_handle(malformed), "{malformed}");
+        }
     }
 
     #[test]
