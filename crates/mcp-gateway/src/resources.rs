@@ -421,6 +421,7 @@ const CAPABILITIES_URI: &str = "bobby://capabilities";
 const FAILURE_TAXONOMY_URI: &str = "bobby://failure-taxonomy";
 const INTENTS_URI: &str = "bobby://intents";
 const PRIMITIVES_URI: &str = "bobby://primitives";
+const JOB_HANDLERS_URI: &str = "bobby://job-handlers";
 
 /// Static reference resources: pullable on demand instead of billed to every
 /// `tools/list`. Every claim here must trace back to source -- see the
@@ -991,6 +992,46 @@ retryable failure -- use a named tool instead. `clickAndWaitForPopup` and
 (`crates/firefox-companion/src/worker.rs`).
 "#;
 
+const JOB_HANDLERS_BODY: &str = r#"# Built-in job handlers
+
+`job_submit` / `job_status` / `job_cancel` mirror HTTP `/v1/jobs`. They need
+`job:submit`, `job:read`, and `job:cancel` respectively, and a job port on the
+gateway (`bobby mcp-stdio` / `bobby serve` MCP HTTP). They advertise in the
+`full`, `act`, and `verify` phases.
+
+Jobs are not intents: an intent resolves and verifies a page effect; a job
+runs a named scheduler handler off the page timeline. Prefer `intent_*` for
+browser work. Use jobs for deferred / background probes the scheduler owns.
+
+## echo
+
+Returns the submitted `payload` unchanged. Useful as a connectivity probe.
+
+```json
+{"name":"echo","payload":{"ok":true}}
+```
+
+## sleep
+
+Sleeps for `payload.ms` milliseconds (default 1000, cap 30000), then completes.
+
+```json
+{"name":"sleep","payload":{"ms":500}}
+```
+
+## http_probe
+
+HEAD (default) or GET a URL under the same SSRF policy as downloads
+(loopback/private denied unless config allows). `timeoutMs` defaults to 5000,
+capped at 15000. Returns status metadata only — no response body.
+
+```json
+{"name":"http_probe","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":5000}}
+```
+
+`bobby doctor` reports the same handler names under `job-handlers`.
+"#;
+
 pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'static str)] {
     &[
         (
@@ -1013,6 +1054,11 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
             "Primitives without a tool",
             "The four executable primitives that have no named tool, their argument shape, and how to reach them via command_execute.",
         ),
+        (
+            JOB_HANDLERS_URI,
+            "Job handlers",
+            "Built-in scheduler handlers (echo, sleep, http_probe), payloads, and when to use jobs vs intents.",
+        ),
     ]
 }
 
@@ -1022,6 +1068,7 @@ pub(crate) fn static_resource_body(uri: &str) -> Option<&'static str> {
         FAILURE_TAXONOMY_URI => Some(FAILURE_TAXONOMY_BODY),
         INTENTS_URI => Some(INTENTS_BODY),
         PRIMITIVES_URI => Some(PRIMITIVES_BODY),
+        JOB_HANDLERS_URI => Some(JOB_HANDLERS_BODY),
         _ => None,
     }
 }

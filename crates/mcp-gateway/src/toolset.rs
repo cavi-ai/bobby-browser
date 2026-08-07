@@ -91,12 +91,12 @@ impl Toolset {
     /// A phase narrows what is shown, never what is allowed: a hidden tool is
     /// still callable, and capability gates stay the only enforcement boundary.
     ///
-    /// Job tools are verify-only in `tools/list` so the default/full connect
-    /// catalog stays inside the byte budget; they remain callable from any
-    /// phase when a [`crate::jobs::JobPort`] is attached.
+    /// Job tools advertise in `full`, `act`, and `verify` once the catalog
+    /// advertise-schema trim leaves budget headroom. They remain callable from
+    /// any phase when a [`crate::jobs::JobPort`] is attached.
     pub fn advertises(self, tool: &str) -> bool {
         if crate::jobs::is_job_tool(tool) {
-            return self == Self::Verify;
+            return matches!(self, Self::Full | Self::Act | Self::Verify);
         }
         if self == Self::Full || ALWAYS.contains(&tool) {
             return true;
@@ -258,22 +258,29 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn full_advertises_everything_except_verify_only_jobs() {
+    fn full_advertises_everything_including_jobs() {
         for tool in EVERY_TOOL {
-            if matches!(*tool, "job_submit" | "job_status" | "job_cancel") {
-                assert!(
-                    !Toolset::Full.advertises(tool),
-                    "{tool} must stay verify-only so full stays under budget"
-                );
-                assert!(
-                    Toolset::Verify.advertises(tool),
-                    "{tool} must advertise in verify"
-                );
-                continue;
-            }
             assert!(
                 Toolset::Full.advertises(tool),
                 "{tool} is missing from the full toolset"
+            );
+        }
+        for tool in ["job_submit", "job_status", "job_cancel"] {
+            assert!(
+                Toolset::Act.advertises(tool),
+                "{tool} must advertise in act"
+            );
+            assert!(
+                Toolset::Verify.advertises(tool),
+                "{tool} must advertise in verify"
+            );
+            assert!(
+                !Toolset::Explore.advertises(tool),
+                "{tool} must stay out of explore"
+            );
+            assert!(
+                !Toolset::Intent.advertises(tool),
+                "{tool} must stay out of intent"
             );
         }
     }

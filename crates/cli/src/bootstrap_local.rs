@@ -22,11 +22,12 @@ const PRESET_MARKER: &str = "bobby-bootstrap-preset:";
 /// Which capability floor heal / init use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum BootstrapPreset {
-    /// Full local operator set, including `authority:admin` (default).
-    #[default]
-    Unrestricted,
     /// Agent host set: no `authority:admin`. Heal never widens past this set.
+    /// Default for fresh `bobby init` / install / loopback auto-init.
+    #[default]
     Agent,
+    /// Full local operator set, including `authority:admin`.
+    Unrestricted,
 }
 
 impl BootstrapPreset {
@@ -155,7 +156,7 @@ pub fn default_bootstrap_path() -> Result<PathBuf> {
 }
 
 pub fn generate_bootstrap(ttl: Duration) -> Result<BootstrapMaterial> {
-    generate_bootstrap_for_preset(ttl, BootstrapPreset::Unrestricted)
+    generate_bootstrap_for_preset(ttl, BootstrapPreset::Agent)
 }
 
 pub fn generate_bootstrap_for_preset(
@@ -667,13 +668,13 @@ mod tests {
     fn generate_bootstrap_meets_bearer_rules() {
         let material = generate_bootstrap(chrono::Duration::days(DEFAULT_TTL_DAYS)).unwrap();
         assert!(material.bearer().len() >= 32);
-        assert!(material.capabilities_csv().contains("authority:admin"));
+        assert!(!material.capabilities_csv().contains("authority:admin"));
         assert!(material.capabilities_csv().contains("session:read"));
         assert!(material.capabilities_csv().contains("context:read"));
         assert!(material.capabilities_csv().contains("job:submit"));
         assert!(material.capabilities_csv().contains("job:read"));
         assert!(material.capabilities_csv().contains("job:cancel"));
-        assert_eq!(material.preset(), BootstrapPreset::Unrestricted);
+        assert_eq!(material.preset(), BootstrapPreset::Agent);
     }
 
     #[test]

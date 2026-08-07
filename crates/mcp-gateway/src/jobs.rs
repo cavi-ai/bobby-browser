@@ -161,7 +161,7 @@ impl InProcessJobPort {
         Self { scheduler }
     }
 
-    /// Memory scheduler with echo/sleep handlers; caller must `spawn` `run()`.
+    /// Memory scheduler with echo/sleep/http_probe handlers; caller must `spawn` `run()`.
     pub fn memory() -> (Self, Arc<JobScheduler>) {
         let mut scheduler = JobScheduler::new(task_scheduler::SchedulerConfig::default());
         register_builtin_handlers(&mut scheduler);
@@ -179,6 +179,7 @@ impl InProcessJobPort {
 fn register_builtin_handlers(scheduler: &mut JobScheduler) {
     scheduler.register_handler("echo".to_string(), Arc::new(EchoHandler));
     scheduler.register_handler("sleep".to_string(), Arc::new(SleepHandler));
+    scheduler.register_handler("http_probe".to_string(), Arc::new(HttpProbeHandler));
 }
 
 struct EchoHandler;
@@ -203,6 +204,40 @@ impl JobHandler for SleepHandler {
             .min(30_000);
         tokio::time::sleep(Duration::from_millis(ms)).await;
         Ok(json!({ "sleptMs": ms }))
+    }
+}
+
+struct HttpProbeHandler;
+
+#[async_trait]
+impl JobHandler for HttpProbeHandler {
+    async fn execute(&self, job: &Job) -> Result<Value, String> {
+        let url = job
+            .payload
+            .get("url")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "http_probe requires payload.url".to_owned())?;
+        let method = job
+            .payload
+            .get("method")
+            .and_then(|value| value.as_str())
+            .map(|raw| {
+                network_engine::HttpProbeMethod::parse(raw)
+                    .ok_or_else(|| format!("http_probe method must be HEAD or GET, got {raw}"))
+            })
+            .transpose()?
+            .unwrap_or(network_engine::HttpProbeMethod::Head);
+        let timeout_ms = job
+            .payload
+            .get("timeoutMs")
+            .and_then(|value| value.as_u64());
+        network_engine::http_probe(
+            url,
+            method,
+            timeout_ms,
+            network_engine::NetworkPolicy::default(),
+        )
+        .await
     }
 }
 

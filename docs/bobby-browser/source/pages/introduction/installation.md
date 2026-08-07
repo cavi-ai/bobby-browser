@@ -51,7 +51,8 @@ Optional: `BOBBY_VERSION={{PRODUCT_VERSION}}` (no leading `v`) and `INSTALL_DIR=
 
 ### Homebrew (macOS / Linuxbrew)
 
-From a checkout of this repo (custom formula; not yet on homebrew-core):
+Not on [homebrew-core](https://github.com/Homebrew/homebrew-core) yet. From a
+checkout of this repo:
 
 ```bash
 brew install --formula ./Formula/bobby-browser.rb
@@ -59,6 +60,10 @@ brew install --formula ./Formula/bobby-browser.rb
 
 The formula downloads the matching GitHub Release tarball and installs the
 same three binaries.
+
+When submitting to homebrew-core later: formula `bobby-browser`; bottle
+`bobby` / `mcp-gateway` / `acp-gateway`; livecheck on GitHub Releases; CI that
+builds all three; pass `brew audit --strict`.
 
 ### Manual download
 

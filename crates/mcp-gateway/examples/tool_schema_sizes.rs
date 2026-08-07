@@ -1,8 +1,12 @@
+//! Print per-tool `tools/list` entry sizes and phase frames vs `TOOLS_LIST_BYTE_BUDGET`.
+//!
+//!   cargo run -p mcp-gateway --example tool_schema_sizes
+
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
-use mcp_gateway::{InProcessJobPort, Server, Toolset};
+use mcp_gateway::{InProcessJobPort, Server, Toolset, TOOLS_LIST_BYTE_BUDGET};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::json;
 use types::{Capability, PrincipalId};
@@ -17,8 +21,11 @@ async fn list_for(toolset: Toolset) -> (usize, Vec<(String, usize)>) {
             Utc::now() + Duration::hours(1),
         )
         .await
-        .unwrap();
-    let handle = authority.verify(&token.expose_once()).await.unwrap();
+        .expect("issue");
+    let handle = authority
+        .verify(&token.expose_once())
+        .await
+        .expect("verify");
     let (jobs, _sched) = InProcessJobPort::memory();
     let server = Server::new(Arc::new(AuthenticatedRuntime::new(
         RuntimeService::default(),
@@ -33,55 +40,57 @@ async fn list_for(toolset: Toolset) -> (usize, Vec<(String, usize)>) {
                       "clientInfo":{"name":"sizes","version":"1"}}
         }))
         .await
-        .unwrap();
+        .expect("initialize");
     server
         .handle_message(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
         .await;
     let response = server
         .handle_message(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
         .await
-        .unwrap();
-    let tools = response["result"]["tools"].as_array().unwrap();
+        .expect("tools/list");
+    let tools = response["result"]["tools"].as_array().expect("tools");
     let mut rows: Vec<(String, usize)> = tools
         .iter()
         .map(|t| {
-            let name = t["name"].as_str().unwrap_or("").to_owned();
-            let bytes = serde_json::to_vec(t).unwrap().len();
-            (name, bytes)
+            (
+                t["name"].as_str().unwrap_or("").to_owned(),
+                serde_json::to_vec(t).expect("ser").len(),
+            )
         })
         .collect();
     rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
-    let frame = serde_json::to_vec(&response).unwrap().len();
-    (frame, rows)
+    let tools_bytes = serde_json::to_vec(tools).expect("ser").len();
+    (tools_bytes, rows)
 }
 
 #[tokio::main]
 async fn main() {
-    let (full_frame, full_rows) = list_for(Toolset::Full).await;
-    let (verify_frame, verify_rows) = list_for(Toolset::Verify).await;
-    let (explore_frame, _) = list_for(Toolset::Explore).await;
-    let (act_frame, _) = list_for(Toolset::Act).await;
-    let (intent_frame, _) = list_for(Toolset::Intent).await;
-    println!("PHASE\tFRAME\tCOUNT");
-    println!("full\t{full_frame}\t{}", full_rows.len());
-    println!("verify\t{verify_frame}\t{}", verify_rows.len());
-    println!("explore\t{explore_frame}");
-    println!("act\t{act_frame}");
-    println!("intent\t{intent_frame}");
-    println!("BUDGET\t{}", 128 * 1024);
-    println!("HEADROOM_FULL\t{}", 128 * 1024 - full_frame);
-    println!("---FULL---");
-    for (n, b) in &full_rows {
-        println!("{n}\t{b}");
-    }
-    println!("---JOBS_IN_VERIFY---");
-    let mut job_sum = 0usize;
-    for (n, b) in &verify_rows {
-        if n.starts_with("job_") {
-            println!("{n}\t{b}");
-            job_sum += b;
+    for phase in [
+        Toolset::Full,
+        Toolset::Verify,
+        Toolset::Explore,
+        Toolset::Act,
+        Toolset::Intent,
+    ] {
+        let (frame, rows) = list_for(phase).await;
+        println!(
+            "{}\t{}\t{}\theadroom={}",
+            phase.as_str(),
+            frame,
+            rows.len(),
+            TOOLS_LIST_BYTE_BUDGET.saturating_sub(frame)
+        );
+        if phase == Toolset::Full {
+            for (n, b) in rows.iter().take(12) {
+                println!("  {n}\t{b}");
+            }
+            let jobs: usize = rows
+                .iter()
+                .filter(|(n, _)| n.starts_with("job_"))
+                .map(|(_, b)| *b)
+                .sum();
+            println!("  job_sum\t{jobs}");
         }
     }
-    println!("JOB_SUM_VERIFY\t{job_sum}");
-    println!("FULL_PLUS_JOBS_EST\t{}", full_frame + job_sum);
+    println!("BUDGET\t{TOOLS_LIST_BYTE_BUDGET}");
 }

@@ -31,7 +31,8 @@ use crate::protocol::{
 };
 use crate::resources::{static_resource_body, static_resources};
 use crate::schema::{
-    advertised_tool_schema, tool_output_schema, validate_tool_arguments, MAX_RECOVERABLE_WORKFLOWS,
+    advertised_tool_output_schema, advertised_tool_schema, validate_tool_arguments,
+    MAX_RECOVERABLE_WORKFLOWS,
 };
 use crate::tool_args::*;
 use crate::tool_meta::{required_capabilities, required_operation, tool_description};
@@ -605,7 +606,7 @@ impl Server {
                     "title": tool_title(name),
                     "description": tool_description(name),
                     "inputSchema": input_schema,
-                    "outputSchema": tool_output_schema(name),
+                    "outputSchema": advertised_tool_output_schema(name),
                     "annotations": tool_annotations(name)
                 }));
             }

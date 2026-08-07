@@ -417,20 +417,19 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 /// The schema advertised in `tools/list`, distinct from the schema
 /// `validate_tool_arguments` enforces at dispatch.
 ///
-/// Identical to `tool_schema` for every tool but `command_execute`, whose
-/// `envelope.command` advertises as an opaque object instead of the 13,783-byte
-/// `PrimitiveCommand`/`IntentCommand` union. Only advertisement narrows: `tool_schema`
-/// and `definitions()` keep the full union, so a malformed nested command still fails
-/// `-32602` before reaching the runtime. The four primitives with no named tool
-/// (`clickAndWaitForPopup`, `clickAndWaitForDownload`, `setFocusEmulation`,
-/// `setEmulatedMedia`) are documented in the `bobby://primitives` resource.
+/// Narrows deep `$defs` that dominate connect cost (`WaitCondition`,
+/// `IntentHints`, `TargetSpec`, `ScreenshotMode`) and, for `command_execute`,
+/// collapses `envelope.command` to an opaque object instead of the full
+/// `PrimitiveCommand`/`IntentCommand` union. Top-level property names and
+/// required fields stay identical. `tool_schema` / `definitions()` keep the
+/// full shapes, so `tools/call` validation is unchanged. The four primitives
+/// with no named tool are documented in `bobby://primitives`.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
-    let mut schema = if name != "command_execute" {
-        tool_schema(name)
-    } else {
-        let mut schema = tool_schema(name);
-        let mut patched = definitions();
-        let patched = patched.as_object_mut().expect("definitions is an object");
+    let mut schema = tool_schema(name);
+    let mut patched = definitions();
+    let patched = patched.as_object_mut().expect("definitions is an object");
+    apply_advertised_input_patches(patched);
+    if name == "command_execute" {
         if let Some(command_envelope) = patched.get_mut("CommandEnvelope") {
             command_envelope["properties"]["command"] = json!({
                 "type": "object",
@@ -438,14 +437,54 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
             Prefer named tools for common actions; they build this envelope."
             });
         }
-        let seed = json!({"properties": schema["properties"], "required": schema["required"]});
-        schema["$defs"] = reachable_definitions_from(&seed, patched);
-        schema
-    };
+    }
+    let seed = json!({"properties": schema["properties"], "required": schema["required"]});
+    schema["$defs"] = reachable_definitions_from(&seed, patched);
     if let Some(example) = tool_argument_example(name) {
         schema["examples"] = json!([example]);
     }
     schema
+}
+
+/// Opaque / property-preserving stand-ins for the largest input `$defs`. Used
+/// only by [`advertised_tool_schema`]; [`definitions`] stays full for validation.
+fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
+    patched.insert(
+        "IntentHints".to_owned(),
+        object(
+            json!({
+                "role":nullable(string(0, 256)),
+                "accessibleName":nullable(string(0, 256)),
+                "nearText":nullable(json!({"type":"object"})),
+                "ordinal":nullable(json!({"type":"integer","minimum":0,"maximum":1000000})),
+                "framePath":{"type":"array","items":{"type":"object"},"maxItems":16},
+                "shadowPath":{"type":"array","items":{"type":"object"},"maxItems":16},
+                "allowBestMatch":{"type":"boolean"}
+            }),
+            &[],
+        ),
+    );
+    patched.insert(
+        "WaitCondition".to_owned(),
+        json!({
+            "type":"object",
+            "description":"Wait condition (tagged kind + fields). Full union enforced at tools/call."
+        }),
+    );
+    patched.insert(
+        "TargetSpec".to_owned(),
+        json!({
+            "type":"object",
+            "description":"Resolved target or selector path. Full TargetSpec enforced at tools/call."
+        }),
+    );
+    patched.insert(
+        "ScreenshotMode".to_owned(),
+        json!({
+            "type":"object",
+            "description":"viewport | fullPage | element | clip. Full union enforced at tools/call."
+        }),
+    );
 }
 
 /// Compact argument templates for the first-run tools. Kept off the validation
@@ -611,6 +650,45 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         schema["$defs"] = defs;
     }
     schema
+}
+
+/// `tools/list` outputSchema. Identical to [`tool_output_schema`] except
+/// `form_snapshot`, whose nested `FormControl*` `$defs` dominate the entry —
+/// advertised as opaque form/control objects while wire types stay unchanged.
+pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
+    if name != "form_snapshot" {
+        return tool_output_schema(name);
+    }
+    let mut schema = output_ref("FormSnapshot");
+    schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
+    let mut patched = definitions();
+    let patched = patched.as_object_mut().expect("definitions is an object");
+    patched.insert("FormSnapshot".to_owned(), advertised_form_snapshot());
+    let defs = reachable_definitions_from(&schema, patched);
+    if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
+        schema["$defs"] = defs;
+    }
+    schema
+}
+
+/// Advertise-only FormSnapshot: keep top-level keys, collapse nested controls.
+fn advertised_form_snapshot() -> Value {
+    object(
+        json!({
+            "schemaVersion":{"type":"integer","const":1},
+            "pageId":id(),
+            "forms":array(json!({"type":"object"}), 64),
+            "unownedControls":array(json!({"type":"object"}), 512),
+            "truncated":{"type":"boolean"}
+        }),
+        &[
+            "schemaVersion",
+            "pageId",
+            "forms",
+            "unownedControls",
+            "truncated",
+        ],
+    )
 }
 
 /// A top-level schema whose entire value equals one named definition. JSON Schema

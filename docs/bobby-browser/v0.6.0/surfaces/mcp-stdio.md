@@ -32,10 +32,11 @@ Generate them with `bobby init` (writes `…/bobby-browser/bootstrap.env`), then
 either export the file into the environment or point your MCP client `env` at
 those keys. Missing or invalid startup input fails closed.
 
-For agent hosts that should not mint principals, use
-`bobby init --preset agent`. That omits `authority:admin`, writes
-`# bobby-bootstrap-preset: agent`, and keeps heal from widening past the agent
-floor. Default `bobby init` remains unrestricted (includes `authority:admin`).
+For agent hosts, default `bobby init` (and install / loopback auto-init) mints
+the **agent** preset: no `authority:admin`, marker
+`# bobby-bootstrap-preset: agent`, heal never widens past that floor. Operators
+who need to mint principals use `bobby init --preset unrestricted`. Marker-less
+existing files still heal as unrestricted (back-compat).
 
 There is no single `AUTOMATION_RUNTIME_TOKEN` env var for stdio startup. That
 name is only a conventional alias for the **client** bearer when talking to the

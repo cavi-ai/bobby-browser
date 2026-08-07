@@ -66,7 +66,7 @@ Tools are advertised only when the principal holds the required capability.
 | `cookie_set` | `browser:mutate` | Store cookies |
 | `cookie_delete` | `browser:mutate` | Delete cookies by origin/name |
 | `workflow_recover` | `recovery:write` | Recover a workflow from its verified checkpoint |
-| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` builtins; verify-phase advertise) |
+| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe`; advertised in full/act/verify) |
 | `job_status` | `job:read` | Read one owned job by id |
 | `job_cancel` | `job:cancel` | Cancel one owned job by id |
 
@@ -214,11 +214,11 @@ agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page, navigate, wait (default) | ~42 KB |
-| `act` | raw primitives and `command_execute` | ~54 KB |
-| `intent` | the `intent_*` family and `extract_structured` | ~74 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~49 KB |
-| `full` | everything the principal's capabilities allow (except verify-only jobs) | ~130 KB |
+| `explore` | read the page, navigate, wait (default) | ~30 KB |
+| `act` | raw primitives, `command_execute`, and job tools | ~45 KB |
+| `intent` | the `intent_*` family and `extract_structured` | ~48 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~41 KB |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~95 KB |
 
 Session and page lifecycle, `runtime_info`, and `toolset_select` itself appear
 in every phase.
