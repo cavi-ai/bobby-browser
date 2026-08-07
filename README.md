@@ -107,16 +107,23 @@ retained-first compact context in every MCP phase.
 rather than replacing it, and writes no secrets into host config — the host
 points at `bobby mcp-stdio`, which loads the credential itself.
 
-Verify, then run:
+Verify, then (companion path) start Firefox and Pair once:
 
 ```bash
 bobby doctor          # config, credential, storage, browsers, MCP handshake
-bobby serve           # http://127.0.0.1:7777/healthz
+make firefox-start    # Bobby profile + --remote-debugging-port=9222; then Pair
+```
+
+Local agents already point at `bobby mcp-stdio` from install — no daemon.
+Optional HTTP / CDP:
+
+```bash
+bobby serve           # http://127.0.0.1:7777/healthz (streamable HTTP MCP)
 bobby cdp             # authenticated CDP on 127.0.0.1:9222 (dedicated port)
 ```
 
 [CLI reference](docs/bobby-browser/source/pages/guides/cli.md) ·
-[Run the server](docs/bobby-browser/source/pages/guides/run.md)
+[Run the server](docs/bobby-browser/source/pages/guides/run.md) (optional HTTP)
 
 ## Use from TypeScript
 
