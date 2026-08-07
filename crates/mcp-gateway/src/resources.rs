@@ -696,7 +696,10 @@ tools most likely to produce it.
   recurs.
 - `targetNotFound` -- the described element no longer resolves to anything on
   the page. Repair: take a fresh `a11y_snapshot` (or `form_snapshot` for
-  typed controls) and pass the new target.
+  typed controls) and pass the new target. If the control lives inside an
+  iframe, the intent tools cannot reach it -- intents resolve in the main
+  frame only; use a primitive (`click`, `type_text`, `control_action`) with
+  a `framePath` on the target instead.
 - `targetAmbiguous` -- the description or selector matched more than one
   candidate. Repair: narrow the purpose or hints until exactly one candidate
   matches, or explicitly allow best-match resolution.
@@ -734,8 +737,13 @@ tools most likely to produce it.
   retry; if it persists, the page, engine, or artifact store may be in a
   bad state.
 - `networkPolicyDenied` -- the requested URL failed the runtime's own network
-  policy before any request was made (not http(s), missing host, or embedded
-  credentials). Repair: use a plain http(s) URL with no userinfo.
+  policy before any request was made: not http(s), missing host, embedded
+  credentials, or a denied destination. Loopback and private-network
+  addresses are denied unless the operator sets `http.allow_loopback` /
+  `http.allow_private_network` in `config.toml` -- so this code on a local
+  dev server is a policy choice, not a bug. Repair: fix the URL, ask the
+  operator to relax the policy, or, for a file the page already offers,
+  click its download link instead of calling `download_url`.
 - `httpResponseTooLarge` -- the HTTP response exceeded the configured byte
   limit for the operation. Repair: raise the byte limit within the
   configured range, or expect a smaller resource.
@@ -915,6 +923,11 @@ variant; `IntentCommand::class` fixes its recovery behavior.
 | `DismissObstruction` | `intent_dismiss_obstruction` | Reconciliable |
 | `SubmitAndVerify` | `intent_submit_and_verify` | Boundary |
 | `Follow` | `intent_follow` | Boundary if `boundary: true`, else Reconciliable |
+
+Intents resolve in the main frame only. A control inside an iframe is
+invisible to them (snapshots do not descend into frames); drive it with a
+primitive (`click`, `type_text`, `control_action`) whose target carries a
+`framePath` — each hop is a TargetSpec for the frame element.
 
 ## Classes and recovery
 

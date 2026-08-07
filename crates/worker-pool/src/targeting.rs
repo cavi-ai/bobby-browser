@@ -208,6 +208,16 @@ impl ResolvedTarget {
             .await
     }
 
+    /// Anchors with a `download` attribute trigger a download on click, which
+    /// a plain click would otherwise drop silently in headless Chromium.
+    pub async fn is_download_link(&self, page: &Page) -> Result<bool, CommandError> {
+        self.eval(
+            page,
+            "return el instanceof HTMLAnchorElement && el.hasAttribute('download')",
+        )
+        .await
+    }
+
     pub async fn is_checkable(&self, page: &Page) -> Result<bool, CommandError> {
         self.eval(
             page,
@@ -384,6 +394,32 @@ pub async fn resolve_target(
     browser: Option<&mut Browser>,
 ) -> Result<ResolvedTarget, CommandError> {
     resolve_target_with_visibility(page_id, page, selector, target, true, browser).await
+}
+
+/// An empty string in a target field can never resolve — an exact match
+/// against "" — but a wait condition would poll for it until the deadline,
+/// reporting a timeout instead of the real mistake. Reject it up front.
+fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
+    for (field, value) in [
+        ("css", &target.css),
+        ("testId", &target.test_id),
+        ("role", &target.role),
+        ("accessibleName", &target.accessible_name),
+        ("label", &target.label),
+    ] {
+        if let Some(value) = value {
+            if value.trim().is_empty() {
+                return Err(target_error(
+                    ErrorCode::InvalidRequest,
+                    format!("target field {field} is empty and can never resolve"),
+                ));
+            }
+        }
+    }
+    for nested in target.frame_path.iter().chain(target.shadow_path.iter()) {
+        validate_target_spec(nested)?;
+    }
+    Ok(())
 }
 
 /// Gather DOM candidates for intent resolution without choosing a match.
@@ -601,6 +637,7 @@ pub async fn resolve_target_with_visibility(
             evidence: selector_evidence(page_id, selector),
         });
     };
+    validate_target_spec(target)?;
 
     let scope = open_target_scope(page, target, browser).await?;
     let base_scope = scope.locator_scope();

@@ -1645,6 +1645,25 @@ impl FirefoxCompanionWorker {
                 false,
             ));
         }
+        // Parity with the Chromium resolver: empty string fields can never
+        // resolve, and a wait would poll for them until the deadline.
+        for (field, value) in [
+            ("css", &target.css),
+            ("testId", &target.test_id),
+            ("role", &target.role),
+            ("accessibleName", &target.accessible_name),
+            ("label", &target.label),
+        ] {
+            if let Some(value) = value {
+                if value.trim().is_empty() {
+                    return Err(driver_error(
+                        ErrorCode::InvalidRequest,
+                        format!("target field {field} is empty and can never resolve"),
+                        false,
+                    ));
+                }
+            }
+        }
         let mut context = top_context.to_owned();
         for frame in &target.frame_path {
             let frame_selector = direct_target_selector(frame).ok_or_else(|| {
