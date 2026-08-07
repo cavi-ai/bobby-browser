@@ -38,7 +38,8 @@ cargo build --release -p bobby-browser
 
 ### Homebrew (macOS / Linux)
 
-From a checkout (ships `bobby`, `mcp-gateway`, and `acp-gateway`):
+Not on homebrew-core yet. From a checkout (ships `bobby`, `mcp-gateway`, and
+`acp-gateway`):
 
 ```bash
 brew install --formula ./Formula/bobby-browser.rb
@@ -49,6 +50,11 @@ Once published under a tap:
 ```bash
 brew install cavi-ai/bobby-browser/bobby-browser
 ```
+
+Future homebrew-core checklist (when ready to submit upstream): formula name
+`bobby-browser`; bottle the three binaries; livecheck against GitHub Releases;
+CI builds `bobby` / `mcp-gateway` / `acp-gateway`; audit against Homebrew's
+accepted licenses and no network-at-install.
 
 Release archives are three binaries on purpose: the CLI plus the two stdio
 gateways agents spawn. Prefer MCP Explore (`BOBBY_MCP_TOOLSET=explore` or

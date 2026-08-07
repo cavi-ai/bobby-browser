@@ -17,7 +17,8 @@ in-process recovery strategies and are not MCP tools.
 Jobs: `job_submit` / `job_status` / `job_cancel` (needs `job:*` caps). They
 advertise in `full`, `act`, and `verify`. Same contract as HTTP `/v1/jobs`.
 Jobs are scheduler probes, not page intents — prefer `intent_*` for browser
-work; see `bobby://job-handlers`. Built-ins: `echo`, `sleep` (`payload.ms`).
+work; see `bobby://job-handlers`. Built-ins: `echo`, `sleep` (`payload.ms`),
+`http_probe` (`payload.url`, optional `method`/`timeoutMs`).
 `bobby doctor` lists them under `job-handlers`.
 
 Release layout is three binaries (`bobby`, `mcp-gateway`, `acp-gateway`). Keep
@@ -34,9 +35,9 @@ Never claim an action worked without its evidence.
    --skill --yes`). That writes the bootstrap credential, merges MCP config,
    and installs this skill into `~/.agents/skills/bobby-browser/` (project:
    `.agents/skills/` with `--project-skill`). Optional: `--skill-claude`,
-   `--skill-openclaw`. For agent hosts that should not mint tokens, prefer
-   `bobby init --preset agent` (no `authority:admin`; heal respects the
-   marker). Default `bobby init` remains unrestricted.
+   `--skill-openclaw`. Default `bobby init` / install mint the **agent**
+   preset (no `authority:admin`; heal respects the marker). Operators who need
+   to mint principals use `bobby init --preset unrestricted`.
 2. For the Firefox companion (persistent logins): `bobby install --companion`
    or `make firefox`, start Firefox with `--remote-debugging-port` (`make
    firefox-start` if using the launchd agent), then **Pair** from the toolbar

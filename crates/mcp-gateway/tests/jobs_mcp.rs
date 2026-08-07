@@ -102,3 +102,47 @@ async fn job_submit_status_and_cancel_round_trip() {
         "{cancelled}"
     );
 }
+
+#[tokio::test]
+async fn http_probe_to_loopback_fails_closed() {
+    let server = server_with_jobs().await;
+    let submitted = server
+        .handle_message(json!({
+            "jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"job_submit","arguments":{
+                "name":"http_probe",
+                "payload":{"url":"http://127.0.0.1:9/","method":"HEAD","timeoutMs":1000},
+                "maxRetries": 0
+            }}
+        }))
+        .await
+        .unwrap();
+    assert!(
+        submitted["result"]["isError"] != true,
+        "submit failed: {submitted}"
+    );
+    let job_id = submitted["result"]["structuredContent"]["jobId"]
+        .as_str()
+        .expect("jobId")
+        .to_owned();
+    for _ in 0..50 {
+        let status = server
+            .handle_message(json!({
+                "jsonrpc":"2.0","id":4,"method":"tools/call",
+                "params":{"name":"job_status","arguments":{"jobId":job_id}}
+            }))
+            .await
+            .unwrap();
+        let st = status["result"]["structuredContent"]["status"]
+            .as_str()
+            .unwrap_or("");
+        if st == "failed" {
+            return;
+        }
+        if st == "completed" {
+            panic!("http_probe to loopback must fail closed: {status}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("http_probe loopback job did not finish");
+}

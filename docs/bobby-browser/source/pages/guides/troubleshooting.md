@@ -23,7 +23,8 @@ See [Authentication](auth.md).
 
 Principal lacks the capability for that operation (or nested command). Check the
 matrix in [Capabilities](../concepts/capabilities.md). Default `bobby init`
-includes a full set; scoped issued principals do not.
+mints the agent floor (no `authority:admin`); use `--preset unrestricted` for
+the full operator set. Scoped issued principals are narrower still.
 
 ## Wrong path (`404`)
 

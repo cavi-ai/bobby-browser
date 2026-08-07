@@ -75,8 +75,8 @@ enum CliCommand {
         /// Days until the bootstrap credential expires
         #[arg(long, default_value_t = bootstrap_local::DEFAULT_TTL_DAYS as u32)]
         ttl_days: u32,
-        /// Capability floor: unrestricted (default) or agent (no authority:admin)
-        #[arg(long, value_enum, default_value_t = bootstrap_local::BootstrapPreset::Unrestricted)]
+        /// Capability floor: agent (default, no authority:admin) or unrestricted
+        #[arg(long, value_enum, default_value_t = bootstrap_local::BootstrapPreset::Agent)]
         preset: bootstrap_local::BootstrapPreset,
         /// Bootstrap env file path
         #[arg(long)]
@@ -2836,6 +2836,7 @@ endpoint_url = "http://127.0.0.1:9100/vision"
         assert_eq!(jobs.status, DoctorStatus::Ok);
         assert!(jobs.detail.contains("echo"));
         assert!(jobs.detail.contains("sleep"));
+        assert!(jobs.detail.contains("http_probe"));
     }
 
     #[test]

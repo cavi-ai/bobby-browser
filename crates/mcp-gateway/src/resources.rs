@@ -1019,6 +1019,16 @@ Sleeps for `payload.ms` milliseconds (default 1000, cap 30000), then completes.
 {"name":"sleep","payload":{"ms":500}}
 ```
 
+## http_probe
+
+HEAD (default) or GET a URL under the same SSRF policy as downloads
+(loopback/private denied unless config allows). `timeoutMs` defaults to 5000,
+capped at 15000. Returns status metadata only — no response body.
+
+```json
+{"name":"http_probe","payload":{"url":"https://example.com/health","method":"HEAD","timeoutMs":5000}}
+```
+
 `bobby doctor` reports the same handler names under `job-handlers`.
 "#;
 
@@ -1047,7 +1057,7 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
         (
             JOB_HANDLERS_URI,
             "Job handlers",
-            "Built-in scheduler handlers (echo, sleep), payloads, and when to use jobs vs intents.",
+            "Built-in scheduler handlers (echo, sleep, http_probe), payloads, and when to use jobs vs intents.",
         ),
     ]
 }

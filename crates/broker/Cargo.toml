@@ -32,6 +32,7 @@ mcp-gateway = { path = "../mcp-gateway", version = "0.6.0" }
 cdp-gateway = { path = "../cdp-gateway", version = "0.6.0" }
 worker-pool = { path = "../worker-pool", version = "0.6.0" }
 task-scheduler = { path = "../task-scheduler", version = "0.6.0" }
+network-engine = { path = "../network-engine", version = "0.6.0" }
 observability = { path = "../observability", version = "0.6.0" }
 
 futures-util.workspace = true
