@@ -427,4 +427,26 @@ mod tests {
             "unexpected deny message: {err}"
         );
     }
+
+    #[tokio::test]
+    async fn fetch_rejects_loopback_by_default() {
+        let err = http_fetch(
+            "http://127.0.0.1:9/",
+            Some(1_000),
+            Some(256),
+            None,
+            NetworkPolicy::default(),
+        )
+        .await
+        .expect_err("loopback must be denied");
+        assert!(
+            err.to_lowercase().contains("denied")
+                || err.to_lowercase().contains("private")
+                || err.to_lowercase().contains("loopback")
+                || err.to_lowercase().contains("policy")
+                || err.to_lowercase().contains("not allowed")
+                || err.to_lowercase().contains("not permitted"),
+            "unexpected deny message: {err}"
+        );
+    }
 }
