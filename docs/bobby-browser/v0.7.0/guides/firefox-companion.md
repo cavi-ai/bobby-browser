@@ -105,6 +105,13 @@ on partial failure.
 ### 3. Start Firefox with BiDi
 
 ```bash
+make firefox-start
+```
+
+That launches the Bobby profile with `--remote-debugging-port=9222` (no
+launchd). `make firefox-stop` quits it. Manual equivalent:
+
+```bash
 PROFILE="$HOME/Library/Application Support/bobby-browser/firefox-profile"
 "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox" \
   --no-remote --foreground \
@@ -112,8 +119,6 @@ PROFILE="$HOME/Library/Application Support/bobby-browser/firefox-profile"
   --remote-debugging-port=9222 \
   about:blank
 ```
-
-If you use the local launchd agent: `make firefox-start`.
 
 Firefox writes the BiDi endpoint to `$PROFILE/WebDriverBiDiServer.json`. A
 fixed port keeps `bidiUrl` stable across restarts; `--remote-debugging-port=0`
@@ -133,9 +138,9 @@ primary enroll path:
    core as the CLI, and atomically persists
    `<config-dir>/bobby-browser/browser-selection.json` (`0600` on Unix).
 3. First-time **Pair** bootstraps enrollment in the native host and does
-   **not** require `bobby serve` (serve needs the selection file first).
-   Day-2 **Re-pair** assumes `bobby serve` or the MCP gateway has
-   published a live descriptor.
+   **not** require `bobby serve`. Local agents use `bobby mcp-stdio` after
+   Pair. Day-2 **Re-pair** assumes a live MCP gateway (stdio or HTTP) has
+   published a descriptor when the extension needs one.
 
 On success the popup shows a **Paired** badge with companion and profile
 ids. `bobby serve`, the MCP gateway, and `bobby doctor` then resolve the
@@ -153,7 +158,7 @@ If **Pair** fails, the popup shows an operator-safe message (no secrets):
 
 | Situation | Message |
 |---|---|
-| Re-pair while serve/gateway is down | Start bobby serve, then Pair again |
+| Re-pair while gateway is down | Start `bobby mcp-stdio` (or `bobby serve` for HTTP), then Pair again |
 | Firefox not started with remote debugging | Start Firefox with remote debugging, then Pair again |
 | Install defaults missing or profile path unknown | Profile path unknown — re-run bobby install (see docs) |
 | Enrollment timed out | Pairing timed out |
@@ -174,7 +179,12 @@ bobby enroll-firefox-profile \
 On success it prints a single-line JSON value and writes the same
 `browser-selection.json` as popup Pair.
 
-### 5. Serve
+### 5. Drive from an agent (stdio) or optional HTTP
+
+Local agents: host spawns `bobby mcp-stdio` (wired by `bobby install`). No
+`bobby serve` process is required.
+
+Optional streamable HTTP:
 
 ```bash
 bobby serve
@@ -187,8 +197,8 @@ backoff, so restarts of either side self-heal).
 
 ## Operations
 
-- Keep Firefox running under a supervisor (e.g. a launchd agent with
-  `KeepAlive`) so the BiDi endpoint and extension stay up.
+- Keep Firefox running while you automate (`make firefox-start`). A KeepAlive
+  launchd agent is optional if you want the profile to survive logouts.
 - `bobby doctor` validates selection JSON, engine satisfiability, per-profile
   `bidiUrl` syntax and TCP reachability, `profileDir`, `companionBind`, and
   browser bundle detection.

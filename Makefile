@@ -6,8 +6,8 @@ SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 
 .PHONY: help \
 	build install firefox cli \
-	start stop firefox-start firefox-stop \
-	reload verify status \
+	firefox-start firefox-stop \
+	start stop reload verify status \
 	fmt lint test \
 	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
 	behavioral-benchmark behavioral-e2e behavioral-dogfood
@@ -21,11 +21,13 @@ help:
 	@echo "  firefox    build + install Firefox companion only"
 	@echo "  cli        build + install bobby (+ mcp-gateway) onto PATH"
 	@echo
-	@echo "Service (launchd)"
+	@echo "Firefox (local agents use stdio — no HTTP serve required)"
+	@echo "  firefox-start  launch Bobby Firefox with --remote-debugging-port (then Pair)"
+	@echo "  firefox-stop   quit that Firefox (also boots out a legacy KeepAlive agent)"
+	@echo
+	@echo "Optional HTTP (launchd) — only if you need bobby serve over the network"
 	@echo "  start          start bobby serve MCP HTTP (com.bobby_browser.serve)"
 	@echo "  stop           stop it for real (bootout; kill alone respawns)"
-	@echo "  firefox-start  start KeepAlive Firefox companion agent"
-	@echo "  firefox-stop   stop KeepAlive Firefox companion agent"
 	@echo "  reload         build, restart bobby serve, verify MCP handshake"
 	@echo "  verify         restart and verify without rebuilding"
 	@echo "  status         launchd state, port health, binary freshness"
@@ -47,10 +49,11 @@ help:
 	@echo "  behavioral-dogfood     live Firefox behavioral probe (needs BOBBY_FIREFOX_*)"
 	@echo
 	@echo "Notes"
+	@echo "  Local agents: host spawns bobby mcp-stdio (wired by install). No daemon."
 	@echo "  Set BOBBY_BROWSER_TOKEN to include the MCP handshake in reload/verify."
 	@echo "  Non-interactive full setup:"
 	@echo "    ./target/release/bobby install --host claude --skill --cli --yes"
-	@echo "  Companion only:  make firefox"
+	@echo "  Companion only:  make firefox && make firefox-start  # then Pair"
 	@echo "  CLI on PATH:     make cli"
 
 # ---------------------------------------------------------------------------
@@ -81,11 +84,20 @@ cli:
 	$(REPO_ROOT)target/release/bobby install --cli
 
 # ---------------------------------------------------------------------------
-# Service
+# Firefox (direct launch — not launchd)
 # ---------------------------------------------------------------------------
 
-FIREFOX_SERVICE_LABEL := com.bobby_browser.firefox
-FIREFOX_SERVICE_PLIST := $(HOME)/Library/LaunchAgents/$(FIREFOX_SERVICE_LABEL).plist
+FIREFOX_START := $(REPO_ROOT)scripts/dev/firefox-start.sh
+
+firefox-start:
+	@$(FIREFOX_START) start
+
+firefox-stop:
+	@$(FIREFOX_START) stop
+
+# ---------------------------------------------------------------------------
+# Optional HTTP serve (launchd) — local agents use mcp-stdio instead
+# ---------------------------------------------------------------------------
 
 # The service keeps serving whatever binary existed when launchd last started
 # it, so a rebuild alone changes nothing. Always go through reload/verify.
@@ -95,23 +107,6 @@ start:
 
 stop:
 	@$(SERVICE) stop
-
-firefox-start:
-	@if launchctl print "gui/$$(id -u)/$(FIREFOX_SERVICE_LABEL)" >/dev/null 2>&1; then \
-		echo "==> $(FIREFOX_SERVICE_LABEL) already loaded"; \
-	else \
-		test -f "$(FIREFOX_SERVICE_PLIST)" || { echo "error: no plist at $(FIREFOX_SERVICE_PLIST)" >&2; exit 1; }; \
-		echo "==> starting $(FIREFOX_SERVICE_LABEL)"; \
-		launchctl bootstrap "gui/$$(id -u)" "$(FIREFOX_SERVICE_PLIST)"; \
-	fi
-
-firefox-stop:
-	@if ! launchctl print "gui/$$(id -u)/$(FIREFOX_SERVICE_LABEL)" >/dev/null 2>&1; then \
-		echo "==> $(FIREFOX_SERVICE_LABEL) not loaded"; \
-	else \
-		echo "==> stopping $(FIREFOX_SERVICE_LABEL) (bootout — KeepAlive will not respawn)"; \
-		launchctl bootout "gui/$$(id -u)/$(FIREFOX_SERVICE_LABEL)"; \
-	fi
 
 reload:
 	@$(SERVICE) reload
