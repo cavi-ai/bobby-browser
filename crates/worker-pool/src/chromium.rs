@@ -1014,16 +1014,17 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, &page, "", Some(&target))
             .await?;
+        let mut committed: Option<Vec<String>> = None;
         match &command.action {
             ControlAction::SetText { value } => resolved.type_text(&page, value, true).await?,
             ControlAction::SetChecked { checked } => {
                 resolved.set_checked(&page, *checked).await?;
             }
             ControlAction::SelectOne { value } => {
-                resolved.select_option(&page, value).await?;
+                committed = Some(vec![resolved.select_option(&page, value).await?]);
             }
             ControlAction::SelectMany { values } => {
-                resolved.select_options(&page, values).await?;
+                committed = Some(resolved.select_options(&page, values).await?);
             }
             ControlAction::SetFiles { paths } => {
                 let requested = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
@@ -1050,7 +1051,12 @@ impl BrowserWorker for ChromiumWorker {
                 "form control was replaced or detached after dispatch",
             )
         })?;
-        let evidence = crate::control_action_evidence(&after_control, &command.action, false)?;
+        let evidence = crate::control_action_evidence(
+            &after_control,
+            &command.action,
+            false,
+            committed.as_deref(),
+        )?;
         Ok(vec![Evidence::ControlAction { action: evidence }])
     }
 

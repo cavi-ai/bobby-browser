@@ -610,10 +610,19 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
     );
     patched.insert(
         "WaitCondition".to_owned(),
-        json!({
-            "type":"object",
-            "description":"Wait condition (tagged kind + fields). Full union enforced at tools/call."
-        }),
+        // Not opaque: an agent must be able to author a condition without
+        // guessing `kind` tags. Tags, required fields, and enums are real;
+        // nested shapes (`target`, `matcher`) stay generic — the full union
+        // is enforced at tools/call. Closed with the full property list per
+        // variant, per the repo's advertised-schema invariant.
+        json!({"oneOf":[
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"element"},"target":{"type":"object"},"state":{"type":"string","enum":["attached","detached","visible","hidden","enabled","disabled"]}},"required":["kind","target","state"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"text"},"target":{"type":"object"},"matcher":{"$ref":"#/$defs/TextMatch"}},"required":["kind","target","matcher"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"value"},"target":{"type":"object"},"matcher":{"$ref":"#/$defs/TextMatch"}},"required":["kind","target","matcher"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"url"},"matcher":{"$ref":"#/$defs/TextMatch"}},"required":["kind","matcher"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"document"},"ready":{"type":"string","enum":["commit","domContentLoaded","interactive","networkIdle"]}},"required":["kind","ready"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"networkQuiet"},"idleMs":{"type":"integer"},"maxInFlight":{"type":"integer"},"ignoreUrlSubstrings":{"type":"array"},"ignoreResourceTypes":{"type":"array"},"ignoreLongLived":{"type":"boolean"}},"required":["kind","idleMs","maxInFlight"]}
+        ]}),
     );
     patched.insert(
         "TargetSpec".to_owned(),

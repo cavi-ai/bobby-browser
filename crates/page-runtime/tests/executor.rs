@@ -1549,6 +1549,23 @@ async fn terminal_policy_denial_never_calls_chromium() {
         .set_url(&page, "file:///secret".into(), "interactive")
         .await
         .unwrap();
+    // Downloads keep the hard terminal denial: the policy boundary exists to
+    // stop the runtime's own HTTP client fetching out-of-policy destinations.
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url: "file:///secret".into(),
+                expected_content_type: None,
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::PolicyDenied { .. }));
+    // An inspect of a page the browser already has open is not a fetch: it
+    // degrades to the browser instead of failing a DOM read with a network
+    // error code. The direct-HTTP path is never consulted either way.
     let outcome = runtime
         .execute(envelope(
             session,
@@ -1556,9 +1573,8 @@ async fn terminal_policy_denial_never_calls_chromium() {
             PrimitiveCommand::Inspect(InspectCommand::default()),
         ))
         .await;
-    assert!(matches!(outcome, CommandOutcome::PolicyDenied { .. }));
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }));
     let events = events.lock().await;
-    assert!(!events.iter().any(|event| event.starts_with("browser:")));
     assert!(!events.contains(&"http:state".to_string()));
 }
 

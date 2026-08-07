@@ -224,7 +224,10 @@ impl ResolvedTarget {
         )
         .await
     }
-    /// Select a native option by exact value and reread the committed value.
+    /// Select a native option by exact value, falling back to a trimmed,
+    /// case-insensitive label/text match when no value matches — snapshots
+    /// surface option labels, so a caller holding only the label must not
+    /// have to guess the underlying value. Rereads the committed value.
     pub async fn select_option(&self, page: &Page, value: &str) -> Result<String, CommandError> {
         let value = serde_json::to_string(value).map_err(|error| {
             target_error(
@@ -233,7 +236,7 @@ impl ResolvedTarget {
             )
         })?;
         let script = format!(
-            "if (!(el instanceof HTMLSelectElement)) throw new Error('resolved control is not a select'); const matches=[...el.options].filter(option=>option.value==={value}); if(matches.length!==1||matches[0].disabled) throw new Error('select option is missing, ambiguous, or disabled'); el.value={value}; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return el.value"
+            "if (!(el instanceof HTMLSelectElement)) throw new Error('resolved control is not a select'); const wanted={value}; const norm=s=>s.trim().toLowerCase(); const byValue=[...el.options].filter(option=>option.value===wanted); const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted)); if(matches.length!==1||matches[0].disabled) throw new Error('select option is missing, ambiguous, or disabled'); el.value=matches[0].value; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return el.value"
         );
         if let Some(element) = &self.native {
             let selected = element
@@ -259,7 +262,7 @@ impl ResolvedTarget {
         })?;
         self.eval(
             page,
-            &format!("if(!(el instanceof HTMLSelectElement)||!el.multiple)throw new Error('resolved control is not a multi-select');const requested=new Set({values});for(const value of requested){{const matches=[...el.options].filter(option=>option.value===value&&!option.disabled);if(matches.length!==1)throw new Error('select option is missing, ambiguous, or disabled')}}for(const option of el.options)option.selected=requested.has(option.value);el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return [...el.selectedOptions].map(option=>option.value)"),
+            &format!("if(!(el instanceof HTMLSelectElement)||!el.multiple)throw new Error('resolved control is not a multi-select');const norm=s=>s.trim().toLowerCase();const requested=new Set({values});const wanted=new Map();for(const value of requested){{const byValue=[...el.options].filter(option=>option.value===value);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(value)||norm(option.textContent)===norm(value));if(matches.length!==1||matches[0].disabled)throw new Error('select option is missing, ambiguous, or disabled');wanted.set(matches[0].value,true)}}for(const option of el.options)option.selected=wanted.has(option.value);el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return [...el.selectedOptions].map(option=>option.value)"),
         )
         .await
     }
