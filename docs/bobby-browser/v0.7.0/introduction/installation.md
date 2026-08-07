@@ -58,6 +58,17 @@ checkout of this repo:
 brew install --formula ./Formula/bobby-browser.rb
 ```
 
+From the tap, once it is published:
+
+```bash
+brew tap cavi-ai/tap
+brew install cavi-ai/tap/bobby-browser
+```
+
+The tap repository is `cavi-ai/homebrew-tap`; brew strips the `homebrew-`
+prefix and addresses it as `cavi-ai/tap`, so the formula is reached as
+`cavi-ai/tap/bobby-browser` rather than repeating the project name.
+
 The formula downloads the matching GitHub Release tarball and installs the
 same three binaries.
 
