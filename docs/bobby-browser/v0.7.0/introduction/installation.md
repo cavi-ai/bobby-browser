@@ -55,7 +55,8 @@ Not on [homebrew-core](https://github.com/Homebrew/homebrew-core) yet. From a
 checkout of this repo:
 
 ```bash
-brew install --formula ./Formula/bobby-browser.rb
+brew tap cavi-ai/tap
+brew install cavi-ai/tap/bobby-browser
 ```
 
 From the tap, once it is published:
