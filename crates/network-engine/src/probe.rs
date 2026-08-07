@@ -254,6 +254,16 @@ const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_INTERVAL_MS: u64 = 1_000;
 const MAX_INTERVAL_MS: u64 = 10_000;
 
+/// Options for [`http_wait`].
+#[derive(Debug, Clone, Default)]
+pub struct HttpWaitOptions<'a> {
+    pub timeout_ms: Option<u64>,
+    pub interval_ms: Option<u64>,
+    pub probe_timeout_ms: Option<u64>,
+    pub contains: Option<&'a str>,
+    pub max_body_bytes: Option<usize>,
+}
+
 /// Poll until a successful probe (or body match) or the wait budget expires.
 ///
 /// `timeout_ms` is the overall wait budget (default 30000, cap 60000).
@@ -265,17 +275,15 @@ const MAX_INTERVAL_MS: u64 = 10_000;
 pub async fn http_wait(
     url: &str,
     method: HttpProbeMethod,
-    timeout_ms: Option<u64>,
-    interval_ms: Option<u64>,
-    probe_timeout_ms: Option<u64>,
-    contains: Option<&str>,
-    max_body_bytes: Option<usize>,
+    options: HttpWaitOptions<'_>,
     network: NetworkPolicy,
 ) -> Result<serde_json::Value, String> {
-    let wait_ms = timeout_ms
+    let wait_ms = options
+        .timeout_ms
         .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
         .min(MAX_WAIT_TIMEOUT_MS);
-    let interval_ms = interval_ms
+    let interval_ms = options
+        .interval_ms
         .unwrap_or(DEFAULT_INTERVAL_MS)
         .clamp(50, MAX_INTERVAL_MS);
     let started = Instant::now();
@@ -284,21 +292,21 @@ pub async fn http_wait(
     // Last non-success outcome from the most recent attempt.
     #[allow(unused_assignments)]
     let mut last_outcome: Option<Result<serde_json::Value, String>> = None;
-    let body_gate = contains.is_some();
+    let body_gate = options.contains.is_some();
 
     loop {
         attempts += 1;
         let attempt = if body_gate {
             http_fetch(
                 url,
-                probe_timeout_ms,
-                max_body_bytes,
-                contains,
+                options.probe_timeout_ms,
+                options.max_body_bytes,
+                options.contains,
                 network.clone(),
             )
             .await
         } else {
-            http_probe(url, method, probe_timeout_ms, network.clone()).await
+            http_probe(url, method, options.probe_timeout_ms, network.clone()).await
         };
         match attempt {
             Ok(sample) => {
@@ -393,11 +401,12 @@ mod tests {
         let err = http_wait(
             "http://127.0.0.1:9/",
             HttpProbeMethod::Head,
-            Some(200),
-            Some(50),
-            Some(50),
-            None,
-            None,
+            HttpWaitOptions {
+                timeout_ms: Some(200),
+                interval_ms: Some(50),
+                probe_timeout_ms: Some(50),
+                ..Default::default()
+            },
             NetworkPolicy::default(),
         )
         .await
@@ -413,11 +422,13 @@ mod tests {
         let err = http_wait(
             "http://127.0.0.1:9/",
             HttpProbeMethod::Get,
-            Some(200),
-            Some(50),
-            Some(50),
-            Some("ready"),
-            Some(256),
+            HttpWaitOptions {
+                timeout_ms: Some(200),
+                interval_ms: Some(50),
+                probe_timeout_ms: Some(50),
+                contains: Some("ready"),
+                max_body_bytes: Some(256),
+            },
             NetworkPolicy::default(),
         )
         .await

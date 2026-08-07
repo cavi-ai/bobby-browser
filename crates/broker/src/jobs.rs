@@ -113,32 +113,30 @@ impl JobHandler for HttpWaitHandler {
             })
             .transpose()?
             .unwrap_or(network_engine::HttpProbeMethod::Head);
-        let timeout_ms = job
-            .payload
-            .get("timeoutMs")
-            .and_then(|value| value.as_u64());
-        let interval_ms = job
-            .payload
-            .get("intervalMs")
-            .and_then(|value| value.as_u64());
-        let probe_timeout_ms = job
-            .payload
-            .get("probeTimeoutMs")
-            .and_then(|value| value.as_u64());
-        let contains = job.payload.get("contains").and_then(|value| value.as_str());
-        let max_body_bytes = job
-            .payload
-            .get("maxBodyBytes")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
+        let options = network_engine::HttpWaitOptions {
+            timeout_ms: job
+                .payload
+                .get("timeoutMs")
+                .and_then(|value| value.as_u64()),
+            interval_ms: job
+                .payload
+                .get("intervalMs")
+                .and_then(|value| value.as_u64()),
+            probe_timeout_ms: job
+                .payload
+                .get("probeTimeoutMs")
+                .and_then(|value| value.as_u64()),
+            contains: job.payload.get("contains").and_then(|value| value.as_str()),
+            max_body_bytes: job
+                .payload
+                .get("maxBodyBytes")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize),
+        };
         network_engine::http_wait(
             url,
             method,
-            timeout_ms,
-            interval_ms,
-            probe_timeout_ms,
-            contains,
-            max_body_bytes,
+            options,
             network_engine::NetworkPolicy::default(),
         )
         .await
