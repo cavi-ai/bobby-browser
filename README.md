@@ -1,11 +1,61 @@
 # bobby-browser
 
-A browser automation runtime for agents, with authenticated, capability-scoped
-control surfaces: MCP (stdio and streamable HTTP), ACP over stdio, Rust and
-TypeScript SDKs, and Playwright/Puppeteer over authenticated CDP. All adapters
-share the same capability, idempotency, evidence, checkpoint, and event
-contracts. Authentication fails closed; credentials are never accepted in URLs
-or query strings.
+A browser automation runtime built for agents, with authenticated,
+capability-scoped control surfaces: MCP (stdio and streamable HTTP), ACP over
+stdio, Rust and TypeScript SDKs, and Playwright/Puppeteer over authenticated
+CDP. All adapters share the same capability, idempotency, evidence, checkpoint,
+and event contracts. Authentication fails closed; credentials are never
+accepted in URLs or query strings.
+
+## Built for agents
+
+An agent pays for every token it reads and every round trip it makes. The
+runtime is shaped around both.
+
+**A catalog you can afford.** `tools/list` opens on a phase, not the whole
+surface. The default `explore` phase is 28,356 bytes against 88,702 for `full`.
+`toolset_select` widens at any time, and hidden tools stay callable — phases
+change what is advertised, never what is permitted. Capability gates remain the
+only enforcement boundary.
+
+| Phase | Bytes | Of `full` |
+|---|---|---|
+| `explore` (default) | 28,356 | 32% |
+| `verify` | 36,909 | 42% |
+| `act` | 43,915 | 50% |
+| `intent` | 46,440 | 52% |
+| `full` | 88,702 | 100% |
+
+Set a different opening phase with `BOBBY_MCP_TOOLSET` or `[mcp]
+startup_toolset`.
+
+**Say what you want, not how to click it.** Intents take a purpose — "the
+submit button", "the email field" — and resolve it against the accessibility
+tree, returning the candidates they considered and why they chose one. Pass an
+`a11y_snapshot` node's `target` straight through when you already have it.
+
+**Fewer round trips per action.** A Boundary command needs a pre-action
+checkpoint; `autoCheckpoint` mints it inside the same call instead of the three
+it used to take. Verified waits report what they observed, so confirming a
+submit does not cost a second snapshot.
+
+**Failures tell you what to do next.** Every error carries a machine-readable
+repair hint alongside the code, so an agent can act without first reading
+`bobby://failure-taxonomy`. A `needsReconciliation` outcome always says the same
+thing: do not retry, reconcile first.
+
+**Memory across sessions.** The runtime remembers each site's form structure —
+roles, names, ordinals — never typed values or credentials. `context_ask` and
+`context_neighbors` answer from it, so a cold session can locate a control
+before its first snapshot. `bobby context list` and `bobby context forget
+<site>` manage it; a release gate scans the store to prove no values land there.
+
+**It survives losing its place.** `recovery_status` takes a `workflowId`, or a
+`sessionId` when a compaction lost it, and lists that session's recoverable
+workflows newest-first.
+
+**Work that outlives a call.** `job_submit` / `job_status` / `job_cancel` mirror
+HTTP `/v1/jobs`. Built-in handlers: `echo`, `sleep`, `http_probe`.
 
 ## Install
 
@@ -36,6 +86,14 @@ cargo build --release -p bobby-browser
 ./target/release/bobby install --host claude --skill --yes
 ```
 
+Hosts: `--host claude`, `zed`, `vscode`, or `acp`. `bobby install` merges into
+an existing MCP config rather than replacing it, and writes no secrets into host
+config — the host points at `bobby mcp-stdio` (or `bobby acp-stdio`), which
+loads the credential itself.
+
+`bobby init` mints an `agent` bootstrap by default, without `authority:admin`.
+Use `--preset unrestricted` when the principal needs to mint others.
+
 ### Homebrew (macOS / Linux)
 
 Not on homebrew-core yet. From a checkout (ships `bobby`, `mcp-gateway`, and
@@ -55,25 +113,22 @@ brew install cavi-ai/tap/bobby-browser
 The tap lives in `cavi-ai/homebrew-tap`; brew addresses it as `cavi-ai/tap`,
 which is why the install line is not `cavi-ai/bobby-browser/bobby-browser`.
 
-Future homebrew-core checklist (when ready to submit upstream): formula name
-`bobby-browser`; bottle the three binaries; livecheck against GitHub Releases;
-CI builds `bobby` / `mcp-gateway` / `acp-gateway`; audit against Homebrew's
-accepted licenses and no network-at-install.
-
 Release archives are three binaries on purpose: the CLI plus the two stdio
-gateways agents spawn. Prefer MCP Explore (`BOBBY_MCP_TOOLSET=explore` or
-`toolset_select`) so `tools/list` stays small.
+gateways agents spawn.
 
-`bobby install` merges into an existing Claude Code, Zed, or VS Code MCP config
-rather than replacing it, and writes no secrets into host config — the host
-points at `bobby mcp-stdio`, which loads the credential itself.
-
-Verify, then run:
+## Run
 
 ```bash
 bobby doctor          # config, credential, storage, browsers, MCP handshake
 bobby serve           # http://127.0.0.1:7777/healthz
 bobby cdp             # authenticated CDP on 127.0.0.1:9222 (dedicated port)
+```
+
+Optional vision assist, off unless configured and double-gated — the principal
+needs `vision:assist` and the session needs `executionPolicy.visionAssist`:
+
+```bash
+bobby vision connect --provider ollama    # or openai, lmstudio, custom
 ```
 
 [CLI reference](docs/bobby-browser/source/pages/guides/cli.md) ·
@@ -159,8 +214,10 @@ These pages are also served at
 - [Bobby skills](docs/bobby-browser/source/pages/guides/skills.md)
 - [Browser gauntlet](docs/bobby-browser/source/pages/guides/gauntlet.md)
 - [Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md)
-- [MCP over HTTP](docs/bobby-browser/source/pages/surfaces/mcp-http.md) ·
+- [MCP tools](docs/bobby-browser/source/pages/surfaces/mcp-tools.md) ·
+  [MCP over HTTP](docs/bobby-browser/source/pages/surfaces/mcp-http.md) ·
   [MCP over stdio](docs/bobby-browser/source/pages/surfaces/mcp-stdio.md) ·
+  [ACP](docs/bobby-browser/source/pages/surfaces/acp.md) ·
   [CDP](docs/bobby-browser/source/pages/surfaces/cdp.md)
 - [Capabilities](docs/bobby-browser/source/pages/concepts/capabilities.md) ·
   [Evidence and checkpoints](docs/bobby-browser/source/pages/concepts/evidence-checkpoints.md) ·
