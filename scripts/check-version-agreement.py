@@ -83,6 +83,20 @@ def firefox_companion_extension_version(expected: str) -> list[str]:
     return []
 
 
+def homebrew_formula_version(expected: str) -> list[str]:
+    """`brew install` resolves the tarball URL from the formula's own version.
+    A stale one points every tap user at the previous release's assets."""
+    path = REPO / "Formula" / "bobby-browser.rb"
+    if not path.is_file():
+        return [f"{path.relative_to(REPO)}: missing"]
+    found = re.search(r'^\s*version "([^"]+)"', path.read_text(), re.M)
+    if not found:
+        return ["Formula/bobby-browser.rb: no version declared"]
+    if found.group(1) != expected:
+        return [f"Formula/bobby-browser.rb: {found.group(1)} != {expected}"]
+    return []
+
+
 def npm_scope() -> list[str]:
     """One scope. `@bobby-browser` is not an org we own; `@cavi-ai` is."""
     problems = []
@@ -116,6 +130,7 @@ def main() -> int:
         crate_versions(expected)
         + package_versions(expected)
         + firefox_companion_extension_version(expected)
+        + homebrew_formula_version(expected)
         + npm_scope()
         + publishable_crates()
     )
