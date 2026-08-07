@@ -4,6 +4,8 @@
 
 Release candidate. No version bump yet.
 
+- MCP `initialize` returns short `instructions`: explore startup phase, `toolset_select` + re-list, `error.repair`, `autoCheckpoint` default, `bobby://` recovery docs.
+- `tools/list` advertise-only output collapse for `recovery_status`, `page_open`, `session_create`, `session_list`, and `checkpoint_save` (opaque / top-level keys; validation schemas unchanged). Full catalog ~80.9 KiB / 128 KiB (~49 KiB headroom); explore ~25.2 KiB.
 - MCP failures carry a machine-readable repair hint: command-layer failures set `error.repair`, RPC-layer rejections set `error.data.repair`, each `{action, doc}` pointing into `bobby://failure-taxonomy`. A `needsReconciliation` outcome always carries the never-retry repair, whatever its error code.
 - `http_wait` accepts optional `contains` (and `maxBodyBytes`): each attempt becomes `http_fetch` and succeeds only when the truncated body includes the substring — for readiness gates that return 200 before they are ready.
 - `runtime_info`'s `capabilities` list reports vision wiring: `vision-assist` and `vision-provider` appear only when configured, so an agent can tell an unconfigured provider apart from a transient vision failure without shell access.

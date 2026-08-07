@@ -25,6 +25,15 @@ mod tool_args;
 mod tool_meta;
 pub mod toolset;
 
+/// Short agent tip returned on MCP `initialize` (`instructions`).
+///
+/// Kept under ~500 characters so it does not push connect payloads.
+pub const INITIALIZE_INSTRUCTIONS: &str = "\
+Startup tools/list is explore. Call toolset_select (act|intent|verify|full) \
+then re-read tools/list when you need more. Failures carry error.repair \
+{action,doc} — follow action. Boundary intents: autoCheckpoint defaults true. \
+Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
+
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
     schema::tool_schema(name)
