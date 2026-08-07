@@ -580,7 +580,11 @@ pub async fn run() -> Result<()> {
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
             VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
-            VisionCommands::Collect { output, examples, journey } => {
+            VisionCommands::Collect {
+                output,
+                examples,
+                journey,
+            } => {
                 vision_collect::run_collect(output, examples, journey)?;
             }
         },

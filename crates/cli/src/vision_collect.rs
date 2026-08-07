@@ -1,14 +1,23 @@
+//! Training-data collection for the vision gauntlet.
+//!
+//! The collector API is staged ahead of the runner that will drive it: the
+//! command below creates and validates the output directory and prints the
+//! collection instructions, while `GauntletDataCollector`'s accessors and
+//! `save`/`stats` wait on the gauntlet integration.
+#![allow(dead_code)]
+
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use vision_proxy::{DataCollectorConfig, ProposeInput, ProposeResponse, VisionAction, VisionDataCollector};
+use vision_proxy::{
+    DataCollectorConfig, ProposeInput, ProposeResponse, VisionAction, VisionDataCollector,
+};
 
 /// Configuration for the gauntlet data collection CLI tool.
 #[derive(Debug, Clone)]
@@ -71,6 +80,9 @@ pub struct GauntletTrainingExample {
 }
 
 impl GauntletTrainingExample {
+    // A flat training record: one argument per field, as in
+    // `VisionTrainingExample::new`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         screenshot_png_b64: String,
         purpose: String,
@@ -132,16 +144,13 @@ pub struct GauntletDataCollector {
 impl GauntletDataCollector {
     pub fn new(config: CollectConfig) -> Result<Self> {
         // Create output directory
-        std::fs::create_dir_all(&config.output_dir)
-            .context("failed to create output directory")?;
+        std::fs::create_dir_all(&config.output_dir).context("failed to create output directory")?;
 
-        let data_collector = Arc::new(VisionDataCollector::new(
-            DataCollectorConfig {
-                output_dir: config.output_dir.clone(),
-                enabled: config.enabled,
-                flush_interval_ms: config.flush_interval_ms,
-            },
-        ));
+        let data_collector = Arc::new(VisionDataCollector::new(DataCollectorConfig {
+            output_dir: config.output_dir.clone(),
+            enabled: config.enabled,
+            flush_interval_ms: config.flush_interval_ms,
+        }));
 
         Ok(Self {
             config,
@@ -160,6 +169,8 @@ impl GauntletDataCollector {
     }
 
     /// Collect a single training example from a gauntlet step.
+    // Forwards the same flat record.
+    #[allow(clippy::too_many_arguments)]
     pub fn collect_example(
         &mut self,
         screenshot_png_b64: String,
@@ -184,12 +195,18 @@ impl GauntletDataCollector {
             journey,
             step,
             error_message,
-            self.config.output_dir.file_stem().unwrap_or_default().to_str().unwrap_or("run").to_string(),
+            self.config
+                .output_dir
+                .file_stem()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or("run")
+                .to_string(),
             "llava:7b".to_string(),
         );
 
         // Also log to data collector for real-time collection
-        let _ = self.data_collector.log_proposal(
+        self.data_collector.log_proposal(
             example.image_b64.clone(),
             &ProposeInput {
                 purpose: example.purpose.clone(),
@@ -208,11 +225,19 @@ impl GauntletDataCollector {
                             Some(VisionAction::Click { x, y })
                         }
                         Some(kind) if kind.as_str() == Some("typeText") => {
-                            let text = action.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let text = action
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             Some(VisionAction::TypeText { text })
                         }
                         Some(kind) if kind.as_str() == Some("extractValue") => {
-                            let value = action.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let value = action
+                                .get("value")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             Some(VisionAction::ExtractValue { value })
                         }
                         _ => None,
@@ -220,7 +245,10 @@ impl GauntletDataCollector {
                     None => None,
                 };
                 let confidence = r.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                action.map(|a| ProposeResponse { confidence, action: a })
+                action.map(|a| ProposeResponse {
+                    confidence,
+                    action: a,
+                })
             }),
             Some(example.journey.clone()),
             Some(example.step.clone()),
@@ -249,8 +277,7 @@ impl GauntletDataCollector {
             let json = example.to_json();
             file.write_all(json.as_bytes())
                 .context("failed to write training data")?;
-            file.write_all(b"\n")
-                .context("failed to write newline")?;
+            file.write_all(b"\n").context("failed to write newline")?;
         }
 
         // Print summary
@@ -276,6 +303,49 @@ impl GauntletDataCollector {
     }
 }
 
+/// Run the training data collection CLI command.
+pub fn run_collect(
+    output: String,
+    examples_per_journey: usize,
+    journey: Option<String>,
+) -> Result<()> {
+    let config = CollectConfig {
+        output_dir: PathBuf::from(output),
+        enabled: true,
+        flush_interval_ms: 1000,
+        examples_per_journey,
+        journey,
+    };
+
+    println!("Starting training data collection...");
+    println!("Output directory: {}", config.output_dir.display());
+    println!("Examples per journey: {}", config.examples_per_journey);
+
+    // Constructed for the side effect: `new` creates the output directory and
+    // fails if it cannot, so the path printed above is validated before the
+    // instructions below tell the operator to fill it.
+    let _collector = GauntletDataCollector::new(config)?;
+
+    // In production, this would:
+    // 1. Launch the gauntlet scenario server
+    // 2. Run each journey with vision assist enabled
+    // 3. Capture vision proposals and outcomes
+    // 4. Store as JSONL
+
+    // For now, print instructions
+    println!("\nTo collect real training data:");
+    println!("1. Ensure Ollama is running with llava:7b");
+    println!("2. Run: bobby serve --vision (enables vision assist)");
+    println!("3. Run gauntlet tests with vision enabled");
+    println!("4. Data will be collected automatically by the vision proxy");
+    println!("\nOr use the Python collector:");
+    println!(
+        "  python3 scripts/vision-mlx/bobby_vision_collector.py --generate --num-examples 1000"
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,45 +369,6 @@ mod tests {
 
         assert_eq!(example.purpose, "test");
         assert_eq!(example.intent_kind, "locate");
-        assert!(example.image_hash.len() > 0);
+        assert!(!example.image_hash.is_empty());
     }
-}
-
-/// Run the training data collection CLI command.
-pub fn run_collect(
-    output: String,
-    examples_per_journey: usize,
-    journey: Option<String>,
-) -> Result<()> {
-    let config = CollectConfig {
-        output_dir: PathBuf::from(output),
-        enabled: true,
-        flush_interval_ms: 1000,
-        examples_per_journey,
-        journey,
-    };
-
-    println!("Starting training data collection...");
-    println!("Output directory: {}", config.output_dir.display());
-    println!("Examples per journey: {}", config.examples_per_journey);
-
-    // Create collector
-    let mut collector = GauntletDataCollector::new(config)?;
-
-    // In production, this would:
-    // 1. Launch the gauntlet scenario server
-    // 2. Run each journey with vision assist enabled
-    // 3. Capture vision proposals and outcomes
-    // 4. Store as JSONL
-
-    // For now, print instructions
-    println!("\nTo collect real training data:");
-    println!("1. Ensure Ollama is running with llava:7b");
-    println!("2. Run: bobby serve --vision (enables vision assist)");
-    println!("3. Run gauntlet tests with vision enabled");
-    println!("4. Data will be collected automatically by the vision proxy");
-    println!("\nOr use the Python collector:");
-    println!("  python3 scripts/vision-mlx/bobby_vision_collector.py --generate --num-examples 1000");
-
-    Ok(())
 }
