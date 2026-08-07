@@ -7,6 +7,47 @@ share the same capability, idempotency, evidence, checkpoint, and event
 contracts. Authentication fails closed; credentials are never accepted in URLs
 or query strings.
 
+## Built for agents
+
+An agent pays for every token it reads and every round trip it makes. The
+runtime is shaped around both.
+
+**A catalog you can afford.** `tools/list` opens on a phase, not the whole
+surface. The default `explore` phase is 39,094 bytes against 116,204 for
+`full`. `toolset_select` widens at any time, and hidden tools stay callable —
+phases change what is advertised, never what is permitted. Capability gates
+remain the only enforcement boundary. Set the opening phase with
+`BOBBY_MCP_TOOLSET` or `[mcp] startup_toolset`.
+
+**Say what you want, not how to click it.** Intents take a purpose — "the
+submit button", "the email field" — and resolve it against the accessibility
+tree, returning the candidates they considered and why they chose one. Pass an
+`a11y_snapshot` node's `target` straight through when you already have it.
+
+**Fewer round trips per action.** A Boundary command needs a pre-action
+checkpoint; `autoCheckpoint` mints it inside the same call instead of the three
+it used to take. Verified waits report what they observed, so confirming a
+submit does not cost a second snapshot.
+
+**Failures tell you what to do next.** Every error carries a machine-readable
+repair hint alongside the code, so an agent can act without first reading
+`bobby://failure-taxonomy`. A `needsReconciliation` outcome always says the same
+thing: do not retry, reconcile first.
+
+**Memory across sessions.** The runtime remembers each site's form structure —
+roles, names, ordinals — never typed values or credentials. `context_ask` and
+`context_neighbors` answer from it, so a cold session can locate a control
+before its first snapshot. `bobby context list` and `bobby context forget
+<site>` manage it; a release gate scans the store to prove no values land there.
+
+**It survives losing its place.** `recovery_status` takes a `workflowId`, or a
+`sessionId` when a compaction lost it, and lists that session's recoverable
+workflows newest-first.
+
+**Work that outlives a call.** `job_submit` / `job_status` / `job_cancel` mirror
+HTTP `/v1/jobs`. Built-in handlers: `echo`, `sleep`, `http_probe`, `http_wait`,
+and `http_fetch`.
+
 ## Install
 
 One command builds the runtime, mints a local credential, wires your agent host,
