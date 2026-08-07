@@ -22,12 +22,14 @@ path = "src/bin/cli.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dialoguer.workspace = true
 dirs.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+sha2.workspace = true
 artifact-store = { path = "../artifact-store", version = "0.6.0" }
 auth-broker = { path = "../auth-broker", version = "0.6.0" }
 context-store = { path = "../context-store", version = "0.6.0" }
