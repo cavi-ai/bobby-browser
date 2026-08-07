@@ -1197,6 +1197,13 @@ fn outcome_response(outcome: CommandOutcome) -> Response {
         CommandOutcome::Failed { error, .. } if error.code == types::ErrorCode::InvalidRequest => {
             (StatusCode::UNPROCESSABLE_ENTITY, None)
         }
+        // A command naming a page or session that does not exist is the
+        // caller's mistake, not a server fault. Without this arm it falls to
+        // the 500 below, which is how a stale page id reads as an outage.
+        // Matches the interface-layer mapping in `auth.rs`.
+        CommandOutcome::Failed { error, .. } if error.code == types::ErrorCode::NotFound => {
+            (StatusCode::NOT_FOUND, None)
+        }
         CommandOutcome::Failed { .. } => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     let mut response = (status, Json(outcome)).into_response();
