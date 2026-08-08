@@ -6,6 +6,51 @@ const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const resultsDir = path.resolve(harnessDir, "../results");
 const runsFile = path.join(resultsDir, "runs.jsonl");
 
+if (process.argv[2] === "check") {
+  // Regression gate: the latest bobby run per task against the committed
+  // baseline. Pass must hold; wall time <= 2x baseline; errors <= +3.
+  const baseline = JSON.parse(
+    readFileSync(path.join(harnessDir, "baseline.json"), "utf8"),
+  );
+  const runs = readFileSync(runsFile, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const latest = new Map<string, any>();
+  for (const run of runs.filter((r) => r.tool === "bobby")) {
+    latest.set(run.task, run);
+  }
+  let failures = 0;
+  for (const [task, base] of Object.entries(
+    baseline.tasks as Record<string, any>,
+  )) {
+    const run = latest.get(task);
+    if (!run) {
+      console.log(`MISS ${task}: no bobby run recorded`);
+      failures += 1;
+      continue;
+    }
+    const wall = run.wallMs / 1000;
+    if (!run.pass) {
+      console.log(`FAIL ${task}: baseline passes, this run did not`);
+      failures += 1;
+    } else if (wall > base.wallSeconds * 2) {
+      console.log(
+        `SLOW ${task}: ${wall.toFixed(0)}s vs baseline ${base.wallSeconds}s (>2x)`,
+      );
+      failures += 1;
+    } else if (run.toolErrors > base.toolErrors + 3) {
+      console.log(
+        `ERRORS ${task}: ${run.toolErrors} vs baseline ${base.toolErrors} (+3 slack)`,
+      );
+      failures += 1;
+    } else {
+      console.log(`OK   ${task}: ${wall.toFixed(0)}s errors=${run.toolErrors}`);
+    }
+  }
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 if (!existsSync(runsFile)) {
   console.error("no results yet — run src/run.ts first");
   process.exit(1);
