@@ -3,21 +3,35 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const resultsDir = path.resolve(harnessDir, "../results");
+const resultsDir =
+  process.env.GAUNTLET_RESULTS_DIR ??
+  path.resolve(harnessDir, "../results");
 const runsFile = path.join(resultsDir, "runs.jsonl");
 
+if (!existsSync(runsFile)) {
+  console.error("no results yet — run src/run.ts first");
+  process.exit(1);
+}
+
+const runs = readFileSync(runsFile, "utf8")
+  .split("\n")
+  .filter(Boolean)
+  .map((line) => JSON.parse(line));
+
 if (process.argv[2] === "check") {
-  // Regression gate: the latest bobby run per task against the committed
+  // Regression gate: one complete bobby invocation against the committed
   // baseline. Pass must hold; wall time <= 2x baseline; errors <= +3.
   const baseline = JSON.parse(
     readFileSync(path.join(harnessDir, "baseline.json"), "utf8"),
   );
-  const runs = readFileSync(runsFile, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  const bobbyRuns = runs.filter((run) => run.tool === "bobby");
+  const latestBatchId = bobbyRuns.at(-1)?.batchId;
+  if (typeof latestBatchId !== "string" || latestBatchId.length === 0) {
+    console.error("latest bobby result has no batchId — rerun src/run.ts");
+    process.exit(1);
+  }
   const latest = new Map<string, any>();
-  for (const run of runs.filter((r) => r.tool === "bobby")) {
+  for (const run of bobbyRuns.filter((run) => run.batchId === latestBatchId)) {
     latest.set(run.task, run);
   }
   let failures = 0;
@@ -27,6 +41,16 @@ if (process.argv[2] === "check") {
     const run = latest.get(task);
     if (!run) {
       console.log(`MISS ${task}: no bobby run recorded`);
+      failures += 1;
+      continue;
+    }
+    if (
+      !Number.isFinite(run.wallMs) ||
+      run.wallMs < 0 ||
+      !Number.isFinite(run.toolErrors) ||
+      run.toolErrors < 0
+    ) {
+      console.log(`INVALID ${task}: missing numeric wallMs or toolErrors`);
       failures += 1;
       continue;
     }
@@ -50,16 +74,6 @@ if (process.argv[2] === "check") {
   }
   process.exit(failures === 0 ? 0 : 1);
 }
-
-if (!existsSync(runsFile)) {
-  console.error("no results yet — run src/run.ts first");
-  process.exit(1);
-}
-
-const runs = readFileSync(runsFile, "utf8")
-  .split("\n")
-  .filter(Boolean)
-  .map((line) => JSON.parse(line));
 
 const byTool = new Map<string, any[]>();
 for (const run of runs) {

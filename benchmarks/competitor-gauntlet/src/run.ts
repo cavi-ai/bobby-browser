@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   mkdirSync,
@@ -214,6 +214,7 @@ async function main() {
   const taskId = arg("task");
   const runs = Number(arg("runs", "1"));
   const timeboxMs = Number(arg("timebox-seconds", "480")) * 1000;
+  const batchId = randomUUID();
   if (!toolName) {
     console.error(
       `--tool required. Benchmark bobby with --tool bobby. The full competitor gamut runs ONLY when explicitly called: --tool all. One of: ${Object.keys(runners).join(", ")}, all`,
@@ -346,6 +347,7 @@ async function main() {
         );
         writeFileSync(transcriptFile, JSON.stringify(events, null, 2));
         const record = {
+          batchId,
           seed,
           tool,
           task: task.id,

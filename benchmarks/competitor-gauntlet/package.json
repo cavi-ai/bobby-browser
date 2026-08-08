@@ -6,6 +6,7 @@
   "scripts": {
     "run": "node --import tsx src/run.ts",
     "score": "node --import tsx src/score.ts",
+    "test": "node --import tsx --test src/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

@@ -158,9 +158,10 @@ behavioral-e2e:
 	cargo test -p firefox-companion --test behavioral_e2e -- --nocapture
 
 # Agent-usability eval gate: bobby-only gauntlet against this checkout's
-# build, then compare with the committed baseline. Costs agent tokens —
-# run deliberately, never in default CI. The full competitor gamut stays
-# explicit: pnpm --dir benchmarks/competitor-gauntlet run run -- --tool all
+# build, then compare that invocation batch with the committed baseline.
+# Costs agent tokens — run deliberately, never in default CI. The full
+# competitor gamut stays explicit:
+# pnpm --dir benchmarks/competitor-gauntlet run run -- --tool all
 agent-eval:
 	cargo build -p bobby-browser -p gauntlet-server
 	pnpm --filter @cavi-ai/bobby-gauntlet build

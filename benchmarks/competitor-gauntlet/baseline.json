@@ -1,5 +1,5 @@
 {
-  "note": "bobby-only gauntlet baseline, measured on main after the friction-fix arc (2026-08-08). score check tolerances: pass must hold, wall time <= 2x, tool errors <= +3. Update deliberately when the product improves or the app changes; never to sneak a regression through.",
+  "note": "bobby-only gauntlet baseline, measured on main after the friction-fix arc (2026-08-08). score check evaluates only the latest invocation batch and requires every baseline task; pass must hold, wall time <= 2x, tool errors <= +3. Update deliberately when the product improves or the app changes; never to sneak a regression through.",
   "measuredAt": "2026-08-08",
   "tasks": {
     "customer-update": { "pass": true, "wallSeconds": 98, "toolErrors": 1 },
