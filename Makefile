@@ -10,7 +10,8 @@ SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 	start stop reload verify status \
 	fmt lint test \
 	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
-	behavioral-benchmark behavioral-e2e behavioral-dogfood
+	behavioral-benchmark behavioral-e2e behavioral-dogfood \
+	agent-eval
 
 help:
 	@echo "bobby-browser make targets"
@@ -47,6 +48,9 @@ help:
 	@echo "  behavioral-benchmark   offline interaction biometric scores"
 	@echo "  behavioral-e2e         multi-seed gates + companion BiDi (FakeBidi; no browser)"
 	@echo "  behavioral-dogfood     live Firefox behavioral probe (needs BOBBY_FIREFOX_*)"
+	@echo
+	@echo "Agent usability"
+	@echo "  agent-eval   bobby-only gauntlet vs committed baseline (spends agent tokens)"
 	@echo
 	@echo "Notes"
 	@echo "  Local agents: host spawns bobby mcp-stdio (wired by install). No daemon."
@@ -152,6 +156,16 @@ behavioral-benchmark:
 behavioral-e2e:
 	cargo test -p behavioral-engine --test e2e -- --nocapture
 	cargo test -p firefox-companion --test behavioral_e2e -- --nocapture
+
+# Agent-usability eval gate: bobby-only gauntlet against this checkout's
+# build, then compare with the committed baseline. Costs agent tokens —
+# run deliberately, never in default CI. The full competitor gamut stays
+# explicit: pnpm --dir benchmarks/competitor-gauntlet run run -- --tool all
+agent-eval:
+	cargo build -p bobby-browser -p gauntlet-server
+	pnpm --filter @cavi-ai/bobby-gauntlet build
+	BOBBY_MCP_COMMAND=$(REPO_ROOT)target/debug/bobby pnpm --dir benchmarks/competitor-gauntlet run run -- --tool bobby --timebox-seconds 300
+	pnpm --dir benchmarks/competitor-gauntlet run score check
 
 behavioral-dogfood:
 	@$(REPO_ROOT)scripts/dev/behavioral-firefox.sh
