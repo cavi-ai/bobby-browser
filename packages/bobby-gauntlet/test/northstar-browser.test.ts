@@ -63,6 +63,41 @@ test("customer search replaces loading content and a saved priority remains visi
   assert.equal(priority, "high");
 });
 
+test("an older customer search response cannot replace newer results", async () => {
+  let resolveSlow: ((value: Response) => void) | undefined;
+  const slowResponse = new Promise<Response>((resolve) => { resolveSlow = resolve; });
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname === "/api/customers" && url.searchParams.get("q") === "slow") return slowResponse;
+    if (url.pathname === "/api/customers" && url.searchParams.get("q") === "Atlas") {
+      return response([{ id: "cus_atlas", name: "Atlas Labs", email: "ops@atlas.example", priority: "normal", status: "active" }]);
+    }
+    return response({ code: "not_found", message: "Not found" }, 404);
+  };
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/customers" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, new NorthstarApi("run-search-order", fetcher));
+  await app.navigate("/customers");
+  const input = window.document.querySelector<HTMLInputElement>("input[aria-label='Search customers']");
+  const form = window.document.querySelector<HTMLFormElement>("form[aria-label='Customer search']");
+  assert.ok(input);
+  assert.ok(form);
+
+  input.value = "slow";
+  form.requestSubmit();
+  input.value = "Atlas";
+  form.requestSubmit();
+  await eventually(window.document, "a[href='/customers/cus_atlas']");
+  resolveSlow?.(response([{ id: "cus_old", name: "Old Result", email: "old@example.test", priority: "low", status: "active" }]));
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  assert.match(root.textContent ?? "", /Atlas Labs/);
+  assert.doesNotMatch(root.textContent ?? "", /Old Result/);
+});
+
 test("server validation preserves accepted onboarding values and focuses the rejected field", async () => {
   const fetcher: typeof fetch = async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -225,6 +260,118 @@ test("popup authorization refreshes the connected identity after a trusted compl
   assert.match(root.textContent ?? "", /Connected as finance@atlas.example/);
 });
 
+test("revisiting Integrations does not duplicate authorization refreshes", async () => {
+  let connected = false;
+  let stateRequests = 0;
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname === "/api/integrations/ledger-cloud") {
+      stateRequests += 1;
+      return response(connected
+        ? { connected: true, identity: "finance@atlas.example" }
+        : { connected: false, authorizationUrl: "/authorize/ledger-cloud" });
+    }
+    return response({ code: "not_found", message: "Not found" }, 404);
+  };
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/integrations" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, new NorthstarApi("run-integration-revisit", fetcher));
+
+  await app.navigate("/integrations");
+  await app.navigate("/integrations");
+  assert.equal(stateRequests, 2);
+  connected = true;
+  window.dispatchEvent(new window.MessageEvent("message", {
+    origin: "https://northstar.test",
+    data: { type: "northstar.authorization.complete" },
+  }));
+
+  await eventually(window.document, "[data-connected='true']");
+  assert.equal(stateRequests, 3);
+});
+
+test("a failed Integrations revisit preserves authorization refresh on the visible page", async () => {
+  let connected = false;
+  let failNextStateRequest = false;
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname !== "/api/integrations/ledger-cloud") {
+      return response({ code: "not_found", message: "Not found" }, 404);
+    }
+    if (failNextStateRequest) {
+      failNextStateRequest = false;
+      return response({ code: "integration_unavailable", message: "Integration unavailable." }, 503);
+    }
+    return response(connected
+      ? { connected: true, identity: "finance@atlas.example" }
+      : { connected: false, authorizationUrl: "/authorize/ledger-cloud" });
+  };
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/integrations" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, new NorthstarApi("run-integration-failed-revisit", fetcher));
+  await app.navigate("/integrations");
+  failNextStateRequest = true;
+  await assert.rejects(app.navigate("/integrations"), /Integration unavailable/);
+
+  connected = true;
+  window.dispatchEvent(new window.MessageEvent("message", {
+    origin: "https://northstar.test",
+    data: { type: "northstar.authorization.complete" },
+  }));
+
+  await eventually(window.document, "[data-connected='true']");
+  assert.match(root.textContent ?? "", /Connected as finance@atlas.example/);
+});
+
+test("out-of-order Integrations revisits keep authorization refresh on the visible page", async () => {
+  let requestNumber = 0;
+  let connected = false;
+  let resolveSlow: ((value: Response) => void) | undefined;
+  let resolveFast: ((value: Response) => void) | undefined;
+  const slowResponse = new Promise<Response>((resolve) => { resolveSlow = resolve; });
+  const fastResponse = new Promise<Response>((resolve) => { resolveFast = resolve; });
+  const fetcher: typeof fetch = async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname !== "/api/integrations/ledger-cloud") {
+      return response({ code: "not_found", message: "Not found" }, 404);
+    }
+    requestNumber += 1;
+    if (requestNumber === 2) return slowResponse;
+    if (requestNumber === 3) return fastResponse;
+    return response(connected
+      ? { connected: true, identity: "finance@atlas.example" }
+      : { connected: false, authorizationUrl: "/authorize/ledger-cloud" });
+  };
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/integrations" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, new NorthstarApi("run-integration-order", fetcher));
+  await app.navigate("/integrations");
+
+  const slowNavigation = app.navigate("/integrations");
+  const fastNavigation = app.navigate("/integrations");
+  resolveFast?.(response({ connected: false, authorizationUrl: "/authorize/ledger-cloud" }));
+  await fastNavigation;
+  resolveSlow?.(response({ connected: false, authorizationUrl: "/authorize/ledger-cloud" }));
+  await slowNavigation;
+  connected = true;
+  window.dispatchEvent(new window.MessageEvent("message", {
+    origin: "https://northstar.test",
+    data: { type: "northstar.authorization.complete" },
+  }));
+
+  await eventually(window.document, "[data-connected='true']");
+  assert.match(root.textContent ?? "", /Connected as finance@atlas.example/);
+});
+
 test("document upload renders the server preview in a labelled frame", async () => {
   class DocumentApi extends NorthstarApi {
     override async uploadDocument(customerId: string, file: File): Promise<DocumentReceipt> {
@@ -247,6 +394,25 @@ test("document upload renders the server preview in a labelled frame", async () 
   const frame = await eventually<HTMLIFrameElement>(window.document, "iframe[title='Preview of approved-upload.txt']");
   assert.equal(frame.getAttribute("src"), "/api/documents/doc_17/preview");
   assert.match(root.textContent ?? "", /Upload complete/);
+});
+
+test("top-level Documents navigation renders the upload workflow", async () => {
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, new NorthstarApi("run-documents-route", async () => response({
+    activeCustomers: 48,
+    pendingOnboarding: 6,
+    documentsProcessed: 127,
+    reportsReady: 9,
+  })));
+
+  await app.navigate("/documents");
+
+  assert.ok(window.document.querySelector("form[aria-label='Upload customer document']"));
+  assert.match(root.textContent ?? "", /Upload source material/);
 });
 
 test("completed report exposes an ordinary download link", async () => {
@@ -289,4 +455,61 @@ test("customer search exposes the transport failure instead of hiding it", async
   await eventually(window.document, ".error-panel");
 
   assert.match(root.textContent ?? "", /Network request could not be constructed/);
+});
+
+test("priority update failure is visible and leaves the form retryable", async () => {
+  let updateAttempts = 0;
+  const fetcher: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.pathname === "/api/customers/cus_atlas" && request.method === "GET") {
+      return response({
+        id: "cus_atlas",
+        name: "Atlas Labs",
+        email: "ops@atlas.example",
+        company: "Atlas Labs",
+        joinedAt: "2026-01-15",
+        priority: "normal",
+        status: "active",
+      });
+    }
+    if (url.pathname === "/api/customers/cus_atlas/priority") {
+      updateAttempts += 1;
+      if (updateAttempts === 1) {
+        return response({ code: "save_failed", message: "Priority service is unavailable." }, 500);
+      }
+      return response({
+        id: "cus_atlas",
+        name: "Atlas Labs",
+        email: "ops@atlas.example",
+        company: "Atlas Labs",
+        joinedAt: "2026-01-15",
+        priority: "normal",
+        status: "active",
+      });
+    }
+    return response({ code: "not_found", message: "Not found" }, 404);
+  };
+  const window = new JSDOM("<div id='app'></div>", { url: "https://northstar.test/customers/cus_atlas" }).window;
+  Object.defineProperty(globalThis, "window", { configurable: true, value: window });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: window.document });
+  const root = window.document.querySelector<HTMLElement>("#app");
+  assert.ok(root);
+  const app = mountNorthstar(root, new NorthstarApi("run-priority-error", fetcher));
+  await app.navigate("/customers/cus_atlas");
+
+  const form = window.document.querySelector<HTMLFormElement>("form[aria-label='Update customer priority']");
+  const save = window.document.querySelector<HTMLButtonElement>("button[type='submit']");
+  assert.ok(form);
+  assert.ok(save);
+  form.requestSubmit();
+
+  const error = await eventually<HTMLElement>(window.document, ".error-panel");
+  assert.match(error.textContent ?? "", /Priority service is unavailable/);
+  assert.equal(save.disabled, false);
+
+  form.requestSubmit();
+  await eventually(window.document, "[role='status']");
+  assert.equal(window.document.querySelector(".error-panel"), null);
+  assert.equal(save.disabled, false);
 });

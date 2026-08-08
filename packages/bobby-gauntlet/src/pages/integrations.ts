@@ -1,6 +1,8 @@
 import type { NorthstarApi } from "../api.js";
 import { element, pageHeader } from "../components.js";
 
+const authorizationListeners = new WeakMap<Window, (event: MessageEvent) => void>();
+
 export async function integrationsPage(document: Document, api: NorthstarApi): Promise<HTMLElement> {
   const page = element(document, "section", { className: "page" });
   page.append(pageHeader(document, "Connected systems", "Integrations", "Bring financial context into customer operations without leaving the workspace."));
@@ -30,11 +32,16 @@ export async function integrationsPage(document: Document, api: NorthstarApi): P
     card.append(element(document, "p", { text: "Connect account balances and reconciliation status." }), connect);
   };
   const window = document.defaultView;
-  window?.addEventListener("message", (event) => {
+  if (window === null) throw new Error("Integrations requires a browser window");
+  const authorizationListener = (event: MessageEvent) => {
     if (event.origin !== window.location.origin || !isAuthorizationMessage(event.data)) return;
     void render();
-  });
+  };
   await render();
+  const previousListener = authorizationListeners.get(window);
+  if (previousListener !== undefined) window.removeEventListener("message", previousListener);
+  authorizationListeners.set(window, authorizationListener);
+  window.addEventListener("message", authorizationListener);
   return page;
 }
 

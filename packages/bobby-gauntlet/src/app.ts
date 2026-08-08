@@ -35,6 +35,7 @@ async function northstarPage(document: Document, route: Route, api: NorthstarApi
   if (route.segments[0] === "customers" && route.segments[1] !== undefined && route.segments[2] === "documents") return documentsPage(document, route.segments[1], api);
   if (route.segments[0] === "customers" && route.segments[1] !== undefined) return customerDetailPage(document, route.segments[1], api);
   if (route.segments[0] === "customers") return customersPage(document, api, router);
+  if (route.segments[0] === "documents") return documentsPage(document, "cus_atlas", api);
   if (route.segments[0] === "onboarding") return onboardingPage(document, api, config);
   if (route.segments[0] === "integrations") return integrationsPage(document, api);
   if (route.segments[0] === "reports") return reportsPage(document, api);
