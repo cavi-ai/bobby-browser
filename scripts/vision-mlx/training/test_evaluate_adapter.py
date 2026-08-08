@@ -1,6 +1,11 @@
 import unittest
 
-from evaluate_adapter import element_accuracy, parse_prediction
+from evaluate_adapter import (
+    element_accuracy,
+    parse_prediction,
+    parse_v1_response,
+    v1_metrics,
+)
 
 
 class MixedActionEvaluationTests(unittest.TestCase):
@@ -99,6 +104,23 @@ class MixedActionEvaluationTests(unittest.TestCase):
         )
 
         self.assertIsNone(prediction)
+
+    def test_v1_parser_rejects_explanatory_text(self):
+        self.assertIsNone(parse_v1_response("I choose 2 because it is the button", 3))
+
+    def test_v1_parser_rejects_out_of_range_indexes(self):
+        self.assertIsNone(parse_v1_response("9", 3))
+
+    def test_v1_parser_accepts_explicit_abstention(self):
+        self.assertEqual(parse_v1_response("-1", 3), -1)
+
+    def test_v1_parse_failure_does_not_count_as_a_correct_abstention(self):
+        result = v1_metrics(
+            [{"prediction": None}],
+            [{"negative": True, "target_index": None}],
+        )
+
+        self.assertEqual(result["abstain_recall"], 0.0)
 
 
 if __name__ == "__main__":

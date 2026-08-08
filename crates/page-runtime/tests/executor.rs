@@ -23,6 +23,7 @@ enum DriverMode {
     FailInspect,
     SlowInspect,
     InspectMismatch,
+    FailNavigate,
     FailClick,
     ClickTargetNotFound,
     WaitTimeout,
@@ -122,6 +123,9 @@ impl BrowserWorker for FakeWorker {
         command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:navigate".into());
+        if matches!(self.mode, DriverMode::FailNavigate) {
+            return Err(driver_failure());
+        }
         Ok(vec![Evidence::Navigation {
             url: command.url.clone(),
             title: "Fixture".into(),
@@ -1331,6 +1335,95 @@ async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
         }
     )));
     let _ = events;
+}
+
+#[tokio::test]
+async fn failed_mutation_taints_the_page_before_the_next_inspect() {
+    let url = http_fixture(
+        "<title>Fixture</title><p>stale server copy</p>",
+        "text/html",
+    )
+    .await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::FailClick).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+
+    let click = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#may-have-fired".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    assert!(!matches!(click, CommandOutcome::Completed { .. }));
+
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::Chromium,
+            reason: ExecutionReason::PageMutated,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn failed_navigation_taints_the_page_before_the_next_inspect() {
+    let url = http_fixture("<title>Fixture</title><p>old document</p>", "text/html").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::FailNavigate).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+
+    let navigate = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Navigate(NavigateCommand {
+                url: url.clone(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 30_000,
+            }),
+        ))
+        .await;
+    assert!(!matches!(navigate, CommandOutcome::Completed { .. }));
+
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::Chromium,
+            reason: ExecutionReason::PageMutated,
+            ..
+        }
+    )));
 }
 
 #[tokio::test]

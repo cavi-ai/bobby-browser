@@ -363,9 +363,7 @@ impl AdaptivePageEngine {
         gate: &SessionGate,
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
         let result = self.execute_inner(envelope, lease, page, gate).await;
-        if result.is_ok() {
-            self.record_page_taint(envelope).await;
-        }
+        self.record_page_taint(envelope, result.is_ok()).await;
         result
     }
 
@@ -373,7 +371,7 @@ impl AdaptivePageEngine {
     /// (refetch == live again), so it clears the taint; any other
     /// non-Replayable command that touches the page may have mutated it, so
     /// it sets it.
-    async fn record_page_taint(&self, envelope: &CommandEnvelope) {
+    async fn record_page_taint(&self, envelope: &CommandEnvelope, succeeded: bool) {
         let Some(page_id) = envelope.page_id.as_ref() else {
             return;
         };
@@ -382,7 +380,14 @@ impl AdaptivePageEngine {
             envelope.command,
             RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_))
         ) {
-            taints.remove(page_id);
+            if succeeded {
+                taints.remove(page_id);
+            } else {
+                // A failed navigation may still have replaced or partially
+                // mutated the document. Preserve correctness by requiring a
+                // live-DOM read until a later navigation succeeds.
+                taints.insert(page_id.clone());
+            }
         } else if envelope.command.class() != types::CommandClass::Replayable
             && !side_band_of_the_dom(&envelope.command)
         {

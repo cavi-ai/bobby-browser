@@ -78,19 +78,21 @@ def parse_prediction(text: str) -> dict | None:
 
 
 def parse_v1_response(text: str, n_candidates: int) -> int | None:
-    """BOBBY-VISION/1 decoder: bare integer, -1 = abstain, else transport
-    noise treated as abstention (never an error)."""
+    """Decode the strict BOBBY-VISION/1 wire format.
+
+    Only a bare in-range integer or the explicit ``-1`` abstention token is
+    valid. Malformed output is a parse failure, not an abstention.
+    """
     stripped = text.strip()
-    import re
-    match = re.search(r"-?\d+", stripped)
-    if not match:
-        return -1
-    value = int(match.group())
+    try:
+        value = int(stripped)
+    except ValueError:
+        return None
     if value == -1:
         return -1
     if 0 <= value < n_candidates:
         return value
-    return -1
+    return None
 
 
 def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
