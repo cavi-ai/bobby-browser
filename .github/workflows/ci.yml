@@ -81,6 +81,10 @@ jobs:
         # 0.3.1 while the last sdk-v* tag was 0.3.0 because nothing checked.
         run: python3 scripts/check-version-agreement.py
 
+      - name: Vision experiment evaluator regressions
+        working-directory: scripts/vision-mlx/training
+        run: python3 -m unittest test_evaluate_adapter.py
+
       - name: Browser-free ignored tests
         # `default_profile_golden` is #[ignore]d because it is a golden lock,
         # not because it needs a browser: it diffs the committed Firefox
@@ -197,6 +201,7 @@ jobs:
           --test intent_extract_workflow
           --test intent_follow_workflow
           --test intent_form_workflow
+          --test intent_frames
           --test intent_vision_escalation
           --test intent_vision_prefill
           --test interface_capacity
