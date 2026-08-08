@@ -4,6 +4,9 @@
 //! each record pairs the real page context (candidates, URL, screenshot) with
 //! the journey's known-correct target as a candidate-index ground truth.
 
+// Collection drives the journeys but asserts no evidence; the driver and
+// evidence items it skips are live in modern_gauntlet_e2e.
+#[allow(dead_code)]
 #[path = "modern_gauntlet/mod.rs"]
 mod modern_gauntlet;
 
@@ -27,8 +30,16 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
 
     for (selector, value, field) in [
         ("input[aria-label='Full name']", "Maya Chen", "full name"),
-        ("input[aria-label='Work email']", "maya@atlas.example", "work email"),
-        ("input[aria-label='Company name']", "Atlas Labs", "company name"),
+        (
+            "input[aria-label='Work email']",
+            "maya@atlas.example",
+            "work email",
+        ),
+        (
+            "input[aria-label='Company name']",
+            "Atlas Labs",
+            "company name",
+        ),
         ("input[aria-label='Postal code']", "02110", "postal code"),
     ] {
         collector
@@ -374,7 +385,9 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
             "open_customer",
         )
         .await?;
-    runtime.click("a[href='/customers/cus_atlas']", false).await?;
+    runtime
+        .click("a[href='/customers/cus_atlas']", false)
+        .await?;
     runtime
         .wait_visible("select[aria-label='Customer priority']")
         .await?;

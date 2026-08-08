@@ -17,8 +17,16 @@ use types::{
 use super::driver::{ModernRuntime, TestResult};
 
 const INTERACTIVE_ROLES: [&str; 10] = [
-    "button", "link", "textbox", "combobox", "checkbox", "radio", "tab", "menuitem",
-    "searchbox", "switch",
+    "button",
+    "link",
+    "textbox",
+    "combobox",
+    "checkbox",
+    "radio",
+    "tab",
+    "menuitem",
+    "searchbox",
+    "switch",
 ];
 
 #[derive(Debug, Clone)]
@@ -276,9 +284,11 @@ fn find_candidate(
 
 async fn capture_screenshot_b64(runtime: &ModernRuntime) -> TestResult<String> {
     let evidence = runtime
-        .submit(PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
-            mode: ScreenshotMode::Viewport,
-        }))
+        .submit(PrimitiveCommand::CaptureScreenshot(
+            CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            },
+        ))
         .await?;
     for item in &evidence {
         if let Evidence::Screenshot { artifact_id, .. } = item {
@@ -375,10 +385,10 @@ mod tests {
     #[test]
     fn html_aria_label_prefers_the_elements_own() {
         let html = r#"<input type="text" aria-label="Work email" value="">"#;
+        assert_eq!(aria_label_from_html(html), Some("Work email".to_string()));
         assert_eq!(
-            aria_label_from_html(html),
-            Some("Work email".to_string())
+            aria_label_from_html("<button type=\"submit\">Create</button>"),
+            None
         );
-        assert_eq!(aria_label_from_html("<button type=\"submit\">Create</button>"), None);
     }
 }
