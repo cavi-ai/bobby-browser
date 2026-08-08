@@ -910,7 +910,7 @@ fn classify_failure(
             command_id: envelope.command_id.clone(),
             error,
         }
-    } else if requires_reconciliation(envelope) {
+    } else if requires_reconciliation(envelope) && !is_pre_effect(&error) {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
@@ -1002,6 +1002,23 @@ fn requires_reconciliation(envelope: &CommandEnvelope) -> bool {
             envelope.command,
             RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(_))
         )
+}
+
+/// Errors raised before the command could reach the browser: argument
+/// validation and target resolution run before dispatch, so the side effect
+/// provably never landed. Reporting `needsReconciliation` for these tells
+/// the agent to stop and reconcile an effect that never happened.
+fn is_pre_effect(error: &CommandError) -> bool {
+    matches!(
+        error.code,
+        ErrorCode::InvalidRequest
+            | ErrorCode::TargetNotFound
+            | ErrorCode::TargetAmbiguous
+            | ErrorCode::FrameNotFound
+            | ErrorCode::ShadowRootUnavailable
+            | ErrorCode::IntentCompileFailed
+            | ErrorCode::IntentActionMismatch
+    )
 }
 
 fn journal_error(error: JournalError) -> CommandError {

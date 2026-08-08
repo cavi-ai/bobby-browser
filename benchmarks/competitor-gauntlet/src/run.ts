@@ -214,8 +214,18 @@ async function main() {
   const taskId = arg("task");
   const runs = Number(arg("runs", "1"));
   const timeboxMs = Number(arg("timebox-seconds", "480")) * 1000;
-  if (!toolName || !runners[toolName]) {
-    console.error(`--tool required, one of: ${Object.keys(runners).join(", ")}`);
+  if (!toolName) {
+    console.error(
+      `--tool required. Benchmark bobby with --tool bobby. The full competitor gamut runs ONLY when explicitly called: --tool all. One of: ${Object.keys(runners).join(", ")}, all`,
+    );
+    process.exit(2);
+  }
+  const toolNames =
+    toolName === "all"
+      ? Object.keys(runners)
+      : toolName.split(",").filter((name) => runners[name]);
+  if (toolNames.length === 0) {
+    console.error(`unknown --tool ${toolName}`);
     process.exit(2);
   }
   const selected = taskId ? tasks.filter((t: any) => t.id === taskId) : tasks;
@@ -225,141 +235,144 @@ async function main() {
   }
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(path.join(resultsDir, "transcripts"), { recursive: true });
-  const runner = runners[toolName];
 
-  for (const task of selected) {
-    for (let run = 1; run <= runs; run += 1) {
-      const seed = `cg-${toolName}-${task.id}-${run}-${Date.now()}`;
-      const server = await startServer(seed);
-      const parsed = new URL(server.url);
-      const entryUrl = `${server.base}${task.entry}${parsed.search}`;
-      const workDir = await mkdtemp(path.join(tmpdir(), `cg-${toolName}-`));
-      const downloadsDir = path.join(workDir, "downloads");
-      mkdirSync(downloadsDir, { recursive: true });
-      // Relative upload_roots in config resolve against the gateway cwd
-      // (the Claude workDir). Ensure the default root exists and stage the
-      // fixture inside it so upload_files does not policyDeny.
-      const uploadRoot = path.join(workDir, "data", "uploads");
-      mkdirSync(uploadRoot, { recursive: true });
-      const stagedFixture = path.join(uploadRoot, "approved-upload.txt");
-      writeFileSync(stagedFixture, readFileSync(fixturePath));
+  for (const tool of toolNames) {
+    const runner = runners[tool];
 
-      const mcpConfig = { mcpServers: structuredClone(runner.mcpServers) };
-      // Prefer the repo's own release build for the bobby runner — the
-      // benchmark should measure this checkout, not a stale installed binary.
-      const repoBobby = path.join(repoRoot, "target/release/bobby");
-      const bobbyCommand =
-        process.env.BOBBY_MCP_COMMAND ??
-        (exists(repoBobby) ? repoBobby : "bobby");
-      // Per-run config: allow loopback (gauntlet-server is 127.0.0.1) and
-      // keep upload_roots relative to workDir. HttpConfig is partial-override
-      // safe (#[serde(default)]); still write a complete enough file that
-      // BOBBY_BROWSER_CONFIG never fails parse and drops MCP.
-      const gauntletConfigPath = path.join(workDir, "bobby-gauntlet.toml");
-      if (toolName === "bobby") {
-        writeFileSync(
-          gauntletConfigPath,
-          [
-            "[browser]",
-            'upload_roots = ["./data/uploads"]',
-            'downloads_dir = "./downloads"',
-            'artifacts_dir = "./artifacts"',
-            'profiles_dir = "./profiles"',
-            "headless = true",
-            "",
-            "[http]",
-            "allow_loopback = true",
-            "allow_private_network = false",
-            "max_redirects = 5",
-            "max_header_bytes = 65536",
-            "max_body_bytes = 8388608",
-            "max_download_bytes = 67108864",
-            "request_timeout_ms = 30000",
-            "max_concurrent_requests = 8",
-            "",
-            "[mcp]",
-            'startup_toolset = "full"',
-            "",
-          ].join("\n"),
-        );
-      }
-      for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
-        if (typeof serverConfig.command === "string") {
-          serverConfig.command = serverConfig.command.replace(
-            "${BOBBY_MCP_COMMAND}",
-            bobbyCommand,
+    for (const task of selected) {
+      for (let run = 1; run <= runs; run += 1) {
+        const seed = `cg-${tool}-${task.id}-${run}-${Date.now()}`;
+        const server = await startServer(seed);
+        const parsed = new URL(server.url);
+        const entryUrl = `${server.base}${task.entry}${parsed.search}`;
+        const workDir = await mkdtemp(path.join(tmpdir(), `cg-${tool}-`));
+        const downloadsDir = path.join(workDir, "downloads");
+        mkdirSync(downloadsDir, { recursive: true });
+        // Relative upload_roots in config resolve against the gateway cwd
+        // (the Claude workDir). Ensure the default root exists and stage the
+        // fixture inside it so upload_files does not policyDeny.
+        const uploadRoot = path.join(workDir, "data", "uploads");
+        mkdirSync(uploadRoot, { recursive: true });
+        const stagedFixture = path.join(uploadRoot, "approved-upload.txt");
+        writeFileSync(stagedFixture, readFileSync(fixturePath));
+
+        const mcpConfig = { mcpServers: structuredClone(runner.mcpServers) };
+        // Prefer the repo's own release build for the bobby runner — the
+        // benchmark should measure this checkout, not a stale installed binary.
+        const repoBobby = path.join(repoRoot, "target/release/bobby");
+        const bobbyCommand =
+          process.env.BOBBY_MCP_COMMAND ??
+          (exists(repoBobby) ? repoBobby : "bobby");
+        // Per-run config: allow loopback (gauntlet-server is 127.0.0.1) and
+        // keep upload_roots relative to workDir. HttpConfig is partial-override
+        // safe (#[serde(default)]); still write a complete enough file that
+        // BOBBY_BROWSER_CONFIG never fails parse and drops MCP.
+        const gauntletConfigPath = path.join(workDir, "bobby-gauntlet.toml");
+        if (tool === "bobby") {
+          writeFileSync(
+            gauntletConfigPath,
+            [
+              "[browser]",
+              'upload_roots = ["./data/uploads"]',
+              'downloads_dir = "./downloads"',
+              'artifacts_dir = "./artifacts"',
+              'profiles_dir = "./profiles"',
+              "headless = true",
+              "",
+              "[http]",
+              "allow_loopback = true",
+              "allow_private_network = false",
+              "max_redirects = 5",
+              "max_header_bytes = 65536",
+              "max_body_bytes = 8388608",
+              "max_download_bytes = 67108864",
+              "request_timeout_ms = 30000",
+              "max_concurrent_requests = 8",
+              "",
+              "[mcp]",
+              'startup_toolset = "full"',
+              "",
+            ].join("\n"),
           );
         }
-        if (serverConfig.env) {
-          for (const [key, value] of Object.entries(serverConfig.env)) {
-            if (typeof value === "string") {
-              serverConfig.env[key] = value
-                .replace("${BOBBY_MCP_COMMAND}", bobbyCommand)
-                .replace("${BOBBY_GAUNTLET_CONFIG}", gauntletConfigPath);
+        for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
+          if (typeof serverConfig.command === "string") {
+            serverConfig.command = serverConfig.command.replace(
+              "${BOBBY_MCP_COMMAND}",
+              bobbyCommand,
+            );
+          }
+          if (serverConfig.env) {
+            for (const [key, value] of Object.entries(serverConfig.env)) {
+              if (typeof value === "string") {
+                serverConfig.env[key] = value
+                  .replace("${BOBBY_MCP_COMMAND}", bobbyCommand)
+                  .replace("${BOBBY_GAUNTLET_CONFIG}", gauntletConfigPath);
+              }
             }
           }
         }
+        writeFileSync(
+          path.join(workDir, ".mcp.json"),
+          JSON.stringify(mcpConfig, null, 2),
+        );
+
+        const prompt =
+          task.prompt
+            .replace("{{url}}", entryUrl)
+            .replace(
+              "{{fixture}}",
+              tool === "bobby" ? stagedFixture : fixturePath,
+            )
+            .replace("{{downloads}}", downloadsDir) +
+          (runner.promptSuffix
+            ? "\n\n" +
+              runner.promptSuffix.replaceAll("{{harnessDir}}", harnessDir)
+            : "") +
+          "\n" +
+          SELF_REPORT;
+
+        const started = Date.now();
+        const { events, timedOut } = await runClaude(prompt, workDir, timeboxMs);
+        const wallMs = Date.now() - started;
+        const summary = summarize(events);
+        const outcome = await verify(server.base, task, downloadsDir);
+        server.stop();
+
+        const transcriptFile = path.join(
+          resultsDir,
+          "transcripts",
+          `${seed}.json`,
+        );
+        writeFileSync(transcriptFile, JSON.stringify(events, null, 2));
+        const record = {
+          seed,
+          tool,
+          task: task.id,
+          run,
+          at: new Date().toISOString(),
+          model: summary.model ?? null,
+          pass: outcome.pass && !timedOut,
+          timedOut,
+          failures: outcome.failures,
+          wallMs,
+          toolCalls: summary.toolCalls,
+          toolErrors: summary.toolErrors,
+          inputTokens: summary.inputTokens,
+          outputTokens: summary.outputTokens,
+          selfReport: parseSelfReport(summary.resultText),
+          transcript: path.relative(repoRoot, transcriptFile),
+        };
+        appendFileSync(
+          path.join(resultsDir, "runs.jsonl"),
+          JSON.stringify(record) + "\n",
+        );
+        console.log(
+          `${record.pass ? "PASS" : "FAIL"} ${tool}/${task.id}#${run} ` +
+            `${(wallMs / 1000).toFixed(1)}s calls=${summary.toolCalls} errors=${summary.toolErrors} ` +
+            `${outcome.failures.join("; ")}`,
+        );
       }
-      writeFileSync(
-        path.join(workDir, ".mcp.json"),
-        JSON.stringify(mcpConfig, null, 2),
-      );
-
-      const prompt =
-        task.prompt
-          .replace("{{url}}", entryUrl)
-          .replace(
-            "{{fixture}}",
-            toolName === "bobby" ? stagedFixture : fixturePath,
-          )
-          .replace("{{downloads}}", downloadsDir) +
-        (runner.promptSuffix
-          ? "\n\n" +
-            runner.promptSuffix.replaceAll("{{harnessDir}}", harnessDir)
-          : "") +
-        "\n" +
-        SELF_REPORT;
-
-      const started = Date.now();
-      const { events, timedOut } = await runClaude(prompt, workDir, timeboxMs);
-      const wallMs = Date.now() - started;
-      const summary = summarize(events);
-      const outcome = await verify(server.base, task, downloadsDir);
-      server.stop();
-
-      const transcriptFile = path.join(
-        resultsDir,
-        "transcripts",
-        `${seed}.json`,
-      );
-      writeFileSync(transcriptFile, JSON.stringify(events, null, 2));
-      const record = {
-        seed,
-        tool: toolName,
-        task: task.id,
-        run,
-        at: new Date().toISOString(),
-        model: summary.model ?? null,
-        pass: outcome.pass && !timedOut,
-        timedOut,
-        failures: outcome.failures,
-        wallMs,
-        toolCalls: summary.toolCalls,
-        toolErrors: summary.toolErrors,
-        inputTokens: summary.inputTokens,
-        outputTokens: summary.outputTokens,
-        selfReport: parseSelfReport(summary.resultText),
-        transcript: path.relative(repoRoot, transcriptFile),
-      };
-      appendFileSync(
-        path.join(resultsDir, "runs.jsonl"),
-        JSON.stringify(record) + "\n",
-      );
-      console.log(
-        `${record.pass ? "PASS" : "FAIL"} ${toolName}/${task.id}#${run} ` +
-          `${(wallMs / 1000).toFixed(1)}s calls=${summary.toolCalls} errors=${summary.toolErrors} ` +
-          `${outcome.failures.join("; ")}`,
-      );
     }
   }
 }

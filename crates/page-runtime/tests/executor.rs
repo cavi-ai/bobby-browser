@@ -24,6 +24,7 @@ enum DriverMode {
     SlowInspect,
     InspectMismatch,
     FailClick,
+    ClickTargetNotFound,
     StateConflict,
     CommitFail,
     CommitPause,
@@ -164,6 +165,14 @@ impl BrowserWorker for FakeWorker {
         self.events.lock().await.push("browser:click".into());
         if matches!(self.mode, DriverMode::FailClick) {
             return Err(driver_failure());
+        }
+        if matches!(self.mode, DriverMode::ClickTargetNotFound) {
+            return Err(CommandError {
+                code: ErrorCode::TargetNotFound,
+                message: "no target candidate matched".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
         }
         Ok(vec![Evidence::Element {
             selector: command.selector.clone(),
@@ -964,6 +973,27 @@ async fn boundary_driver_failure_needs_reconciliation() {
         outcome,
         CommandOutcome::NeedsReconciliation { .. }
     ));
+}
+
+/// A Boundary command whose target never resolved never reached the browser:
+/// that is a plain failure, not a reconciliation stop.
+#[tokio::test]
+async fn boundary_pre_effect_resolution_failure_is_failed_not_needs_reconciliation() {
+    let (runtime, session, page, _) = runtime(DriverMode::ClickTargetNotFound, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#missing".into(),
+                target: None,
+                boundary: true,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    assert!(matches!(outcome, CommandOutcome::Failed { error, .. }
+        if error.code == ErrorCode::TargetNotFound));
 }
 
 #[tokio::test]
