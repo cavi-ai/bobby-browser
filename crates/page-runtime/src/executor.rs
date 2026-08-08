@@ -910,7 +910,11 @@ fn classify_failure(
             command_id: envelope.command_id.clone(),
             error,
         }
-    } else if requires_reconciliation(envelope) && !is_pre_effect(&error) {
+    } else if requires_reconciliation(envelope)
+        && !is_pre_effect(&error)
+        && !is_postcondition_failure(&error)
+        && !is_transient_target_loss(&error)
+    {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
@@ -1019,6 +1023,23 @@ fn is_pre_effect(error: &CommandError) -> bool {
             | ErrorCode::IntentCompileFailed
             | ErrorCode::IntentActionMismatch
     )
+}
+
+/// Postcondition failures after a known act (click landed, wait/verify did
+/// not). Keep these as plain `failed` so agents inspect and adjust rather
+/// than entering the Boundary never-retry recovery path.
+fn is_postcondition_failure(error: &CommandError) -> bool {
+    matches!(
+        error.code,
+        ErrorCode::VerificationFailed | ErrorCode::WaitConditionTimedOut
+    )
+}
+
+/// Transient page/target loss after an act: retryable re-list/reattach, not
+/// Boundary never-retry reconciliation (which caused double-saves in gauntlet
+/// when a tab died mid-submit).
+fn is_transient_target_loss(error: &CommandError) -> bool {
+    matches!(error.code, ErrorCode::TargetDetached)
 }
 
 fn journal_error(error: JournalError) -> CommandError {

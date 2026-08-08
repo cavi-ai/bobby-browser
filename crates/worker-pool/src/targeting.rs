@@ -1265,7 +1265,10 @@ fn cdp_error(error: chromiumoxide::error::CdpError) -> CommandError {
     // The page's CDP target died (crash or close). Hammering the dead pipe
     // produced the cascade of identical driver errors seen in benchmark
     // runs; say what happened and what to check instead.
-    if message.contains("receiver is gone") || message.contains("session closed") {
+    if message.contains("receiver is gone")
+        || message.contains("session closed")
+        || message.contains("oneshot canceled")
+    {
         return CommandError {
             code: ErrorCode::TargetDetached,
             message: "the browser target is gone (crashed or closed); re-list pages or recover the session before retrying".into(),

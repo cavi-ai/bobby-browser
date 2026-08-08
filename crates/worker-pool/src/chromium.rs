@@ -1784,6 +1784,23 @@ impl BrowserWorker for ChromiumWorker {
                 }]);
             }
             if Instant::now() >= deadline {
+                // Page-scoped text waits often race an async UI confirmation
+                // (fetch-then-append). One last body read before timing out.
+                if let types::WaitCondition::Text { target, matcher } = &command.condition {
+                    if is_page_scoped_text_target(target) {
+                        if let Ok(value) = read_page_body_text(&page).await {
+                            if text_matches(matcher, &value).unwrap_or(false) {
+                                return Ok(vec![Evidence::Wait {
+                                    condition: command.condition.clone(),
+                                    elapsed_ms: started.elapsed().as_millis() as u64,
+                                    observations,
+                                    excluded_classes: Vec::new(),
+                                    observed: Some(bound_observed(&value)),
+                                }]);
+                            }
+                        }
+                    }
+                }
                 return Err(CommandError {
                     code: ErrorCode::WaitConditionTimedOut,
                     message: format!(
@@ -1794,7 +1811,7 @@ impl BrowserWorker for ChromiumWorker {
                     retryable: false,
                 });
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -2418,6 +2435,14 @@ async fn wait_condition_satisfied(
             }))
         }
         WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
+            let is_value = matches!(condition, WaitCondition::Value { .. });
+            // a11y / landmark page-scoped roles (and css:body) are not a single
+            // node; read live document.body.innerText via evaluate so polls see
+            // async UI updates the same way a whole-page inspect does.
+            if !is_value && is_page_scoped_text_target(target) {
+                let value = read_page_body_text(page).await?;
+                return Ok(WaitPoll::saw(text_matches(matcher, &value)?, value));
+            }
             let mut browser = browser.lock().await;
             let resolved = match browser.as_mut() {
                 Some(browser) => {
@@ -2432,7 +2457,7 @@ async fn wait_condition_satisfied(
                 }
                 Err(error) => return Err(error),
             };
-            let value = if matches!(condition, WaitCondition::Value { .. }) {
+            let value = if is_value {
                 resolved.value(page).await?.unwrap_or_default()
             } else {
                 resolved.inner_text(page).await?.unwrap_or_default()
@@ -2526,6 +2551,73 @@ fn is_closed_page_message(message: &str) -> bool {
     message.contains("receiver is gone")
         || message.contains("session closed")
         || message.contains("Session with given id not found")
+        || message.contains("oneshot canceled")
+}
+
+fn nonempty_field(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn is_page_scoped_css(css: &str) -> bool {
+    matches!(css.to_ascii_lowercase().as_str(), "body" | "html" | ":root")
+}
+
+fn is_page_scoped_role(role: &str) -> bool {
+    [
+        "RootWebArea",
+        "document",
+        "main",
+        "body",
+        "application",
+        "generic",
+    ]
+    .iter()
+    .any(|name| role.eq_ignore_ascii_case(name))
+}
+
+/// a11y `RootWebArea` / `document` / bare landmarks, and `css: body|html|:root`,
+/// mean "page text" — not a single resolvable node. Empty optional fields are
+/// treated as absent so agents that send `""` still hit the body-text path.
+fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
+    if nonempty_field(&target.test_id).is_some()
+        || nonempty_field(&target.accessible_name).is_some()
+        || nonempty_field(&target.label).is_some()
+        || target.text.is_some()
+        || !target.attributes.is_empty()
+        || !target.frame_path.is_empty()
+        || !target.shadow_path.is_empty()
+        || target.ordinal.is_some()
+    {
+        return false;
+    }
+    let role = nonempty_field(&target.role);
+    let css = nonempty_field(&target.css);
+    match (role, css) {
+        (Some(role), None) => is_page_scoped_role(role),
+        (None, Some(css)) => is_page_scoped_css(css),
+        (Some(role), Some(css)) => is_page_scoped_role(role) && is_page_scoped_css(css),
+        (None, None) => false,
+    }
+}
+
+async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {
+    if let Ok(result) = page
+        .evaluate("document.body ? (document.body.innerText || '') : ''")
+        .await
+    {
+        if let Ok(value) = result.into_value::<String>() {
+            return Ok(value);
+        }
+    }
+    let body = page.find_element("body").await.map_err(command_failed)?;
+    Ok(body
+        .inner_text()
+        .await
+        .map_err(command_failed)?
+        .unwrap_or_default())
 }
 
 fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {
@@ -2942,6 +3034,7 @@ mod tests {
         assert!(is_closed_page_message(
             "send failed because receiver is gone"
         ));
+        assert!(is_closed_page_message("oneshot canceled"));
         assert!(!is_closed_page_message(
             "connection temporarily unavailable"
         ));
@@ -3118,6 +3211,46 @@ mod tests {
                 .code,
             ErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn document_web_area_roles_are_recognized() {
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("RootWebArea".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("document".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("main".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
+            css: Some("body".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("main".into()),
+            css: Some("body".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("main".into()),
+            css: Some("".into()),
+            accessible_name: Some("".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(!super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("main".into()),
+            css: Some("#content".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(!super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("status".into()),
+            ..types::TargetSpec::default()
+        }));
     }
 
     #[tokio::test]
