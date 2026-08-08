@@ -148,6 +148,179 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
 }
 
 #[tokio::test]
+async fn collect_authorization_corpus() -> TestResult<()> {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("authorization")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::Authorization).await?;
+    let mut collector = CorpusCollector::new();
+
+    runtime
+        .wait_visible("button[aria-label='Connect Ledger Cloud']")
+        .await?;
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "button[aria-label='Connect Ledger Cloud']",
+                purpose: "Connect the Ledger Cloud integration".into(),
+                ordinal: None,
+            },
+            "authorization",
+            "connect_ledger",
+        )
+        .await?;
+    let popup = runtime
+        .click_popup("button[aria-label='Connect Ledger Cloud']")
+        .await?;
+
+    // NOTE: the authorize button is on the popup page; the collector targets
+    // the main page, so this step runs but is not captured.
+    runtime.click_on(&popup, "#authorize").await?;
+    runtime.wait_visible("[data-connected='true']").await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "button[aria-label='Dismiss notification preferences']",
+                purpose: "Dismiss the notification preferences prompt".into(),
+                ordinal: None,
+            },
+            "authorization",
+            "dismiss_obstruction",
+        )
+        .await?;
+    runtime
+        .click(
+            "button[aria-label='Dismiss notification preferences']",
+            false,
+        )
+        .await?;
+
+    let path = corpus_path("authorization");
+    collector.save(&path)?;
+    assert_eq!(collector.len(), 2, "expected 2 authorization examples");
+    runtime.mark_completed("authorization")?;
+    println!("wrote {} examples to {}", collector.len(), path.display());
+    Ok(())
+}
+
+#[tokio::test]
+async fn collect_report_recovery_corpus() -> TestResult<()> {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("report-recovery")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::ReportRecovery).await?;
+    let mut collector = CorpusCollector::new();
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "form[aria-label='Generate report'] button",
+                purpose: "Generate the operations report".into(),
+                ordinal: None,
+            },
+            "report-recovery",
+            "generate_report",
+        )
+        .await?;
+    let workflow_id = runtime
+        .click_boundary_with_workflow("form[aria-label='Generate report'] button")
+        .await?;
+    server.wait_for_report_generation().await?;
+
+    let (runtime, _recovery) = runtime
+        .restart_and_recover(&workflow_id, &server.application_url("/reports"))
+        .await?;
+    runtime
+        .wait_visible("a[download='atlas-operations.csv']")
+        .await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "a[download='atlas-operations.csv']",
+                purpose: "Download the generated report".into(),
+                ordinal: None,
+            },
+            "report-recovery",
+            "download_report",
+        )
+        .await?;
+    runtime
+        .click_download("a[download='atlas-operations.csv']")
+        .await?;
+
+    let path = corpus_path("report-recovery");
+    collector.save(&path)?;
+    assert_eq!(collector.len(), 2, "expected 2 report-recovery examples");
+    runtime.mark_completed("report-recovery")?;
+    println!("wrote {} examples to {}", collector.len(), path.display());
+    Ok(())
+}
+
+#[tokio::test]
+async fn collect_documents_corpus() -> TestResult<()> {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("documents")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
+    let mut collector = CorpusCollector::new();
+    let fixture = runtime.fixture_path("approved-upload.txt");
+    runtime
+        .wait_visible("input[aria-label='Customer document']")
+        .await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "input[aria-label='Customer document']",
+                purpose: "Choose the customer document file".into(),
+                ordinal: None,
+            },
+            "documents",
+            "choose_file",
+        )
+        .await?;
+    runtime
+        .upload("input[aria-label='Customer document']", &fixture)
+        .await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "form[aria-label='Upload customer document'] button",
+                purpose: "Upload the chosen document".into(),
+                ordinal: None,
+            },
+            "documents",
+            "click_upload",
+        )
+        .await?;
+    runtime
+        .click("form[aria-label='Upload customer document'] button", true)
+        .await?;
+    runtime.wait_visible("iframe[title^='Preview of']").await?;
+
+    // NOTE: the preview-confirmation button lives inside an iframe; the
+    // accessibility snapshot is main-frame scoped, so that step runs but is
+    // not captured until the collector learns frame-scoped snapshots.
+    runtime
+        .wait_in_frame_button("#document-preview", "#confirm-preview")
+        .await?;
+    runtime
+        .click_in_frame("#document-preview", "#confirm-preview")
+        .await?;
+    server.wait_for_preview_confirmation().await?;
+
+    let path = corpus_path("documents");
+    collector.save(&path)?;
+    assert_eq!(collector.len(), 2, "expected 2 documents examples");
+    runtime.mark_completed("documents")?;
+    println!("wrote {} examples to {}", collector.len(), path.display());
+    Ok(())
+}
+
+#[tokio::test]
 async fn collect_customer_update_corpus() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("customer-update")).await?;
     let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
