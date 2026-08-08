@@ -6,12 +6,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
+use clap::ValueEnum;
 use serde_json::json;
-use types::CURRENT_INTERFACE_VERSION;
+use types::{Capability, CURRENT_INTERFACE_VERSION};
 use uuid::Uuid;
-
-#[cfg(test)]
-use types::Capability;
 
 use crate::bootstrap_local::AGENT_CAPABILITIES;
 use crate::jobs_client::{self, resolve_jobs_auth, resolve_jobs_base_url};
@@ -23,8 +21,45 @@ const DEFAULT_SANDBOX_TTL_HOURS: i64 = 12;
 const DEFAULT_MCP_HOST: &str = "host.docker.internal";
 const DEFAULT_MCP_PORT: u16 = 7777;
 const MCP_PATH: &str = "/v1/mcp";
+/// Headroom above bobby's 128 KiB tools/list budget for OpenShell L7 buffering.
+const MCP_MAX_BODY_BYTES: u32 = 262_144;
 
 const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
+
+/// Capability floor minted for an OpenShell sandbox principal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum OpenshellCapabilityPreset {
+    /// Narrow tenant floor (default): browse/intent/evidence/recovery only.
+    /// No JS eval, vision, jobs, fingerprint, or humanize.
+    #[default]
+    Openshell,
+    /// Full local agent floor (still no `authority:admin`).
+    Agent,
+}
+
+/// Narrow OpenShell tenant set — least privilege for sandboxed agents.
+pub(crate) const OPENSHELL_CAPABILITIES: &[Capability] = &[
+    Capability::SessionRead,
+    Capability::SessionWrite,
+    Capability::PageRead,
+    Capability::PageWrite,
+    Capability::BrowserMutate,
+    Capability::FileUpload,
+    Capability::FileDownload,
+    Capability::IntentExecute,
+    Capability::ContextRead,
+    Capability::ArtifactRead,
+    Capability::ArtifactCapture,
+    Capability::RecoveryRead,
+    Capability::RecoveryWrite,
+];
+
+pub fn capabilities_for_openshell_preset(preset: OpenshellCapabilityPreset) -> &'static [Capability] {
+    match preset {
+        OpenshellCapabilityPreset::Openshell => OPENSHELL_CAPABILITIES,
+        OpenshellCapabilityPreset::Agent => AGENT_CAPABILITIES,
+    }
+}
 
 /// Files written by [`install_pack`] under `<project>/openshell/`.
 pub struct OpenshellPack {
@@ -82,10 +117,13 @@ pub fn emit_policy_yaml(options: &PackOptions) -> String {
     format!(
         r#"# bobby-browser ↔ OpenShell network policy (sample)
 # Apply with: openshell policy set <sandbox> --policy openshell/policy.yaml --wait
+# WARNING: `policy set` replaces the entire sandbox policy. Prefer merging this
+# network_policies block into your existing policy when you already customize FS/process.
 # Replace binaries.path with the agent binary that will call MCP.
 # Reachability uses OpenShell's supervisor proxy — do not expose bobby beyond
 # the host gateway address the sandbox can dial (host.docker.internal /
 # host.containers.internal / LAN host). Keep bobby bind loopback+gateway only.
+# Prefer BOBBY_MCP_TOOLSET=explore (or act) inside the sandbox to keep tools/list small.
 version: 1
 filesystem_policy:
   include_workdir: true
@@ -106,14 +144,24 @@ network_policies:
         protocol: mcp
         enforcement: enforce
         mcp:
-          max_body_bytes: 131072
+          max_body_bytes: {max_body}
           allow_all_known_mcp_methods: true
+        deny_rules:
+          - method: tools/call
+            tool: evaluate_javascript
+          - method: tools/call
+            tool: job_submit
+          - method: tools/call
+            tool: job_status
+          - method: tools/call
+            tool: job_cancel
     binaries:
       - path: {binary}
 "#,
         host = options.mcp_host,
         port = options.mcp_port,
         path = MCP_PATH,
+        max_body = MCP_MAX_BODY_BYTES,
         binary = options.agent_binary,
     )
 }
@@ -125,26 +173,38 @@ fn emit_readme(options: &PackOptions) -> String {
 Host runs bobby + Firefox companion. The sandbox agent reaches bobby only
 through OpenShell's policy proxy (this pack's `policy.yaml`).
 
+## Isolation (read this)
+
+- One OpenShell sandbox ↔ one bobby principal (narrow openshell capability floor by default).
+- Sandbox never holds `authority:admin`.
+- **Shared Firefox companion is a hard constraint:** cookies, logins, and the
+  durable context graph are profile-scoped, not principal-scoped. Two sandboxes
+  on the same host companion share site state. For stronger isolation use a
+  dedicated companion profile per sandbox, or managed Chromium disposable
+  workers (no persistent logins).
+- MCP URL defaults to cleartext HTTP across the host gateway — firewall that
+  path; do not bind bobby to untrusted networks.
+
 ## Host (once)
 
 1. `bobby init --preset unrestricted` (mint principals)
 2. Pair Firefox: `bobby install --companion`, then Pair in the toolbar
 3. `bobby serve` (MCP HTTP at `{url}`)
 4. Bind so the sandbox can reach the host gateway (`host.docker.internal` on
-   Docker Desktop, `host.containers.internal` on Podman, or the LAN IP). Prefer
-   not exposing bobby on untrusted networks.
+   Docker Desktop, `host.containers.internal` on Podman, or the LAN IP).
 
 ## Per sandbox
 
 1. Copy this `openshell/` pack into the sandbox image or sync it in.
-2. `bobby openshell provision --sandbox <id>` on the host — writes a 0600
-   injection env under the OS config dir; pass that bearer into OpenShell
+2. `bobby openshell provision --sandbox <id>` on the host — revokes any prior
+   principal for that id, mints a fresh one (unique idempotency key), writes a
+   0600 injection env under the OS config dir; pass that bearer into OpenShell
    credential injection as `{token_env}` (never bake it into the image).
-3. `openshell policy set <sandbox> --policy policy.yaml --wait`
-4. Point the agent MCP client at `mcp.json` (or merge its `mcpServers` entry).
+   Use `--capabilities-preset agent` only when you need JS/vision/jobs.
+3. `openshell policy set <sandbox> --policy policy.yaml --wait` (full replace —
+   merge network_policies if you already customize FS/process).
+4. Point the agent MCP client at `mcp.json`; set `BOBBY_MCP_TOOLSET=explore`.
 5. When the sandbox dies: `bobby openshell revoke --sandbox <id>`
-
-One sandbox ↔ one bobby principal. Sandbox never holds `authority:admin`.
 "#,
         url = options.mcp_url(),
         token_env = CLIENT_TOKEN_ENV,
@@ -215,15 +275,25 @@ fn validate_sandbox_id(sandbox: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fresh idempotency key per provision attempt (sandbox id alone is sticky and
+/// breaks revoke → re-provision when principalId changes).
+pub fn provision_idempotency_key(sandbox: &str, generation: Uuid) -> String {
+    format!("openshell-provision-{sandbox}-{generation}")
+}
+
 pub struct ProvisionResult {
     pub sandbox: String,
     pub principal_id: Uuid,
     pub expires_at: String,
     pub env_path: PathBuf,
     pub mcp_url: String,
+    pub replaced_prior: bool,
 }
 
-/// Mint one agent-scoped principal for `sandbox` and write injection env (0600).
+/// Mint one principal for `sandbox` and write injection env (0600).
+///
+/// If a prior principal is recorded for this sandbox id, it is revoked first so
+/// operators can rotate cleanly. Idempotency keys are unique per attempt.
 pub fn provision_sandbox(
     sandbox: &str,
     base_url: Option<String>,
@@ -232,15 +302,27 @@ pub fn provision_sandbox(
     token_override: Option<String>,
     ttl_hours: Option<i64>,
     pack: &PackOptions,
+    capabilities_preset: OpenshellCapabilityPreset,
 ) -> Result<ProvisionResult> {
     validate_sandbox_id(sandbox)?;
-    let admin = resolve_jobs_auth(token_override, bootstrap_path)?;
-    let base = resolve_jobs_base_url(base_url, config);
+    let admin = resolve_jobs_auth(token_override.clone(), bootstrap_path)?;
+    let base = resolve_jobs_base_url(base_url.clone(), config);
+
+    let replaced_prior = revoke_recorded_principal_if_any(
+        sandbox,
+        &base,
+        &admin,
+    )?;
+
     let mcp_url = pack.mcp_url();
     let ttl = ChronoDuration::hours(ttl_hours.unwrap_or(DEFAULT_SANDBOX_TTL_HOURS));
     let principal_id = Uuid::new_v4();
+    let generation = Uuid::new_v4();
     let expires_at = (Utc::now() + ttl).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let capabilities: Vec<&str> = AGENT_CAPABILITIES.iter().map(|cap| cap.as_str()).collect();
+    let capabilities: Vec<&str> = capabilities_for_openshell_preset(capabilities_preset)
+        .iter()
+        .map(|cap| cap.as_str())
+        .collect();
 
     let body = json!({
         "principalId": principal_id,
@@ -251,9 +333,9 @@ pub fn provision_sandbox(
     let response = principals_request(PrincipalsRequest {
         method: reqwest::Method::POST,
         url,
-        bearer: admin,
+        bearer: admin.clone(),
         body: Some(body),
-        idempotency_key: Some(format!("openshell-provision-{sandbox}")),
+        idempotency_key: Some(provision_idempotency_key(sandbox, generation)),
     })?;
 
     let bearer = response
@@ -273,8 +355,10 @@ pub fn provision_sandbox(
         .to_owned();
 
     let secrets = openshell_secrets_dir()?;
-    std::fs::create_dir_all(&secrets)
-        .with_context(|| format!("could not create {}", secrets.display()))?;
+    if let Err(error) = std::fs::create_dir_all(&secrets) {
+        let _ = delete_principal(&base, &admin, &principal.to_string());
+        return Err(error).with_context(|| format!("could not create {}", secrets.display()));
+    }
     let env_path = sandbox_env_path(sandbox)?;
     let meta_path = sandbox_meta_path(sandbox)?;
     let env_body = format!(
@@ -283,10 +367,22 @@ pub fn provision_sandbox(
          {CLIENT_TOKEN_ENV}={bearer}\n\
          BOBBY_OPENSHELL_SANDBOX={sandbox}\n\
          BOBBY_OPENSHELL_PRINCIPAL={principal}\n\
-         BOBBY_OPENSHELL_MCP_URL={mcp_url}\n"
+         BOBBY_OPENSHELL_MCP_URL={mcp_url}\n\
+         BOBBY_OPENSHELL_CAPABILITIES_PRESET={}\n",
+        match capabilities_preset {
+            OpenshellCapabilityPreset::Openshell => "openshell",
+            OpenshellCapabilityPreset::Agent => "agent",
+        }
     );
-    write_secret_file(&env_path, &env_body)?;
-    write_secret_file(&meta_path, &format!("{principal}\n"))?;
+    if let Err(error) = write_secret_file(&env_path, &env_body) {
+        let _ = delete_principal(&base, &admin, &principal.to_string());
+        return Err(error);
+    }
+    if let Err(error) = write_secret_file(&meta_path, &format!("{principal}\n")) {
+        let _ = std::fs::remove_file(&env_path);
+        let _ = delete_principal(&base, &admin, &principal.to_string());
+        return Err(error);
+    }
 
     Ok(ProvisionResult {
         sandbox: sandbox.to_owned(),
@@ -294,6 +390,7 @@ pub fn provision_sandbox(
         expires_at: expires,
         env_path,
         mcp_url,
+        replaced_prior,
     })
 }
 
@@ -322,19 +419,51 @@ pub fn revoke_sandbox(
 
     let admin = resolve_jobs_auth(token_override, bootstrap_path)?;
     let base = resolve_jobs_base_url(base_url, config);
-    let url = jobs_client::jobs_url(&base, &format!("/v1/principals/{principal}"))?;
-    principals_request(PrincipalsRequest {
-        method: reqwest::Method::DELETE,
-        url,
-        bearer: admin,
-        body: None,
-        idempotency_key: None,
-    })?;
+    delete_principal(&base, &admin, &principal)?;
 
     let env_path = sandbox_env_path(sandbox)?;
     let _ = std::fs::remove_file(&env_path);
     let _ = std::fs::remove_file(&meta_path);
     Ok(meta_path)
+}
+
+/// If local meta exists for `sandbox`, revoke that principal and clear files.
+/// Returns whether a prior principal was revoked.
+fn revoke_recorded_principal_if_any(
+    sandbox: &str,
+    base_url: &str,
+    admin_bearer: &str,
+) -> Result<bool> {
+    let meta_path = sandbox_meta_path(sandbox)?;
+    if !meta_path.is_file() {
+        return Ok(false);
+    }
+    let principal = std::fs::read_to_string(&meta_path)
+        .with_context(|| format!("could not read {}", meta_path.display()))?
+        .trim()
+        .to_owned();
+    if principal.is_empty() {
+        let _ = std::fs::remove_file(&meta_path);
+        let _ = std::fs::remove_file(sandbox_env_path(sandbox)?);
+        return Ok(false);
+    }
+    // Best-effort: already-revoked principals should not block rotation.
+    let _ = delete_principal(base_url, admin_bearer, &principal);
+    let _ = std::fs::remove_file(sandbox_env_path(sandbox)?);
+    let _ = std::fs::remove_file(&meta_path);
+    Ok(true)
+}
+
+fn delete_principal(base_url: &str, admin_bearer: &str, principal: &str) -> Result<()> {
+    let url = jobs_client::jobs_url(base_url, &format!("/v1/principals/{principal}"))?;
+    principals_request(PrincipalsRequest {
+        method: reqwest::Method::DELETE,
+        url,
+        bearer: admin_bearer.to_owned(),
+        body: None,
+        idempotency_key: None,
+    })?;
+    Ok(())
 }
 
 struct PrincipalsRequest {
@@ -446,13 +575,18 @@ pub fn doctor_pack_detail(project_root: &Path) -> Option<(bool, String)> {
     .filter_map(|(name, ok)| if ok { None } else { Some(name) })
     .collect();
     if missing.is_empty() {
-        Some((
-            true,
-            format!(
-                "pack at {} (policy.yaml + mcp.json); provision with `bobby openshell provision --sandbox <id>`",
-                dir.display()
-            ),
-        ))
+        let mut detail = format!(
+            "pack at {} (policy.yaml + mcp.json); provision with `bobby openshell provision --sandbox <id>`",
+            dir.display()
+        );
+        if let Ok(policy_text) = std::fs::read_to_string(&policy) {
+            if !policy_text.contains("evaluate_javascript") {
+                detail.push_str(
+                    "; warn: policy lacks tool deny_rules — re-run `bobby openshell install`",
+                );
+            }
+        }
+        Some((true, detail))
     } else {
         Some((
             false,
@@ -483,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_yaml_targets_mcp_protocol_on_host_gateway() {
+    fn policy_yaml_denies_js_and_jobs_and_raises_body_budget() {
         let options = PackOptions {
             mcp_host: "host.containers.internal".into(),
             mcp_port: 7777,
@@ -494,7 +628,18 @@ mod tests {
         assert!(yaml.contains("host: host.containers.internal"));
         assert!(yaml.contains("path: /v1/mcp"));
         assert!(yaml.contains("path: /usr/bin/node"));
-        assert!(yaml.contains("allow_all_known_mcp_methods: true"));
+        assert!(yaml.contains("max_body_bytes: 262144"));
+        assert!(yaml.contains("tool: evaluate_javascript"));
+        assert!(yaml.contains("tool: job_submit"));
+        assert!(yaml.contains("policy set` replaces"));
+    }
+
+    #[test]
+    fn readme_states_shared_companion_isolation() {
+        let readme = emit_readme(&PackOptions::default());
+        assert!(readme.contains("Shared Firefox companion is a hard constraint"));
+        assert!(readme.contains("profile-scoped, not principal-scoped"));
+        assert!(readme.contains("unique idempotency key"));
     }
 
     #[test]
@@ -516,11 +661,25 @@ mod tests {
     }
 
     #[test]
-    fn agent_capabilities_exclude_admin() {
-        assert!(!AGENT_CAPABILITIES.contains(&Capability::AuthorityAdmin));
-        let wires: Vec<_> = AGENT_CAPABILITIES.iter().map(|c| c.as_str()).collect();
-        assert!(wires.iter().all(|w| *w != "authority:admin"));
-        assert!(wires.iter().any(|w| *w == "session:read"));
-        assert!(wires.iter().any(|w| *w == "intent:execute"));
+    fn openshell_capabilities_are_narrower_than_agent() {
+        assert!(!OPENSHELL_CAPABILITIES.contains(&Capability::AuthorityAdmin));
+        assert!(!OPENSHELL_CAPABILITIES.contains(&Capability::JavascriptEvaluate));
+        assert!(!OPENSHELL_CAPABILITIES.contains(&Capability::VisionAssist));
+        assert!(!OPENSHELL_CAPABILITIES.contains(&Capability::JobSubmit));
+        assert!(!OPENSHELL_CAPABILITIES.contains(&Capability::BrowserFingerprint));
+        assert!(OPENSHELL_CAPABILITIES.contains(&Capability::IntentExecute));
+        assert!(OPENSHELL_CAPABILITIES.contains(&Capability::SessionRead));
+        assert!(AGENT_CAPABILITIES.len() > OPENSHELL_CAPABILITIES.len());
+    }
+
+    #[test]
+    fn provision_idempotency_key_includes_generation() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let k1 = provision_idempotency_key("demo", a);
+        let k2 = provision_idempotency_key("demo", b);
+        assert_ne!(k1, k2);
+        assert!(k1.starts_with("openshell-provision-demo-"));
+        assert!(!k1.ends_with("demo"));
     }
 }

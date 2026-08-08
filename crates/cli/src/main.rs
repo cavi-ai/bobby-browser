@@ -456,6 +456,9 @@ enum OpenshellCommand {
         mcp_host: String,
         #[arg(long, default_value_t = 7777)]
         mcp_port: u16,
+        /// Capability floor: openshell (default, narrow) or agent (full minus admin)
+        #[arg(long, value_enum, default_value_t = openshell::OpenshellCapabilityPreset::Openshell)]
+        capabilities_preset: openshell::OpenshellCapabilityPreset,
     },
     /// Revoke the principal previously provisioned for a sandbox
     Revoke {
@@ -1016,6 +1019,7 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             ttl_hours,
             mcp_host,
             mcp_port,
+            capabilities_preset,
         } => {
             let config_path = resolve_config_path(common.config);
             let config = AppConfig::load(&config_path)
@@ -1034,7 +1038,11 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
                 common.token,
                 ttl_hours,
                 &pack,
+                capabilities_preset,
             )?;
+            if result.replaced_prior {
+                println!("ok: replaced prior principal for sandbox `{}`", result.sandbox);
+            }
             println!(
                 "ok: provisioned sandbox `{}` principal {} expires {}",
                 result.sandbox, result.principal_id, result.expires_at
@@ -2461,13 +2469,31 @@ mod tests {
             }
             _ => panic!("unexpected openshell install parse"),
         }
-        let provision =
-            Cli::try_parse_from(["bobby", "openshell", "provision", "--sandbox", "demo-1"])
-                .unwrap();
+        let provision = Cli::try_parse_from([
+            "bobby",
+            "openshell",
+            "provision",
+            "--sandbox",
+            "demo-1",
+            "--capabilities-preset",
+            "agent",
+        ])
+        .unwrap();
         match provision.command {
             Some(CliCommand::Openshell {
-                command: OpenshellCommand::Provision { sandbox, .. },
-            }) => assert_eq!(sandbox, "demo-1"),
+                command:
+                    OpenshellCommand::Provision {
+                        sandbox,
+                        capabilities_preset,
+                        ..
+                    },
+            }) => {
+                assert_eq!(sandbox, "demo-1");
+                assert_eq!(
+                    capabilities_preset,
+                    openshell::OpenshellCapabilityPreset::Agent
+                );
+            }
             _ => panic!("unexpected openshell provision parse"),
         }
         let revoke =

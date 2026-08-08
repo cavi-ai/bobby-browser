@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- OpenShell host hardening: `provision` revokes any prior principal for the sandbox id before minting, uses a unique idempotency key per attempt, and rolls back the minted principal if writing the injection env fails. Default capability floor is the narrow `openshell` preset (`--capabilities-preset agent` for the full agent floor). Sample policy denies `evaluate_javascript` / `job_*` at the OpenShell proxy, raises MCP `max_body_bytes` to 262 KiB, and documents shared Firefox companion / cleartext gateway / `policy set` replace risks. Doctor warns when an older pack lacks the deny_rules.
+
 - NVIDIA OpenShell host: `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment. `bobby doctor` reports `openshell-pack` when the pack is present.
 - Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page transparently re-attaches to the live target (`Page::is_closed` + `Browser::get_page` on the vendored chromiumoxide). A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle.
 

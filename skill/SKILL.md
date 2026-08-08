@@ -41,8 +41,9 @@ Never claim an action worked without its evidence.
    preset (no `authority:admin`; heal respects the marker). Operators who need
    to mint principals use `bobby init --preset unrestricted`. For NVIDIA
    OpenShell sandboxes, use `--host openshell` (or `bobby openshell install`)
-   then `bobby openshell provision --sandbox <id>` on the host — see
-   `docs/bobby-browser` OpenShell guide.
+   then `bobby openshell provision --sandbox <id>` on the host (narrow
+   `openshell` capability floor by default; shared Firefox companion is
+   profile-scoped — see the OpenShell guide).
 2. On MCP `initialize`, read `instructions`: startup `tools/list` is explore;
    call `toolset_select` then re-list; follow `error.repair.action` on failures.
 3. For the Firefox companion (persistent logins): `bobby install --companion`
