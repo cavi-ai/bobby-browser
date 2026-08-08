@@ -1995,7 +1995,7 @@ fn evidence_variants() -> Vec<Value> {
             "executionPath",
             json!({
                 "path":{"type":"string","enum":["directHttp","chromium","chromiumFallback"]},
-                "reason":{"type":"string","enum":["eligibleStaticDocument","eligibleExplicitDownload","ineligibleCommand","semanticTargetRequired","javascriptRequired","unsupportedContentType","stateConflict","policyRequired"]},
+                "reason":{"type":"string","enum":["eligibleStaticDocument","eligibleExplicitDownload","ineligibleCommand","semanticTargetRequired","javascriptRequired","unsupportedContentType","stateConflict","policyRequired","pageMutated"]},
                 "stateVersion":{"type":"integer","minimum":0},"elapsedMs":{"type":"integer","minimum":0},
                 "bytes":nullable(json!({"type":"integer","minimum":0})),"sha256":nullable(sha256()),
                 "finalUrl":nullable(string(0, MAX_URL_BYTES)),"contentType":nullable(string(0,256)),

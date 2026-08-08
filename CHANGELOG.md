@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Whole-page `inspect` after a mutating command now reads the live DOM instead of refetching the URL over HTTP. Pages are tainted by any non-read-only command and cleared by navigation, so SPA post-submit state is visible to agents (the direct-HTTP path was answering the app shell). Evidence carries `executionPath.reason: pageMutated` on the live read.
 - `make agent-eval`: bobby-only gauntlet against the checkout's build, gated against a committed baseline (`benchmarks/competitor-gauntlet/baseline.json`) — a previously-passing task failing, >2× wall time, or >+3 tool errors fails the check via `score check`. Deliberate invocation only (spends agent tokens); the full competitor gamut stays behind `--tool all`.
 
 

@@ -512,6 +512,9 @@ pub enum ExecutionReason {
     UnsupportedContentType,
     StateConflict,
     PolicyRequired,
+    /// The page has mutated since load (a non-read-only command ran against
+    /// it), so a whole-page read must come from the live DOM, not a refetch.
+    PageMutated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
