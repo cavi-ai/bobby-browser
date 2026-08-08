@@ -99,10 +99,10 @@ bobby openshell revoke --sandbox demo-1
 
 ## Shared `/v1` client behavior
 
-OpenShell operator APIs and `jobs` tooling share the same blocking `/v1` HTTP client
-named `v1_client` in the host runtime. This keeps bearer and interface headers,
+OpenShell operator commands and `jobs` tooling share the same blocking `/v1` HTTP
+client (`v1_client`) in the host runtime. This keeps bearer and interface headers,
 timeouts, retries, and request behavior consistent across principal lifecycle
-operations and `/v1/jobs` calls that run under the same OpenShell session.
+operations and `/v1/jobs` calls under the same OpenShell session.
 
 Re-running `provision` (or `rotate`) for the same sandbox id rotates: prior
 principal is revoked first, then a new principal is minted.
