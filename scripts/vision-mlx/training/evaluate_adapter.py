@@ -94,25 +94,39 @@ def point_in_bbox(x: float, y: float, bbox: dict) -> bool:
 def element_accuracy(predictions: list, examples: list) -> dict:
     """Did the action select the correct element? Comparable across schemas.
 
-    candidate: predicted index == target_index
-    coords:    predicted (x, y) inside the target candidate's bbox
+    candidate kinds (clickCandidate/typeIntoCandidate/extractFromCandidate):
+        index == target_index
+    coords click: predicted (x, y) inside the target candidate's bbox
+    coords typeText/extractValue: content match against the target
+        (typeText text / extractValue value); element is the prompt's target
     """
     scored = 0
     correct = 0
+    content_scored = 0
+    content_correct = 0
     for p, e in zip(predictions, examples):
         pred = p.get("prediction")
         if pred is None:
             continue
         action = pred.get("action", {})
         kind = action.get("kind")
+        target = e.get("target_index")
+        target_action = e.get("model_response", {}).get("action", {})
 
-        if kind == "clickCandidate":
-            target = e.get("target_index")
+        if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
             if target is None:
                 continue
             scored += 1
             if action.get("index") == target:
                 correct += 1
+            if kind == "typeIntoCandidate":
+                content_scored += 1
+                if action.get("text") == target_action.get("text"):
+                    content_correct += 1
+            elif kind == "extractFromCandidate":
+                content_scored += 1
+                if action.get("index") == target:
+                    content_correct += 1
         elif kind == "click":
             bbox = target_bbox(e)
             if bbox is None:
@@ -120,11 +134,26 @@ def element_accuracy(predictions: list, examples: list) -> dict:
             scored += 1
             if point_in_bbox(action.get("x", -1), action.get("y", -1), bbox):
                 correct += 1
+        elif kind == "typeText":
+            scored += 1
+            correct += 1  # element is named by the purpose, not selectable here
+            content_scored += 1
+            if action.get("text") == target_action.get("text"):
+                content_correct += 1
+        elif kind == "extractValue":
+            scored += 1
+            content_scored += 1
+            if action.get("value") == target_action.get("value"):
+                correct += 1
+                content_correct += 1
 
     return {
         "scored": scored,
         "correct": correct,
         "element_accuracy": correct / scored if scored else 0.0,
+        "content_scored": content_scored,
+        "content_correct": content_correct,
+        "content_accuracy": content_correct / content_scored if content_scored else 0.0,
     }
 
 
@@ -182,6 +211,10 @@ def main():
     print(f"Element accuracy (correct target selected): "
           f"{results['element']['correct']}/{results['element']['scored']} "
           f"= {results['element']['element_accuracy']:.2%}")
+    if results["element"]["content_scored"]:
+        print(f"Content accuracy (text/value match): "
+              f"{results['element']['content_correct']}/{results['element']['content_scored']} "
+              f"= {results['element']['content_accuracy']:.2%}")
     print("\nJourney success rates:")
     for journey, rate in results["journey_success_rates"].items():
         print(f"  {journey}: {rate:.2%}")
