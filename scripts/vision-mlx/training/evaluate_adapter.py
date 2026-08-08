@@ -50,13 +50,13 @@ def parse_prediction(text: str) -> dict | None:
     return parsed
 
 
-def generate_predictions(model, tokenizer, examples: list, max_tokens: int) -> list:
+def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
     from mlx_lm.generate import generate
 
     predictions = []
     for i, example in enumerate(examples):
         start = time.time()
-        prompt = build_prompt(example)
+        prompt = build_prompt(example, schema)
         messages = [{"role": "user", "content": prompt}]
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         try:
@@ -71,12 +71,61 @@ def generate_predictions(model, tokenizer, examples: list, max_tokens: int) -> l
             "step": example.get("step", ""),
             "success": example.get("success", False),
             "prediction": prediction,
-            "target": build_completion(example),
+            "target": build_completion(example, schema),
             "elapsed": time.time() - start,
         })
         if (i + 1) % 10 == 0:
             print(f"  Generated {i + 1}/{len(examples)}")
     return predictions
+
+
+def target_bbox(example: dict) -> dict | None:
+    idx = example.get("target_index")
+    candidates = example.get("context_candidates") or []
+    if idx is None or idx >= len(candidates):
+        return None
+    return candidates[idx].get("bbox")
+
+
+def point_in_bbox(x: float, y: float, bbox: dict) -> bool:
+    return bbox["x"] <= x <= bbox["x"] + bbox["w"] and bbox["y"] <= y <= bbox["y"] + bbox["h"]
+
+
+def element_accuracy(predictions: list, examples: list) -> dict:
+    """Did the action select the correct element? Comparable across schemas.
+
+    candidate: predicted index == target_index
+    coords:    predicted (x, y) inside the target candidate's bbox
+    """
+    scored = 0
+    correct = 0
+    for p, e in zip(predictions, examples):
+        pred = p.get("prediction")
+        if pred is None:
+            continue
+        action = pred.get("action", {})
+        kind = action.get("kind")
+
+        if kind == "clickCandidate":
+            target = e.get("target_index")
+            if target is None:
+                continue
+            scored += 1
+            if action.get("index") == target:
+                correct += 1
+        elif kind == "click":
+            bbox = target_bbox(e)
+            if bbox is None:
+                continue
+            scored += 1
+            if point_in_bbox(action.get("x", -1), action.get("y", -1), bbox):
+                correct += 1
+
+    return {
+        "scored": scored,
+        "correct": correct,
+        "element_accuracy": correct / scored if scored else 0.0,
+    }
 
 
 def main():
@@ -90,6 +139,7 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=16, help="LoRA rank used at training time")
     parser.add_argument("--lora-alpha", type=float, default=32.0, help="LoRA alpha used at training time")
     parser.add_argument("--num-layers", type=int, default=16, help="Trailing LoRA layers used at training time")
+    parser.add_argument("--schema", choices=["coords", "candidate"], default="coords", help="Output schema the model was trained with")
     args = parser.parse_args()
 
     from mlx_lm import load
@@ -115,10 +165,11 @@ def main():
         )
         model.load_weights(args.adapter, strict=False)
 
-    predictions = generate_predictions(model, tokenizer, examples, args.max_tokens)
+    predictions = generate_predictions(model, tokenizer, examples, args.max_tokens, args.schema)
 
     evaluator = VisionEvaluator(FineTuneConfig())
     results = evaluator.evaluate_predictions(predictions)
+    results["element"] = element_accuracy(predictions, examples)
 
     print("\n=== Evaluation Results ===")
     print(f"Total examples: {results['total_examples']}")
@@ -128,6 +179,9 @@ def main():
     print(f"Coordinate accuracy (within 50px): {results['coord_accuracy_50px']:.2%}")
     print(f"Coordinate MAE: {results['coord_mae']:.2f}")
     print(f"Avg confidence: {results['avg_confidence']:.4f}")
+    print(f"Element accuracy (correct target selected): "
+          f"{results['element']['correct']}/{results['element']['scored']} "
+          f"= {results['element']['element_accuracy']:.2%}")
     print("\nJourney success rates:")
     for journey, rate in results["journey_success_rates"].items():
         print(f"  {journey}: {rate:.2%}")

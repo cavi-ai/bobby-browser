@@ -382,6 +382,8 @@ def main():
     parser.add_argument("--lora-alpha", type=float, default=32.0, help="LoRA alpha (scale)")
     parser.add_argument("--num-layers", type=int, default=16, help="Trailing layers to convert to LoRA")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
+    parser.add_argument("--schema", choices=["coords", "candidate"], default="coords", help="Output schema: x,y regression or candidate-index classification")
+    parser.add_argument("--seed", type=int, default=42, help="Shuffle seed for the train/valid split")
     parser.add_argument("--eval", action="store_true", help="Run evaluation")
     parser.add_argument("--predictions", default=None, help="Path to predictions file (for eval)")
     args = parser.parse_args()
@@ -465,7 +467,8 @@ def main():
             lora_rank=config.lora_rank,
             lora_alpha=args.lora_alpha,
             num_layers=args.num_layers,
-            seed=config.seed,
+            seed=args.seed,
+            schema=args.schema,
         )
         run_mlx_finetune(mlx_config)
 
