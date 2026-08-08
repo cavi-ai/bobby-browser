@@ -2317,10 +2317,8 @@ async fn wait_condition_satisfied(
         }
         WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
             let is_value = matches!(condition, WaitCondition::Value { .. });
-            // a11y snapshots expose the page as RootWebArea; DOM targeting has
-            // no such role, so page-level text waits would TargetNotFound-poll
-            // until timeout. Read document.body.innerText instead.
-            if !is_value && is_document_web_area_target(target) {
+            // a11y / landmark page-scoped roles are not DOM roles; read body text.
+            if !is_value && is_page_scoped_text_target(target) {
                 let value: String = page
                     .evaluate("document.body ? (document.body.innerText || '') : ''")
                     .await
@@ -2438,11 +2436,23 @@ fn is_closed_page_message(message: &str) -> bool {
 }
 
 /// a11y `RootWebArea` / `document` targets mean "page text", not a DOM role.
-fn is_document_web_area_target(target: &types::TargetSpec) -> bool {
+/// Bare landmark roles (`main`, …) are the same agent habit: page-scoped text
+/// waits that should read `document.body.innerText` when no other fields pin a node.
+fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
     let Some(role) = target.role.as_deref() else {
         return false;
     };
-    if !(role.eq_ignore_ascii_case("RootWebArea") || role.eq_ignore_ascii_case("document")) {
+    let page_scoped = [
+        "RootWebArea",
+        "document",
+        "main",
+        "body",
+        "application",
+        "generic",
+    ]
+    .iter()
+    .any(|name| role.eq_ignore_ascii_case(name));
+    if !page_scoped {
         return false;
     }
     target.css.is_none()
@@ -3049,17 +3059,25 @@ mod tests {
 
     #[test]
     fn document_web_area_roles_are_recognized() {
-        assert!(super::is_document_web_area_target(&types::TargetSpec {
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
             role: Some("RootWebArea".into()),
             ..types::TargetSpec::default()
         }));
-        assert!(super::is_document_web_area_target(&types::TargetSpec {
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
             role: Some("document".into()),
             ..types::TargetSpec::default()
         }));
-        assert!(!super::is_document_web_area_target(&types::TargetSpec {
+        assert!(super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("main".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(!super::is_page_scoped_text_target(&types::TargetSpec {
             role: Some("RootWebArea".into()),
             css: Some("body".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(!super::is_page_scoped_text_target(&types::TargetSpec {
+            role: Some("status".into()),
             ..types::TargetSpec::default()
         }));
     }
