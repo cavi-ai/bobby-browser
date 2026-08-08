@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- OpenShell/jobs CLI share one blocking `/v1` HTTP client (`v1_client`) for bearer + interface headers.
+
 - OpenShell host isolation/ops: doctor warns (`openshell-companion`) when ≥2 local sandboxes share one Firefox companion; warns (`openshell-cleartext`) on non-loopback cleartext MCP URL / non-loopback `server.host`; pack ships merge-only `policy-network.yaml`.
 
 - OpenShell host operability: `bobby openshell list|status|rotate`; non-secret `.status.json` sidecars; doctor checks `openshell-admin`, `openshell-companion`, `openshell-mcp-url`, `openshell-sandboxes` when a pack is present; live CLI e2e for provision→rotate→revoke. Secrets root overridable via `BOBBY_OPENSHELL_SECRETS_DIR`.
