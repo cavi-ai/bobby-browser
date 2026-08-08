@@ -460,6 +460,28 @@ enum OpenshellCommand {
         #[arg(long, value_enum, default_value_t = openshell::OpenshellCapabilityPreset::Openshell)]
         capabilities_preset: openshell::OpenshellCapabilityPreset,
     },
+    /// Alias for provision (revokes prior principal, mints a fresh one)
+    Rotate {
+        #[command(flatten)]
+        common: JobsCommonArgs,
+        #[arg(long)]
+        sandbox: String,
+        #[arg(long)]
+        ttl_hours: Option<i64>,
+        #[arg(long, default_value = "host.docker.internal")]
+        mcp_host: String,
+        #[arg(long, default_value_t = 7777)]
+        mcp_port: u16,
+        #[arg(long, value_enum, default_value_t = openshell::OpenshellCapabilityPreset::Openshell)]
+        capabilities_preset: openshell::OpenshellCapabilityPreset,
+    },
+    /// List locally recorded OpenShell sandboxes (no secrets)
+    List,
+    /// Show non-secret status for one sandbox
+    Status {
+        #[arg(long)]
+        sandbox: String,
+    },
     /// Revoke the principal previously provisioned for a sandbox
     Revoke {
         #[command(flatten)]
@@ -1020,6 +1042,14 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             mcp_host,
             mcp_port,
             capabilities_preset,
+        }
+        | OpenshellCommand::Rotate {
+            common,
+            sandbox,
+            ttl_hours,
+            mcp_host,
+            mcp_port,
+            capabilities_preset,
         } => {
             let config_path = resolve_config_path(common.config);
             let config = AppConfig::load(&config_path)
@@ -1055,6 +1085,27 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
                 "inject AUTOMATION_RUNTIME_TOKEN from that file into the OpenShell sandbox; MCP URL {}",
                 result.mcp_url
             );
+        }
+        OpenshellCommand::List => {
+            let list = openshell::list_sandboxes()?;
+            if list.is_empty() {
+                println!("no local OpenShell sandboxes");
+            } else {
+                for status in list {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        status.sandbox,
+                        status.principal_id,
+                        status.capabilities_preset,
+                        status.expires_at,
+                        status.mcp_url
+                    );
+                }
+            }
+        }
+        OpenshellCommand::Status { sandbox } => {
+            let status = openshell::read_sandbox_status(&sandbox)?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
         }
         OpenshellCommand::Revoke { common, sandbox } => {
             let config_path = resolve_config_path(common.config);

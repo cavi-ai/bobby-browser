@@ -11,7 +11,7 @@ use serde_json::json;
 use types::{Capability, CURRENT_INTERFACE_VERSION};
 use uuid::Uuid;
 
-use crate::bootstrap_local::AGENT_CAPABILITIES;
+use crate::bootstrap_local::{self, AGENT_CAPABILITIES};
 use crate::jobs_client::{self, resolve_jobs_auth, resolve_jobs_base_url};
 
 const CLIENT_TOKEN_ENV: &str = "AUTOMATION_RUNTIME_TOKEN";
@@ -248,7 +248,11 @@ fn write_text(path: &Path, contents: &str) -> Result<()> {
 }
 
 /// OS config dir for per-sandbox injection env files (secrets, never commit).
+/// Override with `BOBBY_OPENSHELL_SECRETS_DIR` (tests / alternate secret roots).
 pub fn openshell_secrets_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("BOBBY_OPENSHELL_SECRETS_DIR") {
+        return Ok(PathBuf::from(path));
+    }
     let base = dirs::config_dir().context("config directory unavailable")?;
     Ok(base.join("bobby-browser").join("openshell"))
 }
@@ -261,6 +265,110 @@ fn sandbox_env_path(sandbox: &str) -> Result<PathBuf> {
 fn sandbox_meta_path(sandbox: &str) -> Result<PathBuf> {
     validate_sandbox_id(sandbox)?;
     Ok(openshell_secrets_dir()?.join(format!("{sandbox}.principal")))
+}
+
+fn sandbox_status_path(sandbox: &str) -> Result<PathBuf> {
+    validate_sandbox_id(sandbox)?;
+    Ok(openshell_secrets_dir()?.join(format!("{sandbox}.status.json")))
+}
+
+fn clear_local_sandbox_files(sandbox: &str) -> Result<()> {
+    let _ = std::fs::remove_file(sandbox_env_path(sandbox)?);
+    let _ = std::fs::remove_file(sandbox_meta_path(sandbox)?);
+    let _ = std::fs::remove_file(sandbox_status_path(sandbox)?);
+    Ok(())
+}
+
+/// Non-secret sidecar written next to the injection env for `list` / `status`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxStatus {
+    pub sandbox: String,
+    pub principal_id: String,
+    pub expires_at: String,
+    pub mcp_url: String,
+    pub capabilities_preset: String,
+}
+
+/// List locally recorded OpenShell sandboxes (from status sidecars / principal files).
+pub fn list_sandboxes() -> Result<Vec<SandboxStatus>> {
+    let dir = openshell_secrets_dir()?;
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir)
+        .with_context(|| format!("could not read {}", dir.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(sandbox) = name.strip_suffix(".status.json") {
+            if let Ok(status) = read_sandbox_status(sandbox) {
+                out.push(status);
+            }
+            continue;
+        }
+        if let Some(sandbox) = name.strip_suffix(".principal") {
+            if out.iter().any(|s| s.sandbox == sandbox) {
+                continue;
+            }
+            if let Ok(principal) = std::fs::read_to_string(entry.path()) {
+                let principal = principal.trim().to_owned();
+                if !principal.is_empty() {
+                    out.push(SandboxStatus {
+                        sandbox: sandbox.to_owned(),
+                        principal_id: principal,
+                        expires_at: String::new(),
+                        mcp_url: String::new(),
+                        capabilities_preset: String::new(),
+                    });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.sandbox.cmp(&b.sandbox));
+    Ok(out)
+}
+
+/// Read non-secret status for one sandbox.
+pub fn read_sandbox_status(sandbox: &str) -> Result<SandboxStatus> {
+    validate_sandbox_id(sandbox)?;
+    let path = sandbox_status_path(sandbox)?;
+    if path.is_file() {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        return serde_json::from_str(&text)
+            .with_context(|| format!("{} is not valid status JSON", path.display()));
+    }
+    let meta = sandbox_meta_path(sandbox)?;
+    let principal = std::fs::read_to_string(&meta)
+        .with_context(|| {
+            format!(
+                "no status for sandbox `{sandbox}` (missing {} and {})",
+                path.display(),
+                meta.display()
+            )
+        })?
+        .trim()
+        .to_owned();
+    if principal.is_empty() {
+        bail!("principal file for sandbox `{sandbox}` is empty");
+    }
+    Ok(SandboxStatus {
+        sandbox: sandbox.to_owned(),
+        principal_id: principal,
+        expires_at: String::new(),
+        mcp_url: String::new(),
+        capabilities_preset: String::new(),
+    })
+}
+
+fn write_sandbox_status(status: &SandboxStatus) -> Result<()> {
+    let path = sandbox_status_path(&status.sandbox)?;
+    let mut body = serde_json::to_string_pretty(status)?;
+    body.push('\n');
+    write_secret_file(&path, &body)
 }
 
 fn validate_sandbox_id(sandbox: &str) -> Result<()> {
@@ -383,6 +491,21 @@ pub fn provision_sandbox(
         let _ = delete_principal(&base, &admin, &principal.to_string());
         return Err(error);
     }
+    let status = SandboxStatus {
+        sandbox: sandbox.to_owned(),
+        principal_id: principal.to_string(),
+        expires_at: expires.clone(),
+        mcp_url: mcp_url.clone(),
+        capabilities_preset: match capabilities_preset {
+            OpenshellCapabilityPreset::Openshell => "openshell".to_owned(),
+            OpenshellCapabilityPreset::Agent => "agent".to_owned(),
+        },
+    };
+    if let Err(error) = write_sandbox_status(&status) {
+        let _ = clear_local_sandbox_files(sandbox);
+        let _ = delete_principal(&base, &admin, &principal.to_string());
+        return Err(error);
+    }
 
     Ok(ProvisionResult {
         sandbox: sandbox.to_owned(),
@@ -421,9 +544,7 @@ pub fn revoke_sandbox(
     let base = resolve_jobs_base_url(base_url, config);
     delete_principal(&base, &admin, &principal)?;
 
-    let env_path = sandbox_env_path(sandbox)?;
-    let _ = std::fs::remove_file(&env_path);
-    let _ = std::fs::remove_file(&meta_path);
+    clear_local_sandbox_files(sandbox)?;
     Ok(meta_path)
 }
 
@@ -443,14 +564,12 @@ fn revoke_recorded_principal_if_any(
         .trim()
         .to_owned();
     if principal.is_empty() {
-        let _ = std::fs::remove_file(&meta_path);
-        let _ = std::fs::remove_file(sandbox_env_path(sandbox)?);
+        let _ = clear_local_sandbox_files(sandbox);
         return Ok(false);
     }
     // Best-effort: already-revoked principals should not block rotation.
     let _ = delete_principal(base_url, admin_bearer, &principal);
-    let _ = std::fs::remove_file(sandbox_env_path(sandbox)?);
-    let _ = std::fs::remove_file(&meta_path);
+    let _ = clear_local_sandbox_files(sandbox);
     Ok(true)
 }
 
@@ -598,6 +717,116 @@ pub fn doctor_pack_detail(project_root: &Path) -> Option<(bool, String)> {
     }
 }
 
+/// Extra doctor rows when an OpenShell pack is present.
+pub struct OpenshellDoctorExtras {
+    pub admin: (bool, String),
+    pub companion: (bool, String),
+    pub mcp_url: Option<(bool, String)>,
+    pub local_sandboxes: (bool, String),
+}
+
+pub fn doctor_openshell_extras(
+    project_root: &Path,
+    bootstrap_path: Option<&Path>,
+    config: Option<&config::AppConfig>,
+    firefox_enrolled: bool,
+) -> OpenshellDoctorExtras {
+    let admin = match bootstrap_path {
+        Some(path) if path.exists() => {
+            match bootstrap_local::read_bootstrap_preset(Some(path)) {
+                bootstrap_local::BootstrapPreset::Unrestricted => (
+                    true,
+                    "bootstrap preset unrestricted (can mint sandbox principals)".to_owned(),
+                ),
+                bootstrap_local::BootstrapPreset::Agent => (
+                    false,
+                    "bootstrap preset is agent (no authority:admin); use `bobby init --preset unrestricted` to mint principals"
+                        .to_owned(),
+                ),
+            }
+        }
+        _ => (
+            false,
+            "no bootstrap credential; provision needs unrestricted admin bootstrap".to_owned(),
+        ),
+    };
+
+    let companion = if firefox_enrolled {
+        (
+            true,
+            "Firefox companion enrolled — cookies/context are profile-scoped across all OpenShell sandboxes on this host"
+                .to_owned(),
+        )
+    } else {
+        (
+            true,
+            "no Firefox companion enrollment — OpenShell sandboxes can use managed Chromium disposable profiles for stronger isolation"
+                .to_owned(),
+        )
+    };
+
+    let mcp_url = {
+        let mcp_path = project_root.join("openshell").join("mcp.json");
+        if !mcp_path.is_file() {
+            None
+        } else {
+            let detail = match (std::fs::read_to_string(&mcp_path), config) {
+                (Ok(text), Some(cfg)) => match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(json) => {
+                        let url = json["mcpServers"]["bobby-browser"]["url"]
+                            .as_str()
+                            .unwrap_or("");
+                        let expected_port = cfg.server.port.to_string();
+                        let port_ok = url.contains(&format!(":{expected_port}/"))
+                            || url.ends_with(&format!(":{expected_port}"));
+                        if port_ok {
+                            (true, format!("mcp.json URL {url} matches config port {expected_port}"))
+                        } else {
+                            (
+                                false,
+                                format!(
+                                    "mcp.json URL {url} may not match config bind {}:{}",
+                                    cfg.server.host, cfg.server.port
+                                ),
+                            )
+                        }
+                    }
+                    Err(error) => (false, format!("mcp.json is not valid JSON: {error}")),
+                },
+                (Err(error), _) => (false, format!("could not read mcp.json: {error}")),
+                (Ok(_), None) => (true, "mcp.json present (config unavailable for port check)".to_owned()),
+            };
+            Some(detail)
+        }
+    };
+
+    let local_sandboxes = match list_sandboxes() {
+        Ok(list) if list.is_empty() => (
+            true,
+            "no local sandbox principals recorded".to_owned(),
+        ),
+        Ok(list) => (
+            true,
+            format!(
+                "{} local sandbox(es): {}",
+                list.len(),
+                list.iter()
+                    .map(|s| s.sandbox.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Err(error) => (false, format!("could not list local sandboxes: {error:#}")),
+    };
+
+    OpenshellDoctorExtras {
+        admin,
+        companion,
+        mcp_url,
+        local_sandboxes,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,4 +911,37 @@ mod tests {
         assert!(k1.starts_with("openshell-provision-demo-"));
         assert!(!k1.ends_with("demo"));
     }
+
+    #[test]
+    fn list_and_status_round_trip_via_status_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = root.path().join("openshell-secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::env::set_var("BOBBY_OPENSHELL_SECRETS_DIR", &secrets);
+
+        let status = SandboxStatus {
+            sandbox: "demo-list".into(),
+            principal_id: Uuid::new_v4().to_string(),
+            expires_at: "2099-01-01T00:00:00.000Z".into(),
+            mcp_url: "http://host.docker.internal:7777/v1/mcp".into(),
+            capabilities_preset: "openshell".into(),
+        };
+        let result = (|| {
+            write_sandbox_status(&status)?;
+            write_secret_file(
+                &sandbox_meta_path("demo-list")?,
+                &format!("{}\n", status.principal_id),
+            )?;
+            let listed = list_sandboxes()?;
+            anyhow::ensure!(listed.iter().any(|s| s.sandbox == "demo-list"));
+            let read = read_sandbox_status("demo-list")?;
+            anyhow::ensure!(read.principal_id == status.principal_id);
+            anyhow::ensure!(read.capabilities_preset == "openshell");
+            clear_local_sandbox_files("demo-list")?;
+            Ok::<(), anyhow::Error>(())
+        })();
+        std::env::remove_var("BOBBY_OPENSHELL_SECRETS_DIR");
+        result.unwrap();
+    }
 }
+

@@ -92,13 +92,21 @@ When the sandbox ends:
 bobby openshell revoke --sandbox demo-1
 ```
 
-Re-running `provision` for the same sandbox id rotates: prior principal is
-revoked first, then a new principal is minted.
+Re-running `provision` (or `rotate`) for the same sandbox id rotates: prior
+principal is revoked first, then a new principal is minted.
+
+```bash
+bobby openshell list
+bobby openshell status --sandbox demo-1
+bobby openshell rotate --sandbox demo-1
+```
 
 ## Doctor
 
 If `openshell/` is present in the working directory, `bobby doctor` reports
-`openshell-pack` (and warns when the policy lacks hardened deny_rules).
+`openshell-pack` plus `openshell-admin`, `openshell-companion`,
+`openshell-mcp-url`, and `openshell-sandboxes` (and warns when an older pack
+lacks hardened deny_rules).
 
 ## Non-goals
 
