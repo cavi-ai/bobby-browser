@@ -103,10 +103,10 @@ unchanged; a legacy selector is not required when `target` is present.
 hatch for anything the named tools do not cover. Skills are **not** MCP tools.
 
 `click_and_wait_for_popup` is a boundary flow in one call when `autoCheckpoint`
-is `true`. It can accept pinned `commandId` and `attemptId`, then persists a checkpoint
-for the resulting page-affecting click in the same call. The command also registers
-`window.open` targets into the current session page graph for `page_list`, so the next
-authorization step can use those page IDs directly.
+is `true`. It can accept pinned `commandId` and `attemptId`, then persists a
+checkpoint for the resulting page-affecting click in the same call. The command
+also registers `window.open` targets into the current session page graph for
+`page_list`, so the next authorization step can use those page IDs directly.
 
 `wait_for` uses explicit discriminated `WaitCondition` objects:
 

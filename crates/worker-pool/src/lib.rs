@@ -637,6 +637,50 @@ impl WorkerPool {
         self.cleanup_session(session_id, true).await
     }
 
+    /// Invalidates `session_id` only while it still refers to `worker_id`.
+    /// A recovery attempt may arrive after another caller has already installed
+    /// a healthy replacement; that stale attempt must leave the replacement
+    /// and its factory-owned session state intact.
+    pub async fn invalidate_session_if_worker(
+        &self,
+        session_id: &SessionId,
+        worker_id: &WorkerId,
+    ) -> Result<(), CommandError> {
+        let session_gate = self.session_gate(session_id).await;
+        let factory = Arc::clone(&self.inner.factory);
+        let inner = Arc::clone(&self.inner);
+        let session_id = session_id.clone();
+        let worker_id = worker_id.clone();
+        tokio::spawn(async move {
+            let _session_exclusive = session_gate.write_owned().await;
+            let entry = {
+                let mut entries = inner.entries.lock().await;
+                let matches_failed_worker = entries
+                    .get(&session_id)
+                    .and_then(|entry| entry.worker.get())
+                    .is_some_and(|worker| worker.worker_id() == worker_id);
+                matches_failed_worker
+                    .then(|| entries.remove(&session_id))
+                    .flatten()
+            };
+            let Some(entry) = entry else {
+                return Ok(());
+            };
+            let result = if let Some(worker) = entry.worker.get() {
+                worker.terminate().await
+            } else {
+                Ok(())
+            };
+            factory.release_session(&session_id).await;
+            if result.is_ok() {
+                tracing::info!(session_id = %session_id.0, worker_id = %worker_id.0, "worker.invalidated");
+            }
+            result
+        })
+        .await
+        .map_err(|error| resource_error(format!("worker cleanup task failed: {error}")))?
+    }
+
     pub fn can_select(&self, preference: &EnginePreference) -> bool {
         self.inner.factory.can_select(preference)
     }
