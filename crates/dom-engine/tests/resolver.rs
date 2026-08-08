@@ -125,3 +125,20 @@ fn text_and_attribute_constraints_filter_candidates() {
         matches!(resolve_candidates(&target, &[other, matching], &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "match")
     );
 }
+
+/// The a11y snapshot emits the engine's role casing (Chrome's `Iframe`)
+/// while DOM candidates carry the lowercase implicit role; a snapshot
+/// target passed back verbatim must still resolve.
+#[test]
+fn role_matching_is_case_insensitive() {
+    let mut frame = candidate("frame", "Preview", true);
+    frame.role = Some("iframe".into());
+    let target = TargetSpec {
+        role: Some("Iframe".into()),
+        accessible_name: Some("Preview".into()),
+        ..TargetSpec::default()
+    };
+    assert!(
+        matches!(resolve_candidates(&target, &[frame], &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "frame")
+    );
+}
