@@ -1,5 +1,5 @@
 ---
-documentedVersion: {{PRODUCT_VERSION}}
+documentedVersion: 0.7.0
 ---
 
 # MCP over streamable HTTP

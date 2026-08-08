@@ -1071,7 +1071,10 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
                 capabilities_preset,
             )?;
             if result.replaced_prior {
-                println!("ok: replaced prior principal for sandbox `{}`", result.sandbox);
+                println!(
+                    "ok: replaced prior principal for sandbox `{}`",
+                    result.sandbox
+                );
             }
             println!(
                 "ok: provisioned sandbox `{}` principal {} expires {}",
@@ -2510,9 +2513,7 @@ mod tests {
             Some(CliCommand::Openshell {
                 command:
                     OpenshellCommand::Install {
-                        mcp_host,
-                        mcp_port,
-                        ..
+                        mcp_host, mcp_port, ..
                     },
             }) => {
                 assert_eq!(mcp_host, "host.containers.internal");

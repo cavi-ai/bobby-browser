@@ -54,7 +54,9 @@ pub(crate) const OPENSHELL_CAPABILITIES: &[Capability] = &[
     Capability::RecoveryWrite,
 ];
 
-pub fn capabilities_for_openshell_preset(preset: OpenshellCapabilityPreset) -> &'static [Capability] {
+pub fn capabilities_for_openshell_preset(
+    preset: OpenshellCapabilityPreset,
+) -> &'static [Capability] {
     match preset {
         OpenshellCapabilityPreset::Openshell => OPENSHELL_CAPABILITIES,
         OpenshellCapabilityPreset::Agent => AGENT_CAPABILITIES,
@@ -214,8 +216,7 @@ through OpenShell's policy proxy (this pack's `policy.yaml`).
 /// Write the OpenShell pack under `project_root/openshell/`.
 pub fn install_pack(project_root: &Path, options: &PackOptions) -> Result<OpenshellPack> {
     let dir = project_root.join("openshell");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("could not create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
     let skill_dir = dir.join("skills").join("bobby-browser");
     std::fs::create_dir_all(&skill_dir)
         .with_context(|| format!("could not create {}", skill_dir.display()))?;
@@ -297,8 +298,8 @@ pub fn list_sandboxes() -> Result<Vec<SandboxStatus>> {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)
-        .with_context(|| format!("could not read {}", dir.display()))?
+    for entry in
+        std::fs::read_dir(&dir).with_context(|| format!("could not read {}", dir.display()))?
     {
         let entry = entry?;
         let name = entry.file_name();
@@ -416,11 +417,7 @@ pub fn provision_sandbox(
     let admin = resolve_jobs_auth(token_override.clone(), bootstrap_path)?;
     let base = resolve_jobs_base_url(base_url.clone(), config);
 
-    let replaced_prior = revoke_recorded_principal_if_any(
-        sandbox,
-        &base,
-        &admin,
-    )?;
+    let replaced_prior = revoke_recorded_principal_if_any(sandbox, &base, &admin)?;
 
     let mcp_url = pack.mcp_url();
     let ttl = ChronoDuration::hours(ttl_hours.unwrap_or(DEFAULT_SANDBOX_TTL_HOURS));
@@ -686,13 +683,10 @@ pub fn doctor_pack_detail(project_root: &Path) -> Option<(bool, String)> {
     }
     let policy = dir.join("policy.yaml");
     let mcp = dir.join("mcp.json");
-    let missing: Vec<&str> = [
-        ("policy.yaml", policy.exists()),
-        ("mcp.json", mcp.exists()),
-    ]
-    .into_iter()
-    .filter_map(|(name, ok)| if ok { None } else { Some(name) })
-    .collect();
+    let missing: Vec<&str> = [("policy.yaml", policy.exists()), ("mcp.json", mcp.exists())]
+        .into_iter()
+        .filter_map(|(name, ok)| if ok { None } else { Some(name) })
+        .collect();
     if missing.is_empty() {
         let mut detail = format!(
             "pack at {} (policy.yaml + mcp.json); provision with `bobby openshell provision --sandbox <id>`",
@@ -731,9 +725,10 @@ pub fn doctor_openshell_extras(
     config: Option<&config::AppConfig>,
     firefox_enrolled: bool,
 ) -> OpenshellDoctorExtras {
-    let admin = match bootstrap_path {
-        Some(path) if path.exists() => {
-            match bootstrap_local::read_bootstrap_preset(Some(path)) {
+    let admin =
+        match bootstrap_path {
+            Some(path) if path.exists() => {
+                match bootstrap_local::read_bootstrap_preset(Some(path)) {
                 bootstrap_local::BootstrapPreset::Unrestricted => (
                     true,
                     "bootstrap preset unrestricted (can mint sandbox principals)".to_owned(),
@@ -744,12 +739,12 @@ pub fn doctor_openshell_extras(
                         .to_owned(),
                 ),
             }
-        }
-        _ => (
-            false,
-            "no bootstrap credential; provision needs unrestricted admin bootstrap".to_owned(),
-        ),
-    };
+            }
+            _ => (
+                false,
+                "no bootstrap credential; provision needs unrestricted admin bootstrap".to_owned(),
+            ),
+        };
 
     let companion = if firefox_enrolled {
         (
@@ -780,7 +775,10 @@ pub fn doctor_openshell_extras(
                         let port_ok = url.contains(&format!(":{expected_port}/"))
                             || url.ends_with(&format!(":{expected_port}"));
                         if port_ok {
-                            (true, format!("mcp.json URL {url} matches config port {expected_port}"))
+                            (
+                                true,
+                                format!("mcp.json URL {url} matches config port {expected_port}"),
+                            )
                         } else {
                             (
                                 false,
@@ -794,17 +792,17 @@ pub fn doctor_openshell_extras(
                     Err(error) => (false, format!("mcp.json is not valid JSON: {error}")),
                 },
                 (Err(error), _) => (false, format!("could not read mcp.json: {error}")),
-                (Ok(_), None) => (true, "mcp.json present (config unavailable for port check)".to_owned()),
+                (Ok(_), None) => (
+                    true,
+                    "mcp.json present (config unavailable for port check)".to_owned(),
+                ),
             };
             Some(detail)
         }
     };
 
     let local_sandboxes = match list_sandboxes() {
-        Ok(list) if list.is_empty() => (
-            true,
-            "no local sandbox principals recorded".to_owned(),
-        ),
+        Ok(list) if list.is_empty() => (true, "no local sandbox principals recorded".to_owned()),
         Ok(list) => (
             true,
             format!(
@@ -944,4 +942,3 @@ mod tests {
         result.unwrap();
     }
 }
-

@@ -849,8 +849,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
                     .to_owned()
             }
             HostKind::Openshell => {
-                "Openshell: write openshell/ pack (policy.yaml, mcp.json, skill, README)"
-                    .to_owned()
+                "Openshell: write openshell/ pack (policy.yaml, mcp.json, skill, README)".to_owned()
             }
             _ => format!("{host:?}: merge the MCP server entry into its config"),
         };
