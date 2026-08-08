@@ -85,19 +85,28 @@ def main():
             results[label] = json.loads((eval_out / f"{variant}_evaluation.json").read_text())
 
     print("\n=== RESULTS ===")
-    print(f"{'variant':<22} {'parse rate':>11} {'element acc':>12} {'coord MAE':>10}")
+    print(
+        f"{'variant':<22} {'parse rate':>11} {'kind acc':>10} "
+        f"{'target acc':>11} {'payload acc':>12} {'full acc':>10} {'coord MAE':>10}"
+    )
     for label, r in results.items():
         total = r["total_examples"]
         parsed = r["successful_predictions"]
-        elem = r["element"]["element_accuracy"]
+        metrics = r["element"]
         mae = r["coord_mae"]
-        print(f"{label:<22} {parsed/total:>10.0%} {elem:>11.2%} {mae:>10.1f}")
+        print(
+            f"{label:<22} {parsed/total:>10.0%} {r['action_accuracy']:>9.2%} "
+            f"{metrics['element_accuracy']:>10.2%} {metrics['content_accuracy']:>11.2%} "
+            f"{metrics['fully_correct_accuracy']:>9.2%} {mae:>10.1f}"
+        )
 
     summary = {
         "config": vars(args),
         "results": {k: {
             "parse_rate": v["successful_predictions"] / v["total_examples"],
             "element_accuracy": v["element"]["element_accuracy"],
+            "content_accuracy": v["element"]["content_accuracy"],
+            "fully_correct_accuracy": v["element"]["fully_correct_accuracy"],
             "coord_mae": v["coord_mae"],
             "action_accuracy": v["action_accuracy"],
         } for k, v in results.items()},
