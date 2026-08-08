@@ -421,6 +421,7 @@ mod tests {
             include_str!("../../../docs/bobby-browser/source/pages/surfaces/mcp-tools.md");
         let mut documented = Vec::new();
         let mut in_tools = false;
+        let mut in_tool_table = false;
         for line in DOCS.lines() {
             if line.starts_with("## Tools") {
                 in_tools = true;
@@ -433,6 +434,16 @@ mod tests {
                 continue;
             }
             let trimmed = line.trim();
+            if trimmed.starts_with("| Tool |") {
+                in_tool_table = true;
+                continue;
+            }
+            if in_tool_table && !trimmed.starts_with('|') {
+                break;
+            }
+            if !in_tool_table {
+                continue;
+            }
             let Some(rest) = trimmed.strip_prefix("| `") else {
                 continue;
             };
