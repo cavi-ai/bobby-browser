@@ -3,6 +3,7 @@ mod doctor;
 mod jobs_client;
 mod onboarding;
 mod openshell;
+mod v1_client;
 mod vision_child;
 mod vision_collect;
 mod vision_connect;

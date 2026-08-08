@@ -2,21 +2,19 @@
 //! principal provision. OpenShell owns isolation; bobby stays on the host.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::ValueEnum;
 use serde_json::json;
-use types::{Capability, CURRENT_INTERFACE_VERSION};
+use types::Capability;
 use uuid::Uuid;
 
 use crate::bootstrap_local::{self, AGENT_CAPABILITIES};
 use crate::jobs_client::{self, resolve_jobs_auth, resolve_jobs_base_url};
+use crate::v1_client::{self, V1Request};
 
 const CLIENT_TOKEN_ENV: &str = "AUTOMATION_RUNTIME_TOKEN";
-const REQUEST_TIMEOUT_SECS: u64 = 10;
-const DEADLINE_MINUTES: i64 = 2;
 const DEFAULT_SANDBOX_TTL_HOURS: i64 = 12;
 const DEFAULT_MCP_HOST: &str = "host.docker.internal";
 const DEFAULT_MCP_PORT: u16 = 7777;
@@ -621,63 +619,20 @@ struct PrincipalsRequest {
 }
 
 fn principals_request(options: PrincipalsRequest) -> Result<serde_json::Value> {
-    match std::thread::spawn(move || principals_request_blocking(options)).join() {
-        Ok(result) => result,
-        Err(_) => bail!("openshell principals HTTP thread panicked"),
+    let method = options.method.clone();
+    let url = options.url.clone();
+    let response = v1_client::v1_request(V1Request {
+        method: options.method,
+        url: options.url,
+        bearer: options.bearer,
+        body: options.body,
+        idempotency_key: options.idempotency_key,
+    })?;
+    if !response.status.is_success() {
+        bail!("{method} {url}: {} {}", response.status, response.body);
     }
-}
-
-fn principals_request_blocking(options: PrincipalsRequest) -> Result<serde_json::Value> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .no_proxy()
-        .build()
-        .context("failed to build openshell HTTP client")?;
-
-    let correlation_id = Uuid::new_v4();
-    let deadline = (Utc::now() + ChronoDuration::minutes(DEADLINE_MINUTES)).to_rfc3339();
-
-    let mut builder = client
-        .request(options.method.clone(), &options.url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", options.bearer),
-        )
-        .header("x-interface-version", CURRENT_INTERFACE_VERSION)
-        .header("x-correlation-id", correlation_id.to_string())
-        .header("x-deadline", deadline);
-
-    if let Some(key) = options.idempotency_key.as_deref() {
-        builder = builder.header("idempotency-key", key);
-    }
-
-    let response = if let Some(body) = options.body {
-        builder
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&body)
-            .send()
-    } else {
-        builder.send()
-    }
-    .with_context(|| format!("{} {}", options.method, options.url))?;
-
-    let status = response.status();
-    let text = response.text().unwrap_or_default();
-    if status == reqwest::StatusCode::NO_CONTENT {
-        return Ok(json!({}));
-    }
-    if !status.is_success() {
-        bail!("{} {}: {status} {text}", options.method, options.url);
-    }
-    if text.trim().is_empty() {
-        return Ok(json!({}));
-    }
-    serde_json::from_str(&text).with_context(|| {
-        format!(
-            "{} {} returned non-JSON success body",
-            options.method, options.url
-        )
-    })
+    v1_client::parse_json_body(response.status, &response.body)
+        .with_context(|| format!("{method} {url} returned non-JSON success body"))
 }
 
 fn write_secret_file(path: &Path, contents: &str) -> Result<()> {

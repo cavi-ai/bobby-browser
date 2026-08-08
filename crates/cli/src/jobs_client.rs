@@ -1,15 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
-use types::CURRENT_INTERFACE_VERSION;
-use uuid::Uuid;
+
+use crate::v1_client::{self, V1Request};
 
 const CLIENT_TOKEN_ENV: &str = "AUTOMATION_RUNTIME_TOKEN";
-const REQUEST_TIMEOUT_SECS: u64 = 10;
-const DEADLINE_MINUTES: i64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum JobPriorityArg {
@@ -55,13 +51,7 @@ pub fn resolve_jobs_base_url(base_url: Option<String>, config: &config::AppConfi
 }
 
 pub fn jobs_url(base_url: &str, path: &str) -> Result<String> {
-    let base = base_url.trim_end_matches('/');
-    let path = if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("/{path}")
-    };
-    Ok(format!("{base}{path}"))
+    v1_client::v1_url(base_url, path)
 }
 
 /// Prefer `--payload-file` when set; otherwise parse `--payload` JSON.
@@ -106,71 +96,32 @@ pub struct JobsRequestOptions {
 }
 
 pub fn jobs_request(options: JobsRequestOptions) -> Result<()> {
-    // `bobby` runs under `#[tokio::main]`; reqwest's blocking client builds its own
-    // runtime and panics if constructed on a worker thread. Isolate on a plain OS thread.
-    match std::thread::spawn(move || jobs_request_blocking(options)).join() {
-        Ok(result) => result,
-        Err(_) => anyhow::bail!("jobs HTTP thread panicked"),
-    }
-}
+    let response = v1_client::v1_request(V1Request {
+        method: options.method.clone(),
+        url: options.url.clone(),
+        bearer: options.bearer,
+        body: options.body,
+        idempotency_key: options.idempotency_key,
+    })?;
 
-fn jobs_request_blocking(options: JobsRequestOptions) -> Result<()> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .no_proxy()
-        .build()
-        .context("failed to build jobs HTTP client")?;
-
-    let correlation_id = Uuid::new_v4();
-    let deadline = (Utc::now() + ChronoDuration::minutes(DEADLINE_MINUTES)).to_rfc3339();
-
-    let mut builder = client
-        .request(options.method.clone(), &options.url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", options.bearer),
-        )
-        .header("x-interface-version", CURRENT_INTERFACE_VERSION)
-        .header("x-correlation-id", correlation_id.to_string())
-        .header("x-deadline", deadline);
-
-    if let Some(key) = options.idempotency_key.as_deref() {
-        builder = builder.header("idempotency-key", key);
-    }
-
-    let response = if let Some(body) = options.body {
-        builder
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(&body)
-            .send()
-    } else {
-        builder.send()
-    }
-    .with_context(|| format!("{} {}", options.method, options.url))?;
-
-    let status = response.status();
-    let text = response
-        .text()
-        .with_context(|| format!("failed to read response body from {}", options.url))?;
-
-    if !status.is_success() {
-        eprintln!("jobs request failed: HTTP {status}");
-        if !text.is_empty() {
-            eprintln!("{text}");
+    if !response.status.is_success() {
+        eprintln!("jobs request failed: HTTP {}", response.status);
+        if !response.body.is_empty() {
+            eprintln!("{}", response.body);
         }
         std::process::exit(1);
     }
 
-    if text.trim().is_empty() {
+    if response.body.trim().is_empty() {
         return Ok(());
     }
 
-    match serde_json::from_str::<serde_json::Value>(&text) {
+    match serde_json::from_str::<serde_json::Value>(&response.body) {
         Ok(value) => {
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         Err(_) => {
-            println!("{text}");
+            println!("{}", response.body);
         }
     }
     Ok(())
