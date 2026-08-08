@@ -1014,7 +1014,11 @@ impl BrowserWorker for ChromiumWorker {
                 .iter()
                 .flat_map(|form| form.controls.iter())
                 .chain(snapshot.unowned_controls.iter())
-                .find(|control| control.target.as_ref() == Some(&command.target))
+                .find(|control| {
+                    control.target.as_ref().is_some_and(|target| {
+                        crate::target_specs_equivalent(target, &command.target)
+                    })
+                })
                 .cloned()
         };
         let before = read_snapshot().await?;

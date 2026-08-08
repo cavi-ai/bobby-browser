@@ -482,6 +482,18 @@ fn supported_operations(
     }
 }
 
+/// Semantic target equality for control lookup. Snapshots omit `ordinal`
+/// when a role/name pair is unique while callers may pass `ordinal: 0`
+/// explicitly (a11y targets do); both mean "the first match", so a struct
+/// compare false-rejects a target copied from a different snapshot.
+pub fn target_specs_equivalent(a: &types::FormControlTarget, b: &types::FormControlTarget) -> bool {
+    a.ordinal.unwrap_or(0) == b.ordinal.unwrap_or(0)
+        && a.role.eq_ignore_ascii_case(&b.role)
+        && a.accessible_name == b.accessible_name
+        && a.frame_path == b.frame_path
+        && a.shadow_path == b.shadow_path
+}
+
 pub fn validate_control_action(
     control: &FormControl,
     action: &ControlAction,
@@ -931,5 +943,27 @@ mod tests {
             "requested label must not be compared against option values"
         );
         control_action_evidence(control, &action, false, Some(&["high".into()])).unwrap();
+    }
+
+    /// An a11y-style target with explicit `ordinal: 0` must match the
+    /// form-snapshot target that omits it for a unique control.
+    #[test]
+    fn explicit_zero_ordinal_matches_an_omitted_ordinal() {
+        let base = types::FormControlTarget {
+            role: "combobox".into(),
+            accessible_name: "Customer priority".into(),
+            ordinal: None,
+            frame_path: Vec::new(),
+            shadow_path: Vec::new(),
+        };
+        let mut explicit = base.clone();
+        explicit.ordinal = Some(0);
+        assert!(target_specs_equivalent(&base, &explicit));
+        let mut second = base.clone();
+        second.ordinal = Some(1);
+        assert!(!target_specs_equivalent(&base, &second));
+        let mut cased = base.clone();
+        cased.role = "ComboBox".into();
+        assert!(target_specs_equivalent(&base, &cased));
     }
 }
