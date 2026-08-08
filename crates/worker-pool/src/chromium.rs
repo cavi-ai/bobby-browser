@@ -2807,6 +2807,14 @@ fn closed_error() -> CommandError {
     }
 }
 
+/// The worker's browser is gone or unreachable: dead command channel,
+/// canceled oneshot, closed session, or an explicitly closed worker. Such a
+/// worker can never serve another command, so callers may invalidate and
+/// re-lease for a fresh browser instead of surfacing a dead-end failure.
+pub fn is_dead_worker_error(error: &CommandError) -> bool {
+    is_closed_page_message(&error.message) || error.message == "browser worker is closed"
+}
+
 /// DoS clamp for `EvaluateJavaScript::timeout_ms`: bounds a caller-requested
 /// timeout to the configured `max_js_timeout_ms` ceiling so no caller can pin a
 /// worker lease open indefinitely.
