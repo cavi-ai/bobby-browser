@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Feats
-- `page_open` on a session whose browser died now invalidates the dead worker and retries once on a fresh one, instead of returning an opaque `internal` on every call. The stale lease is dropped before invalidation so the session gate cannot deadlock.
+- `page_open` on a session whose browser died now invalidates that specific dead worker and retries once on a fresh one, instead of returning an opaque `internal` on every call. Concurrent recovery cannot discard another caller's healthy replacement, and a failed replacement launch no longer leaves a phantom registered page.
 
 
 - `session_close` no longer wedges on a dead browser: managed-Chromium teardown treats an already-gone browser (closed channel, canceled oneshot) as closed instead of failing the release, which previously left the session listed forever with every retry failing `internal`.

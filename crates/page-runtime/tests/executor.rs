@@ -477,6 +477,35 @@ struct FakeFactory {
     launches: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+struct DeadThenFailFactory {
+    events: Arc<Mutex<Vec<String>>>,
+    launches: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl WorkerFactory for DeadThenFailFactory {
+    async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        if self
+            .launches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return Ok(Arc::new(FakeWorker {
+                id: WorkerId::new(),
+                profile: PathBuf::from("/tmp/dead-then-fail-profile"),
+                events: self.events.clone(),
+                mode: DriverMode::DeadOnOpen,
+            }));
+        }
+        Err(CommandError {
+            code: ErrorCode::BrowserLaunchFailed,
+            message: "injected replacement launch failure".into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        })
+    }
+}
+
 #[async_trait]
 impl WorkerFactory for FakeFactory {
     async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
@@ -1032,6 +1061,37 @@ async fn open_browser_revives_a_dead_worker_once() {
         .open_browser(session)
         .await
         .expect("the revived worker keeps serving the session");
+}
+
+#[tokio::test]
+async fn failed_replacement_launch_does_not_leave_a_registered_page() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(DeadThenFailFactory {
+            events,
+            launches: std::sync::atomic::AtomicUsize::new(0),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+
+    runtime
+        .open_browser(session.clone())
+        .await
+        .expect_err("replacement launch must fail");
+
+    assert!(
+        runtime.remove_session_pages(&session).await.is_empty(),
+        "a failed open must not remain registered"
+    );
 }
 
 #[tokio::test]
