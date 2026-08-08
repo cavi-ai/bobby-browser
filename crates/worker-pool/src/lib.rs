@@ -28,7 +28,7 @@ pub use chromium::ChromiumWorkerFactory;
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_snapshot, form_snapshot_expression,
-    form_snapshot_expression_with_limit, validate_control_action,
+    form_snapshot_expression_with_limit, target_specs_equivalent, validate_control_action,
 };
 pub use har::{har_document, HarEntry, HarRecorder};
 pub use selection::{
