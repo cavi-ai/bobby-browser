@@ -124,7 +124,10 @@ impl Target {
     }
 
     pub fn set_session_id(&mut self, id: SessionId) {
-        self.session_id = Some(id)
+        if self.session_id.as_ref() != Some(&id) {
+            self.page.take();
+            self.session_id = Some(id);
+        }
     }
 
     pub fn session_id(&self) -> Option<&SessionId> {
@@ -135,8 +138,11 @@ impl Target {
         &self.browser_context
     }
 
-    pub fn session_id_mut(&mut self) -> &mut Option<SessionId> {
-        &mut self.session_id
+    pub fn detach_session(&mut self, id: &SessionId) {
+        if self.session_id.as_ref() == Some(id) {
+            self.page.take();
+            self.session_id.take();
+        }
     }
 
     /// The identifier for this target
@@ -712,6 +718,70 @@ impl TargetInit {
             TargetInit::Initialized => None,
             TargetInit::Closing => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page_target() -> Target {
+        let info = TargetInfo::builder()
+            .target_id(TargetId::new("target-1"))
+            .r#type("page")
+            .title("test")
+            .url("https://example.test")
+            .attached(true)
+            .can_access_opener(false)
+            .build()
+            .expect("valid target info");
+        Target::new(info, TargetConfig::default(), BrowserContext::default())
+    }
+
+    #[test]
+    fn detaching_a_session_closes_the_old_page_and_reattaches_with_the_new_session() {
+        let mut target = page_target();
+        target.set_session_id(SessionId::new("session-old"));
+        let old_page = Page::from(
+            target
+                .get_or_create_page()
+                .expect("attached target has a page")
+                .clone(),
+        );
+
+        target.detach_session(&SessionId::new("session-old"));
+
+        assert!(old_page.is_closed(), "detaching must retire the old handle");
+
+        target.set_session_id(SessionId::new("session-new"));
+        let new_page = Page::from(
+            target
+                .get_or_create_page()
+                .expect("reattached target has a page")
+                .clone(),
+        );
+        assert_eq!(new_page.session_id().as_ref(), "session-new");
+        assert!(!new_page.is_closed());
+    }
+
+    #[test]
+    fn late_detach_does_not_close_a_page_for_the_replacement_session() {
+        let mut target = page_target();
+        let old_session = SessionId::new("session-old");
+        let new_session = SessionId::new("session-new");
+        target.set_session_id(old_session.clone());
+        target.set_session_id(new_session.clone());
+        let new_page = Page::from(
+            target
+                .get_or_create_page()
+                .expect("replacement session has a page")
+                .clone(),
+        );
+
+        target.detach_session(&old_session);
+
+        assert_eq!(target.session_id(), Some(&new_session));
+        assert!(!new_page.is_closed());
     }
 }
 
