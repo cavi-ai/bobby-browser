@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- OpenShell host isolation/ops: doctor warns (`openshell-companion`) when ≥2 local sandboxes share one Firefox companion; warns (`openshell-cleartext`) on non-loopback cleartext MCP URL / non-loopback `server.host`; pack ships merge-only `policy-network.yaml`.
+
+- OpenShell host operability: `bobby openshell list|status|rotate`; non-secret `.status.json` sidecars; doctor checks `openshell-admin`, `openshell-companion`, `openshell-mcp-url`, `openshell-sandboxes` when a pack is present; live CLI e2e for provision→rotate→revoke. Secrets root overridable via `BOBBY_OPENSHELL_SECRETS_DIR`.
+
+- OpenShell host hardening: `provision` revokes any prior principal for the sandbox id before minting, uses a unique idempotency key per attempt, and rolls back the minted principal if writing the injection env fails. Default capability floor is the narrow `openshell` preset (`--capabilities-preset agent` for the full agent floor). Sample policy denies `evaluate_javascript` / `job_*` at the OpenShell proxy, raises MCP `max_body_bytes` to 262 KiB, and documents shared Firefox companion / cleartext gateway / `policy set` replace risks. Doctor warns when an older pack lacks the deny_rules.
+- Intent resolution auto-descends one level into iframes on managed Chromium: a main-frame intent whose target lives inside a frame now resolves and acts (the gather stamps each in-frame candidate with a re-resolvable frame hop; the action path uses it when the intent named no explicit `framePath`). Capped at 8 frames per gather; frames with no stable address (no id, test id, or `src`) are skipped. Live installed-Chromium test resolves the gauntlet's in-frame confirm button with no `framePath`.
+
+
 - NVIDIA OpenShell host: `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment. `bobby doctor` reports `openshell-pack` when the pack is present.
 - Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page transparently re-attaches to the live target (`Page::is_closed` + `Browser::get_page` on the vendored chromiumoxide). A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle.
 - Page-scoped text waits (`role: main|RootWebArea|…` or `css: body|html|:root`) read live `document.body.innerText` via evaluate (with empty optional fields treated as absent), so async UI confirmations match the same text a whole-page `inspect` sees.

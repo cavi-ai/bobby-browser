@@ -879,6 +879,59 @@ pub mod testing {
         LAST_BOUND_PRINCIPAL.with(|cell| cell.set(Some(*principal.as_uuid())));
     }
 
+    /// Builds a router with an admin bearer that holds every capability
+    /// ([`Capability::ALL`]), so issued tenants can receive the full agent /
+    /// openshell floors in CLI e2e tests.
+    pub async fn app_with_unrestricted_admin(
+        max_principals: usize,
+    ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
+        let startup = StartupCredential::new(
+            ADMIN_BEARER.to_owned(),
+            PrincipalId::from_uuid(Uuid::nil()),
+            Capability::ALL.to_vec(),
+            Utc::now() + Duration::minutes(30),
+        )
+        .expect("fixed unrestricted admin startup credential is valid");
+        let authority = Arc::new(
+            EnrolledAuthority::enroll(startup, max_principals)
+                .await
+                .expect("admin authority enrolls"),
+        );
+        let persistent_authority = Arc::new(
+            PersistentAuthority::open((*authority).clone(), unique_authority_path())
+                .await
+                .expect("test authority persistence path opens"),
+        );
+        let (_ownership, recorder) = SessionOwnershipRegistry::bounded(64);
+        let runtime = RuntimeService::default();
+        let interface = InterfaceConfig {
+            max_principals,
+            ..InterfaceConfig::default()
+        };
+
+        let bindings = crate::RuntimeBindingCache::new(max_principals);
+        let state = AppState::new(
+            persistent_authority as Arc<dyn Authority>,
+            move |handle| {
+                record_bound_principal(handle.principal_id());
+                bindings.bind(handle, |handle| {
+                    AuthenticatedRuntime::with_session_ownership(
+                        runtime.clone(),
+                        handle,
+                        recorder.clone(),
+                    )
+                }) as Arc<dyn RuntimeInterface>
+            },
+            interface,
+        );
+        let scheduler = Arc::clone(&state.scheduler);
+        tokio::spawn(async move {
+            let _ = scheduler.run().await;
+        });
+        let app = router(state);
+        (app, authority, ADMIN_BEARER.to_owned())
+    }
+
     /// Builds a router wired to an [`EnrolledAuthority`] with a fixed admin bearer that
     /// holds `authority:admin` plus the core session/page capabilities. Returns the
     /// router, the enrolled authority (for direct assertions), and the admin bearer.

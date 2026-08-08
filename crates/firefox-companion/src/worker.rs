@@ -1718,6 +1718,7 @@ impl FirefoxCompanionWorker {
                         visible: true,
                         enabled: !control.disabled,
                     },
+                    frame_path: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();
@@ -4746,6 +4747,7 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
                     visible: true,
                     enabled: node.disabled != Some(true),
                 },
+                frame_path: Vec::new(),
             });
             collect(&node.children, candidates);
         }
@@ -5169,6 +5171,7 @@ fn bounded_text_matches(matcher: &TextMatch, value: &str) -> Result<bool, Comman
             visible: true,
             enabled: true,
         },
+        frame_path: Vec::new(),
     };
     resolve_candidates(&target, &[candidate], &ResolutionPolicy::default())
         .map(|decision| matches!(decision, ResolutionDecision::Resolved { .. }))
