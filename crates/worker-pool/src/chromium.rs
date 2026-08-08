@@ -2316,6 +2316,19 @@ async fn wait_condition_satisfied(
             }))
         }
         WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
+            let is_value = matches!(condition, WaitCondition::Value { .. });
+            // a11y snapshots expose the page as RootWebArea; DOM targeting has
+            // no such role, so page-level text waits would TargetNotFound-poll
+            // until timeout. Read document.body.innerText instead.
+            if !is_value && is_document_web_area_target(target) {
+                let value: String = page
+                    .evaluate("document.body ? (document.body.innerText || '') : ''")
+                    .await
+                    .map_err(command_failed)?
+                    .into_value()
+                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                return Ok(WaitPoll::saw(text_matches(matcher, &value)?, value));
+            }
             let mut browser = browser.lock().await;
             let resolved = match browser.as_mut() {
                 Some(browser) => {
@@ -2330,7 +2343,7 @@ async fn wait_condition_satisfied(
                 }
                 Err(error) => return Err(error),
             };
-            let value = if matches!(condition, WaitCondition::Value { .. }) {
+            let value = if is_value {
                 resolved.value(page).await?.unwrap_or_default()
             } else {
                 resolved.inner_text(page).await?.unwrap_or_default()
@@ -2422,6 +2435,24 @@ fn is_missing_css_node(error: &CommandError) -> bool {
 
 fn is_closed_page_message(message: &str) -> bool {
     message.contains("receiver is gone") || message.contains("session closed")
+}
+
+/// a11y `RootWebArea` / `document` targets mean "page text", not a DOM role.
+fn is_document_web_area_target(target: &types::TargetSpec) -> bool {
+    let Some(role) = target.role.as_deref() else {
+        return false;
+    };
+    if !(role.eq_ignore_ascii_case("RootWebArea") || role.eq_ignore_ascii_case("document")) {
+        return false;
+    }
+    target.css.is_none()
+        && target.test_id.is_none()
+        && target.accessible_name.is_none()
+        && target.label.is_none()
+        && target.text.is_none()
+        && target.attributes.is_empty()
+        && target.frame_path.is_empty()
+        && target.shadow_path.is_empty()
 }
 
 fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {
@@ -3014,6 +3045,23 @@ mod tests {
                 .code,
             ErrorCode::InvalidRequest
         );
+    }
+
+    #[test]
+    fn document_web_area_roles_are_recognized() {
+        assert!(super::is_document_web_area_target(&types::TargetSpec {
+            role: Some("RootWebArea".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(super::is_document_web_area_target(&types::TargetSpec {
+            role: Some("document".into()),
+            ..types::TargetSpec::default()
+        }));
+        assert!(!super::is_document_web_area_target(&types::TargetSpec {
+            role: Some("RootWebArea".into()),
+            css: Some("body".into()),
+            ..types::TargetSpec::default()
+        }));
     }
 
     #[tokio::test]
