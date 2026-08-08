@@ -927,7 +927,17 @@ variant; `IntentCommand::class` fixes its recovery behavior.
 Intents resolve in the main frame only. A control inside an iframe is
 invisible to them (snapshots do not descend into frames); drive it with a
 primitive (`click`, `type_text`, `control_action`) whose target carries a
-`framePath` — each hop is a TargetSpec for the frame element.
+`framePath` — each hop is a TargetSpec resolving the frame element itself,
+outermost first:
+
+    "target": {
+      "role": "button", "accessibleName": "Confirm preview",
+      "framePath": [{"css": "iframe#document-preview"}]
+    }
+
+Role matching is case-insensitive, so a snapshot's `Iframe` works as
+`iframe`. On Firefox each framePath hop must be an exact CSS or test-id
+segment (framePath entries like the example above, not role/name).
 
 ## Classes and recovery
 

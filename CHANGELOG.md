@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Target role matching is case-insensitive, so an `a11y_snapshot` target passed back verbatim resolves even where the engine's role casing differs from the DOM's implicit role (Chrome's `Iframe` vs `iframe`). `bobby://intents` documents the `framePath` step shape with an example and the Firefox exact-CSS/test-id hop requirement.
+
+
 - A Boundary command that fails before reaching the browser (argument or target-resolution errors) now reports a plain `failed` outcome instead of `needsReconciliation`; reconciliation is reserved for effects that may have landed.
 - Stale CDP node ids ("Could not find node with given id", after a re-render) map to `targetNotFound` with fresh-snapshot repair instead of a raw `browserCommandFailed`; a dead page target ("receiver is gone") maps to `targetDetached` with recovery guidance instead of cascading identical driver errors.
 - Competitor gauntlet: `--tool` is required and the full competitor gamut runs only via an explicit `--tool all`.
