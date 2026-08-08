@@ -852,6 +852,19 @@ impl ChromiumWorker {
     }
 }
 
+const PLAIN_CLICK_TARGET_DRIFT_RETRIES: usize = 3;
+const PLAIN_CLICK_TARGET_DRIFT_DELAY: Duration = Duration::from_millis(25);
+
+fn should_retry_plain_click_target_drift(
+    boundary: bool,
+    attempt: usize,
+    error: &CommandError,
+) -> bool {
+    !boundary
+        && attempt < PLAIN_CLICK_TARGET_DRIFT_RETRIES
+        && error.code == ErrorCode::TargetNotFound
+}
+
 #[async_trait]
 impl BrowserWorker for ChromiumWorker {
     fn worker_id(&self) -> WorkerId {
@@ -991,38 +1004,72 @@ impl BrowserWorker for ChromiumWorker {
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        let resolved = self
-            .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
-            .await?;
-        // A plain click on a download link otherwise vanishes: headless
-        // Chromium drops the file and the outcome carries no evidence.
-        // Route through the armed capture path so the file lands in the
-        // session's downloads with Download evidence.
-        if resolved.is_download_link(&page).await? {
-            return self
-                .click_and_wait_for_download(
-                    page_id,
-                    &ClickAndWaitForDownloadCommand {
-                        selector: command.selector.clone(),
-                        target: command.target.clone(),
-                        timeout_ms: 30_000,
-                    },
-                )
-                .await;
+        for attempt in 0..=PLAIN_CLICK_TARGET_DRIFT_RETRIES {
+            let resolved = match self
+                .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(error)
+                    if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
+                {
+                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            // A plain click on a download link otherwise vanishes: headless
+            // Chromium drops the file and the outcome carries no evidence.
+            // Route through the armed capture path so the file lands in the
+            // session's downloads with Download evidence.
+            match resolved.is_download_link(&page).await {
+                Ok(true) => {
+                    return self
+                        .click_and_wait_for_download(
+                            page_id,
+                            &ClickAndWaitForDownloadCommand {
+                                selector: command.selector.clone(),
+                                target: command.target.clone(),
+                                timeout_ms: 30_000,
+                            },
+                        )
+                        .await;
+                }
+                Ok(false) => {}
+                Err(error)
+                    if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
+                {
+                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            let text = resolved.inner_text(&page).await.ok().flatten();
+            let result = if self.humanization_enabled() {
+                self.humanized_click(&page, &resolved).await
+            } else {
+                resolved.click(&page).await
+            };
+            match result {
+                Ok(()) => {
+                    return Ok(vec![
+                        Evidence::Element {
+                            selector: command.selector.clone(),
+                            text,
+                        },
+                        resolved.evidence,
+                    ]);
+                }
+                Err(error)
+                    if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
+                {
+                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let text = resolved.inner_text(&page).await.ok().flatten();
-        if self.humanization_enabled() {
-            self.humanized_click(&page, &resolved).await?;
-        } else {
-            resolved.click(&page).await?;
-        }
-        Ok(vec![
-            Evidence::Element {
-                selector: command.selector.clone(),
-                text,
-            },
-            resolved.evidence,
-        ])
+        unreachable!("plain-click target drift retries are bounded")
     }
 
     async fn click_xy(
@@ -3133,10 +3180,35 @@ mod tests {
 
     use super::{
         apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, is_closed_page_message,
-        is_missing_css_node, snapshot_cookie, text_matches, unscoped_css_wait_selector,
-        ChromiumWorker, HttpBridgeState,
+        is_missing_css_node, should_retry_plain_click_target_drift, snapshot_cookie, text_matches,
+        unscoped_css_wait_selector, ChromiumWorker, HttpBridgeState,
     };
-    use types::{ErrorCode, PageId, SessionId, TargetSpec, TextMatch, WorkerId};
+    use types::{
+        CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec, TextMatch, WorkerId,
+    };
+
+    #[test]
+    fn non_boundary_click_retries_bounded_predispatch_stale_targets_only() {
+        let stale = CommandError {
+            code: ErrorCode::TargetNotFound,
+            message: "stale".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+        let other = CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "other".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert!(should_retry_plain_click_target_drift(false, 0, &stale));
+        assert!(should_retry_plain_click_target_drift(false, 1, &stale));
+        assert!(should_retry_plain_click_target_drift(false, 2, &stale));
+        assert!(!should_retry_plain_click_target_drift(false, 3, &stale));
+        assert!(!should_retry_plain_click_target_drift(true, 0, &stale));
+        assert!(!should_retry_plain_click_target_drift(false, 0, &other));
+    }
 
     fn chromium_worker_without_browser(root: &std::path::Path) -> ChromiumWorker {
         let behavioral = super::BehavioralConfig::default().sanitize();
