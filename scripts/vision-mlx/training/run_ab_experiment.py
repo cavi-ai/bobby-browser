@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--num-layers", type=int, default=8)
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-tokens", type=int, default=256, help="Generation cap for eval")
     parser.add_argument("--output", required=True, help="Run directory")
     args = parser.parse_args()
 
@@ -76,7 +77,8 @@ def main():
             cmd = [sys.executable, "evaluate_adapter.py",
                    "--model", args.model, "--input", str(eval_file),
                    "--output", str(eval_out), "--schema", schema,
-                   "--num-layers", str(args.num_layers), "--lora-rank", str(args.lora_rank)]
+                   "--num-layers", str(args.num_layers), "--lora-rank", str(args.lora_rank),
+                   "--max-tokens", str(args.max_tokens)]
             if adapter_arg:
                 cmd += ["--adapter", adapter_arg]
             run(cmd, f"eval {label}")

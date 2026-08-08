@@ -59,7 +59,9 @@ SYSTEM_PROMPT = (
 CANDIDATE_SYSTEM_PROMPT = (
     "You are a vision assistant for a browser automation agent called Bobby. "
     "Analyze the screenshot and return ONLY valid JSON matching this schema: "
-    '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": N}}. '
+    '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": N} | '
+    '{"kind": "typeIntoCandidate", "index": N, "text": "..."} | '
+    '{"kind": "extractFromCandidate", "index": N}}. '
     "The index refers to the numbered candidate list in the prompt."
 )
 
@@ -86,10 +88,15 @@ def build_completion(example: dict, schema: str = "coords") -> str:
     if schema == "candidate":
         confidence = example.get("model_response", {}).get("confidence", 0.5)
         index = example.get("target_index", 0)
-        return json.dumps({
-            "confidence": confidence,
-            "action": {"kind": "clickCandidate", "index": index},
-        })
+        action = example.get("model_response", {}).get("action", {})
+        kind = action.get("kind", "click")
+        if kind == "typeText":
+            out_action = {"kind": "typeIntoCandidate", "index": index, "text": action.get("text", "")}
+        elif kind == "extractValue":
+            out_action = {"kind": "extractFromCandidate", "index": index}
+        else:
+            out_action = {"kind": "clickCandidate", "index": index}
+        return json.dumps({"confidence": confidence, "action": out_action})
 
     action = example.get("model_response", {}).get("action", {})
     confidence = example.get("model_response", {}).get("confidence", 0.5)
