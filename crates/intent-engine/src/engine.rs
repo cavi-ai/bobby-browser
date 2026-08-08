@@ -752,6 +752,9 @@ fn form_control_target(
 
 fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, TargetSpec) {
     let selector = candidate.css.clone().unwrap_or_default();
+    // Keep frame/shadow hops from the intent so iframe/shadow fills still land.
+    // Do not copy ordinal: the candidate is already chosen; re-resolving with
+    // ordinal against a narrowed (often length-1) set fails duplicate-name fills.
     let target = TargetSpec {
         css: candidate.css.clone(),
         test_id: candidate.test_id.clone(),
@@ -761,7 +764,6 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
         attributes: candidate.attributes.clone(),
         frame_path: intent_target.frame_path.clone(),
         shadow_path: intent_target.shadow_path.clone(),
-        ordinal: intent_target.ordinal,
         ..TargetSpec::default()
     };
     (selector, target)
