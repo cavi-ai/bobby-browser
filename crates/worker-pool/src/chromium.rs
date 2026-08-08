@@ -1682,6 +1682,25 @@ impl BrowserWorker for ChromiumWorker {
                 }]);
             }
             if Instant::now() >= deadline {
+                // Page-scoped text waits often race an async UI confirmation
+                // (fetch-then-append). One last body read before timing out.
+                if let types::WaitCondition::Text { target, matcher } = &command.condition {
+                    if is_page_scoped_text_target(target) {
+                        if let Ok(body) = page.find_element("body").await {
+                            if let Ok(Some(value)) = body.inner_text().await {
+                                if text_matches(matcher, &value).unwrap_or(false) {
+                                    return Ok(vec![Evidence::Wait {
+                                        condition: command.condition.clone(),
+                                        elapsed_ms: started.elapsed().as_millis() as u64,
+                                        observations,
+                                        excluded_classes: Vec::new(),
+                                        observed: Some(bound_observed(&value)),
+                                    }]);
+                                }
+                            }
+                        }
+                    }
+                }
                 return Err(CommandError {
                     code: ErrorCode::WaitConditionTimedOut,
                     message: format!(
@@ -1692,7 +1711,7 @@ impl BrowserWorker for ChromiumWorker {
                     retryable: false,
                 });
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
