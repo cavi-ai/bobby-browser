@@ -91,9 +91,12 @@ await client.submit(
 | Kind | Shape | Notes |
 |---|---|---|
 | `text` | `{ kind: "text", text, clearFirst? }` | Default path for textboxes |
-| `select` | `{ kind: "select", option }` | Exact option **value**, not label |
+| `select` | `{ kind: "select", option }` | Matches option **value** first, then visible label (trimmed, case-insensitive) |
 | `checked` | `{ kind: "checked", checked: boolean }` | Checkbox / radio only |
 | `files` | `{ kind: "files", paths }` | Requires `file:upload` |
+
+`select` therefore resolves by value first so forms using explicit values remain stable,
+then retries with trimmed visible-label matching before failing.
 
 Checkbox / radio example:
 
@@ -215,6 +218,31 @@ await client.submit(
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
+
+### WaitCondition shape
+
+`WaitForState` and MCP `wait_for` share the same `WaitCondition` shape:
+
+| `kind` | Required fields |
+|---|---|
+| `element` | `target`, `state` |
+| `text` | `target`, `matcher` |
+| `value` | `target`, `matcher` |
+| `url` | `matcher` |
+| `document` | `ready` |
+| `networkQuiet` | `idleMs`, `maxInFlight`, optional `ignoreUrlSubstrings`, `ignoreResourceTypes`, `ignoreLongLived` |
+
+`matcher` is a `TextMatch` object: `{ kind: "exact" | "contains" | "regex", value }`.
+
+`state` is one of `attached`, `detached`, `visible`, `hidden`, `enabled`, `disabled`.
+
+`ready` is one of `commit`, `domContentLoaded`, `interactive`, `networkIdle`.
+
+For `text` and `value`, role-based (`role: main|RootWebArea|document|application|generic|body`) and
+`css: body|html|:root` targets read `document.body.innerText` so async confirmation text
+checks align with whole-page assertions.
+
+Firefox supports `text`, `value`, `document`, `url`, and `element`. `networkQuiet` is Chromium-only.
 
 ### Follow
 

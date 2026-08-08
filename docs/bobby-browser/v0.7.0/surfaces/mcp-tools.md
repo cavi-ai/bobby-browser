@@ -25,7 +25,7 @@ Tools are advertised only when the principal holds the required capability.
 | `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree with bounded form-control state, sensitive-value redaction, and command-ready semantic targets (`maxNodes` optional, 1…2048; default 256) |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
 | `click` | `browser:mutate` | Click an element |
-| `click_and_wait_for_popup` | `browser:mutate` | Click and wait for a `window.open` popup to register in `page_list` |
+| `click_and_wait_for_popup` | `browser:mutate` | Click, wait for a `window.open` popup, and sync that page into `page_list` (auto-checkpoint boundary by default) |
 | `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
 | `context_ask` | `page:read` | Ask the retained page context where a described control is |
 | `context_neighbors` | `context:read` | Show remembered form structure around a described control (siblings, success counters) |
@@ -79,10 +79,14 @@ The flat browser tools (`navigate` … `evaluate_javascript` /
 server-generated) and return the same `CommandOutcome` shape as
 `command_execute`, including artifact / accessibility evidence.
 
-`control_action` accepts the exact `target` returned by `form_snapshot` and
-one of `setText`, `setChecked`, `selectOne`, `selectMany`, `setFiles`, `clear`,
-or `activate`. It returns typed reread evidence; file paths and password values
-are never returned. `setFiles` additionally requires `file:upload` at runtime.
+`control_action` accepts semantic `target` forms from `a11y_snapshot` and
+`form_snapshot`, and one of `setText`, `setChecked`, `selectOne`,
+`selectMany`, `setFiles`, `clear`, or `activate`. It returns typed reread
+evidence; file paths and password values are never returned. `setFiles`
+additionally requires `file:upload` at runtime.
+
+`selectOne` and `selectMany` match by option value first and then visible label
+(trimmed, case-insensitive) when no value matches.
 
 `page_open` requires `sessionId` and optionally accepts `url`. With no URL it
 returns the page state exactly as before. With a URL it opens and navigates in
@@ -97,6 +101,31 @@ unchanged; a legacy selector is not required when `target` is present.
 `command_execute` still accepts nested intent envelopes
 (`{ kind: "intent", input: { kind: "locate" \| … } }`) and remains the escape
 hatch for anything the named tools do not cover. Skills are **not** MCP tools.
+
+`click_and_wait_for_popup` is a boundary flow in one call when `autoCheckpoint`
+is `true`. It can accept pinned `commandId` and `attemptId`, then persists a checkpoint
+for the resulting page-affecting click in the same call. The command also registers
+`window.open` targets into the current session page graph for `page_list`, so the next
+authorization step can use those page IDs directly.
+
+`wait_for` uses explicit discriminated `WaitCondition` objects:
+
+| `kind` | Required fields |
+|---|---|
+| `element` | `target`, `state` |
+| `text` | `target`, `matcher` |
+| `value` | `target`, `matcher` |
+| `url` | `matcher` |
+| `document` | `ready` |
+| `networkQuiet` | `idleMs`, `maxInFlight`, optional `ignoreUrlSubstrings`, `ignoreResourceTypes`, `ignoreLongLived` |
+
+`matcher` uses `TextMatch` (`exact`, `contains`, `regex`) and `matcher.value`.
+
+For `text` and `value` waits, role-scoped targets with `main|RootWebArea|document|application|generic|body`
+or `css: body|html|:root` resolve against `document.body.innerText` via page evaluation.
+
+Firefox handles `text`, `value`, `document`, `url`, and `element`; `networkQuiet` is
+currently Chromium-only.
 
 ## Workflow continuity
 
