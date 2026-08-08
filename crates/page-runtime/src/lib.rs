@@ -231,8 +231,33 @@ impl PageRuntime {
             .lease(session_id.clone())
             .await
             .map_err(|error| RuntimeError::Internal(error.message))?;
-        let page = self.register_page(session_id).await;
+        let page = self.register_page(session_id.clone()).await;
         if let Err(error) = lease.worker().open_page(page.id.clone()).await {
+            // A dead browser wedges every later call with opaque internal
+            // errors. Drop it and retry once on a fresh worker instead. The
+            // lease must go first: it holds the session's read gate and
+            // invalidation needs the write gate.
+            if worker_pool::is_dead_worker_error(&error) {
+                let failed_worker_id = lease.worker_id();
+                drop(lease);
+                let _ = workers
+                    .invalidate_session_if_worker(&session_id, &failed_worker_id)
+                    .await;
+                let revived = match workers.lease(session_id).await {
+                    Ok(revived) => revived,
+                    Err(error) => {
+                        self.inner.write().await.remove(&page.id);
+                        return Err(RuntimeError::Internal(error.message));
+                    }
+                };
+                match revived.worker().open_page(page.id.clone()).await {
+                    Ok(()) => return Ok(page),
+                    Err(retry) => {
+                        self.inner.write().await.remove(&page.id);
+                        return Err(RuntimeError::Internal(retry.message));
+                    }
+                }
+            }
             self.inner.write().await.remove(&page.id);
             return Err(RuntimeError::Internal(error.message));
         }

@@ -148,6 +148,15 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         self.lease.worker().type_text(page_id, command).await
     }
 
+    async fn element_at_point(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<(String, String)>, CommandError> {
+        self.lease.worker().element_at_point(page_id, x, y).await
+    }
+
     async fn upload_files(
         &self,
         page_id: &PageId,
@@ -248,6 +257,8 @@ pub struct AdaptivePageEngine {
     /// The runtime's context graph, for the vision prompt's recent-commands
     /// block. Attached always; independent of the prefill flag.
     context_graph: Option<Arc<crate::ContextGraph>>,
+    /// Escalation corpus sink (`[vision].corpus_dir`). `None` writes nothing.
+    corpus: Option<intent_engine::VisionCorpus>,
 }
 
 #[derive(Clone)]
@@ -280,6 +291,7 @@ impl AdaptivePageEngine {
             structured_extractor: None,
             proposals: None,
             context_graph: None,
+            corpus: None,
         }
     }
 
@@ -302,6 +314,12 @@ impl AdaptivePageEngine {
 
     pub fn with_vision_assist(mut self, assist: Arc<dyn VisionAssist>) -> Self {
         self.vision_assist = Some(assist);
+        self
+    }
+
+    /// Enables escalation corpus collection into the configured directory.
+    pub fn with_vision_corpus(mut self, corpus: intent_engine::VisionCorpus) -> Self {
+        self.corpus = Some(corpus);
         self
     }
 
@@ -349,6 +367,7 @@ impl AdaptivePageEngine {
                 self.proposals.clone(),
                 page.as_ref().and_then(|page| page.url.clone()),
                 self.context_graph.clone(),
+                self.corpus.clone(),
             )
             .await;
         }
@@ -591,6 +610,7 @@ async fn execute_intent(
     proposals: Option<Arc<dyn intent_engine::ProposalLookup>>,
     page_url: Option<String>,
     context_graph: Option<Arc<crate::ContextGraph>>,
+    corpus: Option<intent_engine::VisionCorpus>,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
     let browser = WorkerIntentBrowser { lease };
@@ -618,6 +638,7 @@ async fn execute_intent(
         // Escalation deferral is an engine-internal complete_form decision.
         defer_escalation: false,
         prompt_context,
+        corpus,
     };
     match IntentEngine::execute(intent, page_id, &browser, &vision).await {
         IntentOutcome::Completed { evidence } => Ok(AdaptiveExecution {

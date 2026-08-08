@@ -163,6 +163,7 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
             proposals: None,
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -209,6 +210,7 @@ async fn stuck_with_gates_uses_vision_propose_and_execute() {
             proposals: None,
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -254,6 +256,7 @@ async fn low_confidence_proposal_fails_closed() {
             proposals: None,
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -300,6 +303,7 @@ async fn policy_denied_never_calls_vision() {
             proposals: None,
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -348,6 +352,7 @@ async fn an_open_session_policy_does_not_substitute_for_the_capability() {
             proposals: None,
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -392,6 +397,7 @@ async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
             proposals: None,
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -472,6 +478,7 @@ async fn cache_hit_never_calls_the_provider() {
             proposals: Some(proposals),
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -520,6 +527,7 @@ async fn cache_miss_falls_through_to_live_escalation() {
             proposals: Some(proposals),
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -562,6 +570,7 @@ async fn closed_gates_never_consult_the_cache() {
                 proposals: Some(proposals),
                 defer_escalation: false,
                 prompt_context: None,
+                corpus: None,
             },
         )
         .await;
@@ -620,6 +629,7 @@ async fn a_failed_cached_proposal_is_dropped_and_escalates_live() {
             proposals: Some(proposals),
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -804,6 +814,7 @@ async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
             proposals: Some(proposals.clone()),
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;
@@ -924,6 +935,7 @@ async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
             proposals: Some(proposals),
             defer_escalation: false,
             prompt_context: None,
+            corpus: None,
         },
     )
     .await;

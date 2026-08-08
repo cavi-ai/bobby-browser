@@ -449,6 +449,31 @@ async fn invalidate_terminates_and_replaces_worker_without_changing_profile() {
     assert_eq!(factory.terminations.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn stale_worker_invalidation_does_not_remove_its_replacement() {
+    let factory = Arc::new(FakeFactory::default());
+    let pool = WorkerPool::new(1, factory.clone());
+    let session = SessionId::new();
+    let failed = pool.lease(session.clone()).await.unwrap();
+    let failed_id = failed.worker_id();
+    drop(failed);
+
+    pool.invalidate_session_if_worker(&session, &failed_id)
+        .await
+        .unwrap();
+    let replacement = pool.lease(session.clone()).await.unwrap();
+    let replacement_id = replacement.worker_id();
+    drop(replacement);
+
+    pool.invalidate_session_if_worker(&session, &failed_id)
+        .await
+        .unwrap();
+    let current = pool.lease(session).await.unwrap();
+
+    assert_eq!(current.worker_id(), replacement_id);
+    assert_eq!(factory.terminations.load(Ordering::SeqCst), 1);
+}
+
 async fn cancellation_does_not_stop_cleanup(invalidate: bool) {
     let close_started = Arc::new(tokio::sync::Notify::new());
     let finish_close = Arc::new(tokio::sync::Notify::new());

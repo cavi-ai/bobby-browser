@@ -21,11 +21,29 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
 
 from mlx_finetune import build_completion, build_prompt
+
+SUPPORTED_ACTION_KINDS = {
+    "click",
+    "typeText",
+    "extractValue",
+    "clickCandidate",
+    "typeIntoCandidate",
+    "extractFromCandidate",
+}
+
+
+def finite_number(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def parse_prediction(text: str) -> dict | None:
@@ -45,7 +63,16 @@ def parse_prediction(text: str) -> dict | None:
         parsed = json.loads(content[start : end + 1])
     except json.JSONDecodeError:
         return None
-    if not isinstance(parsed, dict) or "action" not in parsed:
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("action"), dict):
+        return None
+    action = parsed["action"]
+    if action.get("kind") not in SUPPORTED_ACTION_KINDS:
+        return None
+    if action.get("kind") == "click" and not (
+        finite_number(action.get("x")) and finite_number(action.get("y"))
+    ):
+        return None
+    if "confidence" in parsed and not finite_number(parsed["confidence"]):
         return None
     return parsed
 
@@ -109,22 +136,25 @@ def target_bbox(example: dict) -> dict | None:
 
 
 def point_in_bbox(x: float, y: float, bbox: dict) -> bool:
+    if not finite_number(x) or not finite_number(y):
+        return False
     return bbox["x"] <= x <= bbox["x"] + bbox["w"] and bbox["y"] <= y <= bbox["y"] + bbox["h"]
 
 
 def element_accuracy(predictions: list, examples: list) -> dict:
-    """Did the action select the correct element? Comparable across schemas.
+    """Score target selection, payload, and full-action correctness separately.
 
     candidate kinds (clickCandidate/typeIntoCandidate/extractFromCandidate):
         index == target_index
     coords click: predicted (x, y) inside the target candidate's bbox
-    coords typeText/extractValue: content match against the target
-        (typeText text / extractValue value); element is the prompt's target
+    coords typeText: the sole textbox is implied; text is scored as payload
+    coords extractValue: the returned value identifies the unique target and payload
     """
     scored = 0
     correct = 0
     content_scored = 0
     content_correct = 0
+    fully_correct = 0
     for p, e in zip(predictions, examples):
         pred = p.get("prediction")
         if pred is None:
@@ -133,40 +163,62 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         kind = action.get("kind")
         target = e.get("target_index")
         target_action = e.get("model_response", {}).get("action", {})
+        expected_kind = target_action.get("kind")
+        canonical_kind = {
+            "clickCandidate": "click",
+            "typeIntoCandidate": "typeText",
+            "extractFromCandidate": "extractValue",
+        }.get(kind, kind)
 
+        if kind in (
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+            "click",
+            "typeText",
+            "extractValue",
+        ) and canonical_kind != expected_kind:
+            scored += 1
+            continue
+
+        target_correct = False
+        payload_required = False
+        payload_correct = False
         if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
             if target is None:
                 continue
             scored += 1
-            if action.get("index") == target:
-                correct += 1
+            target_correct = action.get("index") == target
             if kind == "typeIntoCandidate":
-                content_scored += 1
-                if action.get("text") == target_action.get("text"):
-                    content_correct += 1
-            elif kind == "extractFromCandidate":
-                content_scored += 1
-                if action.get("index") == target:
-                    content_correct += 1
+                payload_required = True
+                payload_correct = action.get("text") == target_action.get("text")
         elif kind == "click":
             bbox = target_bbox(e)
             if bbox is None:
                 continue
             scored += 1
-            if point_in_bbox(action.get("x", -1), action.get("y", -1), bbox):
-                correct += 1
+            target_correct = point_in_bbox(action.get("x", -1), action.get("y", -1), bbox)
         elif kind == "typeText":
             scored += 1
-            correct += 1  # element is named by the purpose, not selectable here
-            content_scored += 1
-            if action.get("text") == target_action.get("text"):
-                content_correct += 1
+            target_correct = True  # the generated purpose names the sole textbox
+            payload_required = True
+            payload_correct = action.get("text") == target_action.get("text")
         elif kind == "extractValue":
             scored += 1
+            target_correct = action.get("value") == target_action.get("value")
+            payload_required = True
+            payload_correct = target_correct
+        else:
+            continue
+
+        if target_correct:
+            correct += 1
+        if payload_required:
             content_scored += 1
-            if action.get("value") == target_action.get("value"):
-                correct += 1
+            if payload_correct:
                 content_correct += 1
+        if target_correct and (not payload_required or payload_correct):
+            fully_correct += 1
 
     return {
         "scored": scored,
@@ -175,6 +227,8 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         "content_scored": content_scored,
         "content_correct": content_correct,
         "content_accuracy": content_correct / content_scored if content_scored else 0.0,
+        "fully_correct": fully_correct,
+        "fully_correct_accuracy": fully_correct / scored if scored else 0.0,
     }
 
 
@@ -379,6 +433,9 @@ def main():
             print(f"Content accuracy (text/value match): "
                   f"{results['element']['content_correct']}/{results['element']['content_scored']} "
                   f"= {results['element']['content_accuracy']:.2%}")
+        print(f"Fully correct actions: "
+              f"{results['element']['fully_correct']}/{results['element']['scored']} "
+              f"= {results['element']['fully_correct_accuracy']:.2%}")
         cal = results["calibration"]
         if cal["scored"]:
             print(f"\nCalibration (ECE): {cal['ece']:.4f}")
