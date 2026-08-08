@@ -143,12 +143,20 @@ fn score<'a>(
         100,
         "exactTestId"
     );
-    exact!(
-        target.role.as_ref(),
-        candidate.role.as_ref(),
-        30,
-        "exactRole"
-    );
+    // Roles are ASCII tokens; the a11y snapshot emits the engine's casing
+    // (Chrome's `Iframe`) while DOM candidates carry the lowercase implicit
+    // role, so a snapshot target passed back verbatim must match either.
+    if let Some(wanted) = target.role.as_ref() {
+        if !candidate
+            .role
+            .as_ref()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(wanted))
+        {
+            return None;
+        }
+        score += 30;
+        reasons.push("exactRole".into());
+    }
     exact!(
         target.accessible_name.as_ref(),
         candidate.name.as_ref(),
