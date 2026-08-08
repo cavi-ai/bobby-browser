@@ -689,6 +689,44 @@ impl ChromiumWorker {
         self.network_trackers.lock().await.remove(page_id);
         self.pages.lock().await.remove(page_id)
     }
+
+    /// Register page targets the runtime did not open — popups from
+    /// `window.open` and any other tab the site spawned. One browser serves
+    /// one session, so an untracked page target belongs to this session.
+    /// Lazy (on `list_pages`) rather than a background listener: the only
+    /// consumer is the listing itself.
+    async fn sync_untracked_pages(&self) -> Result<(), CommandError> {
+        let live = {
+            let mut browser_guard = self.browser.lock().await;
+            let Some(browser) = browser_guard.as_mut() else {
+                return Ok(());
+            };
+            browser.pages().await.map_err(command_failed)?
+        };
+        for page in live {
+            // Browser chrome (new-tab page et al.) is a target but not a
+            // session page.
+            if page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|url| url.starts_with("chrome://"))
+            {
+                continue;
+            }
+            let known = self
+                .pages
+                .lock()
+                .await
+                .values()
+                .any(|known| known.target_id() == page.target_id());
+            if !known {
+                self.register_page(PageId::new(), page).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1109,6 +1147,7 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        self.sync_untracked_pages().await?;
         let handles: Vec<(PageId, Page)> = self
             .pages
             .lock()
