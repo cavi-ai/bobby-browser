@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `session_close` no longer wedges on a dead browser: managed-Chromium teardown treats an already-gone browser (closed channel, canceled oneshot) as closed instead of failing the release, which previously left the session listed forever with every retry failing `internal`.
+
+
 - OpenShell/jobs CLI share one blocking `/v1` HTTP client (`v1_client`) for bearer + interface headers.
 
 - OpenShell host isolation/ops: doctor warns (`openshell-companion`) when ≥2 local sandboxes share one Firefox companion; warns (`openshell-cleartext`) on non-loopback cleartext MCP URL / non-loopback `server.host`; pack ships merge-only `policy-network.yaml`.

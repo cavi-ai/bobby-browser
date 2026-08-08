@@ -2151,7 +2151,17 @@ impl BrowserWorker for ChromiumWorker {
         self.pages.lock().await.clear();
         self.network_trackers.lock().await.clear();
         if let Some(mut browser) = self.browser.lock().await.take() {
-            browser.close().await.map_err(command_failed)?;
+            // Teardown must not fail because the browser is already dead:
+            // an uncloseable-but-gone browser would wedge the session in the
+            // registry forever (every session_close retry failing the same
+            // way, pages stuck listed).
+            if let Err(error) = browser.close().await {
+                let message = error.to_string();
+                if !is_closed_page_message(&message) {
+                    return Err(command_failed(error));
+                }
+                tracing::info!("browser already gone during close: {message}");
+            }
         }
         if let Some(task) = self.handler_task.lock().await.take() {
             task.abort();
