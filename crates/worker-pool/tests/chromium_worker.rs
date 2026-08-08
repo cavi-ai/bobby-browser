@@ -919,6 +919,99 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn page_scoped_text_wait_sees_async_body_updates() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,",
+                    "<section><h1>Atlas Labs</h1>",
+                    "<button id=save type=button>Save priority</button>",
+                    "</section>",
+                    "<script>",
+                    "document.getElementById('save').addEventListener('click',function(){",
+                    "setTimeout(function(){",
+                    "var n=document.createElement('p');",
+                    "n.setAttribute('role','status');",
+                    "n.textContent='Priority saved';",
+                    "document.body.appendChild(n);",
+                    "},150);",
+                    "});",
+                    "</script>"
+                )
+                .into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: "#save".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    for target in [
+        TargetSpec {
+            role: Some("main".into()),
+            ..TargetSpec::default()
+        },
+        TargetSpec {
+            css: Some("body".into()),
+            ..TargetSpec::default()
+        },
+    ] {
+        let evidence = worker
+            .wait_for(
+                &page_id,
+                &WaitForCommand {
+                    condition: WaitCondition::Text {
+                        target: Box::new(target),
+                        matcher: TextMatch::Contains("Priority saved".into()),
+                    },
+                    timeout_ms: 2_000,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            &evidence[0],
+            Evidence::Wait {
+                observations,
+                ..
+            } if *observations > 0
+        ));
+    }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn network_quiet_respects_url_and_long_lived_ignores() {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();

@@ -5100,11 +5100,19 @@ fn contains_sensitive_material(value: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
-fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
-    let Some(role) = target.role.as_deref() else {
-        return false;
-    };
-    let page_scoped = [
+fn nonempty_field(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn is_page_scoped_css(css: &str) -> bool {
+    matches!(css.to_ascii_lowercase().as_str(), "body" | "html" | ":root")
+}
+
+fn is_page_scoped_role(role: &str) -> bool {
+    [
         "RootWebArea",
         "document",
         "main",
@@ -5113,18 +5121,29 @@ fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
         "generic",
     ]
     .iter()
-    .any(|name| role.eq_ignore_ascii_case(name));
-    if !page_scoped {
+    .any(|name| role.eq_ignore_ascii_case(name))
+}
+
+fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
+    if nonempty_field(&target.test_id).is_some()
+        || nonempty_field(&target.accessible_name).is_some()
+        || nonempty_field(&target.label).is_some()
+        || target.text.is_some()
+        || !target.attributes.is_empty()
+        || !target.frame_path.is_empty()
+        || !target.shadow_path.is_empty()
+        || target.ordinal.is_some()
+    {
         return false;
     }
-    target.css.is_none()
-        && target.test_id.is_none()
-        && target.accessible_name.is_none()
-        && target.label.is_none()
-        && target.text.is_none()
-        && target.attributes.is_empty()
-        && target.frame_path.is_empty()
-        && target.shadow_path.is_empty()
+    let role = nonempty_field(&target.role);
+    let css = nonempty_field(&target.css);
+    match (role, css) {
+        (Some(role), None) => is_page_scoped_role(role),
+        (None, Some(css)) => is_page_scoped_css(css),
+        (Some(role), Some(css)) => is_page_scoped_role(role) && is_page_scoped_css(css),
+        (None, None) => false,
+    }
 }
 
 fn bounded_text_matches(matcher: &TextMatch, value: &str) -> Result<bool, CommandError> {

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Page-scoped text waits (`role: main|RootWebArea|…` or `css: body|html|:root`) read live `document.body.innerText` via evaluate (with empty optional fields treated as absent), so async UI confirmations match the same text a whole-page `inspect` sees.
 - `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child so `[mcp] startup_toolset` (and the rest of that file) apply to `tools/list` — gauntlet/full configs no longer look like explore under doctor.
 - Whole-page `inspect` over DirectHttp treats empty-`<body>` SPA shells (title/meta chrome + scripts) as `javascriptRequired` and falls back to the live browser instead of returning shell HTML.
 - Text waits on bare page-scoped roles (`RootWebArea`, `document`, `main`, …) read `document.body.innerText`, so post-submit status text no longer burns a full wait timeout.
