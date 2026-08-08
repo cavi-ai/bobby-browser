@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `control_action` accepts an a11y-snapshot target verbatim: control lookup compares targets semantically (explicit `ordinal: 0` matches an omitted ordinal; role case-insensitive) instead of struct equality, on both engines.
+
+
 - Target role matching is case-insensitive, so an `a11y_snapshot` target passed back verbatim resolves even where the engine's role casing differs from the DOM's implicit role (Chrome's `Iframe` vs `iframe`). `bobby://intents` documents the `framePath` step shape with an example and the Firefox exact-CSS/test-id hop requirement.
 
 
