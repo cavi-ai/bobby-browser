@@ -16,6 +16,7 @@ hex = { workspace = true }
 anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true
+chrono.workspace = true
 config = { path = "../config", version = "0.7.0" }
 behavioral-engine = { path = "../behavioral-engine", version = "0.7.0" }
 dom-engine = { path = "../dom-engine", version = "0.7.0" }

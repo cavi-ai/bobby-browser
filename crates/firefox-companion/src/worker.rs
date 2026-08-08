@@ -1260,6 +1260,8 @@ impl FirefoxCompanionWorker {
                                     url,
                                     method,
                                     status: None,
+                                    status_text: None,
+                                    redirect_url: None,
                                     started_unix_ms: now_unix_seconds() * 1000.0,
                                     elapsed_ms: None,
                                     transfer_bytes: None,
@@ -1282,6 +1284,11 @@ impl FirefoxCompanionWorker {
                                     .pointer("/response/status")
                                     .and_then(Value::as_u64)
                                     .map(|status| status as u16);
+                                entry.status_text = event
+                                    .params
+                                    .pointer("/response/statusText")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned);
                                 entry.mime_type = event
                                     .params
                                     .pointer("/response/mimeType")
