@@ -96,7 +96,7 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                let (context, envelope) = primitive_envelope(
+                let (context, mut envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
@@ -109,7 +109,13 @@ impl Server {
                         },
                     ),
                 );
-                self.submit_envelope(context, envelope).await
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
+                if input.auto_checkpoint.unwrap_or(true) {
+                    self.submit_envelope_with_auto_checkpoint(context, envelope)
+                        .await
+                } else {
+                    self.submit_envelope(context, envelope).await
+                }
             }
             "type_text" => {
                 let input: TypeTextArgs = match bounded_parse(call.arguments) {
