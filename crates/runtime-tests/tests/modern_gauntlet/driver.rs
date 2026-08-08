@@ -477,8 +477,8 @@ impl ModernRuntime {
         };
         let (url, title) = observed
             .iter()
-            .find_map(|item| match item {
-                Evidence::Inspection { url, title, .. } => Some((url.clone(), title.clone())),
+            .find_map(|item| match item.journal_safe() {
+                Evidence::Inspection { url, title, .. } => Some((url, title)),
                 _ => None,
             })
             .ok_or("boundary preflight completed without inspection evidence")?;
