@@ -209,6 +209,10 @@ async fn har_preserves_redirect_responses_that_reuse_a_request_id() {
         .find(|entry| entry["request"]["url"] == redirect_url)
         .expect("HAR retains the redirect request");
     assert_eq!(redirect["response"]["status"], 302);
+    assert_eq!(
+        redirect["response"]["redirectURL"], final_url,
+        "HAR records the redirect destination"
+    );
     assert!(
         entries
             .iter()

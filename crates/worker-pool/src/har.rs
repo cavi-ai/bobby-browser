@@ -16,6 +16,8 @@ pub struct HarEntry {
     pub status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
     pub started_unix_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<f64>,
@@ -93,7 +95,7 @@ pub fn har_document(entries: &[HarEntry], page_url: &str) -> Value {
                     "headers": [],
                     "cookies": [],
                     "content": {"size": entry.transfer_bytes.unwrap_or(0), "mimeType": entry.mime_type.clone().unwrap_or_default()},
-                    "redirectURL": "",
+                    "redirectURL": entry.redirect_url.clone().unwrap_or_default(),
                     "headersSize": -1,
                     "bodySize": entry.transfer_bytes.map(|bytes| bytes as i64).unwrap_or(-1),
                 },
@@ -124,6 +126,7 @@ mod tests {
                 method: "GET".into(),
                 status: Some(200),
                 status_text: Some("OK".into()),
+                redirect_url: None,
                 started_unix_ms: 1_700_000_000_123.0,
                 elapsed_ms: Some(12.0),
                 transfer_bytes: Some(3),
