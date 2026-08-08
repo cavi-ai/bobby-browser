@@ -67,6 +67,8 @@ CANDIDATE_SYSTEM_PROMPT = (
 
 
 def build_prompt(example: dict, schema: str = "coords") -> str:
+    if schema == "v1":
+        return build_v1_prompt(example)
     user_text = f"purpose: {example['purpose']}\nintentKind: {example['intent_kind']}\nstuck: {example['stuck']}"
     if example.get("context_url"):
         user_text += f"\nurl: {example['context_url']}"
@@ -84,7 +86,32 @@ def build_prompt(example: dict, schema: str = "coords") -> str:
     return f"{system}\n\n{user_text}"
 
 
+V1_STABLE_PREFIX = """BOBBY-VISION/1
+ROLE: element selector for a browser automation runtime
+RULES: reply with ONLY the index of the element that satisfies the task. No text, no JSON, no explanation. If nothing fits, reply -1."""
+
+
+def build_v1_prompt(example: dict) -> str:
+    """The BOBBY-VISION/1 wire format: stable prefix + varying block."""
+    block = f"TASK: {example['purpose']}"
+    if example.get("context_url"):
+        block += f"\nPAGE: {example['context_url']}"
+    candidates = example.get("context_candidates") or []
+    if candidates:
+        rows = "\n".join(f"{i}|{c['role']}|{c['name']}" for i, c in enumerate(candidates))
+        block += f"\nELEMENTS:\n{rows}"
+    return f"{V1_STABLE_PREFIX}\n\n{block}"
+
+
+def build_v1_completion(example: dict) -> str:
+    """Bare index ground truth; -1 when the example has no valid target."""
+    index = example.get("target_index")
+    return str(-1 if index is None else index)
+
+
 def build_completion(example: dict, schema: str = "coords") -> str:
+    if schema == "v1":
+        return build_v1_completion(example)
     if schema == "candidate":
         confidence = example.get("model_response", {}).get("confidence", 0.5)
         index = example.get("target_index", 0)
@@ -247,7 +274,7 @@ def main():
     parser.add_argument("--num-layers", type=int, default=16, help="Number of trailing layers to convert to LoRA")
     parser.add_argument("--max-seq-length", type=int, default=1024, help="Max sequence length")
     parser.add_argument("--seed", type=int, default=42, help="Shuffle seed")
-    parser.add_argument("--schema", choices=["coords", "candidate"], default="coords", help="Output schema: x,y regression or candidate-index classification")
+    parser.add_argument("--schema", choices=["coords", "candidate", "v1"], default="coords", help="Output schema: x,y regression or candidate-index classification")
     args = parser.parse_args()
 
     config = MLXFineTuneConfig(

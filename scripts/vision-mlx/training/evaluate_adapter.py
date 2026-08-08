@@ -50,6 +50,22 @@ def parse_prediction(text: str) -> dict | None:
     return parsed
 
 
+def parse_v1_response(text: str, n_candidates: int) -> int | None:
+    """BOBBY-VISION/1 decoder: bare integer, -1 = abstain, else transport
+    noise treated as abstention (never an error)."""
+    stripped = text.strip()
+    import re
+    match = re.search(r"-?\d+", stripped)
+    if not match:
+        return -1
+    value = int(match.group())
+    if value == -1:
+        return -1
+    if 0 <= value < n_candidates:
+        return value
+    return -1
+
+
 def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
     from mlx_lm.generate import generate
 
@@ -61,7 +77,12 @@ def generate_predictions(model, tokenizer, examples: list, max_tokens: int, sche
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         try:
             output = generate(model, tokenizer, prompt=text, max_tokens=max_tokens, verbose=False)
-            prediction = parse_prediction(output)
+            if schema == "v1":
+                n = len(example.get("context_candidates") or [])
+                index = parse_v1_response(output, n)
+                prediction = None if index is None else {"action": {"kind": "v1", "index": index}}
+            else:
+                prediction = parse_prediction(output)
         except Exception as e:
             print(f"  Error on example {i}: {e}")
             prediction = None
@@ -235,6 +256,54 @@ def calibration_metrics(predictions: list, examples: list) -> dict:
     return {"ece": ece, "selective": selective, "separation": separation, "scored": len(pairs)}
 
 
+def v1_metrics(predictions: list, examples: list) -> dict:
+    """BOBBY-VISION/1 scoring.
+
+    Positive examples (target_index present): correct iff predicted index
+    equals the target. Negative examples (flagged, no target): correct iff
+    the model abstains (-1). Also reports abstention precision/recall — the
+    routing signal confidence could not provide.
+    """
+    answered_scored = 0
+    answered_correct = 0
+    pos_total = 0
+    pos_abstained = 0
+    neg_total = 0
+    neg_abstained = 0
+
+    for p, e in zip(predictions, examples):
+        pred = p.get("prediction")
+        index = None if pred is None else pred.get("action", {}).get("index")
+        if e.get("negative") or e.get("target_index") is None:
+            neg_total += 1
+            if index == -1:
+                neg_abstained += 1
+            continue
+        pos_total += 1
+        if index == -1:
+            pos_abstained += 1
+            continue
+        if index is None:
+            continue
+        answered_scored += 1
+        if index == e["target_index"]:
+            answered_correct += 1
+
+    return {
+        "total_examples": len(predictions),
+        "positive_examples": pos_total,
+        "negative_examples": neg_total,
+        "answered": answered_scored,
+        "element_accuracy": answered_correct / answered_scored if answered_scored else 0.0,
+        "abstain_rate_positive": pos_abstained / pos_total if pos_total else 0.0,
+        "abstain_recall": neg_abstained / neg_total if neg_total else None,
+        "abstain_precision": (
+            neg_abstained / (neg_abstained + pos_abstained)
+            if (neg_abstained + pos_abstained) else None
+        ),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Bobby MLX LoRA adapter")
     parser.add_argument("--model", required=True, help="Base MLX model (HF repo or local path)")
@@ -246,7 +315,7 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=16, help="LoRA rank used at training time")
     parser.add_argument("--lora-alpha", type=float, default=32.0, help="LoRA alpha used at training time")
     parser.add_argument("--num-layers", type=int, default=16, help="Trailing LoRA layers used at training time")
-    parser.add_argument("--schema", choices=["coords", "candidate"], default="coords", help="Output schema the model was trained with")
+    parser.add_argument("--schema", choices=["coords", "candidate", "v1"], default="coords", help="Output schema the model was trained with")
     args = parser.parse_args()
 
     from mlx_lm import load
@@ -274,41 +343,57 @@ def main():
 
     predictions = generate_predictions(model, tokenizer, examples, args.max_tokens, args.schema)
 
-    evaluator = VisionEvaluator(FineTuneConfig())
-    results = evaluator.evaluate_predictions(predictions)
-    results["element"] = element_accuracy(predictions, examples)
-    results["calibration"] = calibration_metrics(predictions, examples)
+    if args.schema == "v1":
+        results = v1_metrics(predictions, examples)
+        print("\n=== V1 Evaluation ===")
+        print(f"Examples: {results['total_examples']} "
+              f"({results['positive_examples']} positive, {results['negative_examples']} negative)")
+        print(f"Element accuracy (answered): {results['element_accuracy']:.2%} "
+              f"on {results['answered']} answered")
+        print(f"Abstain rate on positives: {results['abstain_rate_positive']:.2%}")
+        if results["abstain_recall"] is not None:
+            print(f"Abstain recall (negatives caught): {results['abstain_recall']:.2%}")
+        if results["abstain_precision"] is not None:
+            print(f"Abstain precision: {results['abstain_precision']:.2%}")
+    else:
+        evaluator = VisionEvaluator(FineTuneConfig())
+        results = evaluator.evaluate_predictions(predictions)
+        results["element"] = element_accuracy(predictions, examples)
+        results["calibration"] = calibration_metrics(predictions, examples)
 
     print("\n=== Evaluation Results ===")
-    print(f"Total examples: {results['total_examples']}")
-    print(f"Successful predictions: {results['successful_predictions']}")
-    print(f"Action accuracy: {results['action_accuracy']:.2%}")
-    print(f"Coordinate accuracy (within 10px): {results['coord_accuracy_10px']:.2%}")
-    print(f"Coordinate accuracy (within 50px): {results['coord_accuracy_50px']:.2%}")
-    print(f"Coordinate MAE: {results['coord_mae']:.2f}")
-    print(f"Avg confidence: {results['avg_confidence']:.4f}")
-    print(f"Element accuracy (correct target selected): "
-          f"{results['element']['correct']}/{results['element']['scored']} "
-          f"= {results['element']['element_accuracy']:.2%}")
-    if results["element"]["content_scored"]:
-        print(f"Content accuracy (text/value match): "
-              f"{results['element']['content_correct']}/{results['element']['content_scored']} "
-              f"= {results['element']['content_accuracy']:.2%}")
-    cal = results["calibration"]
-    if cal["scored"]:
-        print(f"\nCalibration (ECE): {cal['ece']:.4f}")
-        sep = cal["separation"]
-        if sep.get("incorrect_count"):
-            print(f"Confidence: correct mean {sep['correct_mean']:.3f} vs "
-                  f"incorrect mean {sep['incorrect_mean']:.3f} "
-                  f"({sep['incorrect_count']} errors)")
-        print("Selective accuracy (confidence gate):")
-        for row in cal["selective"]:
-            print(f"  >= {row['threshold']:.2f}: {row['accuracy']:.2%} accurate "
-                  f"on {row['coverage']:.0%} coverage")
-    print("\nJourney success rates:")
-    for journey, rate in results["journey_success_rates"].items():
-        print(f"  {journey}: {rate:.2%}")
+    if args.schema == "v1":
+        pass
+    else:
+        print(f"Total examples: {results['total_examples']}")
+        print(f"Successful predictions: {results['successful_predictions']}")
+        print(f"Action accuracy: {results['action_accuracy']:.2%}")
+        print(f"Coordinate accuracy (within 10px): {results['coord_accuracy_10px']:.2%}")
+        print(f"Coordinate accuracy (within 50px): {results['coord_accuracy_50px']:.2%}")
+        print(f"Coordinate MAE: {results['coord_mae']:.2f}")
+        print(f"Avg confidence: {results['avg_confidence']:.4f}")
+        print(f"Element accuracy (correct target selected): "
+              f"{results['element']['correct']}/{results['element']['scored']} "
+              f"= {results['element']['element_accuracy']:.2%}")
+        if results["element"]["content_scored"]:
+            print(f"Content accuracy (text/value match): "
+                  f"{results['element']['content_correct']}/{results['element']['content_scored']} "
+                  f"= {results['element']['content_accuracy']:.2%}")
+        cal = results["calibration"]
+        if cal["scored"]:
+            print(f"\nCalibration (ECE): {cal['ece']:.4f}")
+            sep = cal["separation"]
+            if sep.get("incorrect_count"):
+                print(f"Confidence: correct mean {sep['correct_mean']:.3f} vs "
+                      f"incorrect mean {sep['incorrect_mean']:.3f} "
+                      f"({sep['incorrect_count']} errors)")
+            print("Selective accuracy (confidence gate):")
+            for row in cal["selective"]:
+                print(f"  >= {row['threshold']:.2f}: {row['accuracy']:.2%} accurate "
+                      f"on {row['coverage']:.0%} coverage")
+        print("\nJourney success rates:")
+        for journey, rate in results["journey_success_rates"].items():
+            print(f"  {journey}: {rate:.2%}")
 
     out_dir = Path(args.output) if args.output else (
         Path(args.adapter).parent if args.adapter else Path(".")
