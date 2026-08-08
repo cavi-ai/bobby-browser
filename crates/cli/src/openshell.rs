@@ -67,6 +67,8 @@ pub fn capabilities_for_openshell_preset(
 pub struct OpenshellPack {
     pub dir: PathBuf,
     pub policy: PathBuf,
+    /// Network-only fragment for merging into an existing OpenShell policy.
+    pub policy_network: PathBuf,
     pub mcp: PathBuf,
     pub readme: PathBuf,
     pub skill: PathBuf,
@@ -114,29 +116,9 @@ pub fn emit_mcp_config(options: &PackOptions) -> String {
     serde_json::to_string_pretty(&fragment).expect("openshell mcp config is serializable")
 }
 
-/// OpenShell network policy allowing MCP Streamable HTTP to host bobby only.
-pub fn emit_policy_yaml(options: &PackOptions) -> String {
+fn emit_network_policies_block(options: &PackOptions) -> String {
     format!(
-        r#"# bobby-browser ↔ OpenShell network policy (sample)
-# Apply with: openshell policy set <sandbox> --policy openshell/policy.yaml --wait
-# WARNING: `policy set` replaces the entire sandbox policy. Prefer merging this
-# network_policies block into your existing policy when you already customize FS/process.
-# Replace binaries.path with the agent binary that will call MCP.
-# Reachability uses OpenShell's supervisor proxy — do not expose bobby beyond
-# the host gateway address the sandbox can dial (host.docker.internal /
-# host.containers.internal / LAN host). Keep bobby bind loopback+gateway only.
-# Prefer BOBBY_MCP_TOOLSET=explore (or act) inside the sandbox to keep tools/list small.
-version: 1
-filesystem_policy:
-  include_workdir: true
-  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
-  read_write: [/sandbox, /tmp, /dev/null]
-landlock:
-  compatibility: best_effort
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-network_policies:
+        r#"network_policies:
   bobby_browser_mcp:
     name: bobby-browser-mcp
     endpoints:
@@ -168,6 +150,48 @@ network_policies:
     )
 }
 
+/// Network-only fragment: merge into an existing OpenShell policy (do not
+/// `policy set` this file alone — it would wipe FS/process defaults).
+pub fn emit_policy_network_yaml(options: &PackOptions) -> String {
+    format!(
+        r#"# bobby-browser ↔ OpenShell network_policies fragment (merge-only)
+# WARNING: `openshell policy set` replaces the entire sandbox policy.
+# Merge this block into your existing policy when you already customize FS/process.
+# For greenfield sandboxes, prefer the full sample at openshell/policy.yaml.
+# Prefer BOBBY_MCP_TOOLSET=explore (or act) inside the sandbox to keep tools/list small.
+{block}"#,
+        block = emit_network_policies_block(options),
+    )
+}
+
+/// Full OpenShell policy sample allowing MCP Streamable HTTP to host bobby only.
+pub fn emit_policy_yaml(options: &PackOptions) -> String {
+    format!(
+        r#"# bobby-browser ↔ OpenShell network policy (sample)
+# Apply with: openshell policy set <sandbox> --policy openshell/policy.yaml --wait
+# WARNING: `policy set` replaces the entire sandbox policy. Prefer merging
+# openshell/policy-network.yaml into your existing policy when you already
+# customize FS/process.
+# Replace binaries.path with the agent binary that will call MCP.
+# Reachability uses OpenShell's supervisor proxy — do not expose bobby beyond
+# the host gateway address the sandbox can dial (host.docker.internal /
+# host.containers.internal / LAN host). Keep bobby bind loopback+gateway only.
+# Prefer BOBBY_MCP_TOOLSET=explore (or act) inside the sandbox to keep tools/list small.
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock:
+  compatibility: best_effort
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+{block}"#,
+        block = emit_network_policies_block(options),
+    )
+}
+
 fn emit_readme(options: &PackOptions) -> String {
     format!(
         r#"# bobby-browser on OpenShell
@@ -183,9 +207,11 @@ through OpenShell's policy proxy (this pack's `policy.yaml`).
   durable context graph are profile-scoped, not principal-scoped. Two sandboxes
   on the same host companion share site state. For stronger isolation use a
   dedicated companion profile per sandbox, or managed Chromium disposable
-  workers (no persistent logins).
+  workers (no persistent logins). `bobby doctor` warns when ≥2 local sandboxes
+  share one enrolled companion.
 - MCP URL defaults to cleartext HTTP across the host gateway — firewall that
-  path; do not bind bobby to untrusted networks.
+  path; do not bind bobby to untrusted networks. Prefer HTTPS or loopback-only
+  bind when possible.
 
 ## Host (once)
 
@@ -203,8 +229,9 @@ through OpenShell's policy proxy (this pack's `policy.yaml`).
    0600 injection env under the OS config dir; pass that bearer into OpenShell
    credential injection as `{token_env}` (never bake it into the image).
    Use `--capabilities-preset agent` only when you need JS/vision/jobs.
-3. `openshell policy set <sandbox> --policy policy.yaml --wait` (full replace —
-   merge network_policies if you already customize FS/process).
+3. Apply policy: greenfield → `openshell policy set <sandbox> --policy policy.yaml --wait`
+   (full replace). Existing FS/process customizations → merge
+   `policy-network.yaml` into your policy, then `policy set`.
 4. Point the agent MCP client at `mcp.json`; set `BOBBY_MCP_TOOLSET=explore`.
 5. When the sandbox dies: `bobby openshell revoke --sandbox <id>`
 "#,
@@ -222,11 +249,13 @@ pub fn install_pack(project_root: &Path, options: &PackOptions) -> Result<Opensh
         .with_context(|| format!("could not create {}", skill_dir.display()))?;
 
     let policy = dir.join("policy.yaml");
+    let policy_network = dir.join("policy-network.yaml");
     let mcp = dir.join("mcp.json");
     let readme = dir.join("README.md");
     let skill = skill_dir.join("SKILL.md");
 
     write_text(&policy, &emit_policy_yaml(options))?;
+    write_text(&policy_network, &emit_policy_network_yaml(options))?;
     let mut mcp_body = emit_mcp_config(options);
     mcp_body.push('\n');
     write_text(&mcp, &mcp_body)?;
@@ -236,6 +265,7 @@ pub fn install_pack(project_root: &Path, options: &PackOptions) -> Result<Opensh
     Ok(OpenshellPack {
         dir,
         policy,
+        policy_network,
         mcp,
         readme,
         skill,
@@ -699,6 +729,11 @@ pub fn doctor_pack_detail(project_root: &Path) -> Option<(bool, String)> {
                 );
             }
         }
+        if !dir.join("policy-network.yaml").is_file() {
+            detail.push_str(
+                "; warn: missing policy-network.yaml merge fragment — re-run `bobby openshell install`",
+            );
+        }
         Some((true, detail))
     } else {
         Some((
@@ -711,11 +746,32 @@ pub fn doctor_pack_detail(project_root: &Path) -> Option<(bool, String)> {
     }
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Parse `scheme` + hostname from an MCP URL like `http://host:7777/v1/mcp`.
+fn mcp_url_scheme_host(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let host = host_port
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_port);
+    if host.is_empty() {
+        return None;
+    }
+    Some((scheme, host))
+}
+
 /// Extra doctor rows when an OpenShell pack is present.
 pub struct OpenshellDoctorExtras {
     pub admin: (bool, String),
     pub companion: (bool, String),
     pub mcp_url: Option<(bool, String)>,
+    /// Cleartext bearer over a non-loopback host gateway / bind.
+    pub cleartext: Option<(bool, String)>,
     pub local_sandboxes: (bool, String),
 }
 
@@ -746,7 +802,15 @@ pub fn doctor_openshell_extras(
             ),
         };
 
-    let companion = if firefox_enrolled {
+    let sandbox_count = list_sandboxes().map(|list| list.len()).unwrap_or(0);
+    let companion = if firefox_enrolled && sandbox_count >= 2 {
+        (
+            false,
+            format!(
+                "{sandbox_count} local OpenShell sandboxes share one Firefox companion profile — cookies/context leak across sandboxes; use a dedicated companion profile per sandbox or managed Chromium disposable workers"
+            ),
+        )
+    } else if firefox_enrolled {
         (
             true,
             "Firefox companion enrolled — cookies/context are profile-scoped across all OpenShell sandboxes on this host"
@@ -760,45 +824,85 @@ pub fn doctor_openshell_extras(
         )
     };
 
+    let mcp_path = project_root.join("openshell").join("mcp.json");
+    let mcp_url_text = std::fs::read_to_string(&mcp_path).ok().and_then(|text| {
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|json| {
+                json["mcpServers"]["bobby-browser"]["url"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+    });
+
     let mcp_url = {
-        let mcp_path = project_root.join("openshell").join("mcp.json");
         if !mcp_path.is_file() {
             None
         } else {
-            let detail = match (std::fs::read_to_string(&mcp_path), config) {
-                (Ok(text), Some(cfg)) => match serde_json::from_str::<serde_json::Value>(&text) {
-                    Ok(json) => {
-                        let url = json["mcpServers"]["bobby-browser"]["url"]
-                            .as_str()
-                            .unwrap_or("");
-                        let expected_port = cfg.server.port.to_string();
-                        let port_ok = url.contains(&format!(":{expected_port}/"))
-                            || url.ends_with(&format!(":{expected_port}"));
-                        if port_ok {
-                            (
-                                true,
-                                format!("mcp.json URL {url} matches config port {expected_port}"),
-                            )
-                        } else {
-                            (
-                                false,
-                                format!(
-                                    "mcp.json URL {url} may not match config bind {}:{}",
-                                    cfg.server.host, cfg.server.port
-                                ),
-                            )
-                        }
+            let detail = match (mcp_url_text.as_deref(), config) {
+                (Some(url), Some(cfg)) => {
+                    let expected_port = cfg.server.port.to_string();
+                    let port_ok = url.contains(&format!(":{expected_port}/"))
+                        || url.ends_with(&format!(":{expected_port}"));
+                    if port_ok {
+                        (
+                            true,
+                            format!("mcp.json URL {url} matches config port {expected_port}"),
+                        )
+                    } else {
+                        (
+                            false,
+                            format!(
+                                "mcp.json URL {url} may not match config bind {}:{}",
+                                cfg.server.host, cfg.server.port
+                            ),
+                        )
                     }
-                    Err(error) => (false, format!("mcp.json is not valid JSON: {error}")),
+                }
+                (None, _) => match std::fs::read_to_string(&mcp_path) {
+                    Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(_) => (false, "mcp.json missing bobby-browser.url".to_owned()),
+                        Err(error) => (false, format!("mcp.json is not valid JSON: {error}")),
+                    },
+                    Err(error) => (false, format!("could not read mcp.json: {error}")),
                 },
-                (Err(error), _) => (false, format!("could not read mcp.json: {error}")),
-                (Ok(_), None) => (
+                (Some(_), None) => (
                     true,
                     "mcp.json present (config unavailable for port check)".to_owned(),
                 ),
             };
             Some(detail)
         }
+    };
+
+    let cleartext = match mcp_url_text.as_deref() {
+        Some(url) => {
+            let mut warnings = Vec::new();
+            if let Some((scheme, host)) = mcp_url_scheme_host(url) {
+                if scheme.eq_ignore_ascii_case("http") && !is_loopback_host(host) {
+                    warnings.push(format!(
+                        "mcp.json uses cleartext {scheme}://{host} — bearer crosses the host gateway; firewall that path or terminate TLS"
+                    ));
+                }
+            }
+            if let Some(cfg) = config {
+                if !is_loopback_host(&cfg.server.host) {
+                    warnings.push(format!(
+                        "config server.host {} is non-loopback without TLS termination in-bobby — scope bind to gateway-only interfaces",
+                        cfg.server.host
+                    ));
+                }
+            }
+            if warnings.is_empty() {
+                Some((
+                    true,
+                    "MCP URL / serve bind look loopback-safe or HTTPS".to_owned(),
+                ))
+            } else {
+                Some((false, warnings.join("; ")))
+            }
+        }
+        None => None,
     };
 
     let local_sandboxes = match list_sandboxes() {
@@ -821,6 +925,7 @@ pub fn doctor_openshell_extras(
         admin,
         companion,
         mcp_url,
+        cleartext,
         local_sandboxes,
     }
 }
@@ -858,7 +963,12 @@ mod tests {
         assert!(yaml.contains("max_body_bytes: 262144"));
         assert!(yaml.contains("tool: evaluate_javascript"));
         assert!(yaml.contains("tool: job_submit"));
-        assert!(yaml.contains("policy set` replaces"));
+        assert!(yaml.contains("policy-network.yaml"));
+        let network = emit_policy_network_yaml(&options);
+        assert!(network.contains("network_policies:"));
+        assert!(network.contains("merge-only") || network.contains("Merge this block"));
+        assert!(!network.contains("filesystem_policy:"));
+        assert!(network.contains("tool: evaluate_javascript"));
     }
 
     #[test]
@@ -867,6 +977,7 @@ mod tests {
         assert!(readme.contains("Shared Firefox companion is a hard constraint"));
         assert!(readme.contains("profile-scoped, not principal-scoped"));
         assert!(readme.contains("unique idempotency key"));
+        assert!(readme.contains("policy-network.yaml"));
     }
 
     #[test]
@@ -874,11 +985,66 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let pack = install_pack(root.path(), &PackOptions::default()).unwrap();
         assert!(pack.policy.is_file());
+        assert!(pack.policy_network.is_file());
         assert!(pack.mcp.is_file());
         assert!(pack.readme.is_file());
         assert!(pack.skill.is_file());
         let (ok, detail) = doctor_pack_detail(root.path()).unwrap();
         assert!(ok, "{detail}");
+        assert!(!detail.contains("missing policy-network.yaml"));
+    }
+
+    #[test]
+    fn doctor_warns_shared_companion_with_multiple_sandboxes() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = root.path().join("openshell-secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::env::set_var("BOBBY_OPENSHELL_SECRETS_DIR", &secrets);
+        let project = root.path().join("project");
+        std::fs::create_dir_all(project.join("openshell")).unwrap();
+        write_text(
+            &project.join("openshell").join("mcp.json"),
+            &emit_mcp_config(&PackOptions::default()),
+        )
+        .unwrap();
+
+        let result = (|| {
+            for name in ["a", "b"] {
+                write_sandbox_status(&SandboxStatus {
+                    sandbox: name.into(),
+                    principal_id: Uuid::new_v4().to_string(),
+                    expires_at: "2099-01-01T00:00:00.000Z".into(),
+                    mcp_url: "http://host.docker.internal:7777/v1/mcp".into(),
+                    capabilities_preset: "openshell".into(),
+                })?;
+            }
+            let extras = doctor_openshell_extras(&project, None, None, true);
+            anyhow::ensure!(!extras.companion.0, "{}", extras.companion.1);
+            anyhow::ensure!(extras.companion.1.contains("share one Firefox companion"));
+            let cleartext = extras.cleartext.expect("cleartext row");
+            anyhow::ensure!(!cleartext.0, "{}", cleartext.1);
+            anyhow::ensure!(cleartext.1.contains("cleartext"));
+            Ok::<(), anyhow::Error>(())
+        })();
+        std::env::remove_var("BOBBY_OPENSHELL_SECRETS_DIR");
+        result.unwrap();
+    }
+
+    #[test]
+    fn cleartext_ok_for_loopback_mcp_url() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let openshell = project.join("openshell");
+        std::fs::create_dir_all(&openshell).unwrap();
+        let options = PackOptions {
+            mcp_host: "127.0.0.1".into(),
+            mcp_port: 7777,
+            agent_binary: "/usr/local/bin/claude".into(),
+        };
+        write_text(&openshell.join("mcp.json"), &emit_mcp_config(&options)).unwrap();
+        let extras = doctor_openshell_extras(&project, None, None, false);
+        let cleartext = extras.cleartext.expect("cleartext row");
+        assert!(cleartext.0, "{}", cleartext.1);
     }
 
     #[test]

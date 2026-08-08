@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.7.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # OpenShell host
@@ -28,12 +28,14 @@ fingerprint / humanize). Use `--capabilities-preset agent` only when needed.
   are **profile-scoped**, not principal-scoped. Two sandboxes on the same host
   companion share site state. For stronger isolation use a dedicated companion
   profile per sandbox, or managed Chromium disposable workers (no persistent
-  logins).
+  logins). `bobby doctor` warns (`openshell-companion`) when ≥2 local sandboxes
+  share one enrolled companion.
 - **Cleartext MCP:** default `mcp.json` uses `http://` to the host gateway.
-  Firewall that path; do not bind bobby to untrusted networks.
+  Firewall that path; do not bind bobby to untrusted networks. Doctor reports
+  `openshell-cleartext` when the MCP URL or `server.host` is non-loopback HTTP.
 - **Policy replace:** `openshell policy set` replaces the entire sandbox policy.
-  Merge the pack’s `network_policies` into an existing policy when you already
-  customize filesystem/process sections.
+  Prefer merging `openshell/policy-network.yaml` into an existing policy when you
+  already customize filesystem/process sections.
 
 ## Install the pack
 
@@ -46,8 +48,10 @@ bobby init --emit openshell
 
 Writes project `openshell/`:
 
-- `policy.yaml` — OpenShell `protocol: mcp` allowlist (denies
+- `policy.yaml` — full OpenShell sample (`protocol: mcp` allowlist; denies
   `evaluate_javascript` / `job_*` at the proxy as defense in depth)
+- `policy-network.yaml` — **merge-only** `network_policies` fragment (do not
+  `policy set` this file alone)
 - `mcp.json` — streamable-HTTP client config (`Bearer ${AUTOMATION_RUNTIME_TOKEN}`)
 - `skills/bobby-browser/SKILL.md` — agent skill copy
 - `README.md` — operator steps
@@ -75,6 +79,7 @@ bobby openshell provision --sandbox demo-1
 # writes ~/.config/bobby-browser/openshell/demo-1.env (0600)
 # inject AUTOMATION_RUNTIME_TOKEN into the OpenShell sandbox credentials
 openshell policy set demo-1 --policy openshell/policy.yaml --wait
+# or merge openshell/policy-network.yaml into an existing policy, then policy set
 ```
 
 Prefer `BOBBY_MCP_TOOLSET=explore` (or `act`) inside the sandbox so `tools/list`
@@ -105,8 +110,8 @@ bobby openshell rotate --sandbox demo-1
 
 If `openshell/` is present in the working directory, `bobby doctor` reports
 `openshell-pack` plus `openshell-admin`, `openshell-companion`,
-`openshell-mcp-url`, and `openshell-sandboxes` (and warns when an older pack
-lacks hardened deny_rules).
+`openshell-mcp-url`, `openshell-cleartext`, and `openshell-sandboxes` (and warns
+when an older pack lacks hardened deny_rules or `policy-network.yaml`).
 
 ## Non-goals
 

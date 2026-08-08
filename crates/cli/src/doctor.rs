@@ -1015,6 +1015,9 @@ pub(crate) fn run_doctor(
             if let Some(mcp) = extras.mcp_url {
                 record("openshell-mcp-url", mcp);
             }
+            if let Some(cleartext) = extras.cleartext {
+                record("openshell-cleartext", cleartext);
+            }
             record("openshell-sandboxes", extras.local_sandboxes);
         }
     }
