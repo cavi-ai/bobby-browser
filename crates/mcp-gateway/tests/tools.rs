@@ -3725,6 +3725,107 @@ async fn auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command() {
     );
 }
 
+#[tokio::test]
+async fn popup_auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let workers = Arc::new(WorkerPool::new(4, Arc::new(MinimalFactory)));
+    let checkpoint_store = checkpoint_store::CheckpointStore::open(root.path().join("checkpoints"))
+        .await
+        .unwrap();
+    let runtime_service = RuntimeService::with_recovery(
+        SessionManager::new(workers.clone()),
+        PageRuntime::new_with_checkpoints(journal, workers, checkpoint_store.clone()),
+        page_runtime::RecoveryCoordinator::new(checkpoint_store.clone()),
+    );
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000c2")),
+            [
+                Capability::SessionWrite,
+                Capability::PageWrite,
+                Capability::BrowserMutate,
+                Capability::RecoveryWrite,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let server = Server::new(Arc::new(AuthenticatedRuntime::new(runtime_service, handle)));
+    initialize(&server).await;
+
+    let session = server
+        .handle_message(request(
+            100,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"fixture"}}),
+        ))
+        .await
+        .unwrap();
+    let session_id = session_id_from_structured_content(&session);
+    let page = server
+        .handle_message(request(
+            101,
+            "tools/call",
+            json!({
+                "name":"page_open",
+                "arguments":{"sessionId":session_id.0.to_string()}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(page["result"]["isError"], false, "{page}");
+    let page_id = page["result"]["structuredContent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let workflow_id = types::WorkflowId::new().0.to_string();
+    let submitted = server
+        .handle_message(request(
+            102,
+            "tools/call",
+            json!({
+                "name":"click_and_wait_for_popup",
+                "arguments":{
+                    "sessionId":session_id.0.to_string(),
+                    "pageId":page_id,
+                    "workflowId":workflow_id,
+                    "target":{"role":"button","accessibleName":"Connect"},
+                    "timeoutMs":1000
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    // MinimalFactory has no real popup; the gate under test is the checkpoint
+    // mint, which must happen before browser dispatch either way.
+    let structured = &submitted["result"]["structuredContent"];
+    assert!(
+        structured["checkpointId"].is_string(),
+        "click_and_wait_for_popup must autoCheckpoint by default: {submitted}"
+    );
+    let saved = checkpoint_store
+        .load(&types::WorkflowId(workflow_id.parse().unwrap()))
+        .await
+        .expect("autoCheckpoint must persist a checkpoint under the envelope's workflow");
+    assert_eq!(saved.recovery_class, types::CommandClass::Boundary);
+    assert_eq!(
+        saved
+            .boundary_command_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+        structured["commandId"].as_str().map(str::to_owned),
+        "the checkpoint must name the popup command it guards"
+    );
+}
+
 /// `autoCheckpoint` is sugar over the boundary gate, never a way around it.
 ///
 /// Without a recovery coordinator there is nowhere to save a checkpoint, so

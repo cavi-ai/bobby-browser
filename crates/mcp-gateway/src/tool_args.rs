@@ -270,11 +270,27 @@ pub(crate) struct ClickArgs {
     pub(crate) expected_url: Option<String>,
 }
 
-page_scoped_args!(ClickAndWaitForPopupArgs {
-    selector: Option<String>,
-    target: Option<types::TargetSpec>,
-    timeout_ms: Option<u64>,
-});
+/// Popup wait is always Boundary class, so — like boundary `click` — it
+/// accepts caller-pinned `commandId`/`attemptId` and defaults
+/// `autoCheckpoint` to true so the flat tool is usable without a prior
+/// `checkpoint_save`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ClickAndWaitForPopupArgs {
+    pub(crate) session_id: types::SessionId,
+    pub(crate) page_id: types::PageId,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
+    #[serde(default)]
+    pub(crate) command_id: Option<types::CommandId>,
+    #[serde(default)]
+    pub(crate) attempt_id: Option<types::AttemptId>,
+    pub(crate) selector: Option<String>,
+    pub(crate) target: Option<types::TargetSpec>,
+    pub(crate) timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) auto_checkpoint: Option<bool>,
+}
 
 page_scoped_args!(TypeTextArgs {
     selector: Option<String>,

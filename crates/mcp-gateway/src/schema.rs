@@ -277,11 +277,14 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "click_and_wait_for_popup" => (
             json!({
                 "workflowId": id(),
+                "commandId": id_pin(),
+                "attemptId": id_pin(),
                 "sessionId": id(),
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
                 "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                "timeoutMs": timeout_ms()
+                "timeoutMs": timeout_ms(),
+                "autoCheckpoint":{"type":"boolean"}
             }),
             vec!["sessionId", "pageId"],
         ),
