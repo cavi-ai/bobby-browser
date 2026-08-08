@@ -433,6 +433,7 @@ pub struct ProvisionResult {
 ///
 /// If a prior principal is recorded for this sandbox id, it is revoked first so
 /// operators can rotate cleanly. Idempotency keys are unique per attempt.
+#[allow(clippy::too_many_arguments)]
 pub fn provision_sandbox(
     sandbox: &str,
     base_url: Option<String>,
