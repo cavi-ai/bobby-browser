@@ -21,11 +21,29 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
 
 from mlx_finetune import build_completion, build_prompt
+
+SUPPORTED_ACTION_KINDS = {
+    "click",
+    "typeText",
+    "extractValue",
+    "clickCandidate",
+    "typeIntoCandidate",
+    "extractFromCandidate",
+}
+
+
+def finite_number(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def parse_prediction(text: str) -> dict | None:
@@ -45,9 +63,34 @@ def parse_prediction(text: str) -> dict | None:
         parsed = json.loads(content[start : end + 1])
     except json.JSONDecodeError:
         return None
-    if not isinstance(parsed, dict) or "action" not in parsed:
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("action"), dict):
+        return None
+    action = parsed["action"]
+    if action.get("kind") not in SUPPORTED_ACTION_KINDS:
+        return None
+    if action.get("kind") == "click" and not (
+        finite_number(action.get("x")) and finite_number(action.get("y"))
+    ):
+        return None
+    if "confidence" in parsed and not finite_number(parsed["confidence"]):
         return None
     return parsed
+
+
+def parse_v1_response(text: str, n_candidates: int) -> int | None:
+    """BOBBY-VISION/1 decoder: bare integer, -1 = abstain, else transport
+    noise treated as abstention (never an error)."""
+    stripped = text.strip()
+    import re
+    match = re.search(r"-?\d+", stripped)
+    if not match:
+        return -1
+    value = int(match.group())
+    if value == -1:
+        return -1
+    if 0 <= value < n_candidates:
+        return value
+    return -1
 
 
 def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
@@ -61,7 +104,12 @@ def generate_predictions(model, tokenizer, examples: list, max_tokens: int, sche
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         try:
             output = generate(model, tokenizer, prompt=text, max_tokens=max_tokens, verbose=False)
-            prediction = parse_prediction(output)
+            if schema == "v1":
+                n = len(example.get("context_candidates") or [])
+                index = parse_v1_response(output, n)
+                prediction = None if index is None else {"action": {"kind": "v1", "index": index}}
+            else:
+                prediction = parse_prediction(output)
         except Exception as e:
             print(f"  Error on example {i}: {e}")
             prediction = None
@@ -88,22 +136,25 @@ def target_bbox(example: dict) -> dict | None:
 
 
 def point_in_bbox(x: float, y: float, bbox: dict) -> bool:
+    if not finite_number(x) or not finite_number(y):
+        return False
     return bbox["x"] <= x <= bbox["x"] + bbox["w"] and bbox["y"] <= y <= bbox["y"] + bbox["h"]
 
 
 def element_accuracy(predictions: list, examples: list) -> dict:
-    """Did the action select the correct element? Comparable across schemas.
+    """Score target selection, payload, and full-action correctness separately.
 
     candidate kinds (clickCandidate/typeIntoCandidate/extractFromCandidate):
         index == target_index
     coords click: predicted (x, y) inside the target candidate's bbox
-    coords typeText/extractValue: content match against the target
-        (typeText text / extractValue value); element is the prompt's target
+    coords typeText: the sole textbox is implied; text is scored as payload
+    coords extractValue: the returned value identifies the unique target and payload
     """
     scored = 0
     correct = 0
     content_scored = 0
     content_correct = 0
+    fully_correct = 0
     for p, e in zip(predictions, examples):
         pred = p.get("prediction")
         if pred is None:
@@ -112,40 +163,62 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         kind = action.get("kind")
         target = e.get("target_index")
         target_action = e.get("model_response", {}).get("action", {})
+        expected_kind = target_action.get("kind")
+        canonical_kind = {
+            "clickCandidate": "click",
+            "typeIntoCandidate": "typeText",
+            "extractFromCandidate": "extractValue",
+        }.get(kind, kind)
 
+        if kind in (
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+            "click",
+            "typeText",
+            "extractValue",
+        ) and canonical_kind != expected_kind:
+            scored += 1
+            continue
+
+        target_correct = False
+        payload_required = False
+        payload_correct = False
         if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
             if target is None:
                 continue
             scored += 1
-            if action.get("index") == target:
-                correct += 1
+            target_correct = action.get("index") == target
             if kind == "typeIntoCandidate":
-                content_scored += 1
-                if action.get("text") == target_action.get("text"):
-                    content_correct += 1
-            elif kind == "extractFromCandidate":
-                content_scored += 1
-                if action.get("index") == target:
-                    content_correct += 1
+                payload_required = True
+                payload_correct = action.get("text") == target_action.get("text")
         elif kind == "click":
             bbox = target_bbox(e)
             if bbox is None:
                 continue
             scored += 1
-            if point_in_bbox(action.get("x", -1), action.get("y", -1), bbox):
-                correct += 1
+            target_correct = point_in_bbox(action.get("x", -1), action.get("y", -1), bbox)
         elif kind == "typeText":
             scored += 1
-            correct += 1  # element is named by the purpose, not selectable here
-            content_scored += 1
-            if action.get("text") == target_action.get("text"):
-                content_correct += 1
+            target_correct = True  # the generated purpose names the sole textbox
+            payload_required = True
+            payload_correct = action.get("text") == target_action.get("text")
         elif kind == "extractValue":
             scored += 1
+            target_correct = action.get("value") == target_action.get("value")
+            payload_required = True
+            payload_correct = target_correct
+        else:
+            continue
+
+        if target_correct:
+            correct += 1
+        if payload_required:
             content_scored += 1
-            if action.get("value") == target_action.get("value"):
-                correct += 1
+            if payload_correct:
                 content_correct += 1
+        if target_correct and (not payload_required or payload_correct):
+            fully_correct += 1
 
     return {
         "scored": scored,
@@ -154,6 +227,134 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         "content_scored": content_scored,
         "content_correct": content_correct,
         "content_accuracy": content_correct / content_scored if content_scored else 0.0,
+        "fully_correct": fully_correct,
+        "fully_correct_accuracy": fully_correct / scored if scored else 0.0,
+    }
+
+
+def is_correct(pred: dict | None, e: dict) -> bool | None:
+    """Per-item element correctness. None = unscored (unparsed or untargeted)."""
+    if pred is None:
+        return None
+    action = pred.get("action", {})
+    kind = action.get("kind")
+    target = e.get("target_index")
+    target_action = e.get("model_response", {}).get("action", {})
+
+    if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+        if target is None:
+            return None
+        return action.get("index") == target
+    if kind == "click":
+        bbox = target_bbox(e)
+        if bbox is None:
+            return None
+        return point_in_bbox(action.get("x", -1), action.get("y", -1), bbox)
+    if kind == "typeText":
+        return action.get("text") == target_action.get("text")
+    if kind == "extractValue":
+        return action.get("value") == target_action.get("value")
+    return None
+
+
+def calibration_metrics(predictions: list, examples: list) -> dict:
+    """Confidence-vs-correctness analysis for the routing claim: does gating
+    low-confidence predictions raise accuracy on the kept set?
+
+    - ece: expected calibration error over 10 bins
+    - selective: accuracy/coverage at each confidence threshold
+    - separation: mean confidence of correct vs incorrect predictions
+    """
+    pairs = []
+    for p, e in zip(predictions, examples):
+        pred = p.get("prediction")
+        correct = is_correct(pred, e)
+        if correct is None:
+            continue
+        confidence = pred.get("confidence", 0.5)
+        pairs.append((confidence, correct))
+
+    if not pairs:
+        return {"ece": 0.0, "selective": [], "separation": {}, "scored": 0}
+
+    bins: list[list[tuple[float, bool]]] = [[] for _ in range(10)]
+    for confidence, correct in pairs:
+        bins[min(int(confidence * 10), 9)].append((confidence, correct))
+    ece = 0.0
+    for bucket in bins:
+        if not bucket:
+            continue
+        acc = sum(1 for _, c in bucket if c) / len(bucket)
+        conf = sum(c for c, _ in bucket) / len(bucket)
+        ece += (len(bucket) / len(pairs)) * abs(acc - conf)
+
+    selective = []
+    for threshold in (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95):
+        kept = [(c, ok) for c, ok in pairs if c >= threshold]
+        if kept:
+            acc = sum(1 for _, ok in kept if ok) / len(kept)
+            selective.append({
+                "threshold": threshold,
+                "coverage": len(kept) / len(pairs),
+                "accuracy": acc,
+            })
+
+    correct_confs = [c for c, ok in pairs if ok]
+    incorrect_confs = [c for c, ok in pairs if not ok]
+    separation = {
+        "correct_mean": sum(correct_confs) / len(correct_confs) if correct_confs else None,
+        "incorrect_mean": sum(incorrect_confs) / len(incorrect_confs) if incorrect_confs else None,
+        "incorrect_count": len(incorrect_confs),
+    }
+
+    return {"ece": ece, "selective": selective, "separation": separation, "scored": len(pairs)}
+
+
+def v1_metrics(predictions: list, examples: list) -> dict:
+    """BOBBY-VISION/1 scoring.
+
+    Positive examples (target_index present): correct iff predicted index
+    equals the target. Negative examples (flagged, no target): correct iff
+    the model abstains (-1). Also reports abstention precision/recall — the
+    routing signal confidence could not provide.
+    """
+    answered_scored = 0
+    answered_correct = 0
+    pos_total = 0
+    pos_abstained = 0
+    neg_total = 0
+    neg_abstained = 0
+
+    for p, e in zip(predictions, examples):
+        pred = p.get("prediction")
+        index = None if pred is None else pred.get("action", {}).get("index")
+        if e.get("negative") or e.get("target_index") is None:
+            neg_total += 1
+            if index == -1:
+                neg_abstained += 1
+            continue
+        pos_total += 1
+        if index == -1:
+            pos_abstained += 1
+            continue
+        if index is None:
+            continue
+        answered_scored += 1
+        if index == e["target_index"]:
+            answered_correct += 1
+
+    return {
+        "total_examples": len(predictions),
+        "positive_examples": pos_total,
+        "negative_examples": neg_total,
+        "answered": answered_scored,
+        "element_accuracy": answered_correct / answered_scored if answered_scored else 0.0,
+        "abstain_rate_positive": pos_abstained / pos_total if pos_total else 0.0,
+        "abstain_recall": neg_abstained / neg_total if neg_total else None,
+        "abstain_precision": (
+            neg_abstained / (neg_abstained + pos_abstained)
+            if (neg_abstained + pos_abstained) else None
+        ),
     }
 
 
@@ -168,7 +369,7 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=16, help="LoRA rank used at training time")
     parser.add_argument("--lora-alpha", type=float, default=32.0, help="LoRA alpha used at training time")
     parser.add_argument("--num-layers", type=int, default=16, help="Trailing LoRA layers used at training time")
-    parser.add_argument("--schema", choices=["coords", "candidate"], default="coords", help="Output schema the model was trained with")
+    parser.add_argument("--schema", choices=["coords", "candidate", "v1"], default="coords", help="Output schema the model was trained with")
     args = parser.parse_args()
 
     from mlx_lm import load
@@ -196,28 +397,60 @@ def main():
 
     predictions = generate_predictions(model, tokenizer, examples, args.max_tokens, args.schema)
 
-    evaluator = VisionEvaluator(FineTuneConfig())
-    results = evaluator.evaluate_predictions(predictions)
-    results["element"] = element_accuracy(predictions, examples)
+    if args.schema == "v1":
+        results = v1_metrics(predictions, examples)
+        print("\n=== V1 Evaluation ===")
+        print(f"Examples: {results['total_examples']} "
+              f"({results['positive_examples']} positive, {results['negative_examples']} negative)")
+        print(f"Element accuracy (answered): {results['element_accuracy']:.2%} "
+              f"on {results['answered']} answered")
+        print(f"Abstain rate on positives: {results['abstain_rate_positive']:.2%}")
+        if results["abstain_recall"] is not None:
+            print(f"Abstain recall (negatives caught): {results['abstain_recall']:.2%}")
+        if results["abstain_precision"] is not None:
+            print(f"Abstain precision: {results['abstain_precision']:.2%}")
+    else:
+        evaluator = VisionEvaluator(FineTuneConfig())
+        results = evaluator.evaluate_predictions(predictions)
+        results["element"] = element_accuracy(predictions, examples)
+        results["calibration"] = calibration_metrics(predictions, examples)
 
     print("\n=== Evaluation Results ===")
-    print(f"Total examples: {results['total_examples']}")
-    print(f"Successful predictions: {results['successful_predictions']}")
-    print(f"Action accuracy: {results['action_accuracy']:.2%}")
-    print(f"Coordinate accuracy (within 10px): {results['coord_accuracy_10px']:.2%}")
-    print(f"Coordinate accuracy (within 50px): {results['coord_accuracy_50px']:.2%}")
-    print(f"Coordinate MAE: {results['coord_mae']:.2f}")
-    print(f"Avg confidence: {results['avg_confidence']:.4f}")
-    print(f"Element accuracy (correct target selected): "
-          f"{results['element']['correct']}/{results['element']['scored']} "
-          f"= {results['element']['element_accuracy']:.2%}")
-    if results["element"]["content_scored"]:
-        print(f"Content accuracy (text/value match): "
-              f"{results['element']['content_correct']}/{results['element']['content_scored']} "
-              f"= {results['element']['content_accuracy']:.2%}")
-    print("\nJourney success rates:")
-    for journey, rate in results["journey_success_rates"].items():
-        print(f"  {journey}: {rate:.2%}")
+    if args.schema == "v1":
+        pass
+    else:
+        print(f"Total examples: {results['total_examples']}")
+        print(f"Successful predictions: {results['successful_predictions']}")
+        print(f"Action accuracy: {results['action_accuracy']:.2%}")
+        print(f"Coordinate accuracy (within 10px): {results['coord_accuracy_10px']:.2%}")
+        print(f"Coordinate accuracy (within 50px): {results['coord_accuracy_50px']:.2%}")
+        print(f"Coordinate MAE: {results['coord_mae']:.2f}")
+        print(f"Avg confidence: {results['avg_confidence']:.4f}")
+        print(f"Element accuracy (correct target selected): "
+              f"{results['element']['correct']}/{results['element']['scored']} "
+              f"= {results['element']['element_accuracy']:.2%}")
+        if results["element"]["content_scored"]:
+            print(f"Content accuracy (text/value match): "
+                  f"{results['element']['content_correct']}/{results['element']['content_scored']} "
+                  f"= {results['element']['content_accuracy']:.2%}")
+        print(f"Fully correct actions: "
+              f"{results['element']['fully_correct']}/{results['element']['scored']} "
+              f"= {results['element']['fully_correct_accuracy']:.2%}")
+        cal = results["calibration"]
+        if cal["scored"]:
+            print(f"\nCalibration (ECE): {cal['ece']:.4f}")
+            sep = cal["separation"]
+            if sep.get("incorrect_count"):
+                print(f"Confidence: correct mean {sep['correct_mean']:.3f} vs "
+                      f"incorrect mean {sep['incorrect_mean']:.3f} "
+                      f"({sep['incorrect_count']} errors)")
+            print("Selective accuracy (confidence gate):")
+            for row in cal["selective"]:
+                print(f"  >= {row['threshold']:.2f}: {row['accuracy']:.2%} accurate "
+                      f"on {row['coverage']:.0%} coverage")
+        print("\nJourney success rates:")
+        for journey, rate in results["journey_success_rates"].items():
+            print(f"  {journey}: {rate:.2%}")
 
     out_dir = Path(args.output) if args.output else (
         Path(args.adapter).parent if args.adapter else Path(".")

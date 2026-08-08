@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
     CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
-    ExecutionPath, FollowIntent, InspectCommand, IntentCommand, IntentHints, NavigateCommand,
-    PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec,
-    TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    ExecutionPath, ExecutionReason, FollowIntent, InspectCommand, IntentCommand, IntentHints,
+    NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent,
+    TargetSpec, TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
     WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -27,6 +27,7 @@ enum DriverMode {
     ClickTargetNotFound,
     WaitTimeout,
     TargetDetached,
+    DeadOnOpen,
     StateConflict,
     CommitFail,
     CommitPause,
@@ -105,6 +106,14 @@ impl BrowserWorker for FakeWorker {
         &self.profile
     }
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        if matches!(self.mode, DriverMode::DeadOnOpen) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         Ok(())
     }
     async fn navigate(
@@ -348,6 +357,7 @@ async fn adaptive_runtime_with_failure(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -393,6 +403,7 @@ async fn adaptive_runtime_paused(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -417,11 +428,20 @@ async fn http_fixture(body: &'static str, content_type: &'static str) -> String 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0; 2048];
-        let _ = socket.read(&mut request).await.unwrap();
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        socket.write_all(response.as_bytes()).await.unwrap();
+        // Serve every connection: a test may fetch the fixture several times.
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0; 2048];
+            if socket.read(&mut request).await.is_err() {
+                continue;
+            }
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            if socket.write_all(response.as_bytes()).await.is_err() {
+                continue;
+            }
+        }
     });
     format!("http://{address}/")
 }
@@ -463,16 +483,58 @@ async fn assert_single_download_readable(root: &Path, session: &SessionId, expec
 struct FakeFactory {
     events: Arc<Mutex<Vec<String>>>,
     mode: DriverMode,
+    launches: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct DeadThenFailFactory {
+    events: Arc<Mutex<Vec<String>>>,
+    launches: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl WorkerFactory for DeadThenFailFactory {
+    async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        if self
+            .launches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return Ok(Arc::new(FakeWorker {
+                id: WorkerId::new(),
+                profile: PathBuf::from("/tmp/dead-then-fail-profile"),
+                events: self.events.clone(),
+                mode: DriverMode::DeadOnOpen,
+            }));
+        }
+        Err(CommandError {
+            code: ErrorCode::BrowserLaunchFailed,
+            message: "injected replacement launch failure".into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        })
+    }
 }
 
 #[async_trait]
 impl WorkerFactory for FakeFactory {
     async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        // DeadOnOpen: only the first launch is dead; replacements are healthy,
+        // so a revived session can open pages again.
+        let mode = if matches!(self.mode, DriverMode::DeadOnOpen)
+            && self
+                .launches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                > 0
+        {
+            DriverMode::Succeed
+        } else {
+            self.mode
+        };
         Ok(Arc::new(FakeWorker {
             id: WorkerId::new(),
             profile: PathBuf::from("/tmp/fake-profile"),
             events: self.events.clone(),
-            mode: self.mode,
+            mode,
         }))
     }
 }
@@ -499,6 +561,7 @@ async fn runtime(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode,
+            launches: Default::default(),
         }),
     ));
     let runtime = page_runtime::PageRuntime::new(journal, workers);
@@ -680,6 +743,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -747,6 +811,7 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -844,6 +909,7 @@ async fn follow_with_boundary_true_requires_matching_checkpoint_before_boundary_
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -912,6 +978,7 @@ async fn follow_with_boundary_false_runs_without_any_pre_established_checkpoint(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -971,6 +1038,69 @@ async fn replayable_driver_failure_is_retryable() {
         ))
         .await;
     assert!(matches!(outcome, CommandOutcome::RetryableFailure { .. }));
+}
+
+/// A dead browser must not wedge the session: open_browser invalidates the
+/// dead worker and retries on a fresh one instead of returning `internal`.
+#[tokio::test]
+async fn open_browser_revives_a_dead_worker_once() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::DeadOnOpen,
+            launches: Default::default(),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser must revive a dead worker");
+    runtime
+        .open_browser(session)
+        .await
+        .expect("the revived worker keeps serving the session");
+}
+
+#[tokio::test]
+async fn failed_replacement_launch_does_not_leave_a_registered_page() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(DeadThenFailFactory {
+            events,
+            launches: std::sync::atomic::AtomicUsize::new(0),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+
+    runtime
+        .open_browser(session.clone())
+        .await
+        .expect_err("replacement launch must fail");
+
+    assert!(
+        runtime.remove_session_pages(&session).await.is_empty(),
+        "a failed open must not remain registered"
+    );
 }
 
 #[tokio::test]
@@ -1033,6 +1163,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::WaitTimeout,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -1106,6 +1237,144 @@ async fn boundary_target_detached_is_retryable_not_needs_reconciliation() {
         CommandOutcome::RetryableFailure { error, .. }
             if error.code == ErrorCode::TargetDetached
     ));
+}
+
+#[tokio::test]
+async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
+    let url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    // The fake worker's HTTP mirror reads its URL from this event.
+    events.lock().await.push(format!("url:{url}"));
+    // Untainted: the direct-HTTP read optimization applies.
+    let first = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    let evidence = completed_evidence(first);
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::DirectHttp,
+            ..
+        }
+    )));
+    // A mutating command taints the page.
+    let click = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#safe".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    assert!(matches!(click, CommandOutcome::Completed { .. }));
+    // The next whole-page inspect must read the live DOM, not a refetch.
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session.clone(),
+                page.clone(),
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::Chromium,
+            reason: ExecutionReason::PageMutated,
+            ..
+        }
+    )));
+    // Navigation replaces the DOM: the taint clears and HTTP reads resume.
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    let navigate = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Navigate(NavigateCommand {
+                url: url.clone(),
+                wait_until: types::WaitUntil::Interactive,
+                timeout_ms: 30_000,
+            }),
+        ))
+        .await;
+    assert!(matches!(navigate, CommandOutcome::Completed { .. }));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::DirectHttp,
+            ..
+        }
+    )));
+    let _ = events;
+}
+
+#[tokio::test]
+async fn a_side_band_download_does_not_taint_the_page() {
+    let page_url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let download_url = http_fixture("durable-download", "application/octet-stream").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, page_url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{page_url}"));
+    // A download fetches beside the page; it leaves the document untouched.
+    let download = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url: download_url,
+                expected_content_type: Some("application/octet-stream".into()),
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(download, CommandOutcome::Completed { .. }));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::ExecutionPath {
+                path: ExecutionPath::DirectHttp,
+                ..
+            }
+        )),
+        "a download must not push the next whole-page read onto a stale DOM"
+    );
 }
 
 #[tokio::test]
@@ -1497,6 +1766,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
         Arc::new(FakeFactory {
             events: Arc::new(Mutex::new(Vec::new())),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let runtime = page_runtime::PageRuntime::new(journal, workers);
@@ -1579,6 +1849,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
         Arc::new(FakeFactory {
             events: Arc::new(Mutex::new(Vec::new())),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let network = network_engine::NetworkPolicy {

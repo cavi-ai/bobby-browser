@@ -47,7 +47,7 @@ def non_overlapping_boxes(rng: random.Random, count: int) -> list:
     return boxes
 
 
-def make_example(rng: random.Random, i: int) -> dict:
+def make_example(rng: random.Random, i: int, negative: bool = False) -> dict:
     n = rng.randint(3, 8)
     boxes = non_overlapping_boxes(rng, n)
 
@@ -57,10 +57,17 @@ def make_example(rng: random.Random, i: int) -> dict:
     #   extractValue: purpose "Read the <noun>"      -> candidate whose name's
     #                 noun matches; value is that candidate's name
     # Positions stay random so x,y remain unpredictable from the prompt.
+    # `negative` removes the target's verb from the pool so the purpose has
+    # no valid match: ground truth for abstention (target_index omitted).
     kind = rng.choices(["click", "typeText", "extractValue"], weights=[0.5, 0.25, 0.25])[0]
     verbs = rng.sample(VERBS, n)
     nouns = rng.sample(NOUNS, n)  # unique nouns: extractValue matches on noun
     target_index = rng.randrange(n)
+
+    if negative:
+        absent_verb = rng.choice([v for v in VERBS if v not in verbs])
+    else:
+        absent_verb = None
 
     candidates = []
     for j, (x, y, w, h) in enumerate(boxes):
@@ -77,6 +84,30 @@ def make_example(rng: random.Random, i: int) -> dict:
     cx = rng.randint(bbox["x"] + margin_x, bbox["x"] + bbox["w"] - margin_x)
     cy = rng.randint(bbox["y"] + margin_y, bbox["y"] + bbox["h"] - margin_y)
     confidence = round(rng.uniform(0.7, 0.95), 2)
+
+    if negative:
+        # The purpose references an element the page does not have; there is
+        # no ground-truth target, and the correct response is abstention.
+        noun = rng.choice(nouns).lower()
+        purpose = f"{absent_verb} the {noun}"
+        action = {"kind": "click", "x": 0.0, "y": 0.0}
+        record = {
+            "image_b64": "",
+            "purpose": purpose,
+            "intent_kind": "locate",
+            "stuck": "targetMissing",
+            "context_url": f"https://example.com/{rng.choice(JOURNEYS)}/page{i}",
+            "context_candidates": candidates,
+            "model_response": {
+                "confidence": confidence,
+                "action": action,
+            },
+            "success": True,
+            "journey": rng.choice(JOURNEYS),
+            "step": f"step_{i}",
+            "negative": True,
+        }
+        return record
 
     if kind == "click":
         purpose = f"{verbs[target_index]} the {target['name'].split(' ', 1)[1].lower()}"
@@ -118,16 +149,21 @@ def main():
     parser = argparse.ArgumentParser(description="Synthetic data generator (bbox candidates)")
     parser.add_argument("--n", type=int, default=200, help="Number of examples")
     parser.add_argument("--seed", type=int, default=42, help="RNG seed")
+    parser.add_argument("--neg-frac", type=float, default=0.0,
+                        help="Fraction of examples with no valid target (abstention ground truth)")
     parser.add_argument("--output", required=True, help="Output JSONL path")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
+    negatives = 0
     with open(out, "w") as f:
         for i in range(args.n):
-            f.write(json.dumps(make_example(rng, i)) + "\n")
-    print(f"wrote {args.n} examples to {out} (seed {args.seed})")
+            negative = rng.random() < args.neg_frac
+            negatives += int(negative)
+            f.write(json.dumps(make_example(rng, i, negative)) + "\n")
+    print(f"wrote {args.n} examples to {out} (seed {args.seed}, {negatives} negatives)")
 
 
 if __name__ == "__main__":

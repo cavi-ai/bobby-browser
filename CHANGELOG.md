@@ -2,42 +2,48 @@
 
 ## Unreleased
 
+- Whole-page `inspect` after a mutating command now reads the live DOM instead of refetching the URL over HTTP. Pages are tainted by any non-read-only command and cleared by navigation, so SPA post-submit state is visible to agents (the direct-HTTP path was answering the app shell). Evidence carries `executionPath.reason: pageMutated` on the live read.
+- `make agent-eval`: bobby-only gauntlet against the checkout's build, gated against a committed baseline (`benchmarks/competitor-gauntlet/baseline.json`) — a previously-passing task failing, >2× wall time, or >+3 tool errors fails the check via `score check`. Deliberate invocation only (spends agent tokens); the full competitor gamut stays behind `--tool all`.
+
+
+### Feats
+- `page_open` on a session whose browser died now invalidates that specific dead worker and retries once on a fresh one, instead of returning an opaque `internal` on every call. Concurrent recovery cannot discard another caller's healthy replacement, and a failed replacement launch no longer leaves a phantom registered page.
+
+
 - `session_close` no longer wedges on a dead browser: managed-Chromium teardown treats an already-gone browser (closed channel, canceled oneshot) as closed instead of failing the release, which previously left the session listed forever with every retry failing `internal`.
 
 
 - OpenShell/jobs CLI share one blocking `/v1` HTTP client (`v1_client`) for bearer + interface headers.
-
 - OpenShell host isolation/ops: doctor warns (`openshell-companion`) when ≥2 local sandboxes share one Firefox companion; warns (`openshell-cleartext`) on non-loopback cleartext MCP URL / non-loopback `server.host`; pack ships merge-only `policy-network.yaml`.
-
 - OpenShell host operability: `bobby openshell list|status|rotate`; non-secret `.status.json` sidecars; doctor checks `openshell-admin`, `openshell-companion`, `openshell-mcp-url`, `openshell-sandboxes` when a pack is present; live CLI e2e for provision→rotate→revoke. Secrets root overridable via `BOBBY_OPENSHELL_SECRETS_DIR`.
-
 - OpenShell host hardening: `provision` revokes any prior principal for the sandbox id before minting, uses a unique idempotency key per attempt, and rolls back the minted principal if writing the injection env fails. Default capability floor is the narrow `openshell` preset (`--capabilities-preset agent` for the full agent floor). Sample policy denies `evaluate_javascript` / `job_*` at the OpenShell proxy, raises MCP `max_body_bytes` to 262 KiB, and documents shared Firefox companion / cleartext gateway / `policy set` replace risks. Doctor warns when an older pack lacks the deny_rules.
 - Intent resolution auto-descends one level into iframes on managed Chromium: a main-frame intent whose target lives inside a frame now resolves and acts (the gather stamps each in-frame candidate with a re-resolvable frame hop; the action path uses it when the intent named no explicit `framePath`). Capped at 8 frames per gather; frames with no stable address (no id, test id, or `src`) are skipped. Live installed-Chromium test resolves the gauntlet's in-frame confirm button with no `framePath`.
-
-
 - NVIDIA OpenShell host: `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment. `bobby doctor` reports `openshell-pack` when the pack is present.
-- Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page transparently re-attaches to the live target (`Page::is_closed` + `Browser::get_page` on the vendored chromiumoxide). A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle.
 - Page-scoped text waits (`role: main|RootWebArea|…` or `css: body|html|:root`) read live `document.body.innerText` via evaluate (with empty optional fields treated as absent), so async UI confirmations match the same text a whole-page `inspect` sees.
+- Flat `click_and_wait_for_popup` defaults `autoCheckpoint=true` (and accepts pinned `commandId`/`attemptId`) so the Boundary popup wait is one call, matching boundary `click` / `intent_submit_and_verify`.
+- Flat MCP tool `click_and_wait_for_popup` registers `window.open` targets so `page_list` can drive authorization popups without curling app source.
+- Popups register even without the dedicated command: `page_list` syncs untracked page targets into the session (one browser per session), excluding `chrome://` browser chrome. Live installed-Chromium regression test included.
+- `control_action` accepts an a11y-snapshot target verbatim: control lookup compares targets semantically (explicit `ordinal: 0` matches an omitted ordinal; role case-insensitive) instead of struct equality, on both engines.
+- Target role matching is case-insensitive, so an `a11y_snapshot` target passed back verbatim resolves even where the engine's role casing differs from the DOM's implicit role (Chrome's `Iframe` vs `iframe`). `bobby://intents` documents the `framePath` step shape with an example and the Firefox exact-CSS/test-id hop requirement.
+- `control_action` `selectOne`/`selectMany` and select fills accept an option's visible label as well as its value (trimmed, case-insensitive label fallback on both engines). Snapshots surface labels, so agents no longer guess underlying values. Verification compares the committed option values, ending false `verificationFailed` on label requests.
+- Firefox companion `wait_for` supports Text, Value, and Document conditions (Chromium parity). `networkQuiet` remains unsupported on Firefox.
+- The advertised `WaitCondition` schema names every `kind` tag, required field, and enum instead of an opaque object; agents no longer guess condition shapes.
+- Competitor gauntlet bobby runner starts on `BOBBY_MCP_TOOLSET=full`, stages upload fixtures under the gateway cwd, and allows loopback HTTP for scenario downloads.
+- Competitor gauntlet: `--tool` is required and the full competitor gamut runs only via an explicit `--tool all`.
+
+### Fixes
+
+- `session_close` no longer wedges on a dead browser: managed-Chromium teardown treats an already-gone browser (closed channel, canceled oneshot) as closed instead of failing the release, which previously left the session listed forever with every retry failing `internal`.
+- Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page transparently re-attaches to the live target (`Page::is_closed` + `Browser::get_page` on the vendored chromiumoxide). A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle.
 - Boundary commands that fail with `waitConditionTimedOut` / `verificationFailed` stay `failed` (inspect-then-adjust) instead of `needsReconciliation` never-retry.
 - CDP `oneshot canceled` / dead-target loss maps to `targetDetached` (retryable); Boundary outcomes use retryable failure instead of never-retry reconciliation so agents re-list rather than double-submit.
-- Flat `click_and_wait_for_popup` defaults `autoCheckpoint=true` (and accepts pinned `commandId`/`attemptId`) so the Boundary popup wait is one call, matching boundary `click` / `intent_submit_and_verify`.
 - `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child so `[mcp] startup_toolset` (and the rest of that file) apply to `tools/list` — gauntlet/full configs no longer look like explore under doctor.
 - Whole-page `inspect` over DirectHttp treats empty-`<body>` SPA shells (title/meta chrome + scripts) as `javascriptRequired` and falls back to the live browser instead of returning shell HTML.
 - `[http]` accepts partial overrides: missing fields fall back to defaults instead of failing TOML parse (gauntlet / agent hosts that only set `allow_loopback` no longer brick MCP startup).
-- Flat MCP tool `click_and_wait_for_popup` registers `window.open` targets so `page_list` can drive authorization popups without curling app source.
-- Popups register even without the dedicated command: `page_list` syncs untracked page targets into the session (one browser per session), excluding `chrome://` browser chrome. Live installed-Chromium regression test included.
 - `intent` `action_target` preserves `framePath` / `shadowPath` from the intent target (iframe submits no longer discard the frame hop).
 - `intent_submit_and_verify` with a `networkQuiet`-only wait fails when `[aria-invalid=true]` markers remain, instead of reporting `completed` on a soft settle after a rejected submit.
-- Competitor gauntlet bobby runner starts on `BOBBY_MCP_TOOLSET=full`, stages upload fixtures under the gateway cwd, and allows loopback HTTP for scenario downloads.
-- `control_action` accepts an a11y-snapshot target verbatim: control lookup compares targets semantically (explicit `ordinal: 0` matches an omitted ordinal; role case-insensitive) instead of struct equality, on both engines.
-- Target role matching is case-insensitive, so an `a11y_snapshot` target passed back verbatim resolves even where the engine's role casing differs from the DOM's implicit role (Chrome's `Iframe` vs `iframe`). `bobby://intents` documents the `framePath` step shape with an example and the Firefox exact-CSS/test-id hop requirement.
-
-
 - A Boundary command that fails before reaching the browser (argument or target-resolution errors) now reports a plain `failed` outcome instead of `needsReconciliation`; reconciliation is reserved for effects that may have landed.
 - Stale CDP node ids ("Could not find node with given id", after a re-render) map to `targetNotFound` with fresh-snapshot repair instead of a raw `browserCommandFailed`; a dead page target ("receiver is gone") maps to `targetDetached` with recovery guidance instead of cascading identical driver errors.
-- Competitor gauntlet: `--tool` is required and the full competitor gamut runs only via an explicit `--tool all`.
-
-
 - A plain `click` on an anchor with a `download` attribute now routes through the armed download capture on managed Chromium: the file lands in the session's downloads with `Download` evidence instead of vanishing with a bare `completed`.
 - `networkPolicyDenied` guidance names the loopback/private-destination cause and the `http.allow_loopback` / `http.allow_private_network` operator switches (repair hint, taxonomy, and `download_url` description); for page-offered files it points at clicking the link.
 - `upload_files` policy errors name the resolved absolute roots and the gateway working directory that relative roots resolve against.
@@ -45,12 +51,7 @@
 - Protocol-layer `-32602` rejections carry `error.data.repair` like every other failure.
 - `a11y_snapshot` drops `InlineTextBox` leaves, which duplicated their `StaticText` parents' text and dominated snapshot payload.
 - `bobby://intents` and the taxonomy state the frame boundary: intents resolve in the main frame only; iframe controls take primitives with a `framePath`.
-
-
-- `control_action` `selectOne`/`selectMany` and select fills accept an option's visible label as well as its value (trimmed, case-insensitive label fallback on both engines). Snapshots surface labels, so agents no longer guess underlying values. Verification compares the committed option values, ending false `verificationFailed` on label requests.
 - `inspect` denied by network policy (loopback page, non-http URL) degrades to the browser that already has the page open instead of failing a DOM read with `networkPolicyDenied`. `download_url` keeps the hard denial.
-- Firefox companion `wait_for` supports Text, Value, and Document conditions (Chromium parity). `networkQuiet` remains unsupported on Firefox.
-- The advertised `WaitCondition` schema names every `kind` tag, required field, and enum instead of an opaque object; agents no longer guess condition shapes.
 - `a11y_snapshot`'s description points at `toolset_select` for the mutation and intent phases hidden by the default `explore` phase.
 
 

@@ -277,6 +277,18 @@ impl RuntimeService {
         if let Some(extractor) = provider {
             adaptive = adaptive.with_structured_extractor(extractor);
         }
+        if let Some(corpus_dir) = &config.vision.corpus_dir {
+            match intent_engine::VisionCorpus::new(corpus_dir) {
+                Ok(corpus) => adaptive = adaptive.with_vision_corpus(corpus),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        dir = %corpus_dir.display(),
+                        "vision corpus directory unavailable; collection disabled"
+                    );
+                }
+            }
+        }
         let mut pages =
             PageRuntime::new_adaptive(journal, workers.clone(), Some(checkpoints), adaptive);
         pages = pages.with_context_graph_attached();
