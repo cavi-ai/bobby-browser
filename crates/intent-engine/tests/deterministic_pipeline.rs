@@ -114,6 +114,7 @@ fn button(name: &str) -> Candidate {
             visible: true,
             enabled: true,
         },
+        frame_path: Vec::new(),
     }
 }
 

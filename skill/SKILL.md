@@ -33,13 +33,17 @@ Never claim an action worked without its evidence.
 
 ## Setup
 
-1. Operator runs `bobby install` (or `bobby install --host <claude|zed|vscode|acp>
+1. Operator runs `bobby install` (or `bobby install --host <claude|zed|vscode|acp|openshell>
    --skill --yes`). That writes the bootstrap credential, merges MCP config,
    and installs this skill into `~/.agents/skills/bobby-browser/` (project:
    `.agents/skills/` with `--project-skill`). Optional: `--skill-claude`,
    `--skill-openclaw`. Default `bobby init` / install mint the **agent**
    preset (no `authority:admin`; heal respects the marker). Operators who need
-   to mint principals use `bobby init --preset unrestricted`.
+   to mint principals use `bobby init --preset unrestricted`. For NVIDIA
+   OpenShell sandboxes, use `--host openshell` (or `bobby openshell install`)
+   then `bobby openshell provision --sandbox <id>` on the host (narrow
+   `openshell` capability floor by default; shared Firefox companion is
+   profile-scoped — see the OpenShell guide).
 2. On MCP `initialize`, read `instructions`: startup `tools/list` is explore;
    call `toolset_select` then re-list; follow `error.repair.action` on failures.
 3. For the Firefox companion (persistent logins): `bobby install --companion`

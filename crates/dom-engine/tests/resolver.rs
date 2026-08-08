@@ -20,6 +20,7 @@ fn candidate(id: &str, name: &str, visible: bool) -> Candidate {
             visible,
             enabled: true,
         },
+        frame_path: Vec::new(),
     }
 }
 

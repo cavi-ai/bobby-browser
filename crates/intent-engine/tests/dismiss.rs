@@ -153,6 +153,7 @@ fn overlay_close_button() -> Candidate {
             visible: true,
             enabled: true,
         },
+        frame_path: Vec::new(),
     }
 }
 

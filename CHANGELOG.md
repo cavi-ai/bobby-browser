@@ -2,18 +2,26 @@
 
 ## Unreleased
 
+- OpenShell host isolation/ops: doctor warns (`openshell-companion`) when ≥2 local sandboxes share one Firefox companion; warns (`openshell-cleartext`) on non-loopback cleartext MCP URL / non-loopback `server.host`; pack ships merge-only `policy-network.yaml`.
+
+- OpenShell host operability: `bobby openshell list|status|rotate`; non-secret `.status.json` sidecars; doctor checks `openshell-admin`, `openshell-companion`, `openshell-mcp-url`, `openshell-sandboxes` when a pack is present; live CLI e2e for provision→rotate→revoke. Secrets root overridable via `BOBBY_OPENSHELL_SECRETS_DIR`.
+
+- OpenShell host hardening: `provision` revokes any prior principal for the sandbox id before minting, uses a unique idempotency key per attempt, and rolls back the minted principal if writing the injection env fails. Default capability floor is the narrow `openshell` preset (`--capabilities-preset agent` for the full agent floor). Sample policy denies `evaluate_javascript` / `job_*` at the OpenShell proxy, raises MCP `max_body_bytes` to 262 KiB, and documents shared Firefox companion / cleartext gateway / `policy set` replace risks. Doctor warns when an older pack lacks the deny_rules.
+- Intent resolution auto-descends one level into iframes on managed Chromium: a main-frame intent whose target lives inside a frame now resolves and acts (the gather stamps each in-frame candidate with a re-resolvable frame hop; the action path uses it when the intent named no explicit `framePath`). Capped at 8 frames per gather; frames with no stable address (no id, test id, or `src`) are skipped. Live installed-Chromium test resolves the gauntlet's in-frame confirm button with no `framePath`.
+
+
+- NVIDIA OpenShell host: `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment. `bobby doctor` reports `openshell-pack` when the pack is present.
 - Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page transparently re-attaches to the live target (`Page::is_closed` + `Browser::get_page` on the vendored chromiumoxide). A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle.
 
 
 - `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child so `[mcp] startup_toolset` (and the rest of that file) apply to `tools/list` — gauntlet/full configs no longer look like explore under doctor.
 - `[http]` accepts partial overrides: missing fields fall back to defaults instead of failing TOML parse (gauntlet / agent hosts that only set `allow_loopback` no longer brick MCP startup).
 - Flat MCP tool `click_and_wait_for_popup` registers `window.open` targets so `page_list` can drive authorization popups without curling app source.
+- Popups register even without the dedicated command: `page_list` syncs untracked page targets into the session (one browser per session), excluding `chrome://` browser chrome. Live installed-Chromium regression test included.
 - `intent` `action_target` preserves `framePath` / `shadowPath` from the intent target (iframe submits no longer discard the frame hop).
 - `intent_submit_and_verify` with a `networkQuiet`-only wait fails when `[aria-invalid=true]` markers remain, instead of reporting `completed` on a soft settle after a rejected submit.
 - Competitor gauntlet bobby runner starts on `BOBBY_MCP_TOOLSET=full`, stages upload fixtures under the gateway cwd, and allows loopback HTTP for scenario downloads.
 - `control_action` accepts an a11y-snapshot target verbatim: control lookup compares targets semantically (explicit `ordinal: 0` matches an omitted ordinal; role case-insensitive) instead of struct equality, on both engines.
-
-
 - Target role matching is case-insensitive, so an `a11y_snapshot` target passed back verbatim resolves even where the engine's role casing differs from the DOM's implicit role (Chrome's `Iframe` vs `iframe`). `bobby://intents` documents the `framePath` step shape with an example and the Firefox exact-CSS/test-id hop requirement.
 
 

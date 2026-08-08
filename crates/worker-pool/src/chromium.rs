@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -23,7 +23,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
     SetCookiesParams, TimeSinceEpoch,
 };
 use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
-use chromiumoxide::cdp::browser_protocol::target::EventTargetCreated;
+use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, TargetId};
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
@@ -170,6 +170,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             max_js_timeout_ms: self.config.max_js_timeout_ms,
             browser: Mutex::new(Some(browser)),
             pages: Mutex::new(HashMap::new()),
+            closed_targets: Mutex::new(HashSet::new()),
             network_trackers: Mutex::new(HashMap::new()),
             har_recorders: Mutex::new(HashMap::new()),
             har_tasks: Mutex::new(HashMap::new()),
@@ -247,6 +248,9 @@ struct ChromiumWorker {
     max_js_timeout_ms: u64,
     browser: Mutex<Option<Browser>>,
     pages: Mutex<HashMap<PageId, Page>>,
+    /// Targets this worker closed, kept until the browser reaps them so
+    /// `sync_untracked_pages` does not re-adopt a page that is on its way out.
+    closed_targets: Mutex<HashSet<TargetId>>,
     network_trackers: Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>,
     har_recorders: Mutex<HashMap<PageId, Arc<crate::HarRecorder>>>,
     har_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
@@ -716,6 +720,68 @@ impl ChromiumWorker {
         self.network_trackers.lock().await.remove(page_id);
         self.pages.lock().await.remove(page_id)
     }
+
+    /// Register page targets the runtime did not open — popups from
+    /// `window.open` and any other tab the site spawned. One browser serves
+    /// one session, so an untracked page target belongs to this session.
+    /// Lazy (on `list_pages`) rather than a background listener: the only
+    /// consumer is the listing itself.
+    async fn sync_untracked_pages(&self) -> Result<(), CommandError> {
+        let live = {
+            let mut browser_guard = self.browser.lock().await;
+            let Some(browser) = browser_guard.as_mut() else {
+                return Ok(());
+            };
+            browser.pages().await.map_err(command_failed)?
+        };
+        // `Page.close` is acknowledged before the browser finishes destroying
+        // the target, so a page this worker just closed can still sit in the
+        // handler's target cache. Tombstones keep it from being resurrected
+        // here as an "untracked" page, and are dropped once the target is
+        // actually gone.
+        let closed = {
+            let mut closed = self.closed_targets.lock().await;
+            closed.retain(|target| live.iter().any(|page| page.target_id() == target));
+            closed.clone()
+        };
+        for page in live {
+            if closed.contains(page.target_id()) {
+                continue;
+            }
+            // Browser chrome (new-tab page et al.) is a target but not a
+            // session page.
+            if page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|url| url.starts_with("chrome://"))
+            {
+                continue;
+            }
+            let known = self
+                .pages
+                .lock()
+                .await
+                .values()
+                .any(|known| known.target_id() == page.target_id());
+            if !known {
+                // Registration talks to the target over CDP, so a target that
+                // died between the listing and the attach (the site's own
+                // `window.close`, or a close whose destruction the browser has
+                // not finished) fails with a dead-session error. That target is
+                // not a page of this session: skip it instead of failing the
+                // whole listing.
+                if let Err(error) = self.register_page(PageId::new(), page).await {
+                    if is_closed_page_message(&error.message) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1136,6 +1202,7 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        self.sync_untracked_pages().await?;
         let handles: Vec<(PageId, Page)> = self
             .pages
             .lock()
@@ -1166,6 +1233,10 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .ok_or_else(page_missing)?;
         let evidence = page_evidence(command.page_id.clone(), &page).await?;
+        self.closed_targets
+            .lock()
+            .await
+            .insert(page.target_id().clone());
         page.close().await.map_err(command_failed)?;
         Ok(vec![Evidence::Page {
             page_id: evidence.page_id,
@@ -2452,7 +2523,9 @@ fn is_missing_css_node(error: &CommandError) -> bool {
 }
 
 fn is_closed_page_message(message: &str) -> bool {
-    message.contains("receiver is gone") || message.contains("session closed")
+    message.contains("receiver is gone")
+        || message.contains("session closed")
+        || message.contains("Session with given id not found")
 }
 
 fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {

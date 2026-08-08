@@ -66,5 +66,6 @@ gates: [MCP tools](mcp-tools.md).
 
 - Tool list and capabilities: [MCP tools](mcp-tools.md)
 - Single-process local agent: [MCP stdio](mcp-stdio.md)
+- NVIDIA OpenShell sandboxes: [OpenShell host](../guides/openshell.md)
 - End-to-end loop: [First browser session](../introduction/first-session.md)
 - Troubleshooting: [Troubleshooting](../guides/troubleshooting.md)
