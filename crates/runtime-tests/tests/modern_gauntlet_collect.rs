@@ -38,6 +38,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
                     selector,
                     text: value,
                     purpose: format!("Enter '{value}' into the {field} field"),
+                    ordinal: None,
                 },
                 "onboarding",
                 &format!("type_{field}"),
@@ -52,6 +53,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
             &GroundTruth::Click {
                 selector: "select[aria-label='Plan']",
                 purpose: "Choose the growth plan".into(),
+                ordinal: None,
             },
             "onboarding",
             "select_plan",
@@ -68,6 +70,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
             &GroundTruth::Click {
                 selector: "select[aria-label='Billing cycle']",
                 purpose: "Choose annual billing".into(),
+                ordinal: None,
             },
             "onboarding",
             "select_billing",
@@ -81,6 +84,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
             &GroundTruth::Click {
                 selector: "form[aria-label='Customer onboarding'] button[type='submit']",
                 purpose: "Submit the onboarding form".into(),
+                ordinal: None,
             },
             "onboarding",
             "submit_invalid_postal",
@@ -103,6 +107,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
                 selector: "input[aria-label='Postal code']",
                 text: "10001",
                 purpose: "Enter '10001' into the postal code field".into(),
+                ordinal: None,
             },
             "onboarding",
             "fix_postal_code",
@@ -118,6 +123,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
             &GroundTruth::Click {
                 selector: "form[aria-label='Customer onboarding'] button[type='submit']",
                 purpose: "Submit the onboarding form".into(),
+                ordinal: None,
             },
             "onboarding",
             "submit_valid",

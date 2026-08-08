@@ -23,8 +23,19 @@ const INTERACTIVE_ROLES: [&str; 10] = [
 
 #[derive(Debug, Clone)]
 pub enum GroundTruth {
-    Click { selector: &'static str, purpose: String },
-    TypeText { selector: &'static str, text: &'static str, purpose: String },
+    Click {
+        selector: &'static str,
+        purpose: String,
+        /// Which match to use when several candidates share the reference
+        /// name (e.g. per-row buttons). `None` means the name must be unique.
+        ordinal: Option<usize>,
+    },
+    TypeText {
+        selector: &'static str,
+        text: &'static str,
+        purpose: String,
+        ordinal: Option<usize>,
+    },
 }
 
 impl GroundTruth {
@@ -39,6 +50,13 @@ impl GroundTruth {
         match self {
             Self::Click { purpose, .. } => purpose,
             Self::TypeText { purpose, .. } => purpose,
+        }
+    }
+
+    fn ordinal(&self) -> Option<usize> {
+        match self {
+            Self::Click { ordinal, .. } => *ordinal,
+            Self::TypeText { ordinal, .. } => *ordinal,
         }
     }
 }
@@ -96,13 +114,13 @@ impl CorpusCollector {
             }
         });
         let reference = inspection_reference(&inspection, truth.selector());
-        let target_index = find_candidate(&candidates, &reference).ok_or_else(|| {
-            format!(
-                "collector could not map selector {:?} (reference {reference:?}) onto {} candidates at step {step}",
-                truth.selector(),
-                candidates.len(),
-            )
-        })?;
+        let target_index = find_candidate(&candidates, &reference, truth.ordinal())
+            .map_err(|reason| {
+                format!(
+                    "collector could not map selector {:?} (reference {reference:?}) at step {step}: {reason}",
+                    truth.selector(),
+                )
+            })?;
 
         let image_b64 = capture_screenshot_b64(runtime).await?;
 
@@ -211,18 +229,49 @@ fn aria_label_from_html(html: &str) -> Option<String> {
     Some(html[start..end].to_string())
 }
 
-fn find_candidate(candidates: &[CandidateRow], reference: &str) -> Option<usize> {
+/// Resolve the reference name to one candidate index. Exact match (then
+/// case-insensitive exact) only — no prefix matching, because a near miss
+/// writes a wrong index into training data and teaches wrong behavior.
+/// Duplicate names are an error unless `ordinal` picks one explicitly.
+fn find_candidate(
+    candidates: &[CandidateRow],
+    reference: &str,
+    ordinal: Option<usize>,
+) -> Result<usize, String> {
     if reference.is_empty() {
-        return None;
+        return Err("inspection produced no reference (no aria-label or text)".into());
     }
-    if let Some(index) = candidates.iter().position(|c| c.name == reference) {
-        return Some(index);
-    }
-    let lowered = reference.to_lowercase();
-    candidates
+    let mut matches: Vec<usize> = candidates
         .iter()
-        .position(|c| c.name.to_lowercase() == lowered)
-        .or_else(|| candidates.iter().position(|c| c.name.starts_with(reference)))
+        .enumerate()
+        .filter(|(_, c)| c.name == reference)
+        .map(|(i, _)| i)
+        .collect();
+    if matches.is_empty() {
+        let lowered = reference.to_lowercase();
+        matches = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.name.to_lowercase() == lowered)
+            .map(|(i, _)| i)
+            .collect();
+    }
+    match matches.len() {
+        0 => Err(format!(
+            "no candidate named {reference:?} among {} candidates",
+            candidates.len()
+        )),
+        1 => Ok(matches[0]),
+        n => match ordinal {
+            Some(k) if k < n => Ok(matches[k]),
+            Some(k) => Err(format!(
+                "ordinal {k} out of range: {n} candidates named {reference:?}"
+            )),
+            None => Err(format!(
+                "{n} candidates named {reference:?}; pass an explicit ordinal"
+            )),
+        },
+    }
 }
 
 async fn capture_screenshot_b64(runtime: &ModernRuntime) -> TestResult<String> {
@@ -257,4 +306,79 @@ fn find_artifact_file(root: &Path, artifact_id: &str, extension: &str) -> Option
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(role: &str, name: &str) -> CandidateRow {
+        CandidateRow {
+            role: role.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn exact_match_wins() {
+        let candidates = vec![row("button", "Save"), row("button", "Cancel")];
+        assert_eq!(find_candidate(&candidates, "Cancel", None).unwrap(), 1);
+    }
+
+    #[test]
+    fn case_insensitive_match_is_exact_only() {
+        let candidates = vec![row("button", "Create customer")];
+        assert_eq!(
+            find_candidate(&candidates, "create customer", None).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn prefix_is_not_a_match() {
+        let candidates = vec![row("combobox", "Plan settings")];
+        let err = find_candidate(&candidates, "Plan", None).unwrap_err();
+        assert!(err.contains("no candidate named"), "{err}");
+    }
+
+    #[test]
+    fn empty_reference_is_an_error_not_a_silent_miss() {
+        let candidates = vec![row("button", "Save")];
+        let err = find_candidate(&candidates, "", None).unwrap_err();
+        assert!(err.contains("no reference"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_names_require_an_ordinal() {
+        let candidates = vec![
+            row("button", "Edit"),
+            row("textbox", "Name"),
+            row("button", "Edit"),
+        ];
+        let err = find_candidate(&candidates, "Edit", None).unwrap_err();
+        assert!(err.contains("2 candidates named"), "{err}");
+        assert_eq!(find_candidate(&candidates, "Edit", Some(0)).unwrap(), 0);
+        assert_eq!(find_candidate(&candidates, "Edit", Some(1)).unwrap(), 2);
+        let err = find_candidate(&candidates, "Edit", Some(2)).unwrap_err();
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn selector_aria_label_is_parsed() {
+        assert_eq!(
+            aria_label_from_selector("input[aria-label='Full name']"),
+            Some("Full name".to_string())
+        );
+        assert_eq!(aria_label_from_selector("button[type='submit']"), None);
+    }
+
+    #[test]
+    fn html_aria_label_prefers_the_elements_own() {
+        let html = r#"<input type="text" aria-label="Work email" value="">"#;
+        assert_eq!(
+            aria_label_from_html(html),
+            Some("Work email".to_string())
+        );
+        assert_eq!(aria_label_from_html("<button type=\"submit\">Create</button>"), None);
+    }
 }
