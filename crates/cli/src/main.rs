@@ -456,6 +456,31 @@ enum OpenshellCommand {
         mcp_host: String,
         #[arg(long, default_value_t = 7777)]
         mcp_port: u16,
+        /// Capability floor: openshell (default, narrow) or agent (full minus admin)
+        #[arg(long, value_enum, default_value_t = openshell::OpenshellCapabilityPreset::Openshell)]
+        capabilities_preset: openshell::OpenshellCapabilityPreset,
+    },
+    /// Alias for provision (revokes prior principal, mints a fresh one)
+    Rotate {
+        #[command(flatten)]
+        common: JobsCommonArgs,
+        #[arg(long)]
+        sandbox: String,
+        #[arg(long)]
+        ttl_hours: Option<i64>,
+        #[arg(long, default_value = "host.docker.internal")]
+        mcp_host: String,
+        #[arg(long, default_value_t = 7777)]
+        mcp_port: u16,
+        #[arg(long, value_enum, default_value_t = openshell::OpenshellCapabilityPreset::Openshell)]
+        capabilities_preset: openshell::OpenshellCapabilityPreset,
+    },
+    /// List locally recorded OpenShell sandboxes (no secrets)
+    List,
+    /// Show non-secret status for one sandbox
+    Status {
+        #[arg(long)]
+        sandbox: String,
     },
     /// Revoke the principal previously provisioned for a sandbox
     Revoke {
@@ -1005,6 +1030,7 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             let pack = openshell::install_pack(&root, &options)?;
             println!("ok: wrote OpenShell pack at {}", pack.dir.display());
             println!("  policy  {}", pack.policy.display());
+            println!("  network {}", pack.policy_network.display());
             println!("  mcp     {}", pack.mcp.display());
             println!("  readme  {}", pack.readme.display());
             println!("  skill   {}", pack.skill.display());
@@ -1016,6 +1042,15 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             ttl_hours,
             mcp_host,
             mcp_port,
+            capabilities_preset,
+        }
+        | OpenshellCommand::Rotate {
+            common,
+            sandbox,
+            ttl_hours,
+            mcp_host,
+            mcp_port,
+            capabilities_preset,
         } => {
             let config_path = resolve_config_path(common.config);
             let config = AppConfig::load(&config_path)
@@ -1034,7 +1069,14 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
                 common.token,
                 ttl_hours,
                 &pack,
+                capabilities_preset,
             )?;
+            if result.replaced_prior {
+                println!(
+                    "ok: replaced prior principal for sandbox `{}`",
+                    result.sandbox
+                );
+            }
             println!(
                 "ok: provisioned sandbox `{}` principal {} expires {}",
                 result.sandbox, result.principal_id, result.expires_at
@@ -1047,6 +1089,27 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
                 "inject AUTOMATION_RUNTIME_TOKEN from that file into the OpenShell sandbox; MCP URL {}",
                 result.mcp_url
             );
+        }
+        OpenshellCommand::List => {
+            let list = openshell::list_sandboxes()?;
+            if list.is_empty() {
+                println!("no local OpenShell sandboxes");
+            } else {
+                for status in list {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        status.sandbox,
+                        status.principal_id,
+                        status.capabilities_preset,
+                        status.expires_at,
+                        status.mcp_url
+                    );
+                }
+            }
+        }
+        OpenshellCommand::Status { sandbox } => {
+            let status = openshell::read_sandbox_status(&sandbox)?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
         }
         OpenshellCommand::Revoke { common, sandbox } => {
             let config_path = resolve_config_path(common.config);
@@ -2451,9 +2514,7 @@ mod tests {
             Some(CliCommand::Openshell {
                 command:
                     OpenshellCommand::Install {
-                        mcp_host,
-                        mcp_port,
-                        ..
+                        mcp_host, mcp_port, ..
                     },
             }) => {
                 assert_eq!(mcp_host, "host.containers.internal");
@@ -2461,13 +2522,31 @@ mod tests {
             }
             _ => panic!("unexpected openshell install parse"),
         }
-        let provision =
-            Cli::try_parse_from(["bobby", "openshell", "provision", "--sandbox", "demo-1"])
-                .unwrap();
+        let provision = Cli::try_parse_from([
+            "bobby",
+            "openshell",
+            "provision",
+            "--sandbox",
+            "demo-1",
+            "--capabilities-preset",
+            "agent",
+        ])
+        .unwrap();
         match provision.command {
             Some(CliCommand::Openshell {
-                command: OpenshellCommand::Provision { sandbox, .. },
-            }) => assert_eq!(sandbox, "demo-1"),
+                command:
+                    OpenshellCommand::Provision {
+                        sandbox,
+                        capabilities_preset,
+                        ..
+                    },
+            }) => {
+                assert_eq!(sandbox, "demo-1");
+                assert_eq!(
+                    capabilities_preset,
+                    openshell::OpenshellCapabilityPreset::Agent
+                );
+            }
             _ => panic!("unexpected openshell provision parse"),
         }
         let revoke =
