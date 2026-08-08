@@ -984,6 +984,16 @@ pub(crate) fn run_doctor(
         }
     }
 
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some((ok, detail)) = crate::openshell::doctor_pack_detail(&cwd) {
+            if ok {
+                report.ok("openshell-pack", detail);
+            } else {
+                report.warn("openshell-pack", detail);
+            }
+        }
+    }
+
     if let Some(config) = &config {
         for (name, dir) in [
             (

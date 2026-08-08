@@ -22,6 +22,8 @@ pub enum EmitFormat {
     Vscode,
     /// Generic MCP JSON fragment (same shape as Claude's).
     Json,
+    /// OpenShell sandbox MCP client JSON (streamable HTTP to host bobby).
+    Openshell,
 }
 
 const GATEWAY_COMMAND: &str = if cfg!(windows) {
@@ -49,6 +51,13 @@ fn bootstrap_env_placeholders() -> serde_json::Value {
 /// never carries the credential itself: each host expands `${VAR}` from its
 /// own environment, which is where `bootstrap.env` is expected to be sourced.
 pub fn emit_mcp_config(format: EmitFormat) -> String {
+    match format {
+        EmitFormat::Openshell => {
+            return crate::openshell::emit_mcp_config(&crate::openshell::PackOptions::default());
+        }
+        EmitFormat::Claude | EmitFormat::Json => {}
+        EmitFormat::Vscode | EmitFormat::Zed => {}
+    }
     let fragment = match format {
         EmitFormat::Claude | EmitFormat::Json => serde_json::json!({
             "mcpServers": {
@@ -78,6 +87,7 @@ pub fn emit_mcp_config(format: EmitFormat) -> String {
                 }
             }
         }),
+        EmitFormat::Openshell => unreachable!("openshell returned above"),
     };
     serde_json::to_string_pretty(&fragment).expect("emitted config is serializable")
 }
@@ -293,6 +303,21 @@ mod tests {
             assert!(!text.contains("=Bearer"));
         }
     }
+
+    #[test]
+    fn openshell_emit_is_streamable_http_with_token_placeholder() {
+        let emitted = emit_mcp_config(EmitFormat::Openshell);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&emitted).expect("openshell emit parses");
+        let server = &parsed["mcpServers"]["bobby-browser"];
+        assert_eq!(server["transport"], "streamable-http");
+        assert!(server["url"].as_str().unwrap().ends_with("/v1/mcp"));
+        assert_eq!(
+            server["headers"]["Authorization"],
+            "Bearer ${AUTOMATION_RUNTIME_TOKEN}"
+        );
+        assert!(!emitted.contains("mcp-gateway"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +335,8 @@ pub enum HostKind {
     Vscode,
     /// ACP stdio: project `.acp.json` launching `acp-gateway` with bootstrap env.
     Acp,
+    /// NVIDIA OpenShell: project `openshell/` pack (policy + MCP HTTP + skill).
+    Openshell,
 }
 
 const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
@@ -357,12 +384,20 @@ fn host_config_path(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
             .join("zed")
             .join("settings.json")),
         HostKind::Acp => Ok(project_root.join(".acp.json")),
+        HostKind::Openshell => Ok(project_root.join("openshell").join("mcp.json")),
     }
 }
 
 /// Merge the bobby-browser server entry into one host's config file,
 /// preserving everything already there. Returns the file written.
 pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
+    if kind == HostKind::Openshell {
+        let pack = crate::openshell::install_pack(
+            project_root,
+            &crate::openshell::PackOptions::default(),
+        )?;
+        return Ok(pack.dir);
+    }
     let path = host_config_path(kind, project_root)?;
     let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
         Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)
@@ -400,6 +435,7 @@ pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf>
                 "agentServers",
             )
         }
+        HostKind::Openshell => unreachable!("openshell returned above"),
     };
     let table = config
         .as_object_mut()
@@ -802,6 +838,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         HostKind::Zed,
         HostKind::Vscode,
         HostKind::Acp,
+        HostKind::Openshell,
     ] {
         let selected = hosts.contains(&host);
         let default_on = matches!(host, HostKind::Claude);
@@ -809,6 +846,10 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         let label = match host {
             HostKind::Acp => {
                 "Acp: merge bobby acp-stdio into .acp.json (no bootstrap env in the file)"
+                    .to_owned()
+            }
+            HostKind::Openshell => {
+                "Openshell: write openshell/ pack (policy.yaml, mcp.json, skill, README)"
                     .to_owned()
             }
             _ => format!("{host:?}: merge the MCP server entry into its config"),
@@ -895,7 +936,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             || !std::io::IsTerminal::is_terminal(&std::io::stdout())
         {
             anyhow::bail!(
-                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode> --skill [--skill-claude] [--skill-openclaw] --cli --yes"
+                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode|acp|openshell> --skill [--skill-claude] [--skill-openclaw] --cli --yes"
             );
         }
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
