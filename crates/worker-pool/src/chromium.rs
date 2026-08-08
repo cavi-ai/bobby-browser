@@ -3056,6 +3056,7 @@ mod tests {
             max_js_timeout_ms: 1_000,
             browser: super::Mutex::new(None),
             pages: super::Mutex::new(super::HashMap::new()),
+            closed_targets: super::Mutex::new(super::HashSet::new()),
             network_trackers: super::Mutex::new(super::HashMap::new()),
             har_recorders: super::Mutex::new(super::HashMap::new()),
             har_tasks: super::Mutex::new(super::HashMap::new()),
