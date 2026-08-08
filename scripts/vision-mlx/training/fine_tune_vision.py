@@ -365,56 +365,6 @@ class VisionEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# Fine-Tuning (placeholder for MLX when vision support lands)
-# ---------------------------------------------------------------------------
-
-class VisionFineTuner:
-    """Fine-tunes vision-language models."""
-
-    def __init__(self, config: FineTuneConfig):
-        self.config = config
-        self.processor = TrainingDataProcessor(config)
-
-    def fine_tune(self):
-        """Run fine-tuning pipeline."""
-        print(f"Loading model: {self.config.model_name}")
-
-        examples = self.processor.load_dataset(self.config.input_path)
-        processed = self.processor.prepare_training_data(examples)
-        train, val = self.processor.split_dataset(processed)
-
-        print("\nStarting fine-tuning...")
-        self._run_training_loop(train, val)
-        self._save_model()
-
-    def _run_training_loop(self, train: list, val: list):
-        """Run training loop (placeholder for MLX when vision support lands)."""
-        print(f"Training for {self.config.num_epochs} epochs...")
-        print("Note: MLX vision support not yet available.")
-        print("Use --ollama to run inference on training data instead.")
-
-    def _save_model(self):
-        """Save fine-tuned model (or metadata for future fine-tuning)."""
-        output_path = Path(self.config.output_dir) / f"{self.config.model_name}-bobby-ft"
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        metadata = {
-            "model_name": self.config.model_name,
-            "training_data": self.config.input_path,
-            "learning_rate": self.config.learning_rate,
-            "num_epochs": self.config.num_epochs,
-            "lora_rank": self.config.lora_rank,
-            "lora_alpha": self.config.lora_alpha,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "mlx_vision_available": False,
-            "note": "MLX vision support not yet available. Use --ollama for inference.",
-        }
-
-        (output_path / "metadata.json").write_text(json.dumps(metadata, indent=2))
-        print(f"\nModel metadata saved to: {output_path}")
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -425,9 +375,12 @@ def main():
     parser.add_argument("--output", default="models", help="Output directory")
     parser.add_argument("--ollama", action="store_true", help="Use Ollama for inference")
     parser.add_argument("--ollama-base-url", default="http://127.0.0.1:11434", help="Ollama URL")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
-    parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
+    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs (legacy, unused by MLX path)")
+    parser.add_argument("--iters", type=int, default=300, help="MLX training iterations")
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--lora-rank", type=int, default=16, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=float, default=32.0, help="LoRA alpha (scale)")
+    parser.add_argument("--num-layers", type=int, default=16, help="Trailing layers to convert to LoRA")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
     parser.add_argument("--eval", action="store_true", help="Run evaluation")
     parser.add_argument("--predictions", default=None, help="Path to predictions file (for eval)")
@@ -446,11 +399,10 @@ def main():
     )
 
     processor = TrainingDataProcessor(config)
-    examples = processor.load_dataset(config.input_path)
-    processed = processor.prepare_training_data(examples)
 
     if args.ollama:
         # Run Ollama inference on training data (pass raw examples)
+        examples = processor.load_dataset(config.input_path)
         engine = OllamaInferenceEngine(config)
         predictions = engine.run_inference_on_dataset(examples)
 
@@ -499,9 +451,23 @@ def main():
         print(f"Coordinate MAE: {results['coord_mae']:.2f}")
 
     else:
-        # Fine-tune (placeholder)
-        tuner = VisionFineTuner(config)
-        tuner.fine_tune()
+        # Fine-tune via MLX LoRA (see mlx_finetune.py)
+        from mlx_finetune import MLXFineTuneConfig, run_mlx_finetune
+
+        mlx_model = args.model if "/" in args.model else "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        mlx_config = MLXFineTuneConfig(
+            model_name=mlx_model,
+            input_path=config.input_path,
+            output_dir=config.output_dir,
+            iters=args.iters,
+            batch_size=config.batch_size,
+            learning_rate=config.learning_rate,
+            lora_rank=config.lora_rank,
+            lora_alpha=args.lora_alpha,
+            num_layers=args.num_layers,
+            seed=config.seed,
+        )
+        run_mlx_finetune(mlx_config)
 
 
 if __name__ == "__main__":

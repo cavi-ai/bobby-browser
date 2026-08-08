@@ -25,6 +25,7 @@ Tools are advertised only when the principal holds the required capability.
 | `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree with bounded form-control state, sensitive-value redaction, and command-ready semantic targets (`maxNodes` optional, 1…2048; default 256) |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
 | `click` | `browser:mutate` | Click an element |
+| `click_and_wait_for_popup` | `browser:mutate` | Click and wait for a `window.open` popup to register in `page_list` |
 | `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
 | `context_ask` | `page:read` | Ask the retained page context where a described control is |
 | `context_neighbors` | `context:read` | Show remembered form structure around a described control (siblings, success counters) |
@@ -202,7 +203,7 @@ Example live result without forms:
 ```
 
 The handle can replace the explicit scope fields on this exact V1 allowlist:
-`a11y_snapshot`, `click`, `context_ask`, `context_neighbors`,
+`a11y_snapshot`, `click`, `click_and_wait_for_popup`, `context_ask`, `context_neighbors`,
 `control_action`, `cookie_delete`, `cookie_get`, `cookie_set`, `dialog`,
 `download_url`, `emulate`, `evaluate_javascript`, `extract_structured`,
 `form_snapshot`, `inspect`, `intent_complete_form`,

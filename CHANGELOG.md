@@ -3,6 +3,19 @@
 ## Unreleased
 
 - NVIDIA OpenShell host: `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment. `bobby doctor` reports `openshell-pack` when the pack is present.
+- Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page transparently re-attaches to the live target (`Page::is_closed` + `Browser::get_page` on the vendored chromiumoxide). A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle.
+
+
+- `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child so `[mcp] startup_toolset` (and the rest of that file) apply to `tools/list` — gauntlet/full configs no longer look like explore under doctor.
+- `[http]` accepts partial overrides: missing fields fall back to defaults instead of failing TOML parse (gauntlet / agent hosts that only set `allow_loopback` no longer brick MCP startup).
+- Flat MCP tool `click_and_wait_for_popup` registers `window.open` targets so `page_list` can drive authorization popups without curling app source.
+- Popups register even without the dedicated command: `page_list` syncs untracked page targets into the session (one browser per session), excluding `chrome://` browser chrome. Live installed-Chromium regression test included.
+- `intent` `action_target` preserves `framePath` / `shadowPath` from the intent target (iframe submits no longer discard the frame hop).
+- `intent_submit_and_verify` with a `networkQuiet`-only wait fails when `[aria-invalid=true]` markers remain, instead of reporting `completed` on a soft settle after a rejected submit.
+- Competitor gauntlet bobby runner starts on `BOBBY_MCP_TOOLSET=full`, stages upload fixtures under the gateway cwd, and allows loopback HTTP for scenario downloads.
+- `control_action` accepts an a11y-snapshot target verbatim: control lookup compares targets semantically (explicit `ordinal: 0` matches an omitted ordinal; role case-insensitive) instead of struct equality, on both engines.
+- Target role matching is case-insensitive, so an `a11y_snapshot` target passed back verbatim resolves even where the engine's role casing differs from the DOM's implicit role (Chrome's `Iframe` vs `iframe`). `bobby://intents` documents the `framePath` step shape with an example and the Firefox exact-CSS/test-id hop requirement.
+
 
 - A Boundary command that fails before reaching the browser (argument or target-resolution errors) now reports a plain `failed` outcome instead of `needsReconciliation`; reconciliation is reserved for effects that may have landed.
 - Stale CDP node ids ("Could not find node with given id", after a re-render) map to `targetNotFound` with fresh-snapshot repair instead of a raw `browserCommandFailed`; a dead page target ("receiver is gone") maps to `targetDetached` with recovery guidance instead of cascading identical driver errors.

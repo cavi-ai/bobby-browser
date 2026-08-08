@@ -270,6 +270,12 @@ pub(crate) struct ClickArgs {
     pub(crate) expected_url: Option<String>,
 }
 
+page_scoped_args!(ClickAndWaitForPopupArgs {
+    selector: Option<String>,
+    target: Option<types::TargetSpec>,
+    timeout_ms: Option<u64>,
+});
+
 page_scoped_args!(TypeTextArgs {
     selector: Option<String>,
     target: Option<types::TargetSpec>,

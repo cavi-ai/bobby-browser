@@ -1,12 +1,14 @@
 {
   "bobby": {
-    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability)",
+    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability). Starts on toolset full via BOBBY_MCP_TOOLSET so agents skip toolset_select + most ToolSearch round-trips.",
     "mcpServers": {
       "bobby": {
         "command": "${BOBBY_MCP_COMMAND}",
         "args": ["mcp-stdio"],
         "env": {
-          "AUTOMATION_RUNTIME_BROWSER_SELECTION": "{\"preference\":{\"mode\":\"exact\",\"engine\":\"chromium\"}}"
+          "AUTOMATION_RUNTIME_BROWSER_SELECTION": "{\"preference\":{\"mode\":\"exact\",\"engine\":\"chromium\"}}",
+          "BOBBY_MCP_TOOLSET": "full",
+          "BOBBY_BROWSER_CONFIG": "${BOBBY_GAUNTLET_CONFIG}"
         }
       }
     }

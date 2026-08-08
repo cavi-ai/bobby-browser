@@ -927,7 +927,17 @@ variant; `IntentCommand::class` fixes its recovery behavior.
 Intents resolve in the main frame only. A control inside an iframe is
 invisible to them (snapshots do not descend into frames); drive it with a
 primitive (`click`, `type_text`, `control_action`) whose target carries a
-`framePath` — each hop is a TargetSpec for the frame element.
+`framePath` — each hop is a TargetSpec resolving the frame element itself,
+outermost first:
+
+    "target": {
+      "role": "button", "accessibleName": "Confirm preview",
+      "framePath": [{"css": "iframe#document-preview"}]
+    }
+
+Role matching is case-insensitive, so a snapshot's `Iframe` works as
+`iframe`. On Firefox each framePath hop must be an exact CSS or test-id
+segment (framePath entries like the example above, not role/name).
 
 ## Classes and recovery
 
@@ -988,22 +998,23 @@ resolution or verification overhead.
 
 const PRIMITIVES_BODY: &str = r#"# Primitives with no named tool
 
-Every `IntentCommand` variant, and every `PrimitiveCommand` variant but four,
-has a named MCP tool that builds the command envelope for you. These four do
-not (`PrimitiveCommand`, `crates/types/src/commands.rs`). They are fully
-executable -- validation, capability gating, and evidence are identical to any
-named tool -- but they are reachable only through `command_execute`, and
+Every `IntentCommand` variant, and every `PrimitiveCommand` variant but three
+(`clickAndWaitForDownload`, `setFocusEmulation`, `setEmulatedMedia`),
+has a named MCP tool that builds the command envelope for you. Those three
+remain reachable only through `command_execute`, and
 `command_execute` advertises `envelope.command` as an opaque object, so
 nothing in `tools/list` describes their shape. This document is that
-description.
+description. `clickAndWaitForPopup` also has a flat MCP tool
+(`click_and_wait_for_popup`); the primitive form is documented below for
+envelope callers.
 
 ## Calling one
 
 `command_execute` takes `{envelope, idempotencyKey?}`. Inside the envelope,
 `command` is `{"kind":"primitive","input":{"kind":<name>,"input":{...}}}`,
-where `<name>` is one of the four below. The envelope's own required fields
+where `<name>` is one of the primitives below. The envelope's own required fields
 (`schemaVersion` 2, `commandId`, `workflowId`, `attemptId`, `sessionId`,
-`deadline`) are unchanged. All four are per-page commands: `pageId` is
+`deadline`) are unchanged. These are per-page commands: `pageId` is
 optional in the envelope schema but required by the runtime, and omitting it
 fails with `invalidRequest` ("pageId is required for page commands",
 `crates/page-runtime/src/executor.rs`) before anything runs. The envelope
@@ -1015,6 +1026,10 @@ reaches the runtime.
 is rejected with `deadlineOutOfRange` -- see `bobby://failure-taxonomy`.
 
 ## `clickAndWaitForPopup`
+
+Prefer the flat MCP tool `click_and_wait_for_popup` for the same behavior.
+The primitive remains available through `command_execute` for callers that
+mint their own envelopes.
 
 Clicks the resolved element and waits for the popup it opens, then registers
 that popup as a new page in the session so later calls can address it.

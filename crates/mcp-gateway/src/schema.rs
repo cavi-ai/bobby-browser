@@ -274,6 +274,17 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId"],
         ),
+        "click_and_wait_for_popup" => (
+            json!({
+                "workflowId": id(),
+                "sessionId": id(),
+                "pageId": id(),
+                "selector": string(1, MAX_STRING_BYTES),
+                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                "timeoutMs": timeout_ms()
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "type_text" => (
             json!({
                 "workflowId": id(),

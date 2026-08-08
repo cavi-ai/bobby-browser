@@ -84,6 +84,7 @@ pub(crate) fn tool_title(name: &str) -> &'static str {
         "a11y_snapshot" => "Accessibility snapshot",
         "checkpoint_save" => "Save checkpoint",
         "click" => "Click",
+        "click_and_wait_for_popup" => "Click and wait for popup",
         "command_execute" => "Execute command envelope",
         "control_action" => "Form control action",
         "cookie_delete" => "Delete cookies",
