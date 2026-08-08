@@ -45,6 +45,7 @@ class MLXFineTuneConfig:
     seed: int = 42
     mask_prompt: bool = True
     train_ratio: float = 0.9
+    schema: str = "coords"  # "coords" (x,y regression) or "candidate" (index classification)
 
 
 SYSTEM_PROMPT = (
@@ -55,18 +56,41 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_prompt(example: dict) -> str:
+CANDIDATE_SYSTEM_PROMPT = (
+    "You are a vision assistant for a browser automation agent called Bobby. "
+    "Analyze the screenshot and return ONLY valid JSON matching this schema: "
+    '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": N}}. '
+    "The index refers to the numbered candidate list in the prompt."
+)
+
+
+def build_prompt(example: dict, schema: str = "coords") -> str:
     user_text = f"purpose: {example['purpose']}\nintentKind: {example['intent_kind']}\nstuck: {example['stuck']}"
     if example.get("context_url"):
         user_text += f"\nurl: {example['context_url']}"
-    if example.get("context_candidates"):
-        user_text += "\ncandidates:"
-        for c in example["context_candidates"]:
-            user_text += f"\n- {c['role']} \"{c['name']}\""
-    return f"{SYSTEM_PROMPT}\n\n{user_text}"
+    candidates = example.get("context_candidates")
+    if candidates:
+        if schema == "candidate":
+            user_text += "\ncandidates:"
+            for i, c in enumerate(candidates):
+                user_text += f"\n{i}: {c['role']} \"{c['name']}\""
+        else:
+            user_text += "\ncandidates:"
+            for c in candidates:
+                user_text += f"\n- {c['role']} \"{c['name']}\""
+    system = CANDIDATE_SYSTEM_PROMPT if schema == "candidate" else SYSTEM_PROMPT
+    return f"{system}\n\n{user_text}"
 
 
-def build_completion(example: dict) -> str:
+def build_completion(example: dict, schema: str = "coords") -> str:
+    if schema == "candidate":
+        confidence = example.get("model_response", {}).get("confidence", 0.5)
+        index = example.get("target_index", 0)
+        return json.dumps({
+            "confidence": confidence,
+            "action": {"kind": "clickCandidate", "index": index},
+        })
+
     action = example.get("model_response", {}).get("action", {})
     confidence = example.get("model_response", {}).get("confidence", 0.5)
     kind = action.get("kind")
@@ -91,11 +115,11 @@ def load_examples(path: str) -> list:
     return examples
 
 
-def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: int) -> dict:
+def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: int, schema: str = "coords") -> dict:
     import random
 
     records = [
-        {"prompt": build_prompt(e), "completion": build_completion(e)}
+        {"prompt": build_prompt(e, schema), "completion": build_completion(e, schema)}
         for e in examples
     ]
     rng = random.Random(seed)
@@ -125,12 +149,12 @@ def run_mlx_finetune(config: MLXFineTuneConfig) -> dict:
     if not examples:
         raise SystemExit(f"no training examples in {config.input_path}")
 
-    output_path = Path(config.output_dir) / "mlx-lora-bobby"
+    output_path = Path(config.output_dir) / f"mlx-lora-bobby-{config.schema}"
     output_path.mkdir(parents=True, exist_ok=True)
 
     data_dir = Path(tempfile.mkdtemp(prefix="bobby-mlx-data-"))
     try:
-        counts = write_mlx_dataset(examples, data_dir, config.train_ratio, config.seed)
+        counts = write_mlx_dataset(examples, data_dir, config.train_ratio, config.seed, config.schema)
         print(f"Dataset: {counts['train']} train, {counts['valid']} valid")
 
         print(f"Loading model: {config.model_name}")
@@ -179,6 +203,7 @@ def run_mlx_finetune(config: MLXFineTuneConfig) -> dict:
 
         metadata = {
             "base_model": config.model_name,
+            "schema": config.schema,
             "adapter_file": adapter_file,
             "training_data": config.input_path,
             "iters": config.iters,
@@ -215,6 +240,7 @@ def main():
     parser.add_argument("--num-layers", type=int, default=16, help="Number of trailing layers to convert to LoRA")
     parser.add_argument("--max-seq-length", type=int, default=1024, help="Max sequence length")
     parser.add_argument("--seed", type=int, default=42, help="Shuffle seed")
+    parser.add_argument("--schema", choices=["coords", "candidate"], default="coords", help="Output schema: x,y regression or candidate-index classification")
     args = parser.parse_args()
 
     config = MLXFineTuneConfig(
@@ -230,6 +256,7 @@ def main():
         num_layers=args.num_layers,
         max_seq_length=args.max_seq_length,
         seed=args.seed,
+        schema=args.schema,
     )
     run_mlx_finetune(config)
 
