@@ -45,6 +45,13 @@ pub struct Page {
 }
 
 impl Page {
+    /// Whether this handle's command channel is closed — the target crashed,
+    /// was destroyed, or the browser dropped the session. A closed handle
+    /// can be re-attached with `Browser::get_page` while the target lives.
+    pub fn is_closed(&self) -> bool {
+        self.inner.sender().is_closed()
+    }
+
     /// Removes the `navigator.webdriver` property
     /// changes permissions, pluggins rendering contexts and the `window.chrome`
     /// property to make it harder to detect the scraper as a bot

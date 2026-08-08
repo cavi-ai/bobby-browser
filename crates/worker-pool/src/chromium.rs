@@ -279,12 +279,39 @@ impl ChromiumWorker {
     /// serialize (or, with no timeout, permanently stall) every page of the
     /// session and block close/terminate.
     async fn page_handle(&self, page_id: &PageId) -> Result<Page, CommandError> {
-        self.pages
+        let page = self
+            .pages
             .lock()
             .await
             .get(page_id)
             .cloned()
-            .ok_or_else(page_missing)
+            .ok_or_else(page_missing)?;
+        if !page.is_closed() {
+            return Ok(page);
+        }
+        // The handle's channel is dead (renderer crash or target hiccup).
+        // Re-attach to the live target if it still exists; if it is truly
+        // gone, drop the registration so the caller gets a clean notFound
+        // instead of a dead handle.
+        let target_id = page.target_id().clone();
+        let reattached = {
+            let mut browser_guard = self.browser.lock().await;
+            match browser_guard.as_mut() {
+                Some(browser) => browser.get_page(target_id).await.ok(),
+                None => None,
+            }
+        };
+        match reattached {
+            Some(fresh) => {
+                self.unregister_page(page_id).await;
+                self.register_page(page_id.clone(), fresh.clone()).await?;
+                Ok(fresh)
+            }
+            None => {
+                self.unregister_page(page_id).await;
+                Err(page_missing())
+            }
+        }
     }
     fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
         fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
