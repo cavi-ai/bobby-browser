@@ -15,6 +15,7 @@
 - Page-scoped text waits (`role: main|RootWebArea|…` or `css: body|html|:root`) read live `document.body.innerText` via evaluate (with empty optional fields treated as absent), so async UI confirmations match the same text a whole-page `inspect` sees.
 - Boundary commands that fail with `waitConditionTimedOut` / `verificationFailed` stay `failed` (inspect-then-adjust) instead of `needsReconciliation` never-retry.
 - CDP `oneshot canceled` / dead-target loss maps to `targetDetached` (retryable); Boundary outcomes use retryable failure instead of never-retry reconciliation so agents re-list rather than double-submit.
+- Flat `click_and_wait_for_popup` defaults `autoCheckpoint=true` (and accepts pinned `commandId`/`attemptId`) so the Boundary popup wait is one call, matching boundary `click` / `intent_submit_and_verify`.
 - `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child so `[mcp] startup_toolset` (and the rest of that file) apply to `tools/list` — gauntlet/full configs no longer look like explore under doctor.
 - Whole-page `inspect` over DirectHttp treats empty-`<body>` SPA shells (title/meta chrome + scripts) as `javascriptRequired` and falls back to the live browser instead of returning shell HTML.
 - `[http]` accepts partial overrides: missing fields fall back to defaults instead of failing TOML parse (gauntlet / agent hosts that only set `allow_loopback` no longer brick MCP startup).
