@@ -2,6 +2,7 @@ mod bootstrap_local;
 mod doctor;
 mod jobs_client;
 mod onboarding;
+mod openshell;
 mod vision_child;
 mod vision_collect;
 mod vision_connect;
@@ -81,7 +82,7 @@ enum CliCommand {
         /// Bootstrap env file path
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Print an MCP client config fragment for an agent host (claude, zed, vscode, json)
+        /// Print an MCP client config fragment for an agent host (claude, zed, vscode, json, openshell)
         #[arg(long)]
         emit: Option<onboarding::EmitFormat>,
     },
@@ -230,6 +231,11 @@ enum CliCommand {
     Jobs {
         #[command(subcommand)]
         command: JobsCommand,
+    },
+    /// NVIDIA OpenShell host: pack, provision, revoke sandbox principals
+    Openshell {
+        #[command(subcommand)]
+        command: OpenshellCommand,
     },
     /// Inspect or erase remembered site context (durable context graph)
     Context {
@@ -418,6 +424,49 @@ enum JobsCommand {
     },
 }
 
+#[derive(clap::Subcommand)]
+enum OpenshellCommand {
+    /// Write the openshell/ pack (policy, mcp.json, skill, README)
+    Install {
+        /// Project root (default: cwd)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Host gateway hostname the sandbox dials (OpenShell policy + MCP URL)
+        #[arg(long, default_value = "host.docker.internal")]
+        mcp_host: String,
+        /// Host bobby port
+        #[arg(long, default_value_t = 7777)]
+        mcp_port: u16,
+        /// Agent binary path listed in the OpenShell policy
+        #[arg(long, default_value = "/usr/local/bin/claude")]
+        agent_binary: String,
+    },
+    /// Mint one agent-scoped principal for a sandbox; write injection env (0600)
+    Provision {
+        #[command(flatten)]
+        common: JobsCommonArgs,
+        /// Sandbox id (1–128 chars of [A-Za-z0-9_-]); one principal per id
+        #[arg(long)]
+        sandbox: String,
+        /// Principal TTL in hours (default 12)
+        #[arg(long)]
+        ttl_hours: Option<i64>,
+        /// Host gateway hostname recorded in the injection env MCP URL
+        #[arg(long, default_value = "host.docker.internal")]
+        mcp_host: String,
+        #[arg(long, default_value_t = 7777)]
+        mcp_port: u16,
+    },
+    /// Revoke the principal previously provisioned for a sandbox
+    Revoke {
+        #[command(flatten)]
+        common: JobsCommonArgs,
+        /// Sandbox id that was passed to provision
+        #[arg(long)]
+        sandbox: String,
+    },
+}
+
 #[derive(clap::Args)]
 struct JobsCommonArgs {
     /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
@@ -576,6 +625,7 @@ pub async fn run() -> Result<()> {
             }
         }
         CliCommand::Jobs { command } => run_jobs(command)?,
+        CliCommand::Openshell { command } => run_openshell(command)?,
         CliCommand::Context { command } => run_context(command).await?,
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
@@ -930,6 +980,90 @@ fn run_jobs(command: JobsCommand) -> Result<()> {
         JobsCommand::Cancel { common, job_id } => {
             let (base_url, bearer) = prepare_jobs_client(&common)?;
             jobs_client::cancel_job(&base_url, bearer, &job_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_openshell(command: OpenshellCommand) -> Result<()> {
+    match command {
+        OpenshellCommand::Install {
+            path,
+            mcp_host,
+            mcp_port,
+            agent_binary,
+        } => {
+            let root = match path {
+                Some(path) => path,
+                None => std::env::current_dir()?,
+            };
+            let options = openshell::PackOptions {
+                mcp_host,
+                mcp_port,
+                agent_binary,
+            };
+            let pack = openshell::install_pack(&root, &options)?;
+            println!("ok: wrote OpenShell pack at {}", pack.dir.display());
+            println!("  policy  {}", pack.policy.display());
+            println!("  mcp     {}", pack.mcp.display());
+            println!("  readme  {}", pack.readme.display());
+            println!("  skill   {}", pack.skill.display());
+            println!("next: `bobby serve`, then `bobby openshell provision --sandbox <id>`");
+        }
+        OpenshellCommand::Provision {
+            common,
+            sandbox,
+            ttl_hours,
+            mcp_host,
+            mcp_port,
+        } => {
+            let config_path = resolve_config_path(common.config);
+            let config = AppConfig::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let bootstrap_path = resolve_bootstrap_path(common.bootstrap_env)?;
+            let pack = openshell::PackOptions {
+                mcp_host,
+                mcp_port,
+                agent_binary: "/usr/local/bin/claude".to_owned(),
+            };
+            let result = openshell::provision_sandbox(
+                &sandbox,
+                common.base_url,
+                &config,
+                &bootstrap_path,
+                common.token,
+                ttl_hours,
+                &pack,
+            )?;
+            println!(
+                "ok: provisioned sandbox `{}` principal {} expires {}",
+                result.sandbox, result.principal_id, result.expires_at
+            );
+            println!(
+                "injection env (0600, do not commit): {}",
+                result.env_path.display()
+            );
+            println!(
+                "inject AUTOMATION_RUNTIME_TOKEN from that file into the OpenShell sandbox; MCP URL {}",
+                result.mcp_url
+            );
+        }
+        OpenshellCommand::Revoke { common, sandbox } => {
+            let config_path = resolve_config_path(common.config);
+            let config = AppConfig::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let bootstrap_path = resolve_bootstrap_path(common.bootstrap_env)?;
+            let meta = openshell::revoke_sandbox(
+                &sandbox,
+                common.base_url,
+                &config,
+                &bootstrap_path,
+                common.token,
+            )?;
+            println!(
+                "ok: revoked sandbox `{sandbox}` (cleared {})",
+                meta.display()
+            );
         }
     }
     Ok(())
@@ -2297,6 +2431,52 @@ mod tests {
                 command: JobsCommand::Cancel { job_id, .. },
             }) => assert_eq!(job_id, "job-456"),
             _ => panic!("unexpected cancel parse"),
+        }
+    }
+
+    #[test]
+    fn openshell_clap_parses_install_provision_revoke() {
+        use clap::Parser;
+        let install = Cli::try_parse_from([
+            "bobby",
+            "openshell",
+            "install",
+            "--mcp-host",
+            "host.containers.internal",
+            "--mcp-port",
+            "8888",
+        ])
+        .unwrap();
+        match install.command {
+            Some(CliCommand::Openshell {
+                command:
+                    OpenshellCommand::Install {
+                        mcp_host,
+                        mcp_port,
+                        ..
+                    },
+            }) => {
+                assert_eq!(mcp_host, "host.containers.internal");
+                assert_eq!(mcp_port, 8888);
+            }
+            _ => panic!("unexpected openshell install parse"),
+        }
+        let provision =
+            Cli::try_parse_from(["bobby", "openshell", "provision", "--sandbox", "demo-1"])
+                .unwrap();
+        match provision.command {
+            Some(CliCommand::Openshell {
+                command: OpenshellCommand::Provision { sandbox, .. },
+            }) => assert_eq!(sandbox, "demo-1"),
+            _ => panic!("unexpected openshell provision parse"),
+        }
+        let revoke =
+            Cli::try_parse_from(["bobby", "openshell", "revoke", "--sandbox", "demo-1"]).unwrap();
+        match revoke.command {
+            Some(CliCommand::Openshell {
+                command: OpenshellCommand::Revoke { sandbox, .. },
+            }) => assert_eq!(sandbox, "demo-1"),
+            _ => panic!("unexpected openshell revoke parse"),
         }
     }
 

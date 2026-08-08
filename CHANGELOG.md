@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- NVIDIA OpenShell host: `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment. `bobby doctor` reports `openshell-pack` when the pack is present.
+
 - A Boundary command that fails before reaching the browser (argument or target-resolution errors) now reports a plain `failed` outcome instead of `needsReconciliation`; reconciliation is reserved for effects that may have landed.
 - Stale CDP node ids ("Could not find node with given id", after a re-render) map to `targetNotFound` with fresh-snapshot repair instead of a raw `browserCommandFailed`; a dead page target ("receiver is gone") maps to `targetDetached` with recovery guidance instead of cascading identical driver errors.
 - Competitor gauntlet: `--tool` is required and the full competitor gamut runs only via an explicit `--tool all`.

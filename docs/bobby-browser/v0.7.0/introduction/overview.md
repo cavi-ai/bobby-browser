@@ -24,6 +24,7 @@ credentials are never accepted in URLs or query strings.
 | Embed in Rust | [Rust crate book](../rust/index.md) · [Rust SDK](../surfaces/rust-sdk.md) |
 | Raw HTTP / curl | [HTTP API](../surfaces/http-api.md) + [Authentication](../guides/auth.md) |
 | Agent host (Claude, Cursor, …) | [MCP tools](../surfaces/mcp-tools.md) via [stdio](../surfaces/mcp-stdio.md) or [HTTP](../surfaces/mcp-http.md) |
+| NVIDIA OpenShell sandbox | [OpenShell host](../guides/openshell.md) |
 | Playwright / Puppeteer | [Authenticated CDP](../surfaces/cdp.md) (primitives only) |
 
 Default browser engine preference is **Firefox** (with Chromium available when
