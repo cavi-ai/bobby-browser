@@ -519,8 +519,20 @@ impl RuntimeService {
             humanize: policy.humanize,
             vision_node,
         };
+        let closed_page = match &envelope.command {
+            RuntimeCommand::Primitive(PrimitiveCommand::ClosePage(command)) => {
+                Some((envelope.session_id.clone(), command.page_id.clone()))
+            }
+            _ => None,
+        };
         let _in_flight = InFlightGuard::acquire(Arc::clone(&self.in_flight));
-        self.pages.execute_with_session_gate(envelope, gate).await
+        let outcome = self.pages.execute_with_session_gate(envelope, gate).await;
+        if matches!(outcome, CommandOutcome::Completed { .. }) {
+            if let Some((session_id, page_id)) = closed_page {
+                let _ = self.sessions.remove_page(&session_id, &page_id).await;
+            }
+        }
+        outcome
     }
 
     /// Save a checkpoint whose evidence the caller has already verified.

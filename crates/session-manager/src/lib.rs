@@ -85,4 +85,14 @@ impl SessionManager {
         session.last_used_at = Utc::now();
         Ok(())
     }
+
+    pub async fn remove_page(&self, id: &SessionId, page_id: &PageId) -> Result<(), RuntimeError> {
+        let mut guard = self.inner.write().await;
+        let session = guard
+            .get_mut(id)
+            .ok_or_else(|| RuntimeError::NotFound("session".to_string()))?;
+        session.page_ids.retain(|candidate| candidate != page_id);
+        session.last_used_at = Utc::now();
+        Ok(())
+    }
 }

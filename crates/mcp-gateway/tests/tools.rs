@@ -237,6 +237,122 @@ async fn page_open_with_url_requires_browser_mutate_before_opening_a_page() {
 }
 
 #[tokio::test]
+async fn page_open_closes_the_new_page_when_navigation_returns_an_interface_error() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000d1")),
+            [
+                Capability::SessionRead,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+                Capability::BrowserMutate,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let live = common::live_server_failing_navigation_interface(handle).await;
+    common::initialize(&live.server).await;
+
+    let created = live
+        .server
+        .handle_message(request(
+            2,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"fixture"}}),
+        ))
+        .await
+        .unwrap();
+    let session_id = created["result"]["structuredContent"]["id"].clone();
+    let failed = live
+        .server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"page_open",
+                "arguments":{"sessionId":session_id,"url":"https://example.test/fails"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        failed["error"]["data"]["interfaceError"]["code"],
+        json!("internal"),
+        "the injected navigation failure must reach the caller: {failed}"
+    );
+
+    let listed = live
+        .server
+        .handle_message(request(
+            4,
+            "tools/call",
+            json!({"name":"session_list","arguments":{}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed["result"]["structuredContent"]["sessions"][0]["page_ids"],
+        json!([]),
+        "a failed page_open must not leave an unreachable page behind: {listed}"
+    );
+}
+
+#[tokio::test]
+async fn page_close_removes_the_page_from_session_state() {
+    let authority = AuthorityStore::with_capacity(1);
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000d2")),
+            [
+                Capability::SessionRead,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+                Capability::BrowserMutate,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    let live = common::live_server(handle).await;
+    common::initialize(&live.server).await;
+    let mut next_id = 10;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let closed = live
+        .server
+        .handle_message(request(
+            12,
+            "tools/call",
+            json!({
+                "name":"page_close",
+                "arguments":{"sessionId":session_id,"pageId":page_id}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(closed["result"]["structuredContent"]["status"], "completed");
+
+    let listed = live
+        .server
+        .handle_message(request(
+            13,
+            "tools/call",
+            json!({"name":"session_list","arguments":{}}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed["result"]["structuredContent"]["sessions"][0]["page_ids"],
+        json!([]),
+        "page_close must keep session metadata in sync: {listed}"
+    );
+}
+
+#[tokio::test]
 async fn runtime_info_calls_the_authenticated_runtime_and_returns_structured_content() {
     let server = fixture_server(vec![Capability::SessionRead]).await;
     let response = server
