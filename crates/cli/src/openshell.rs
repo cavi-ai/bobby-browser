@@ -935,6 +935,18 @@ pub fn doctor_openshell_extras(
 mod tests {
     use super::*;
 
+    /// `BOBBY_OPENSHELL_SECRETS_DIR` is process-global, so tests that point it
+    /// at their own temp root must not overlap: otherwise one test's
+    /// `remove_var` sends another test's `list_sandboxes` at the real config
+    /// dir mid-assertion.
+    static SECRETS_DIR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_secrets_dir_env() -> std::sync::MutexGuard<'static, ()> {
+        SECRETS_DIR_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn mcp_config_uses_env_placeholder_not_a_literal_secret() {
         let options = PackOptions::default();
@@ -997,6 +1009,7 @@ mod tests {
 
     #[test]
     fn doctor_warns_shared_companion_with_multiple_sandboxes() {
+        let _env = lock_secrets_dir_env();
         let root = tempfile::tempdir().unwrap();
         let secrets = root.path().join("openshell-secrets");
         std::fs::create_dir_all(&secrets).unwrap();
@@ -1079,6 +1092,7 @@ mod tests {
 
     #[test]
     fn list_and_status_round_trip_via_status_sidecar() {
+        let _env = lock_secrets_dir_env();
         let root = tempfile::tempdir().unwrap();
         let secrets = root.path().join("openshell-secrets");
         std::fs::create_dir_all(&secrets).unwrap();
