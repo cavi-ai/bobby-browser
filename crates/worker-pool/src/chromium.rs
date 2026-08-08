@@ -852,12 +852,17 @@ impl ChromiumWorker {
     }
 }
 
+const PLAIN_CLICK_TARGET_DRIFT_RETRIES: usize = 3;
+const PLAIN_CLICK_TARGET_DRIFT_DELAY: Duration = Duration::from_millis(25);
+
 fn should_retry_plain_click_target_drift(
     boundary: bool,
     attempt: usize,
     error: &CommandError,
 ) -> bool {
-    !boundary && attempt == 0 && error.code == ErrorCode::TargetNotFound
+    !boundary
+        && attempt < PLAIN_CLICK_TARGET_DRIFT_RETRIES
+        && error.code == ErrorCode::TargetNotFound
 }
 
 #[async_trait]
@@ -999,7 +1004,7 @@ impl BrowserWorker for ChromiumWorker {
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        for attempt in 0..=1 {
+        for attempt in 0..=PLAIN_CLICK_TARGET_DRIFT_RETRIES {
             let resolved = match self
                 .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
                 .await
@@ -1008,6 +1013,7 @@ impl BrowserWorker for ChromiumWorker {
                 Err(error)
                     if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
                 {
+                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -1033,6 +1039,7 @@ impl BrowserWorker for ChromiumWorker {
                 Err(error)
                     if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
                 {
+                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -1056,12 +1063,13 @@ impl BrowserWorker for ChromiumWorker {
                 Err(error)
                     if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
                 {
+                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
                     continue;
                 }
                 Err(error) => return Err(error),
             }
         }
-        unreachable!("plain-click target drift retries are bounded to one")
+        unreachable!("plain-click target drift retries are bounded")
     }
 
     async fn click_xy(
@@ -3180,7 +3188,7 @@ mod tests {
     };
 
     #[test]
-    fn non_boundary_click_retries_one_predispatch_stale_target_only() {
+    fn non_boundary_click_retries_bounded_predispatch_stale_targets_only() {
         let stale = CommandError {
             code: ErrorCode::TargetNotFound,
             message: "stale".into(),
@@ -3195,7 +3203,9 @@ mod tests {
         };
 
         assert!(should_retry_plain_click_target_drift(false, 0, &stale));
-        assert!(!should_retry_plain_click_target_drift(false, 1, &stale));
+        assert!(should_retry_plain_click_target_drift(false, 1, &stale));
+        assert!(should_retry_plain_click_target_drift(false, 2, &stale));
+        assert!(!should_retry_plain_click_target_drift(false, 3, &stale));
         assert!(!should_retry_plain_click_target_drift(true, 0, &stale));
         assert!(!should_retry_plain_click_target_drift(false, 0, &other));
     }
