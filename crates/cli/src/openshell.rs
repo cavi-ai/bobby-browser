@@ -888,6 +888,10 @@ pub fn doctor_openshell_extras(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// `BOBBY_OPENSHELL_SECRETS_DIR` is process-global; serialize tests that mutate it.
+    static SECRETS_DIR_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn mcp_config_uses_env_placeholder_not_a_literal_secret() {
@@ -951,6 +955,7 @@ mod tests {
 
     #[test]
     fn doctor_warns_shared_companion_with_multiple_sandboxes() {
+        let _guard = SECRETS_DIR_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let secrets = root.path().join("openshell-secrets");
         std::fs::create_dir_all(&secrets).unwrap();
@@ -1033,6 +1038,7 @@ mod tests {
 
     #[test]
     fn list_and_status_round_trip_via_status_sidecar() {
+        let _guard = SECRETS_DIR_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let secrets = root.path().join("openshell-secrets");
         std::fs::create_dir_all(&secrets).unwrap();
