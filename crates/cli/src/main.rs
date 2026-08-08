@@ -1030,6 +1030,7 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             let pack = openshell::install_pack(&root, &options)?;
             println!("ok: wrote OpenShell pack at {}", pack.dir.display());
             println!("  policy  {}", pack.policy.display());
+            println!("  network {}", pack.policy_network.display());
             println!("  mcp     {}", pack.mcp.display());
             println!("  readme  {}", pack.readme.display());
             println!("  skill   {}", pack.skill.display());
