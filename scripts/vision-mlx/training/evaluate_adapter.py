@@ -157,6 +157,84 @@ def element_accuracy(predictions: list, examples: list) -> dict:
     }
 
 
+def is_correct(pred: dict | None, e: dict) -> bool | None:
+    """Per-item element correctness. None = unscored (unparsed or untargeted)."""
+    if pred is None:
+        return None
+    action = pred.get("action", {})
+    kind = action.get("kind")
+    target = e.get("target_index")
+    target_action = e.get("model_response", {}).get("action", {})
+
+    if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+        if target is None:
+            return None
+        return action.get("index") == target
+    if kind == "click":
+        bbox = target_bbox(e)
+        if bbox is None:
+            return None
+        return point_in_bbox(action.get("x", -1), action.get("y", -1), bbox)
+    if kind == "typeText":
+        return action.get("text") == target_action.get("text")
+    if kind == "extractValue":
+        return action.get("value") == target_action.get("value")
+    return None
+
+
+def calibration_metrics(predictions: list, examples: list) -> dict:
+    """Confidence-vs-correctness analysis for the routing claim: does gating
+    low-confidence predictions raise accuracy on the kept set?
+
+    - ece: expected calibration error over 10 bins
+    - selective: accuracy/coverage at each confidence threshold
+    - separation: mean confidence of correct vs incorrect predictions
+    """
+    pairs = []
+    for p, e in zip(predictions, examples):
+        pred = p.get("prediction")
+        correct = is_correct(pred, e)
+        if correct is None:
+            continue
+        confidence = pred.get("confidence", 0.5)
+        pairs.append((confidence, correct))
+
+    if not pairs:
+        return {"ece": 0.0, "selective": [], "separation": {}, "scored": 0}
+
+    bins: list[list[tuple[float, bool]]] = [[] for _ in range(10)]
+    for confidence, correct in pairs:
+        bins[min(int(confidence * 10), 9)].append((confidence, correct))
+    ece = 0.0
+    for bucket in bins:
+        if not bucket:
+            continue
+        acc = sum(1 for _, c in bucket if c) / len(bucket)
+        conf = sum(c for c, _ in bucket) / len(bucket)
+        ece += (len(bucket) / len(pairs)) * abs(acc - conf)
+
+    selective = []
+    for threshold in (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95):
+        kept = [(c, ok) for c, ok in pairs if c >= threshold]
+        if kept:
+            acc = sum(1 for _, ok in kept if ok) / len(kept)
+            selective.append({
+                "threshold": threshold,
+                "coverage": len(kept) / len(pairs),
+                "accuracy": acc,
+            })
+
+    correct_confs = [c for c, ok in pairs if ok]
+    incorrect_confs = [c for c, ok in pairs if not ok]
+    separation = {
+        "correct_mean": sum(correct_confs) / len(correct_confs) if correct_confs else None,
+        "incorrect_mean": sum(incorrect_confs) / len(incorrect_confs) if incorrect_confs else None,
+        "incorrect_count": len(incorrect_confs),
+    }
+
+    return {"ece": ece, "selective": selective, "separation": separation, "scored": len(pairs)}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Bobby MLX LoRA adapter")
     parser.add_argument("--model", required=True, help="Base MLX model (HF repo or local path)")
@@ -199,6 +277,7 @@ def main():
     evaluator = VisionEvaluator(FineTuneConfig())
     results = evaluator.evaluate_predictions(predictions)
     results["element"] = element_accuracy(predictions, examples)
+    results["calibration"] = calibration_metrics(predictions, examples)
 
     print("\n=== Evaluation Results ===")
     print(f"Total examples: {results['total_examples']}")
@@ -215,6 +294,18 @@ def main():
         print(f"Content accuracy (text/value match): "
               f"{results['element']['content_correct']}/{results['element']['content_scored']} "
               f"= {results['element']['content_accuracy']:.2%}")
+    cal = results["calibration"]
+    if cal["scored"]:
+        print(f"\nCalibration (ECE): {cal['ece']:.4f}")
+        sep = cal["separation"]
+        if sep.get("incorrect_count"):
+            print(f"Confidence: correct mean {sep['correct_mean']:.3f} vs "
+                  f"incorrect mean {sep['incorrect_mean']:.3f} "
+                  f"({sep['incorrect_count']} errors)")
+        print("Selective accuracy (confidence gate):")
+        for row in cal["selective"]:
+            print(f"  >= {row['threshold']:.2f}: {row['accuracy']:.2%} accurate "
+                  f"on {row['coverage']:.0%} coverage")
     print("\nJourney success rates:")
     for journey, rate in results["journey_success_rates"].items():
         print(f"  {journey}: {rate:.2%}")
