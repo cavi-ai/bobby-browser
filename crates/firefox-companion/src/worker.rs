@@ -3920,7 +3920,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 WaitCondition::Text { target, matcher }
                 | WaitCondition::Value { target, matcher } => {
                     let is_value = matches!(command.condition, WaitCondition::Value { .. });
-                    if !is_value && is_document_web_area_target(target) {
+                    if !is_value && is_page_scoped_text_target(target) {
                         let context = self.context(page_id).await?;
                         let response = self.transport.send("script.evaluate", json!({
                             "expression": "document.body ? (document.body.innerText || '') : ''",
@@ -5104,11 +5104,21 @@ fn contains_sensitive_material(value: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
-fn is_document_web_area_target(target: &types::TargetSpec) -> bool {
+fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
     let Some(role) = target.role.as_deref() else {
         return false;
     };
-    if !(role.eq_ignore_ascii_case("RootWebArea") || role.eq_ignore_ascii_case("document")) {
+    let page_scoped = [
+        "RootWebArea",
+        "document",
+        "main",
+        "body",
+        "application",
+        "generic",
+    ]
+    .iter()
+    .any(|name| role.eq_ignore_ascii_case(name));
+    if !page_scoped {
         return false;
     }
     target.css.is_none()

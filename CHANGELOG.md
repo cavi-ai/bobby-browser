@@ -8,7 +8,7 @@
 
 - `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child so `[mcp] startup_toolset` (and the rest of that file) apply to `tools/list` — gauntlet/full configs no longer look like explore under doctor.
 - Whole-page `inspect` over DirectHttp treats empty-`<body>` SPA shells (title/meta chrome + scripts) as `javascriptRequired` and falls back to the live browser instead of returning shell HTML.
-- Text waits targeting `RootWebArea` / `document` read `document.body.innerText` (a11y page root is not a DOM role), so post-submit status text no longer 30s-timeouts.
+- Text waits on bare page-scoped roles (`RootWebArea`, `document`, `main`, …) read `document.body.innerText`, so post-submit status text no longer burns a full wait timeout.
 - `[http]` accepts partial overrides: missing fields fall back to defaults instead of failing TOML parse (gauntlet / agent hosts that only set `allow_loopback` no longer brick MCP startup).
 - Flat MCP tool `click_and_wait_for_popup` registers `window.open` targets so `page_list` can drive authorization popups without curling app source.
 - Popups register even without the dedicated command: `page_list` syncs untracked page targets into the session (one browser per session), excluding `chrome://` browser chrome. Live installed-Chromium regression test included.
