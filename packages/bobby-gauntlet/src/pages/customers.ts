@@ -15,12 +15,17 @@ export async function customersPage(document: Document, api: NorthstarApi, route
   const submit = element(document, "button", { text: "Search" });
   submit.type = "submit";
   const results = element(document, "div", { className: "customer-results" });
+  let searchGeneration = 0;
   search.append(label, submit);
   page.append(search, results);
   search.addEventListener("submit", (event) => {
     event.preventDefault();
+    const generation = ++searchGeneration;
     results.replaceChildren(loading(document, "Searching customer records"));
-    void api.customers(input.value).then((customers) => results.replaceChildren(customerTable(document, customers, router))).catch((error: unknown) => {
+    void api.customers(input.value).then((customers) => {
+      if (generation === searchGeneration) results.replaceChildren(customerTable(document, customers, router));
+    }).catch((error: unknown) => {
+      if (generation !== searchGeneration) return;
       const detail = error instanceof Error ? ` ${error.message}` : "";
       results.replaceChildren(element(document, "p", { className: "error-panel", text: `Customer search failed.${detail}` }));
     });
@@ -58,6 +63,7 @@ export async function customerDetailPage(document: Document, id: string, api: No
   page.append(pageHeader(document, "Customer profile", customer.name, `${customer.email} · Joined ${customer.joinedAt}`));
   const card = element(document, "article", { className: "detail-card" });
   const form = element(document, "form", { className: "priority-form", ariaLabel: "Update customer priority" });
+  const feedback = element(document, "div", { className: "priority-feedback" });
   const label = element(document, "label", { text: "Customer priority" });
   const select = element(document, "select", { ariaLabel: "Customer priority" });
   for (const priority of ["low", "normal", "high"] as const) {
@@ -73,9 +79,16 @@ export async function customerDetailPage(document: Document, id: string, api: No
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     save.disabled = true;
-    void api.updatePriority(id, select.value as Priority).then(() => card.append(status(document, "Priority saved"))).finally(() => { save.disabled = false; });
+    feedback.replaceChildren();
+    void api.updatePriority(id, select.value as Priority)
+      .then(() => feedback.replaceChildren(status(document, "Priority saved")))
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Priority update failed.";
+        feedback.replaceChildren(element(document, "p", { className: "error-panel", text: message }));
+      })
+      .finally(() => { save.disabled = false; });
   });
-  card.append(element(document, "h2", { text: "Account details" }), form);
+  card.append(element(document, "h2", { text: "Account details" }), form, feedback);
   page.append(card);
   return page;
 }
