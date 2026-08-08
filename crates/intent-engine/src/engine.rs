@@ -36,6 +36,9 @@ pub struct VisionContext {
     /// runtime; the engine merges per-stuck candidates into it. `None`
     /// keeps every request byte-identical to before.
     pub prompt_context: Option<crate::VisionPromptContext>,
+    /// Escalation corpus sink (`[vision].corpus_dir`). `None` writes nothing;
+    /// the default path is byte-identical to before.
+    pub corpus: Option<crate::VisionCorpus>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +72,18 @@ pub trait IntentBrowser: Send + Sync {
         x: f64,
         y: f64,
     ) -> Result<Vec<Evidence>, CommandError>;
+
+    /// Accessible identity (role, name) of the interactive element at a
+    /// viewport point, used by the vision corpus collector to ground a
+    /// verified click back onto the candidate list. Default: unsupported.
+    async fn element_at_point(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Option<(String, String)>, CommandError> {
+        Ok(None)
+    }
 
     async fn type_text(
         &self,
@@ -422,13 +437,28 @@ async fn execute_locate(
             }
         }
         ResolutionDecision::NotFound => {
+            // The page's interactive candidates still went unmatched, and the
+            // model should see them: a stuck escalation with no candidate
+            // list asks the model to pick blind. Attach the near-miss set
+            // (capped, score zero) so both the prompt and the corpus carry it.
+            let near_misses = candidates
+                .iter()
+                .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
+                .take(5)
+                .map(|candidate| types::CandidateEvidence {
+                    role: candidate.role.clone(),
+                    name: candidate.name.clone(),
+                    score: 0,
+                    reasons: vec!["noMatch".into()],
+                })
+                .collect();
             stuck_outcome(
                 StuckReport {
                     intent_kind: "locate",
                     kind: StuckKind::TargetMissing,
                     purpose,
                     plan_summary,
-                    candidates: Vec::new(),
+                    candidates: near_misses,
                     verification: "targetNotFound",
                 },
                 page_id,
@@ -1831,7 +1861,7 @@ async fn stuck_outcome_with_prior_evidence(
         page_id,
         browser,
         assist.as_ref(),
-        vision.prompt_context.clone(),
+        vision,
     )
     .await
 }
@@ -1875,8 +1905,10 @@ async fn escalate_with_vision(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     assist: &dyn VisionAssist,
-    prompt_context: Option<crate::VisionPromptContext>,
+    vision: &VisionContext,
 ) -> IntentOutcome {
+    let prompt_context = vision.prompt_context.clone();
+    let corpus = vision.corpus.clone();
     let StuckReport {
         intent_kind,
         kind,
@@ -1928,6 +1960,26 @@ async fn escalate_with_vision(
             })
             .collect();
     }
+    // Corpus capture: snapshot the exact prompt inputs before they move into
+    // the request, so the record shows what the model actually saw.
+    let corpus_inputs = corpus.as_ref().map(|_| {
+        (
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png),
+            context.as_ref().and_then(|c| c.url.clone()),
+            context
+                .as_ref()
+                .map(|c| {
+                    c.candidates
+                        .iter()
+                        .map(|p| crate::CorpusCandidate {
+                            role: p.role.clone(),
+                            name: p.name.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+    });
     let propose_started = std::time::Instant::now();
     let proposal = match assist
         .propose(VisionProposeRequest {
@@ -1967,6 +2019,21 @@ async fn escalate_with_vision(
             confidence = proposal.confidence,
             "vision.rejection_floor"
         );
+        record_escalation(
+            &corpus,
+            corpus_inputs.as_ref(),
+            &purpose,
+            intent_kind,
+            kind,
+            &proposal,
+            false,
+            "visionRejectionFloor",
+            Some(format!(
+                "proposal confidence {:.2} below floor {VISION_CONFIDENCE_FLOOR}",
+                proposal.confidence
+            )),
+            None,
+        );
         let mut evidence = base_evidence;
         evidence.append(&mut screenshot_evidence);
         evidence.push(intent_evidence(execution_record_with_path(
@@ -2002,6 +2069,18 @@ async fn escalate_with_vision(
     let mut act_evidence = match execute_vision_action(page_id, browser, &proposal.action).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            record_escalation(
+                &corpus,
+                corpus_inputs.as_ref(),
+                &purpose,
+                intent_kind,
+                kind,
+                &proposal,
+                false,
+                "visionActFailed",
+                Some(format!("vision act failed: {}", error.message)),
+                None,
+            );
             let mut evidence = base_evidence;
             evidence.append(&mut screenshot_evidence);
             evidence.push(intent_evidence(execution_record_with_path(
@@ -2033,6 +2112,28 @@ async fn escalate_with_vision(
     evidence.append(&mut screenshot_evidence);
     evidence.append(&mut act_evidence);
     let artifact_ids = artifact_ids_from(&evidence);
+    // Ground the executed action back onto the candidate list before the
+    // record is written; only clicks resolve (point-based).
+    let resolved = match &proposal.action {
+        VisionAction::Click { x, y } => browser
+            .element_at_point(page_id, *x, *y)
+            .await
+            .ok()
+            .flatten(),
+        _ => None,
+    };
+    record_escalation(
+        &corpus,
+        corpus_inputs.as_ref(),
+        &purpose,
+        intent_kind,
+        kind,
+        &proposal,
+        true,
+        "visionFallback",
+        None,
+        resolved,
+    );
     evidence.push(intent_evidence(execution_record_with_path(
         intent_kind,
         purpose,
@@ -2047,6 +2148,58 @@ async fn escalate_with_vision(
         },
     )));
     IntentOutcome::Completed { evidence }
+}
+
+/// Write one corpus record for a terminal escalation branch. No-ops unless
+/// `[vision].corpus_dir` threaded a sink through the `VisionContext`.
+#[allow(clippy::too_many_arguments)]
+fn record_escalation(
+    corpus: &Option<crate::VisionCorpus>,
+    inputs: Option<&(String, Option<String>, Vec<crate::CorpusCandidate>)>,
+    purpose: &Option<String>,
+    intent_kind: &str,
+    kind: StuckKind,
+    proposal: &crate::VisionProposal,
+    success: bool,
+    stage: &'static str,
+    error_message: Option<String>,
+    resolved: Option<(String, String)>,
+) {
+    let (Some(corpus), Some((image_b64, context_url, candidates))) = (corpus, inputs) else {
+        return;
+    };
+    let resolved_element = resolved.map(|(role, name)| crate::ResolvedElement { role, name });
+    let target_index = resolved_element.as_ref().and_then(|element| {
+        crate::corpus::match_resolved(candidates, &(element.role.clone(), element.name.clone()))
+    });
+    corpus.record(&crate::CorpusRecord {
+        image_b64: image_b64.clone(),
+        purpose: purpose.clone().unwrap_or_default(),
+        intent_kind: intent_kind.to_owned(),
+        stuck: stuck_label(kind).to_owned(),
+        context_url: context_url.clone(),
+        context_candidates: candidates.clone(),
+        target_index,
+        resolved_element,
+        model_response: crate::corpus::CorpusModelResponse {
+            confidence: proposal.confidence,
+            action: crate::corpus::raw_action(&proposal.action),
+        },
+        success,
+        journey: "production".into(),
+        step: intent_kind.to_owned(),
+        outcome_stage: stage.to_owned(),
+        error_message,
+    });
+}
+
+fn stuck_label(kind: StuckKind) -> &'static str {
+    match kind {
+        StuckKind::TargetMissing => "targetMissing",
+        StuckKind::TargetAmbiguous => "targetAmbiguous",
+        StuckKind::ObstructionSuspected => "obstructionSuspected",
+        StuckKind::VerifyNoDomSignal => "verifyNoDomSignal",
+    }
 }
 
 async fn execute_vision_action(

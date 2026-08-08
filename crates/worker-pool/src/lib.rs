@@ -377,6 +377,20 @@ pub trait BrowserWorker: Send + Sync {
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
+    /// Best-effort accessible identity of the interactive element at viewport
+    /// point (x, y): role + name, matching the shape a11y candidates carry.
+    /// Used by the vision corpus collector to ground a verified click back to
+    /// the candidate list. Runs on the worker's internal DOM channel (the same
+    /// path as the targeting bounds probes), never through the policy-gated
+    /// `evaluate_javascript` primitive. Default: unsupported, `Ok(None)`.
+    async fn element_at_point(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Option<(String, String)>, CommandError> {
+        Ok(None)
+    }
     async fn set_focus_emulation(
         &self,
         _page_id: &PageId,

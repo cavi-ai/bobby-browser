@@ -1,4 +1,5 @@
 mod compiler;
+mod corpus;
 mod engine;
 mod http_vision;
 mod stuck;
@@ -6,6 +7,7 @@ mod verify;
 mod vision;
 
 pub use compiler::{compile_intent, CompileError, ExtractFieldPlan, IntentPlan};
+pub use corpus::{CorpusCandidate, CorpusRecord, ResolvedElement, VisionCorpus};
 pub use engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
 pub use http_vision::{HttpVisionAssist, StructuredExtractRequest, StructuredExtractor};
 pub use stuck::{never_escalates, StuckKind};
