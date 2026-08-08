@@ -130,7 +130,23 @@ impl Server {
                         }),
                     );
                     let navigation_outcome =
-                        self.runtime.submit(navigation_context, envelope).await?;
+                        match self.runtime.submit(navigation_context, envelope).await {
+                            Ok(outcome) => outcome,
+                            Err(navigation_error) => {
+                                let (cleanup_context, cleanup_envelope) = primitive_envelope(
+                                    context,
+                                    session_id,
+                                    Some(page_id.clone()),
+                                    None,
+                                    types::PrimitiveCommand::ClosePage(types::ClosePageCommand {
+                                        page_id,
+                                    }),
+                                );
+                                let _ =
+                                    self.runtime.submit(cleanup_context, cleanup_envelope).await;
+                                return Err(navigation_error);
+                            }
+                        };
                     let navigation_completed =
                         matches!(navigation_outcome, types::CommandOutcome::Completed { .. });
                     let mut value = to_json(page)?;

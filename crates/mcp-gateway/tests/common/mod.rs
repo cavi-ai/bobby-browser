@@ -57,6 +57,7 @@ pub struct LiveProbe {
     pub last_accessibility_max_nodes: AtomicUsize,
     pub last_form_max_controls: AtomicUsize,
     pub accessibility_restarts_remaining: AtomicUsize,
+    pub navigation_interface_failures_remaining: AtomicUsize,
     pub open_entered: tokio::sync::Notify,
     pub open_release: tokio::sync::Notify,
     pub navigation_entered: tokio::sync::Notify,
@@ -322,13 +323,13 @@ pub struct LiveFactory {
     block_delete: bool,
 }
 
-struct RestartingRuntime {
+struct FaultInjectingRuntime {
     inner: Arc<AuthenticatedRuntime>,
     probe: Arc<LiveProbe>,
 }
 
 #[async_trait::async_trait]
-impl RuntimeInterface for RestartingRuntime {
+impl RuntimeInterface for FaultInjectingRuntime {
     async fn runtime_info(
         &self,
         ctx: types::RequestContext,
@@ -416,6 +417,29 @@ impl RuntimeInterface for RestartingRuntime {
         ctx: types::RequestContext,
         envelope: types::CommandEnvelope,
     ) -> InterfaceResult<types::CommandOutcome> {
+        let fail_navigation = matches!(
+            envelope.command,
+            types::RuntimeCommand::Primitive(types::PrimitiveCommand::Navigate(_))
+        ) && self
+            .probe
+            .navigation_interface_failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if fail_navigation {
+            return Err(types::InterfaceError {
+                code: types::InterfaceErrorCode::Internal,
+                layer: types::ErrorLayer::Interface,
+                message: "injected navigation interface failure".into(),
+                correlation_id: ctx.correlation_id,
+                command_id: Some(envelope.command_id),
+                retryable: false,
+                retry_after_ms: None,
+                reconciliation_required: false,
+                required_capability: None,
+            });
+        }
         let restart = matches!(
             envelope.command,
             types::RuntimeCommand::Primitive(types::PrimitiveCommand::AccessibilitySnapshot(_))
@@ -555,35 +579,39 @@ impl CommandJournal for LiveJournal {
 }
 
 pub async fn live_server(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false, false).await
 }
 
 pub async fn live_server_restarting_accessibility(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, true).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, true, false).await
+}
+
+pub async fn live_server_failing_navigation_interface(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false, true).await
 }
 
 pub async fn live_server_blocking_open(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Block, false, 0, false).await
+    live_server_with_modes(handle, LiveOpenMode::Block, false, 0, false, false).await
 }
 
 pub async fn live_server_failing_open(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Fail, false, 0, false).await
+    live_server_with_modes(handle, LiveOpenMode::Fail, false, 0, false, false).await
 }
 
 pub async fn live_server_failing_open_and_delete_once(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Fail, false, 1, false).await
+    live_server_with_modes(handle, LiveOpenMode::Fail, false, 1, false, false).await
 }
 
 pub async fn live_server_blocking_delete(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 0, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 0, false, false).await
 }
 
 pub async fn live_server_failing_delete_once(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 1, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 1, false, false).await
 }
 
 pub async fn live_server_blocking_failing_delete_once(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 1, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 1, false, false).await
 }
 
 async fn live_server_with_modes(
@@ -592,6 +620,7 @@ async fn live_server_with_modes(
     block_delete: bool,
     delete_failures: usize,
     restart_accessibility: bool,
+    fail_navigation_interface: bool,
 ) -> LiveServer {
     let root = tempfile::tempdir().expect("harness tempdir");
     let journal = Arc::new(LiveJournal {
@@ -604,6 +633,9 @@ async fn live_server_with_modes(
     probe
         .delete_failures_remaining
         .store(delete_failures, Ordering::SeqCst);
+    probe
+        .navigation_interface_failures_remaining
+        .store(usize::from(fail_navigation_interface), Ordering::SeqCst);
     let workers = Arc::new(WorkerPool::new(
         4,
         Arc::new(LiveFactory {
@@ -621,11 +653,12 @@ async fn live_server_with_modes(
         RecoveryCoordinator::new(checkpoints),
     );
     let authenticated = Arc::new(AuthenticatedRuntime::new(runtime.clone(), handle.clone()));
-    let interface: Arc<dyn RuntimeInterface> = if restart_accessibility {
+    let interface: Arc<dyn RuntimeInterface> = if restart_accessibility || fail_navigation_interface
+    {
         probe
             .accessibility_restarts_remaining
-            .store(1, Ordering::SeqCst);
-        Arc::new(RestartingRuntime {
+            .store(usize::from(restart_accessibility), Ordering::SeqCst);
+        Arc::new(FaultInjectingRuntime {
             inner: authenticated,
             probe: Arc::clone(&probe),
         })
