@@ -460,6 +460,25 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
         "{outcome:?}"
     );
 
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(TargetSpec {
+                    role: Some("combobox".into()),
+                    accessible_name: Some("Customer priority".into()),
+                    ..TargetSpec::default()
+                }),
+                state: types::ElementState::Visible,
+            },
+            timeout_ms: 5_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "customer detail did not become interactive: {outcome:?}"
+    );
+
     // Set the priority via control action, then submit with the text
     // expectedState the agents used.
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::ControlAction(

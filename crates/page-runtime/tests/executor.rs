@@ -27,6 +27,7 @@ enum DriverMode {
     ClickTargetNotFound,
     WaitTimeout,
     TargetDetached,
+    DeadOnOpen,
     StateConflict,
     CommitFail,
     CommitPause,
@@ -105,6 +106,14 @@ impl BrowserWorker for FakeWorker {
         &self.profile
     }
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        if matches!(self.mode, DriverMode::DeadOnOpen) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         Ok(())
     }
     async fn navigate(
@@ -348,6 +357,7 @@ async fn adaptive_runtime_with_failure(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -393,6 +403,7 @@ async fn adaptive_runtime_paused(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -472,16 +483,29 @@ async fn assert_single_download_readable(root: &Path, session: &SessionId, expec
 struct FakeFactory {
     events: Arc<Mutex<Vec<String>>>,
     mode: DriverMode,
+    launches: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[async_trait]
 impl WorkerFactory for FakeFactory {
     async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        // DeadOnOpen: only the first launch is dead; replacements are healthy,
+        // so a revived session can open pages again.
+        let mode = if matches!(self.mode, DriverMode::DeadOnOpen)
+            && self
+                .launches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                > 0
+        {
+            DriverMode::Succeed
+        } else {
+            self.mode
+        };
         Ok(Arc::new(FakeWorker {
             id: WorkerId::new(),
             profile: PathBuf::from("/tmp/fake-profile"),
             events: self.events.clone(),
-            mode: self.mode,
+            mode,
         }))
     }
 }
@@ -508,6 +532,7 @@ async fn runtime(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode,
+            launches: Default::default(),
         }),
     ));
     let runtime = page_runtime::PageRuntime::new(journal, workers);
@@ -689,6 +714,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -756,6 +782,7 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -853,6 +880,7 @@ async fn follow_with_boundary_true_requires_matching_checkpoint_before_boundary_
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -921,6 +949,7 @@ async fn follow_with_boundary_false_runs_without_any_pre_established_checkpoint(
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -980,6 +1009,38 @@ async fn replayable_driver_failure_is_retryable() {
         ))
         .await;
     assert!(matches!(outcome, CommandOutcome::RetryableFailure { .. }));
+}
+
+/// A dead browser must not wedge the session: open_browser invalidates the
+/// dead worker and retries on a fresh one instead of returning `internal`.
+#[tokio::test]
+async fn open_browser_revives_a_dead_worker_once() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::DeadOnOpen,
+            launches: Default::default(),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser must revive a dead worker");
+    runtime
+        .open_browser(session)
+        .await
+        .expect("the revived worker keeps serving the session");
 }
 
 #[tokio::test]
@@ -1042,6 +1103,7 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
         Arc::new(FakeFactory {
             events: events.clone(),
             mode: DriverMode::WaitTimeout,
+            launches: Default::default(),
         }),
     ));
     let root = tempfile::tempdir().unwrap();
@@ -1600,6 +1662,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
         Arc::new(FakeFactory {
             events: Arc::new(Mutex::new(Vec::new())),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let runtime = page_runtime::PageRuntime::new(journal, workers);
@@ -1682,6 +1745,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
         Arc::new(FakeFactory {
             events: Arc::new(Mutex::new(Vec::new())),
             mode: DriverMode::Succeed,
+            launches: Default::default(),
         }),
     ));
     let network = network_engine::NetworkPolicy {
