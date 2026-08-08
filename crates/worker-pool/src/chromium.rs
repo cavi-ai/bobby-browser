@@ -628,8 +628,22 @@ impl ChromiumWorker {
                 tokio::select! {
                     event = will_send.next() => {
                         let Some(event) = event else { break };
+                        let id = event.request_id.inner().to_owned();
+                        let started_monotonic_ms = *event.timestamp.inner() * 1000.0;
+                        if let (Some(response), Some((mut redirected, redirect_started_ms))) =
+                            (event.redirect_response.as_ref(), pending.remove(&id))
+                        {
+                            redirected.elapsed_ms = (redirect_started_ms.is_finite()
+                                && started_monotonic_ms.is_finite())
+                            .then(|| (started_monotonic_ms - redirect_started_ms).max(0.0));
+                            redirected.status = u16::try_from(response.status).ok();
+                            redirected.transfer_bytes =
+                                Some(response.encoded_data_length.max(0.0) as u64);
+                            redirected.mime_type = Some(response.mime_type.clone());
+                            task_recorder.record(redirected).await;
+                        }
                         pending.insert(
-                            event.request_id.inner().to_owned(),
+                            id,
                             (
                                 crate::HarEntry {
                                     url: event.request.url.clone(),
@@ -641,7 +655,7 @@ impl ChromiumWorker {
                                     mime_type: None,
                                     error_text: None,
                                 },
-                                *event.timestamp.inner() * 1000.0,
+                                started_monotonic_ms,
                             ),
                         );
                     }

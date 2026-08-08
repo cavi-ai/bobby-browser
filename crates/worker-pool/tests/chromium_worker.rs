@@ -142,6 +142,81 @@ async fn har_reports_request_duration_instead_of_monotonic_uptime() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn har_preserves_redirect_responses_that_reuse_a_request_id() {
+    let fixture = test_site::spawn().await;
+    let redirect_url = format!("{}/redirect-static", fixture.base_url());
+    let final_url = format!("{}/static", fixture.base_url());
+    let root = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&session_id).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .network_log(&page_id, &NetworkLogCommand { clear: true })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: redirect_url.clone(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let evidence = worker
+        .network_log(&page_id, &NetworkLogCommand { clear: false })
+        .await
+        .unwrap();
+    let artifact_id = match &evidence[0] {
+        Evidence::HarArtifact { artifact_id, .. } => artifact_id,
+        other => panic!("unexpected evidence: {other:?}"),
+    };
+    let artifact = root
+        .path()
+        .join("artifacts")
+        .join(session_id.0.to_string())
+        .join(artifact_id)
+        .join(format!("{artifact_id}.har"));
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(artifact).unwrap()).unwrap();
+    let entries = document["log"]["entries"].as_array().unwrap();
+    let redirect = entries
+        .iter()
+        .find(|entry| entry["request"]["url"] == redirect_url)
+        .expect("HAR retains the redirect request");
+    assert_eq!(redirect["response"]["status"], 302);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["request"]["url"] == final_url),
+        "HAR retains the final request"
+    );
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn synchronizes_versioned_http_state() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
