@@ -18,4 +18,8 @@ pub struct Candidate {
     pub text: String,
     pub attributes: BTreeMap<String, String>,
     pub state: CandidateState,
+    /// Frame hops (outermost first) when the candidate was gathered inside
+    /// an iframe; empty for main-frame candidates. Stamped at gather time so
+    /// the action path can re-resolve through the same frames.
+    pub frame_path: Vec<Box<types::TargetSpec>>,
 }

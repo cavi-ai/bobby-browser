@@ -134,6 +134,7 @@ fn candidate(name: &str, text: &str, attributes: BTreeMap<String, String>) -> Ca
             visible: true,
             enabled: true,
         },
+        frame_path: Vec::new(),
     }
 }
 
