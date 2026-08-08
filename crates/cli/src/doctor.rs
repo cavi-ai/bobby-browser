@@ -933,6 +933,19 @@ pub(crate) fn run_doctor(
                 .filter(|path| path.exists())
                 .and_then(|path| bootstrap_local::load_bootstrap_env_map(&path).ok())
         };
+    // Hand the same config path doctor validated into the gateway child so
+    // `[mcp] startup_toolset` (and the rest of the file) apply to handshake —
+    // without this, doctor always probes explore defaults while gauntlet/agent
+    // hosts that set BOBBY_BROWSER_CONFIG see a different surface.
+    let handshake_env = handshake_env.map(|mut env| {
+        if config_path.exists() {
+            env.insert(
+                "BOBBY_BROWSER_CONFIG".into(),
+                config_path.display().to_string(),
+            );
+        }
+        env
+    });
     match handshake_env {
         Some(env) => match onboarding::mcp_handshake(&env) {
             Ok(handshake) => {
