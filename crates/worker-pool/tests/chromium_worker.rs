@@ -135,6 +135,10 @@ async fn har_reports_request_duration_instead_of_monotonic_uptime() {
         (100.0..2_000.0).contains(&elapsed_ms),
         "HAR time must be an elapsed request duration, got {elapsed_ms}ms"
     );
+    assert_eq!(
+        entry["response"]["statusText"], "OK",
+        "HAR preserves the HTTP response status text"
+    );
 
     worker.close().await.unwrap();
     fixture.abort();

@@ -14,6 +14,8 @@ pub struct HarEntry {
     pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_text: Option<String>,
     pub started_unix_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<f64>,
@@ -86,7 +88,7 @@ pub fn har_document(entries: &[HarEntry], page_url: &str) -> Value {
                 "request": {"method": entry.method, "url": entry.url, "httpVersion": "HTTP/1.1", "headers": [], "queryString": [], "cookies": [], "headersSize": -1, "bodySize": -1},
                 "response": {
                     "status": entry.status.unwrap_or(0),
-                    "statusText": entry.error_text.clone().unwrap_or_default(),
+                    "statusText": entry.status_text.clone().or_else(|| entry.error_text.clone()).unwrap_or_default(),
                     "httpVersion": "HTTP/1.1",
                     "headers": [],
                     "cookies": [],
@@ -121,6 +123,7 @@ mod tests {
                 url: "https://example.test/".into(),
                 method: "GET".into(),
                 status: Some(200),
+                status_text: Some("OK".into()),
                 started_unix_ms: 1_700_000_000_123.0,
                 elapsed_ms: Some(12.0),
                 transfer_bytes: Some(3),

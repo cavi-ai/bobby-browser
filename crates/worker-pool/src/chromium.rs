@@ -637,6 +637,7 @@ impl ChromiumWorker {
                                 && started_monotonic_ms.is_finite())
                             .then(|| (started_monotonic_ms - redirect_started_ms).max(0.0));
                             redirected.status = u16::try_from(response.status).ok();
+                            redirected.status_text = Some(response.status_text.clone());
                             redirected.transfer_bytes =
                                 Some(response.encoded_data_length.max(0.0) as u64);
                             redirected.mime_type = Some(response.mime_type.clone());
@@ -649,6 +650,7 @@ impl ChromiumWorker {
                                     url: event.request.url.clone(),
                                     method: event.request.method.clone(),
                                     status: None,
+                                    status_text: None,
                                     started_unix_ms: *event.wall_time.inner() * 1000.0,
                                     elapsed_ms: None,
                                     transfer_bytes: None,
@@ -664,6 +666,7 @@ impl ChromiumWorker {
                         let id = event.request_id.inner().to_owned();
                         if let Some((entry, _)) = pending.get_mut(&id) {
                             entry.status = Some(event.response.status as u16);
+                            entry.status_text = Some(event.response.status_text.clone());
                             entry.mime_type = Some(event.response.mime_type.clone());
                         }
                     }
@@ -3129,6 +3132,7 @@ mod tests {
                 url: "https://example.test/before-crash".into(),
                 method: "GET".into(),
                 status: Some(200),
+                status_text: Some("OK".into()),
                 started_unix_ms: 1.0,
                 elapsed_ms: Some(2.0),
                 transfer_bytes: Some(3),
