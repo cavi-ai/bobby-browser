@@ -146,3 +146,101 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
     println!("wrote {} examples to {}", collector.len(), path.display());
     Ok(())
 }
+
+#[tokio::test]
+async fn collect_customer_update_corpus() -> TestResult<()> {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("customer-update")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
+    let mut collector = CorpusCollector::new();
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::TypeText {
+                selector: "input[aria-label='Search customers']",
+                text: "Atlas",
+                purpose: "Enter 'Atlas' into the search customers field".into(),
+                ordinal: None,
+            },
+            "customer-update",
+            "type_search",
+        )
+        .await?;
+    runtime
+        .type_text("input[aria-label='Search customers']", "Atlas")
+        .await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "form[aria-label='Customer search'] button",
+                purpose: "Run the customer search".into(),
+                ordinal: None,
+            },
+            "customer-update",
+            "click_search",
+        )
+        .await?;
+    runtime
+        .click("form[aria-label='Customer search'] button", false)
+        .await?;
+    runtime
+        .wait_visible("a[href='/customers/cus_atlas']")
+        .await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "a[href='/customers/cus_atlas']",
+                purpose: "Open the Atlas Labs customer".into(),
+                ordinal: None,
+            },
+            "customer-update",
+            "open_customer",
+        )
+        .await?;
+    runtime.click("a[href='/customers/cus_atlas']", false).await?;
+    runtime
+        .wait_visible("select[aria-label='Customer priority']")
+        .await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "select[aria-label='Customer priority']",
+                purpose: "Choose the high priority".into(),
+                ordinal: None,
+            },
+            "customer-update",
+            "select_priority",
+        )
+        .await?;
+    runtime.select_one("Customer priority", "high").await?;
+
+    collector
+        .capture(
+            &runtime,
+            &GroundTruth::Click {
+                selector: "form[aria-label='Update customer priority'] button",
+                purpose: "Save the priority change".into(),
+                ordinal: None,
+            },
+            "customer-update",
+            "save_priority",
+        )
+        .await?;
+    runtime
+        .click("form[aria-label='Update customer priority'] button", true)
+        .await?;
+    runtime.wait_visible("[role='status']").await?;
+
+    let path = corpus_path("customer-update");
+    collector.save(&path)?;
+    assert_eq!(collector.len(), 5, "expected 5 customer-update examples");
+    runtime.mark_completed("customer-update")?;
+    println!("wrote {} examples to {}", collector.len(), path.display());
+    Ok(())
+}
