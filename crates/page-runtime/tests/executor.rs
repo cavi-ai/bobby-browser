@@ -25,6 +25,7 @@ enum DriverMode {
     InspectMismatch,
     FailClick,
     ClickTargetNotFound,
+    WaitTimeout,
     StateConflict,
     CommitFail,
     CommitPause,
@@ -229,6 +230,14 @@ impl BrowserWorker for FakeWorker {
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:wait_for".into());
+        if matches!(self.mode, DriverMode::WaitTimeout) {
+            return Err(CommandError {
+                code: ErrorCode::WaitConditionTimedOut,
+                message: "wait condition was not satisfied within 1000ms".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
         Ok(vec![Evidence::Wait {
             condition: command.condition.clone(),
             elapsed_ms: 1,
@@ -994,6 +1003,77 @@ async fn boundary_pre_effect_resolution_failure_is_failed_not_needs_reconciliati
         .await;
     assert!(matches!(outcome, CommandOutcome::Failed { error, .. }
         if error.code == ErrorCode::TargetNotFound));
+}
+
+/// A Boundary act whose postcondition wait times out already reached the
+/// browser; keep it as plain `failed` (inspect/retry guidance) instead of
+/// the never-retry `needsReconciliation` path.
+#[tokio::test]
+async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::WaitTimeout,
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = page_runtime::PageRuntime::new_with_checkpoints(journal, workers, store.clone());
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let submit = IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
+        purpose: "Save priority".into(),
+        hints: IntentHints {
+            role: Some("button".into()),
+            accessible_name: Some("Save".into()),
+            ..IntentHints::default()
+        },
+        expected_state: WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("main".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Priority saved".into()),
+            },
+            timeout_ms: 1_000,
+        },
+    });
+    let request = intent_envelope(session.clone(), page.id.clone(), submit);
+    store
+        .save(&WorkflowCheckpoint {
+            schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            workflow_id: request.workflow_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            session_id: session,
+            page_id: page.id,
+            restart_url: "https://example.test/".into(),
+            current_url: "https://example.test/".into(),
+            cursor: None,
+            boundary_command_id: Some(request.command_id.clone()),
+            recovery_class: CommandClass::Boundary,
+            invariants: Vec::new(),
+            replayable_inputs: Vec::new(),
+            evidence: Vec::new(),
+            recovery_history: Vec::new(),
+            recovery_receipts: Vec::new(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let outcome = runtime.execute(request).await;
+    assert!(matches!(outcome, CommandOutcome::Failed { error, .. }
+        if error.code == ErrorCode::WaitConditionTimedOut));
 }
 
 #[tokio::test]

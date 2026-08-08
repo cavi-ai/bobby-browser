@@ -910,7 +910,10 @@ fn classify_failure(
             command_id: envelope.command_id.clone(),
             error,
         }
-    } else if requires_reconciliation(envelope) && !is_pre_effect(&error) {
+    } else if requires_reconciliation(envelope)
+        && !is_pre_effect(&error)
+        && !is_postcondition_failure(&error)
+    {
         CommandOutcome::NeedsReconciliation {
             command_id: envelope.command_id.clone(),
             error,
@@ -1018,6 +1021,16 @@ fn is_pre_effect(error: &CommandError) -> bool {
             | ErrorCode::ShadowRootUnavailable
             | ErrorCode::IntentCompileFailed
             | ErrorCode::IntentActionMismatch
+    )
+}
+
+/// Postcondition failures after a known act (click landed, wait/verify did
+/// not). Keep these as plain `failed` so agents inspect and adjust rather
+/// than entering the Boundary never-retry recovery path.
+fn is_postcondition_failure(error: &CommandError) -> bool {
+    matches!(
+        error.code,
+        ErrorCode::VerificationFailed | ErrorCode::WaitConditionTimedOut
     )
 }
 
