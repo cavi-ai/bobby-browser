@@ -16,7 +16,7 @@ use types::{
 
 use super::scenario::ScenarioServer;
 
-type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Journey {
@@ -602,6 +602,10 @@ impl ModernRuntime {
 
     pub fn journal_path(&self) -> &Path {
         &self.journal_path
+    }
+
+    pub fn artifacts_dir(&self) -> &Path {
+        &self.artifacts_dir
     }
 
     pub async fn capture_diagnostics(&self, journey: &str) -> TestResult<()> {
