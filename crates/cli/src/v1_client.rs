@@ -3,15 +3,17 @@
 //! `bobby` runs under `#[tokio::main]`; reqwest's blocking client builds its own
 //! runtime and panics if constructed on a worker thread. Isolate on a plain OS thread.
 
+use std::io::Read;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use types::CURRENT_INTERFACE_VERSION;
 use uuid::Uuid;
 
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 const DEADLINE_MINUTES: i64 = 2;
+const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct V1Request {
@@ -81,9 +83,28 @@ fn v1_request_blocking(options: V1Request) -> Result<V1Response> {
     .with_context(|| format!("{} {}", options.method, options.url))?;
 
     let status = response.status();
-    let body = response
-        .text()
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BODY_BYTES as u64)
+    {
+        bail!(
+            "response body exceeds {MAX_RESPONSE_BODY_BYTES} bytes from {}",
+            options.url
+        );
+    }
+    let mut bounded = response.take((MAX_RESPONSE_BODY_BYTES + 1) as u64);
+    let mut bytes = Vec::new();
+    bounded
+        .read_to_end(&mut bytes)
         .with_context(|| format!("failed to read response body from {}", options.url))?;
+    if bytes.len() > MAX_RESPONSE_BODY_BYTES {
+        bail!(
+            "response body exceeds {MAX_RESPONSE_BODY_BYTES} bytes from {}",
+            options.url
+        );
+    }
+    let body = String::from_utf8(bytes)
+        .with_context(|| format!("response body from {} is not UTF-8", options.url))?;
 
     Ok(V1Response { status, body })
 }
@@ -99,6 +120,20 @@ pub fn parse_json_body(status: reqwest::StatusCode, text: &str) -> Result<serde_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn serve_once(response: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(&response);
+        });
+        (format!("http://{address}/v1/test"), handle)
+    }
 
     #[test]
     fn v1_url_joins_base_and_path() {
@@ -125,6 +160,55 @@ mod tests {
         assert_eq!(
             parse_json_body(reqwest::StatusCode::OK, r#"{"ok":true}"#).unwrap()["ok"],
             true
+        );
+    }
+
+    #[test]
+    fn rejects_response_advertised_above_the_body_limit() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 16777216\r\n\r\n".to_vec();
+        let (url, server) = serve_once(response);
+
+        let error = v1_request(V1Request {
+            method: reqwest::Method::GET,
+            url,
+            bearer: "test-token".into(),
+            body: None,
+            idempotency_key: None,
+        })
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert!(
+            error.to_string().contains("response body exceeds"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_chunked_response_that_crosses_the_body_limit() {
+        let oversized = vec![b'x'; MAX_RESPONSE_BODY_BYTES + 1];
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            oversized.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&oversized);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (url, server) = serve_once(response);
+
+        let error = v1_request(V1Request {
+            method: reqwest::Method::GET,
+            url,
+            bearer: "test-token".into(),
+            body: None,
+            idempotency_key: None,
+        })
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert!(
+            error.to_string().contains("response body exceeds"),
+            "unexpected error: {error:#}"
         );
     }
 }
