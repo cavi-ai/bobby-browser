@@ -2319,12 +2319,12 @@ async fn wait_condition_satisfied(
             let is_value = matches!(condition, WaitCondition::Value { .. });
             // a11y / landmark page-scoped roles are not DOM roles; read body text.
             if !is_value && is_page_scoped_text_target(target) {
-                let value: String = page
-                    .evaluate("document.body ? (document.body.innerText || '') : ''")
+                let body = page.find_element("body").await.map_err(command_failed)?;
+                let value = body
+                    .inner_text()
                     .await
                     .map_err(command_failed)?
-                    .into_value()
-                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                    .unwrap_or_default();
                 return Ok(WaitPoll::saw(text_matches(matcher, &value)?, value));
             }
             let mut browser = browser.lock().await;
