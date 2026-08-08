@@ -623,26 +623,32 @@ impl ChromiumWorker {
             let Ok(mut failed) = page.event_listener::<EventLoadingFailed>().await else {
                 return;
             };
-            let mut pending: HashMap<String, crate::HarEntry> = HashMap::new();
+            let mut pending: HashMap<String, (crate::HarEntry, f64)> = HashMap::new();
             loop {
                 tokio::select! {
                     event = will_send.next() => {
                         let Some(event) = event else { break };
-                        pending.insert(event.request_id.inner().to_owned(), crate::HarEntry {
-                            url: event.request.url.clone(),
-                            method: event.request.method.clone(),
-                            status: None,
-                            started_unix_ms: *event.wall_time.inner() * 1000.0,
-                            elapsed_ms: None,
-                            transfer_bytes: None,
-                            mime_type: None,
-                            error_text: None,
-                        });
+                        pending.insert(
+                            event.request_id.inner().to_owned(),
+                            (
+                                crate::HarEntry {
+                                    url: event.request.url.clone(),
+                                    method: event.request.method.clone(),
+                                    status: None,
+                                    started_unix_ms: *event.wall_time.inner() * 1000.0,
+                                    elapsed_ms: None,
+                                    transfer_bytes: None,
+                                    mime_type: None,
+                                    error_text: None,
+                                },
+                                *event.timestamp.inner() * 1000.0,
+                            ),
+                        );
                     }
                     event = responses.next() => {
                         let Some(event) = event else { break };
                         let id = event.request_id.inner().to_owned();
-                        if let Some(entry) = pending.get_mut(&id) {
+                        if let Some((entry, _)) = pending.get_mut(&id) {
                             entry.status = Some(event.response.status as u16);
                             entry.mime_type = Some(event.response.mime_type.clone());
                         }
@@ -650,11 +656,11 @@ impl ChromiumWorker {
                     event = finished.next() => {
                         let Some(event) = event else { break };
                         let id = event.request_id.inner().to_owned();
-                        if let Some(mut entry) = pending.remove(&id) {
-                            entry.elapsed_ms = entry
-                                .started_unix_ms
-                                .is_finite()
-                                .then(|| (*event.timestamp.inner() * 1000.0).max(0.0));
+                        if let Some((mut entry, started_monotonic_ms)) = pending.remove(&id) {
+                            let finished_monotonic_ms = *event.timestamp.inner() * 1000.0;
+                            entry.elapsed_ms = (started_monotonic_ms.is_finite()
+                                && finished_monotonic_ms.is_finite())
+                            .then(|| (finished_monotonic_ms - started_monotonic_ms).max(0.0));
                             entry.transfer_bytes = Some(event.encoded_data_length as u64);
                             task_recorder.record(entry).await;
                         }
@@ -662,7 +668,11 @@ impl ChromiumWorker {
                     event = failed.next() => {
                         let Some(event) = event else { break };
                         let id = event.request_id.inner().to_owned();
-                        if let Some(mut entry) = pending.remove(&id) {
+                        if let Some((mut entry, started_monotonic_ms)) = pending.remove(&id) {
+                            let failed_monotonic_ms = *event.timestamp.inner() * 1000.0;
+                            entry.elapsed_ms = (started_monotonic_ms.is_finite()
+                                && failed_monotonic_ms.is_finite())
+                            .then(|| (failed_monotonic_ms - started_monotonic_ms).max(0.0));
                             entry.error_text = Some(event.error_text.clone());
                             task_recorder.record(entry).await;
                         }

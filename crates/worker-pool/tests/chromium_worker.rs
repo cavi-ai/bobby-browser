@@ -15,9 +15,9 @@ use types::{
     AccessibilityNode, AccessibilitySnapshotCommand, CaptureScreenshotCommand,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
     ControlAction, ControlActionCommand, ElementState, ErrorCode, EvaluateJavaScriptCommand,
-    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId,
-    ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitUntil,
+    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, NetworkLogCommand,
+    OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -39,6 +39,105 @@ fn cookie(name: &str, value: &str) -> HttpCookie {
         source_port: None,
         partition_key: None,
     }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn har_reports_request_duration_instead_of_monotonic_uptime() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 9\r\nConnection: close\r\n\r\n<p>ok</p>",
+                    )
+                    .await
+                    .unwrap();
+            });
+        }
+    });
+    let url = format!("http://{address}/timed");
+    let root = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&session_id).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .network_log(&page_id, &NetworkLogCommand { clear: true })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: url.clone(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let evidence = worker
+        .network_log(&page_id, &NetworkLogCommand { clear: false })
+        .await
+        .unwrap();
+    let artifact_id = match &evidence[0] {
+        Evidence::HarArtifact {
+            artifact_id,
+            entries,
+            ..
+        } => {
+            assert!(*entries > 0, "the delayed request must be recorded");
+            artifact_id
+        }
+        other => panic!("unexpected evidence: {other:?}"),
+    };
+    let artifact = root
+        .path()
+        .join("artifacts")
+        .join(session_id.0.to_string())
+        .join(artifact_id)
+        .join(format!("{artifact_id}.har"));
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(artifact).unwrap()).unwrap();
+    let entry = document["log"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["request"]["url"] == url)
+        .expect("HAR contains the delayed navigation request");
+    let elapsed_ms = entry["time"].as_f64().unwrap();
+    assert!(
+        (100.0..2_000.0).contains(&elapsed_ms),
+        "HAR time must be an elapsed request duration, got {elapsed_ms}ms"
+    );
+
+    worker.close().await.unwrap();
+    fixture.abort();
 }
 
 #[tokio::test]
