@@ -21,11 +21,26 @@ pub(crate) fn required_capabilities(name: &str) -> Option<&'static [types::Capab
     match name {
         "checkpoint_save" | "workflow_recover" => Some(&[types::Capability::RecoveryWrite]),
         "recovery_status" => Some(&[types::Capability::RecoveryRead]),
-        "command_execute" | "control_action" | "navigate" | "click"
-        | "click_and_wait_for_popup" | "type_text" | "inspect"
-        | "screenshot" | "wait_for" | "page_list" | "page_close" | "page_activate"
-        | "a11y_snapshot" | "pdf" | "dialog" | "emulate" | "network_log" | "cookie_get"
-        | "cookie_set" | "cookie_delete" => Some(&[types::Capability::BrowserMutate]),
+        "command_execute"
+        | "control_action"
+        | "navigate"
+        | "click"
+        | "click_and_wait_for_popup"
+        | "type_text"
+        | "inspect"
+        | "screenshot"
+        | "wait_for"
+        | "page_list"
+        | "page_close"
+        | "page_activate"
+        | "a11y_snapshot"
+        | "pdf"
+        | "dialog"
+        | "emulate"
+        | "network_log"
+        | "cookie_get"
+        | "cookie_set"
+        | "cookie_delete" => Some(&[types::Capability::BrowserMutate]),
         "extract_structured" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::VisionAssist,

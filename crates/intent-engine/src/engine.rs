@@ -110,10 +110,7 @@ pub trait IntentBrowser: Send + Sync {
     /// True when the page still shows client-side validation markers
     /// (`[aria-invalid=true]`). Used after soft waits (e.g. networkQuiet) so
     /// submit-and-verify does not report `completed` on a rejected form.
-    async fn validation_errors_visible(
-        &self,
-        _page_id: &PageId,
-    ) -> Result<bool, CommandError> {
+    async fn validation_errors_visible(&self, _page_id: &PageId) -> Result<bool, CommandError> {
         Ok(false)
     }
 }
@@ -945,10 +942,7 @@ async fn execute_submit_and_verify(
     // Soft waits (networkQuiet alone) can succeed while the server rejected
     // the submit and left aria-invalid markers on the form. That must not
     // report status:completed — agents would skip the re-entry path.
-    if matches!(
-        expected_state.condition,
-        WaitCondition::NetworkQuiet { .. }
-    ) {
+    if matches!(expected_state.condition, WaitCondition::NetworkQuiet { .. }) {
         match browser.validation_errors_visible(page_id).await {
             Ok(true) => {
                 return IntentOutcome::Failed {

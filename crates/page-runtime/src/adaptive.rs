@@ -172,10 +172,7 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         self.lease.worker().wait_for(page_id, command).await
     }
 
-    async fn validation_errors_visible(
-        &self,
-        page_id: &PageId,
-    ) -> Result<bool, CommandError> {
+    async fn validation_errors_visible(&self, page_id: &PageId) -> Result<bool, CommandError> {
         let probe = TargetSpec {
             css: Some("[aria-invalid='true']".into()),
             ..TargetSpec::default()

@@ -105,9 +105,7 @@ impl Server {
                         types::ClickAndWaitForPopupCommand {
                             selector: input.selector.unwrap_or_default(),
                             target: input.target,
-                            timeout_ms: input
-                                .timeout_ms
-                                .unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
+                            timeout_ms: input.timeout_ms.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
                         },
                     ),
                 );
