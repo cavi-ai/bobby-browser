@@ -38,6 +38,13 @@ pub struct VisionConfig {
     /// caches the results. Default off; the off path is byte-identical.
     #[serde(default)]
     pub prefill: bool,
+    /// When set, every vision escalation (executed or rejected) appends one
+    /// JSONL corpus record to `<corpus_dir>/vision-corpus.jsonl` with the
+    /// screenshot, the exact candidate list sent to the model, the proposal,
+    /// the terminal outcome, and — for verified clicks — the resolved target
+    /// index. Default unset: no records are written.
+    #[serde(default, alias = "corpusDir")]
+    pub corpus_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

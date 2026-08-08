@@ -2064,6 +2064,64 @@ impl BrowserWorker for ChromiumWorker {
         Ok(vec![Evidence::JavaScriptResult { value, truncated }])
     }
 
+    async fn element_at_point(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<(String, String)>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let expression = format!(
+            r#"(() => {{
+const INTERACTIVE = "a,button,input,select,textarea,[role],[tabindex]";
+const IMPLICIT = {{a:"link",button:"button",input:"textbox",select:"combobox",textarea:"textbox"}};
+let el = document.elementFromPoint({x}, {y});
+if (!el) return null;
+const host = el.closest(INTERACTIVE) || el;
+let role = host.getAttribute("role") || IMPLICIT[host.tagName.toLowerCase()] || "";
+if (host.tagName === "INPUT" && !host.getAttribute("role")) {{
+  const t = (host.getAttribute("type") || "text").toLowerCase();
+  if (["button","submit","reset"].includes(t)) role = "button";
+  else if (t === "checkbox") role = "checkbox";
+  else if (t === "radio") role = "radio";
+  else if (t === "range") role = "slider";
+  else if (t === "search") role = "searchbox";
+}}
+let name = host.getAttribute("aria-label") || "";
+if (!name && host.hasAttribute("aria-labelledby")) {{
+  name = host.getAttribute("aria-labelledby").split(/\s+/).map(id => {{
+    const n = document.getElementById(id);
+    return n ? n.textContent.trim() : "";
+  }}).filter(Boolean).join(" ");
+}}
+if (!name && host.id) {{
+  const label = document.querySelector(`label[for="${{host.id}}"]`);
+  if (label) name = label.textContent.trim();
+}}
+if (!name) name = host.getAttribute("placeholder") || "";
+if (!name) name = host.getAttribute("title") || "";
+if (!name) name = (host.innerText || host.value || "").trim();
+if (!role && !name) return null;
+return [role, name.slice(0, 200)];
+}})()"#
+        );
+        let mut params = EvaluateParams::new(expression);
+        params.return_by_value = Some(true);
+        let value: serde_json::Value =
+            tokio::time::timeout(Duration::from_millis(2_000), page.evaluate(params))
+                .await
+                .map_err(|_| timeout_error(2_000))?
+                .map_err(command_failed)?
+                .into_value()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let pair: (String, String) = serde_json::from_value(value)
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(Some(pair))
+    }
+
     fn supports_http_state(&self) -> bool {
         true
     }

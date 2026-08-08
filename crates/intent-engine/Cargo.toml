@@ -21,3 +21,6 @@ tokio.workspace = true
 url.workspace = true
 tracing.workspace = true
 types = { path = "../types", version = "0.7.0" }
+
+[dev-dependencies]
+tempfile.workspace = true
