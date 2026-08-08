@@ -3920,38 +3920,62 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 WaitCondition::Text { target, matcher }
                 | WaitCondition::Value { target, matcher } => {
                     let is_value = matches!(command.condition, WaitCondition::Value { .. });
-                    let context = self.context(page_id).await?;
-                    let resolved = self
-                        .resolve_input_target(page_id, &context, "", Some(target))
-                        .await;
-                    match resolved {
-                        Ok((context, selector)) => {
-                            let selector = serde_json::to_string(&selector).map_err(|error| {
-                                driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
-                            })?;
-                            let read = if is_value {
-                                format!("document.querySelector({selector})?.value ?? ''")
-                            } else {
-                                format!("document.querySelector({selector})?.innerText ?? ''")
-                            };
-                            let response = self.transport.send("script.evaluate", json!({
+                    if !is_value && is_document_web_area_target(target) {
+                        let context = self.context(page_id).await?;
+                        let response = self.transport.send("script.evaluate", json!({
+                            "expression": "document.body ? (document.body.innerText || '') : ''",
+                            "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                            "awaitPromise": false,
+                            "resultOwnership": "none",
+                        })).await?;
+                        let value = response
+                            .pointer("/result/value")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        (
+                            bounded_text_matches(matcher, &value)?,
+                            Some(bound_observed(&value)),
+                        )
+                    } else {
+                        let context = self.context(page_id).await?;
+                        let resolved = self
+                            .resolve_input_target(page_id, &context, "", Some(target))
+                            .await;
+                        match resolved {
+                            Ok((context, selector)) => {
+                                let selector =
+                                    serde_json::to_string(&selector).map_err(|error| {
+                                        driver_error(
+                                            ErrorCode::InvalidRequest,
+                                            error.to_string(),
+                                            false,
+                                        )
+                                    })?;
+                                let read = if is_value {
+                                    format!("document.querySelector({selector})?.value ?? ''")
+                                } else {
+                                    format!("document.querySelector({selector})?.innerText ?? ''")
+                                };
+                                let response = self.transport.send("script.evaluate", json!({
                                 "expression": read,
                                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                                 "awaitPromise": false,
                                 "resultOwnership": "none",
                             })).await?;
-                            let value = response
-                                .pointer("/result/value")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_owned();
-                            (
-                                bounded_text_matches(matcher, &value)?,
-                                Some(bound_observed(&value)),
-                            )
+                                let value = response
+                                    .pointer("/result/value")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                (
+                                    bounded_text_matches(matcher, &value)?,
+                                    Some(bound_observed(&value)),
+                                )
+                            }
+                            Err(error) if error.code == ErrorCode::TargetNotFound => (false, None),
+                            Err(error) => return Err(error),
                         }
-                        Err(error) if error.code == ErrorCode::TargetNotFound => (false, None),
-                        Err(error) => return Err(error),
                     }
                 }
                 WaitCondition::Document { ready } => {
@@ -5078,6 +5102,23 @@ fn contains_sensitive_material(value: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+}
+
+fn is_document_web_area_target(target: &types::TargetSpec) -> bool {
+    let Some(role) = target.role.as_deref() else {
+        return false;
+    };
+    if !(role.eq_ignore_ascii_case("RootWebArea") || role.eq_ignore_ascii_case("document")) {
+        return false;
+    }
+    target.css.is_none()
+        && target.test_id.is_none()
+        && target.accessible_name.is_none()
+        && target.label.is_none()
+        && target.text.is_none()
+        && target.attributes.is_empty()
+        && target.frame_path.is_empty()
+        && target.shadow_path.is_empty()
 }
 
 fn bounded_text_matches(matcher: &TextMatch, value: &str) -> Result<bool, CommandError> {
