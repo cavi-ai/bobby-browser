@@ -1274,6 +1274,50 @@ async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
 }
 
 #[tokio::test]
+async fn a_side_band_download_does_not_taint_the_page() {
+    let page_url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let download_url = http_fixture("durable-download", "application/octet-stream").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, page_url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{page_url}"));
+    // A download fetches beside the page; it leaves the document untouched.
+    let download = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url: download_url,
+                expected_content_type: Some("application/octet-stream".into()),
+                max_bytes: 1024,
+            }),
+        ))
+        .await;
+    assert!(matches!(download, CommandOutcome::Completed { .. }));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::ExecutionPath {
+                path: ExecutionPath::DirectHttp,
+                ..
+            }
+        )),
+        "a download must not push the next whole-page read onto a stale DOM"
+    );
+}
+
+#[tokio::test]
 async fn eligible_inspect_uses_http_without_browser_dispatch() {
     let url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
     let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;

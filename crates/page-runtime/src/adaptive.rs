@@ -371,7 +371,8 @@ impl AdaptivePageEngine {
 
     /// Taint bookkeeping: navigation replaces the DOM with a fresh document
     /// (refetch == live again), so it clears the taint; any other
-    /// non-Replayable command may have mutated the page, so it sets it.
+    /// non-Replayable command that touches the page may have mutated it, so
+    /// it sets it.
     async fn record_page_taint(&self, envelope: &CommandEnvelope) {
         let Some(page_id) = envelope.page_id.as_ref() else {
             return;
@@ -382,7 +383,9 @@ impl AdaptivePageEngine {
             RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_))
         ) {
             taints.remove(page_id);
-        } else if envelope.command.class() != types::CommandClass::Replayable {
+        } else if envelope.command.class() != types::CommandClass::Replayable
+            && !side_band_of_the_dom(&envelope.command)
+        {
             taints.insert(page_id.clone());
         }
     }
@@ -645,6 +648,19 @@ fn internal_artifact_error(message: impl Into<String>) -> CommandError {
         layer: ErrorLayer::Page,
         retryable: false,
     }
+}
+
+/// Non-Replayable commands that never touch the document. `DownloadUrl` is a
+/// side-band HTTP fetch against the session's own state mirror: it leaves the
+/// open page byte-for-byte as it was, so it must not taint the page and push
+/// the next whole-page read onto the browser. Tainting it also loses the state
+/// the download itself established (a `Set-Cookie` the DOM predates), which the
+/// deterministic refetch reflects and a stale DOM does not.
+fn side_band_of_the_dom(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(_))
+    )
 }
 
 fn equivalence_unproven(reason: ExecutionReason) -> CommandError {
