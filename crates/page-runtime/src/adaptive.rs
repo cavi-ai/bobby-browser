@@ -249,6 +249,11 @@ pub struct PreparedHttpResult {
 #[derive(Clone, Default)]
 pub struct AdaptivePageEngine {
     direct: Option<DirectComponents>,
+    /// Pages that have seen a non-read-only command since their last
+    /// navigation. A whole-page read of a tainted page must come from the
+    /// live DOM: a direct-HTTP refetch of the URL answers the app shell,
+    /// not the post-interaction state.
+    taints: Arc<tokio::sync::Mutex<std::collections::HashSet<types::PageId>>>,
     vision_assist: Option<Arc<dyn VisionAssist>>,
     structured_extractor: Option<Arc<dyn intent_engine::StructuredExtractor>>,
     /// Prefill proposal cache handle. `None` unless `[vision].prefill` is
@@ -287,6 +292,7 @@ impl AdaptivePageEngine {
                 artifacts,
                 network,
             }),
+            taints: Default::default(),
             vision_assist: None,
             structured_extractor: None,
             proposals: None,
@@ -356,6 +362,38 @@ impl AdaptivePageEngine {
         page: Option<PageState>,
         gate: &SessionGate,
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
+        let result = self.execute_inner(envelope, lease, page, gate).await;
+        if result.is_ok() {
+            self.record_page_taint(envelope).await;
+        }
+        result
+    }
+
+    /// Taint bookkeeping: navigation replaces the DOM with a fresh document
+    /// (refetch == live again), so it clears the taint; any other
+    /// non-Replayable command may have mutated the page, so it sets it.
+    async fn record_page_taint(&self, envelope: &CommandEnvelope) {
+        let Some(page_id) = envelope.page_id.as_ref() else {
+            return;
+        };
+        let mut taints = self.taints.lock().await;
+        if matches!(
+            envelope.command,
+            RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_))
+        ) {
+            taints.remove(page_id);
+        } else if envelope.command.class() != types::CommandClass::Replayable {
+            taints.insert(page_id.clone());
+        }
+    }
+
+    async fn execute_inner(
+        &self,
+        envelope: &CommandEnvelope,
+        lease: &WorkerLease,
+        page: Option<PageState>,
+        gate: &SessionGate,
+    ) -> Result<AdaptiveExecution, AdaptiveFailure> {
         let vision_gate = gate.vision;
         if let RuntimeCommand::Intent(intent) = &envelope.command {
             return execute_intent(
@@ -408,6 +446,24 @@ impl AdaptivePageEngine {
             .as_ref()
             .and_then(|page| page.url.as_deref())
             .unwrap_or_default();
+        // A whole-page read of a page that has mutated since load must come
+        // from the live DOM: a direct-HTTP refetch answers the app shell.
+        if matches!(command, PrimitiveCommand::Inspect(_)) {
+            let tainted = match envelope.page_id.as_ref() {
+                Some(page_id) => self.taints.lock().await.contains(page_id),
+                None => false,
+            };
+            if tainted {
+                return browser_execute(
+                    envelope,
+                    lease,
+                    ExecutionPath::Chromium,
+                    ExecutionReason::PageMutated,
+                    0,
+                )
+                .await;
+            }
+        }
         match direct.eligibility.classify(command, page_url) {
             EligibilityDecision::Denied(error) => {
                 if matches!(command, PrimitiveCommand::Inspect(_)) {

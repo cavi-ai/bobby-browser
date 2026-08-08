@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Whole-page `inspect` after a mutating command now reads the live DOM instead of refetching the URL over HTTP. Pages are tainted by any non-read-only command and cleared by navigation, so SPA post-submit state is visible to agents (the direct-HTTP path was answering the app shell). Evidence carries `executionPath.reason: pageMutated` on the live read.
+
+
 - `session_close` no longer wedges on a dead browser: managed-Chromium teardown treats an already-gone browser (closed channel, canceled oneshot) as closed instead of failing the release, which previously left the session listed forever with every retry failing `internal`.
 
 

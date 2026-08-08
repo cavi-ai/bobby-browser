@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
     CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
-    ExecutionPath, FollowIntent, InspectCommand, IntentCommand, IntentHints, NavigateCommand,
-    PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec,
-    TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    ExecutionPath, ExecutionReason, FollowIntent, InspectCommand, IntentCommand, IntentHints,
+    NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent,
+    TargetSpec, TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
     WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -417,11 +417,20 @@ async fn http_fixture(body: &'static str, content_type: &'static str) -> String 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0; 2048];
-        let _ = socket.read(&mut request).await.unwrap();
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        socket.write_all(response.as_bytes()).await.unwrap();
+        // Serve every connection: a test may fetch the fixture several times.
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0; 2048];
+            if socket.read(&mut request).await.is_err() {
+                continue;
+            }
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            if socket.write_all(response.as_bytes()).await.is_err() {
+                continue;
+            }
+        }
     });
     format!("http://{address}/")
 }
@@ -1106,6 +1115,100 @@ async fn boundary_target_detached_is_retryable_not_needs_reconciliation() {
         CommandOutcome::RetryableFailure { error, .. }
             if error.code == ErrorCode::TargetDetached
     ));
+}
+
+#[tokio::test]
+async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
+    let url = http_fixture("<title>Fixture</title><p>Ada</p>", "text/html").await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    // The fake worker's HTTP mirror reads its URL from this event.
+    events.lock().await.push(format!("url:{url}"));
+    // Untainted: the direct-HTTP read optimization applies.
+    let first = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Inspect(InspectCommand::default()),
+        ))
+        .await;
+    let evidence = completed_evidence(first);
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::DirectHttp,
+            ..
+        }
+    )));
+    // A mutating command taints the page.
+    let click = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#safe".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    assert!(matches!(click, CommandOutcome::Completed { .. }));
+    // The next whole-page inspect must read the live DOM, not a refetch.
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session.clone(),
+                page.clone(),
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::Chromium,
+            reason: ExecutionReason::PageMutated,
+            ..
+        }
+    )));
+    // Navigation replaces the DOM: the taint clears and HTTP reads resume.
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    let navigate = runtime
+        .execute(envelope(
+            session.clone(),
+            page.clone(),
+            PrimitiveCommand::Navigate(NavigateCommand {
+                url: url.clone(),
+                wait_until: types::WaitUntil::Interactive,
+                timeout_ms: 30_000,
+            }),
+        ))
+        .await;
+    assert!(matches!(navigate, CommandOutcome::Completed { .. }));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::DirectHttp,
+            ..
+        }
+    )));
+    let _ = events;
 }
 
 #[tokio::test]
