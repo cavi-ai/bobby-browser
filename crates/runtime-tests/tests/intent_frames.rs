@@ -10,9 +10,9 @@ use gauntlet_server::{ScenarioConfig, ScenarioServer};
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ElementState,
-    IntentCommand, IntentHints, LocateIntent, NavigateCommand, OpenPageRequest,
-    PrimitiveCommand, RuntimeCommand, TargetSpec, UploadFilesCommand, WaitCondition,
-    WaitForCommand, WaitUntil, WorkflowId,
+    IntentCommand, IntentHints, LocateIntent, NavigateCommand, OpenPageRequest, PrimitiveCommand,
+    RuntimeCommand, TargetSpec, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
+    WorkflowId,
 };
 
 fn chrome_executable() -> PathBuf {
