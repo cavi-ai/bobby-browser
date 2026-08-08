@@ -221,6 +221,7 @@ impl BrowserWorker for FakeWorker {
                 visible: true,
                 enabled: true,
             },
+            frame_path: Vec::new(),
         }])
     }
     async fn wait_for(

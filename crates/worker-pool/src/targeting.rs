@@ -426,9 +426,9 @@ fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
 pub async fn gather_candidates(
     page: &Page,
     target: &TargetSpec,
-    browser: Option<&mut Browser>,
+    mut browser: Option<&mut Browser>,
 ) -> Result<Vec<Candidate>, CommandError> {
-    let scope = open_target_scope(page, target, browser).await?;
+    let scope = open_target_scope(page, target, browser.as_deref_mut()).await?;
     let scope_ref = scope.locator_scope();
     let (raw, _owners) = collect_candidates_merged(
         &scope.execution_page,
@@ -437,7 +437,101 @@ pub async fn gather_candidates(
         scope.scope_id,
     )
     .await?;
-    Ok(raw.into_iter().map(into_candidate).collect())
+    let mut candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
+    // Auto-descend one level into iframes for main-frame intents: agents
+    // cannot name a framePath for content they cannot see, so without this
+    // every in-frame control resolves as targetNotFound. Each stamped
+    // frame_path lets the action path re-resolve through the same frame.
+    if target.frame_path.is_empty() {
+        let frames: Vec<Candidate> = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.role.as_deref() == Some("iframe") && candidate.state.attached
+            })
+            .take(8)
+            .cloned()
+            .collect();
+        for frame in frames {
+            let Some(hop) = frame_stable_hop(&frame) else {
+                continue;
+            };
+            let gathered =
+                gather_frame_candidates(&scope, &frame, &hop, browser.as_deref_mut()).await;
+            if let Ok(mut gathered) = gathered {
+                candidates.append(&mut gathered);
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+/// A re-resolvable hop for a frame element: real-id CSS, then test id, then
+/// a src attribute selector. Without one the frame's candidates could not be
+/// re-resolved at action time, so the frame is skipped entirely.
+fn frame_stable_hop(frame: &Candidate) -> Option<Box<TargetSpec>> {
+    if let Some(css) = &frame.css {
+        return Some(Box::new(TargetSpec {
+            css: Some(css.clone()),
+            ..TargetSpec::default()
+        }));
+    }
+    if let Some(test_id) = &frame.test_id {
+        return Some(Box::new(TargetSpec {
+            test_id: Some(test_id.clone()),
+            ..TargetSpec::default()
+        }));
+    }
+    frame.attributes.get("src").and_then(|src| {
+        (!src.is_empty()).then(|| {
+            Box::new(TargetSpec {
+                css: Some(format!(
+                    "iframe[src={}]",
+                    serde_json::to_string(src).unwrap()
+                )),
+                ..TargetSpec::default()
+            })
+        })
+    })
+}
+
+async fn gather_frame_candidates(
+    scope: &TargetScope,
+    frame: &Candidate,
+    hop: &TargetSpec,
+    browser: Option<&mut Browser>,
+) -> Result<Vec<Candidate>, CommandError> {
+    let (child, oopif) =
+        match find_child_frame(&scope.execution_page, &scope.frame_id, frame).await? {
+            Some(child) => (Some(child), None),
+            None => match browser {
+                Some(active_browser) => (
+                    None,
+                    find_oopif(active_browser, &scope.frame_id, frame).await?,
+                ),
+                None => (None, None),
+            },
+        };
+    let (execution_page, frame_id) = if let Some(child) = child {
+        (scope.execution_page.clone(), child)
+    } else if let Some((oopif_page, oopif_frame)) = oopif {
+        (oopif_page, oopif_frame)
+    } else {
+        return Ok(Vec::new());
+    };
+    let context_id = execution_page
+        .frame_execution_context(frame_id)
+        .await
+        .map_err(cdp_error)?;
+    let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
+    let raw = collect_candidates(&execution_page, context_id, &[], nested_scope).await?;
+    Ok(raw
+        .into_iter()
+        .map(|item| {
+            let mut candidate = into_candidate(item);
+            candidate.frame_path = vec![Box::new(hop.clone())];
+            candidate
+        })
+        .collect())
 }
 
 struct TargetScope {
@@ -613,6 +707,7 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
             visible: item.visible,
             enabled: item.enabled,
         },
+        frame_path: Vec::new(),
     }
 }
 
