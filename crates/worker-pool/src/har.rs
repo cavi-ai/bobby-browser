@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
@@ -63,12 +64,24 @@ impl HarRecorder {
     }
 }
 
+fn iso_8601_from_unix_ms(unix_ms: f64) -> String {
+    let millis = if unix_ms.is_finite() {
+        unix_ms.round() as i64
+    } else {
+        0
+    };
+    DateTime::<Utc>::from_timestamp_millis(millis)
+        .unwrap_or(DateTime::UNIX_EPOCH)
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
 pub fn har_document(entries: &[HarEntry], page_url: &str) -> Value {
     let items: Vec<Value> = entries
         .iter()
         .map(|entry| {
+            let started_date_time = iso_8601_from_unix_ms(entry.started_unix_ms);
             json!({
-                "startedDateTime": entry.started_unix_ms,
+                "startedDateTime": started_date_time,
                 "time": entry.elapsed_ms.unwrap_or(0.0),
                 "request": {"method": entry.method, "url": entry.url, "httpVersion": "HTTP/1.1", "headers": [], "queryString": [], "cookies": [], "headersSize": -1, "bodySize": -1},
                 "response": {
@@ -91,8 +104,39 @@ pub fn har_document(entries: &[HarEntry], page_url: &str) -> Value {
         "log": {
             "version": "1.2",
             "creator": {"name": "bobby-browser", "version": env!("CARGO_PKG_VERSION")},
-            "pages": [{"startedDateTime": entries.first().map_or(0.0, |entry| entry.started_unix_ms), "id": "page-1", "title": page_url, "pageTimings": {}}],
+            "pages": [{"startedDateTime": iso_8601_from_unix_ms(entries.first().map_or(0.0, |entry| entry.started_unix_ms)), "id": "page-1", "title": page_url, "pageTimings": {}}],
             "entries": items,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{har_document, HarEntry};
+
+    #[test]
+    fn har_started_datetimes_are_iso_8601_strings() {
+        let document = har_document(
+            &[HarEntry {
+                url: "https://example.test/".into(),
+                method: "GET".into(),
+                status: Some(200),
+                started_unix_ms: 1_700_000_000_123.0,
+                elapsed_ms: Some(12.0),
+                transfer_bytes: Some(3),
+                mime_type: Some("text/plain".into()),
+                error_text: None,
+            }],
+            "https://example.test/",
+        );
+
+        assert_eq!(
+            document["log"]["entries"][0]["startedDateTime"],
+            "2023-11-14T22:13:20.123Z"
+        );
+        assert_eq!(
+            document["log"]["pages"][0]["startedDateTime"],
+            "2023-11-14T22:13:20.123Z"
+        );
+    }
 }
