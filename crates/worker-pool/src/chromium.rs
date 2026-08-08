@@ -307,8 +307,12 @@ impl ChromiumWorker {
         };
         match reattached {
             Some(fresh) => {
-                self.unregister_page(page_id).await;
+                let (_, recorder) = self.unregister_page_state(page_id, true).await;
                 self.register_page(page_id.clone(), fresh.clone()).await?;
+                if let Some(recorder) = recorder {
+                    self.install_har_collector(page_id, fresh.clone(), Some(recorder))
+                        .await?;
+                }
                 Ok(fresh)
             }
             None => {
@@ -568,19 +572,39 @@ impl ChromiumWorker {
         &self,
         page_id: &PageId,
     ) -> Result<Arc<crate::HarRecorder>, CommandError> {
-        if let Some(recorder) = self.har_recorders.lock().await.get(page_id) {
-            return Ok(recorder.clone());
-        }
         let page = self.page_handle(page_id).await?;
-        // Single-flight the collector spawn without holding this map's guard
-        // across other lock acquisitions: re-lock and re-check, so the loser
-        // of the race returns the winner's recorder instead of spawning a
-        // duplicate collector that splits entries between them.
-        let mut recorders = self.har_recorders.lock().await;
-        if let Some(recorder) = recorders.get(page_id) {
-            return Ok(recorder.clone());
+        self.install_har_collector(page_id, page, None).await
+    }
+
+    async fn install_har_collector(
+        &self,
+        page_id: &PageId,
+        page: Page,
+        recovered_recorder: Option<Arc<crate::HarRecorder>>,
+    ) -> Result<Arc<crate::HarRecorder>, CommandError> {
+        // Coordinate page identity and collector installation under one lock
+        // order. Unregistration takes these locks in the same order, so a
+        // collector for a stale page cannot be inserted after replacement.
+        let pages = self.pages.lock().await;
+        let current = pages.get(page_id).ok_or_else(page_missing)?;
+        if current.is_closed() || current.session_id() != page.session_id() {
+            return Err(page_missing());
         }
-        let recorder = Arc::new(crate::HarRecorder::default());
+        let mut recorders = self.har_recorders.lock().await;
+        let mut tasks = self.har_tasks.lock().await;
+        if recovered_recorder.is_none() {
+            if let (Some(recorder), Some(task)) = (recorders.get(page_id), tasks.get(page_id)) {
+                if !task.is_finished() {
+                    return Ok(recorder.clone());
+                }
+            }
+        }
+        let recorder = recovered_recorder
+            .or_else(|| recorders.remove(page_id))
+            .unwrap_or_else(|| Arc::new(crate::HarRecorder::default()));
+        if let Some(task) = tasks.remove(page_id) {
+            task.abort();
+        }
         let task_recorder = recorder.clone();
         let task = tokio::spawn(async move {
             use chromiumoxide::cdp::browser_protocol::network::{
@@ -599,38 +623,63 @@ impl ChromiumWorker {
             let Ok(mut failed) = page.event_listener::<EventLoadingFailed>().await else {
                 return;
             };
-            let mut pending: HashMap<String, crate::HarEntry> = HashMap::new();
+            let mut pending: HashMap<String, (crate::HarEntry, f64)> = HashMap::new();
             loop {
                 tokio::select! {
                     event = will_send.next() => {
                         let Some(event) = event else { break };
-                        pending.insert(event.request_id.inner().to_owned(), crate::HarEntry {
-                            url: event.request.url.clone(),
-                            method: event.request.method.clone(),
-                            status: None,
-                            started_unix_ms: *event.wall_time.inner() * 1000.0,
-                            elapsed_ms: None,
-                            transfer_bytes: None,
-                            mime_type: None,
-                            error_text: None,
-                        });
+                        let id = event.request_id.inner().to_owned();
+                        let started_monotonic_ms = *event.timestamp.inner() * 1000.0;
+                        if let (Some(response), Some((mut redirected, redirect_started_ms))) =
+                            (event.redirect_response.as_ref(), pending.remove(&id))
+                        {
+                            redirected.elapsed_ms = (redirect_started_ms.is_finite()
+                                && started_monotonic_ms.is_finite())
+                            .then(|| (started_monotonic_ms - redirect_started_ms).max(0.0));
+                            redirected.status = u16::try_from(response.status).ok();
+                            redirected.status_text = Some(response.status_text.clone());
+                            redirected.redirect_url = Some(event.request.url.clone());
+                            redirected.transfer_bytes =
+                                Some(response.encoded_data_length.max(0.0) as u64);
+                            redirected.mime_type = Some(response.mime_type.clone());
+                            task_recorder.record(redirected).await;
+                        }
+                        pending.insert(
+                            id,
+                            (
+                                crate::HarEntry {
+                                    url: event.request.url.clone(),
+                                    method: event.request.method.clone(),
+                                    status: None,
+                                    status_text: None,
+                                    redirect_url: None,
+                                    started_unix_ms: *event.wall_time.inner() * 1000.0,
+                                    elapsed_ms: None,
+                                    transfer_bytes: None,
+                                    mime_type: None,
+                                    error_text: None,
+                                },
+                                started_monotonic_ms,
+                            ),
+                        );
                     }
                     event = responses.next() => {
                         let Some(event) = event else { break };
                         let id = event.request_id.inner().to_owned();
-                        if let Some(entry) = pending.get_mut(&id) {
+                        if let Some((entry, _)) = pending.get_mut(&id) {
                             entry.status = Some(event.response.status as u16);
+                            entry.status_text = Some(event.response.status_text.clone());
                             entry.mime_type = Some(event.response.mime_type.clone());
                         }
                     }
                     event = finished.next() => {
                         let Some(event) = event else { break };
                         let id = event.request_id.inner().to_owned();
-                        if let Some(mut entry) = pending.remove(&id) {
-                            entry.elapsed_ms = entry
-                                .started_unix_ms
-                                .is_finite()
-                                .then(|| (*event.timestamp.inner() * 1000.0).max(0.0));
+                        if let Some((mut entry, started_monotonic_ms)) = pending.remove(&id) {
+                            let finished_monotonic_ms = *event.timestamp.inner() * 1000.0;
+                            entry.elapsed_ms = (started_monotonic_ms.is_finite()
+                                && finished_monotonic_ms.is_finite())
+                            .then(|| (finished_monotonic_ms - started_monotonic_ms).max(0.0));
                             entry.transfer_bytes = Some(event.encoded_data_length as u64);
                             task_recorder.record(entry).await;
                         }
@@ -638,7 +687,11 @@ impl ChromiumWorker {
                     event = failed.next() => {
                         let Some(event) = event else { break };
                         let id = event.request_id.inner().to_owned();
-                        if let Some(mut entry) = pending.remove(&id) {
+                        if let Some((mut entry, started_monotonic_ms)) = pending.remove(&id) {
+                            let failed_monotonic_ms = *event.timestamp.inner() * 1000.0;
+                            entry.elapsed_ms = (started_monotonic_ms.is_finite()
+                                && failed_monotonic_ms.is_finite())
+                            .then(|| (failed_monotonic_ms - started_monotonic_ms).max(0.0));
                             entry.error_text = Some(event.error_text.clone());
                             task_recorder.record(entry).await;
                         }
@@ -647,8 +700,7 @@ impl ChromiumWorker {
             }
         });
         recorders.insert(page_id.clone(), recorder.clone());
-        drop(recorders);
-        self.har_tasks.lock().await.insert(page_id.clone(), task);
+        tasks.insert(page_id.clone(), task);
         Ok(recorder)
     }
 
@@ -716,9 +768,25 @@ impl ChromiumWorker {
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))
     }
 
-    async fn unregister_page(&self, page_id: &PageId) -> Option<Page> {
+    async fn unregister_page_state(
+        &self,
+        page_id: &PageId,
+        preserve_har: bool,
+    ) -> (Option<Page>, Option<Arc<crate::HarRecorder>>) {
         self.network_trackers.lock().await.remove(page_id);
-        self.pages.lock().await.remove(page_id)
+        let mut pages = self.pages.lock().await;
+        let mut recorders = self.har_recorders.lock().await;
+        let mut tasks = self.har_tasks.lock().await;
+        let page = pages.remove(page_id);
+        let recorder = recorders.remove(page_id);
+        if let Some(task) = tasks.remove(page_id) {
+            task.abort();
+        }
+        (page, preserve_har.then_some(recorder).flatten())
+    }
+
+    async fn unregister_page(&self, page_id: &PageId) -> Option<Page> {
+        self.unregister_page_state(page_id, false).await.0
     }
 
     /// Register page targets the runtime did not open — popups from
@@ -1250,12 +1318,10 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &types::NetworkLogCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        let page = self.page_handle(page_id).await?;
         let recorder = self.ensure_har_collector(page_id).await?;
         let entries = recorder.take(command.clear).await;
-        let page_url = match self.page_handle(page_id).await {
-            Ok(page) => page.url().await.ok().flatten().unwrap_or_default(),
-            Err(_) => String::new(),
-        };
+        let page_url = page.url().await.ok().flatten().unwrap_or_default();
         let document = crate::har::har_document(&entries, &page_url);
         let bytes = serde_json::to_vec(&document)
             .map_err(|error| driver_error(ErrorCode::Internal, error.to_string()))?;
@@ -3000,9 +3066,103 @@ mod tests {
     use super::{
         apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, is_closed_page_message,
         is_missing_css_node, snapshot_cookie, text_matches, unscoped_css_wait_selector,
-        HttpBridgeState,
+        ChromiumWorker, HttpBridgeState,
     };
-    use types::{ErrorCode, TargetSpec, TextMatch};
+    use types::{ErrorCode, PageId, SessionId, TargetSpec, TextMatch, WorkerId};
+
+    fn chromium_worker_without_browser(root: &std::path::Path) -> ChromiumWorker {
+        let behavioral = super::BehavioralConfig::default().sanitize();
+        let fingerprint = super::FingerprintConfig::default();
+        ChromiumWorker {
+            id: WorkerId::new(),
+            profile_dir: root.join("profile"),
+            pid_registry_path: None,
+            upload_roots: Vec::new(),
+            download_dir: root.join("downloads"),
+            session_id: SessionId::new(),
+            artifacts: super::ArtifactStore::new(root.join("artifacts"), 1024, 1024),
+            max_js_result_bytes: 1024,
+            max_js_timeout_ms: 1_000,
+            browser: super::Mutex::new(None),
+            pages: super::Mutex::new(super::HashMap::new()),
+            closed_targets: super::Mutex::new(super::HashSet::new()),
+            network_trackers: super::Mutex::new(super::HashMap::new()),
+            har_recorders: super::Mutex::new(super::HashMap::new()),
+            har_tasks: super::Mutex::new(super::HashMap::new()),
+            http_state: super::Mutex::new(HttpBridgeState::default()),
+            handler_task: super::Mutex::new(None),
+            fingerprint: super::Mutex::new(fingerprint.clone()),
+            fingerprint_enabled: super::AtomicBool::new(fingerprint.enabled),
+            fingerprint_plan: super::Mutex::new(None),
+            humanization_enabled: super::AtomicBool::new(false),
+            typing_simulator: super::TypingSimulator::new(behavioral.typing.clone()),
+            mouse_simulator: super::BezierMouseSimulator::new(behavioral.mouse.clone()),
+            session_jitter: behavioral.session_jitter,
+            session_random: super::Mutex::new(super::SessionRandom::new(1)),
+        }
+    }
+
+    #[tokio::test]
+    async fn unregistering_a_page_invalidates_its_cached_har_collector() {
+        let temp = tempfile::tempdir().expect("temporary worker root");
+        let worker = chromium_worker_without_browser(temp.path());
+        let page_id = PageId::new();
+        worker.har_recorders.lock().await.insert(
+            page_id.clone(),
+            std::sync::Arc::new(crate::HarRecorder::default()),
+        );
+        worker
+            .har_tasks
+            .lock()
+            .await
+            .insert(page_id.clone(), tokio::spawn(std::future::pending::<()>()));
+
+        worker.unregister_page(&page_id).await;
+
+        assert!(!worker.har_recorders.lock().await.contains_key(&page_id));
+        assert!(!worker.har_tasks.lock().await.contains_key(&page_id));
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_entries_while_detaching_the_old_har_task() {
+        let temp = tempfile::tempdir().expect("temporary worker root");
+        let worker = chromium_worker_without_browser(temp.path());
+        let page_id = PageId::new();
+        let recorder = std::sync::Arc::new(crate::HarRecorder::default());
+        recorder
+            .record(crate::HarEntry {
+                url: "https://example.test/before-crash".into(),
+                method: "GET".into(),
+                status: Some(200),
+                status_text: Some("OK".into()),
+                redirect_url: None,
+                started_unix_ms: 1.0,
+                elapsed_ms: Some(2.0),
+                transfer_bytes: Some(3),
+                mime_type: Some("text/plain".into()),
+                error_text: None,
+            })
+            .await;
+        worker
+            .har_recorders
+            .lock()
+            .await
+            .insert(page_id.clone(), recorder.clone());
+        worker
+            .har_tasks
+            .lock()
+            .await
+            .insert(page_id.clone(), tokio::spawn(std::future::pending::<()>()));
+
+        let (_, recovered) = worker.unregister_page_state(&page_id, true).await;
+
+        let recovered = recovered.expect("recovery retains the recorder");
+        assert!(std::sync::Arc::ptr_eq(&recorder, &recovered));
+        let entries = recovered.take(false).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].url, "https://example.test/before-crash");
+        assert!(!worker.har_tasks.lock().await.contains_key(&page_id));
+    }
 
     #[test]
     fn element_wait_recognizes_an_unscoped_css_query() {
