@@ -27,6 +27,8 @@ NOUNS = ["Account", "Order", "Report", "Settings", "Profile", "Invoice", "Ticket
          "Document", "Payment", "Subscription", "Filter", "Export", "Draft", "User"]
 PURPOSES = ["Fill form", "Submit request", "Open settings", "Confirm dialog",
             "Navigate to next step", "Save changes", "Search records", "Upload file"]
+TEXT_VALUES = ["alice@example.com", "hunter2", "Acme Corp", "2026-08-08",
+               "+1-555-0100", "42", "john.doe", "CA-94110"]
 JOURNEYS = ["onboarding", "customer-update", "documents", "authorization", "report-recovery"]
 
 
@@ -49,28 +51,50 @@ def make_example(rng: random.Random, i: int) -> dict:
     n = rng.randint(3, 8)
     boxes = non_overlapping_boxes(rng, n)
 
-    # Learnable rule: the purpose names the target candidate's verb, and the
-    # target is the only candidate whose name starts with that verb. The model
-    # can learn "purpose verb -> matching candidate" from context alone;
-    # positions stay random so x,y remain unpredictable from the prompt.
+    # Learnable rules, one per action kind:
+    #   click:        purpose "Verb the noun"        -> candidate "Verb Noun"
+    #   typeText:     purpose "Enter '<text>' ..."   -> the only textbox
+    #   extractValue: purpose "Read the <noun>"      -> candidate whose name's
+    #                 noun matches; value is that candidate's name
+    # Positions stay random so x,y remain unpredictable from the prompt.
+    kind = rng.choices(["click", "typeText", "extractValue"], weights=[0.5, 0.25, 0.25])[0]
     verbs = rng.sample(VERBS, n)
+    nouns = rng.sample(NOUNS, n)  # unique nouns: extractValue matches on noun
     target_index = rng.randrange(n)
 
     candidates = []
     for j, (x, y, w, h) in enumerate(boxes):
         candidates.append({
             "role": rng.choice(ROLES),
-            "name": f"{verbs[j]} {rng.choice(NOUNS)}",
+            "name": f"{verbs[j]} {nouns[j]}",
             "bbox": {"x": x, "y": y, "w": w, "h": h},
         })
 
-    purpose = f"{verbs[target_index]} the {candidates[target_index]['name'].split(' ', 1)[1].lower()}"
-
-    bbox = candidates[target_index]["bbox"]
+    target = candidates[target_index]
+    bbox = target["bbox"]
     margin_x = max(4, int(bbox["w"] * 0.15))
     margin_y = max(4, int(bbox["h"] * 0.15))
     cx = rng.randint(bbox["x"] + margin_x, bbox["x"] + bbox["w"] - margin_x)
     cy = rng.randint(bbox["y"] + margin_y, bbox["y"] + bbox["h"] - margin_y)
+    confidence = round(rng.uniform(0.7, 0.95), 2)
+
+    if kind == "click":
+        purpose = f"{verbs[target_index]} the {target['name'].split(' ', 1)[1].lower()}"
+        action = {"kind": "click", "x": float(cx), "y": float(cy)}
+    elif kind == "typeText":
+        # Exactly one textbox; the purpose quotes the text to enter.
+        target["role"] = "textbox"
+        for j, c in enumerate(candidates):
+            if j != target_index and c["role"] == "textbox":
+                c["role"] = "button"
+        text = rng.choice(TEXT_VALUES)
+        noun = target["name"].split(" ", 1)[1].lower()
+        purpose = f"Enter '{text}' into the {noun} field"
+        action = {"kind": "typeText", "text": text}
+    else:
+        noun = target["name"].split(" ", 1)[1].lower()
+        purpose = f"Read the {noun}"
+        action = {"kind": "extractValue", "value": target["name"]}
 
     return {
         "image_b64": "",
@@ -81,8 +105,8 @@ def make_example(rng: random.Random, i: int) -> dict:
         "context_candidates": candidates,
         "target_index": target_index,
         "model_response": {
-            "confidence": round(rng.uniform(0.7, 0.95), 2),
-            "action": {"kind": "click", "x": float(cx), "y": float(cy)},
+            "confidence": confidence,
+            "action": action,
         },
         "success": True,
         "journey": rng.choice(JOURNEYS),
