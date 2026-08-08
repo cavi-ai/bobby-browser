@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Intent resolution auto-descends one level into iframes on managed Chromium: a main-frame intent whose target lives inside a frame now resolves and acts (the gather stamps each in-frame candidate with a re-resolvable frame hop; the action path uses it when the intent named no explicit `framePath`). Capped at 8 frames per gather; frames with no stable address (no id, test id, or `src`) are skipped. Live installed-Chromium test resolves the gauntlet's in-frame confirm button with no `framePath`.
+
+
 - NVIDIA OpenShell host: `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment. `bobby doctor` reports `openshell-pack` when the pack is present.
 - Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page transparently re-attaches to the live target (`Page::is_closed` + `Browser::get_page` on the vendored chromiumoxide). A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle.
 

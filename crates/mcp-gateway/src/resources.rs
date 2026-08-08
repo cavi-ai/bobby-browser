@@ -924,11 +924,14 @@ variant; `IntentCommand::class` fixes its recovery behavior.
 | `SubmitAndVerify` | `intent_submit_and_verify` | Boundary |
 | `Follow` | `intent_follow` | Boundary if `boundary: true`, else Reconciliable |
 
-Intents resolve in the main frame only. A control inside an iframe is
-invisible to them (snapshots do not descend into frames); drive it with a
-primitive (`click`, `type_text`, `control_action`) whose target carries a
-`framePath` — each hop is a TargetSpec resolving the frame element itself,
-outermost first:
+On managed Chromium, intent resolution auto-descends one level into
+iframes (the gather stamps each in-frame candidate with a re-resolvable
+hop), so a main-frame intent can find and act on in-frame controls.
+Snapshots still do not descend, and the Firefox companion resolves in
+the main frame only — there, drive in-frame controls with a primitive
+(`click`, `type_text`, `control_action`) whose target carries a
+`framePath` — each hop is a TargetSpec resolving the frame element
+itself, outermost first:
 
     "target": {
       "role": "button", "accessibleName": "Confirm preview",

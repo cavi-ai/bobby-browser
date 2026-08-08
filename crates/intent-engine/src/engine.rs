@@ -762,7 +762,13 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
         accessible_name: candidate.name.clone(),
         label: candidate.label.clone(),
         attributes: candidate.attributes.clone(),
-        frame_path: intent_target.frame_path.clone(),
+        // An explicit frame path on the intent wins; otherwise use the one
+        // the gather stamped when it found this candidate inside an iframe.
+        frame_path: if intent_target.frame_path.is_empty() {
+            candidate.frame_path.clone()
+        } else {
+            intent_target.frame_path.clone()
+        },
         shadow_path: intent_target.shadow_path.clone(),
         ..TargetSpec::default()
     };
