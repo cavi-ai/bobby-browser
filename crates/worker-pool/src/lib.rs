@@ -24,7 +24,7 @@ use types::{
     UploadFilesCommand, WaitForCommand, WorkerId,
 };
 
-pub use chromium::ChromiumWorkerFactory;
+pub use chromium::{is_dead_worker_error, ChromiumWorkerFactory};
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_snapshot, form_snapshot_expression,
