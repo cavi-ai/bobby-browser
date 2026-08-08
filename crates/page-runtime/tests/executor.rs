@@ -26,6 +26,7 @@ enum DriverMode {
     FailClick,
     ClickTargetNotFound,
     WaitTimeout,
+    TargetDetached,
     StateConflict,
     CommitFail,
     CommitPause,
@@ -173,6 +174,14 @@ impl BrowserWorker for FakeWorker {
                 message: "no target candidate matched".into(),
                 layer: ErrorLayer::Driver,
                 retryable: false,
+            });
+        }
+        if matches!(self.mode, DriverMode::TargetDetached) {
+            return Err(CommandError {
+                code: ErrorCode::TargetDetached,
+                message: "the browser target is gone (crashed or closed); re-list pages or recover the session before retrying".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
             });
         }
         Ok(vec![Evidence::Element {
@@ -1075,6 +1084,28 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
     let outcome = runtime.execute(request).await;
     assert!(matches!(outcome, CommandOutcome::Failed { error, .. }
         if error.code == ErrorCode::WaitConditionTimedOut));
+}
+
+#[tokio::test]
+async fn boundary_target_detached_is_retryable_not_needs_reconciliation() {
+    let (runtime, session, page, _) = runtime(DriverMode::TargetDetached, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#submit".into(),
+                target: None,
+                boundary: true,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        CommandOutcome::RetryableFailure { error, .. }
+            if error.code == ErrorCode::TargetDetached
+    ));
 }
 
 #[tokio::test]

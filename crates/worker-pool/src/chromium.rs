@@ -2551,6 +2551,7 @@ fn is_closed_page_message(message: &str) -> bool {
     message.contains("receiver is gone")
         || message.contains("session closed")
         || message.contains("Session with given id not found")
+        || message.contains("oneshot canceled")
 }
 
 fn nonempty_field(value: &Option<String>) -> Option<&str> {
@@ -3033,6 +3034,7 @@ mod tests {
         assert!(is_closed_page_message(
             "send failed because receiver is gone"
         ));
+        assert!(is_closed_page_message("oneshot canceled"));
         assert!(!is_closed_page_message(
             "connection temporarily unavailable"
         ));
