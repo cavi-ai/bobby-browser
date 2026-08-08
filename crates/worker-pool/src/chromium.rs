@@ -2897,6 +2897,39 @@ mod tests {
     }
 
     #[test]
+    fn accessibility_snapshot_drops_named_inline_text_box_leaves() {
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
+            serde_json::from_value(serde_json::json!([{
+                "nodeId": "root",
+                "ignored": true,
+                "childIds": ["1"]
+            }, {
+                "nodeId": "1",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "StaticText"},
+                "name": {"type": "computedString", "value": "Priority saved"},
+                "childIds": ["2"]
+            }, {
+                "nodeId": "2",
+                "ignored": false,
+                "parentId": "1",
+                "role": {"type": "role", "value": "InlineTextBox"},
+                "name": {"type": "computedString", "value": "Priority saved"}
+            }]))
+            .expect("valid CDP AX fixture");
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 10);
+        assert!(!truncated);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].role.as_deref(), Some("StaticText"));
+        assert!(
+            nodes[0].children.is_empty(),
+            "InlineTextBox leaves must be pruned even when named"
+        );
+    }
+
+    #[test]
     fn accessibility_snapshot_keeps_global_ordinal_when_duplicate_is_truncated() {
         let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
             serde_json::from_value(serde_json::json!([{
