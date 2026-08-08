@@ -175,6 +175,51 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         "in-frame intent locate did not resolve: {outcome:?}"
     );
 
+    // A plain (non-boundary) click into the frame must work and must not
+    // kill the page target — the agent-path crash from the benchmark runs.
+    let frame_button = || TargetSpec {
+        css: Some("#confirm-preview".into()),
+        frame_path: vec![Box::new(TargetSpec {
+            css: Some("#document-preview".into()),
+            ..TargetSpec::default()
+        })],
+        ..TargetSpec::default()
+    };
+    let outcome = submit_primitive(PrimitiveCommand::WaitFor(WaitForCommand {
+        condition: WaitCondition::Element {
+            target: Box::new(frame_button()),
+            state: ElementState::Visible,
+        },
+        timeout_ms: 15_000,
+    }))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "in-frame confirm button never became visible: {outcome:?}"
+    );
+    let outcome = submit_primitive(PrimitiveCommand::Click(types::ClickCommand {
+        selector: String::new(),
+        target: Some(frame_button()),
+        boundary: false,
+        expected_url: None,
+    }))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "in-frame click failed: {outcome:?}"
+    );
+
+    // The page must still be alive and answer afterwards.
+    let outcome =
+        submit_primitive(PrimitiveCommand::Inspect(types::InspectCommand::default())).await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "page died after the in-frame click: {outcome:?}"
+    );
+    server.wait_for_preview_confirmation().await.unwrap();
+    let snapshot = server.snapshot().await;
+    assert_eq!(snapshot.preview_confirmations, 1);
+
     runtime.sessions.delete(&session.id).await.unwrap();
 }
 
