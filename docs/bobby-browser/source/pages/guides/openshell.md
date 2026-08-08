@@ -1,5 +1,5 @@
 ---
-documentedVersion: 0.7.0
+documentedVersion: {{PRODUCT_VERSION}}
 ---
 
 # OpenShell host
