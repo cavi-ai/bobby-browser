@@ -49,9 +49,9 @@ fn compile_complete_form_preserves_order_and_rejects_duplicate_names() {
 }
 
 #[test]
-fn compile_locate_uses_purpose_as_accessible_name_hint() {
+fn compile_locate_keeps_role_only_when_purpose_is_descriptive_prose() {
     let plan = compile_intent(&IntentCommand::Locate(LocateIntent {
-        purpose: "Continue".into(),
+        purpose: "Continue button in the document preview iframe".into(),
         hints: IntentHints {
             role: Some("button".into()),
             ..IntentHints::default()
@@ -63,7 +63,8 @@ fn compile_locate_uses_purpose_as_accessible_name_hint() {
         panic!()
     };
     assert_eq!(target.role.as_deref(), Some("button"));
-    assert!(target.accessible_name.is_some() || target.text.is_some());
+    assert_eq!(target.accessible_name, None);
+    assert_eq!(target.text, None);
 }
 
 #[test]
@@ -109,6 +110,28 @@ fn compile_fill_maps_purpose_to_text_when_role_absent() {
             clear_first: true,
         } if text == "a@b.co"
     ));
+}
+
+#[test]
+fn compile_fill_uses_purpose_as_accessible_name_when_role_is_present() {
+    let plan = compile_intent(&IntentCommand::Fill(FillIntent {
+        purpose: "Full name".into(),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            ..IntentHints::default()
+        },
+        value: FillValue::Text {
+            text: "Ada Lovelace".into(),
+            clear_first: true,
+        },
+    }))
+    .expect("compile");
+    let IntentPlan::Fill { target, .. } = plan else {
+        panic!("expected Fill plan");
+    };
+    assert_eq!(target.role.as_deref(), Some("textbox"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Full name"));
+    assert_eq!(target.text, None);
 }
 
 #[test]
@@ -185,6 +208,7 @@ fn compile_follow_carries_target_expected_destination_and_boundary_flag() {
     };
     assert_eq!(target.role.as_deref(), Some("link"));
     assert_eq!(target.accessible_name.as_deref(), Some("Details"));
+    assert_eq!(target.text, None);
     assert_eq!(expected_destination.timeout_ms, 5_000);
     assert!(boundary);
 }
@@ -210,6 +234,7 @@ fn compile_dismiss_obstruction_carries_target_and_timeout() {
         target.accessible_name.as_deref(),
         Some("Cookie notice close button")
     );
+    assert_eq!(target.text, None);
     assert_eq!(timeout_ms, 3_000);
 }
 
@@ -252,6 +277,7 @@ fn compile_extract_resolves_each_field_to_its_own_target_and_value_kind() {
         fields[1].target.accessible_name.as_deref(),
         Some("Profile link")
     );
+    assert_eq!(fields[1].target.text, None);
     assert!(matches!(fields[1].value, ExtractValueKind::Href));
 }
 

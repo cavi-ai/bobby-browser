@@ -15,18 +15,15 @@ Environment variables:
 """
 
 import argparse
-import base64
-import io
 import json
 import logging
+import math
 import os
-import sys
+from dataclasses import dataclass
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Any, Optional
+from typing import Optional
 
 import requests
-from PIL import Image, ImageDraw
-import io
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -81,7 +78,9 @@ class OllamaClient:
                         ]
                     }
                 ],
-                "max_tokens": 512
+                "max_tokens": 512,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
             },
             timeout=120
         )
@@ -133,34 +132,55 @@ class OllamaClient:
         json_str = self._extract_json(content)
 
         if not json_str:
-            # Fallback: return a low-confidence no-op
-            return {"confidence": 0.1, "action": {"kind": "click", "x": 0.0, "y": 0.0}}
+            return self._rejected_proposal()
 
         try:
             result = json.loads(json_str)
-
-            # Normalize to Bobby's schema
-            if "kind" not in result.get("action", {}):
-                # Try to detect action type from keys
-                if "x" in result.get("action", {}) and "y" in result.get("action", {}):
-                    result["action"]["kind"] = "click"
-                elif "text" in result.get("action", {}):
-                    result["action"]["kind"] = "typeText"
-                elif "value" in result.get("action", {}):
-                    result["action"]["kind"] = "extractValue"
-                else:
-                    result["action"]["kind"] = "click"
-
-            # Ensure confidence is in valid range
-            if "confidence" not in result:
-                result["confidence"] = 0.5
-
-            result["confidence"] = max(0.0, min(1.0, float(result["confidence"])))
-
-            return result
-
         except json.JSONDecodeError:
-            return {"confidence": 0.1, "action": {"kind": "click", "x": 0.0, "y": 0.0}}
+            return self._rejected_proposal()
+        if not isinstance(result, dict) or not isinstance(result.get("action"), dict):
+            return self._rejected_proposal()
+
+        try:
+            confidence = float(result.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            return self._rejected_proposal()
+        if not math.isfinite(confidence):
+            return self._rejected_proposal()
+        confidence = max(0.0, min(1.0, confidence))
+
+        action = result["action"]
+        kind = action.get("kind")
+        if kind is None:
+            if "x" in action and "y" in action:
+                kind = "click"
+            elif "text" in action:
+                kind = "typeText"
+            elif "value" in action:
+                kind = "extractValue"
+
+        if kind == "click":
+            try:
+                x = float(action["x"])
+                y = float(action["y"])
+            except (KeyError, TypeError, ValueError):
+                return self._rejected_proposal()
+            if not math.isfinite(x) or not math.isfinite(y):
+                return self._rejected_proposal()
+            normalized_action = {"kind": "click", "x": x, "y": y}
+        elif kind == "typeText" and isinstance(action.get("text"), str):
+            normalized_action = {"kind": "typeText", "text": action["text"]}
+        elif kind == "extractValue" and isinstance(action.get("value"), str):
+            normalized_action = {"kind": "extractValue", "value": action["value"]}
+        else:
+            return self._rejected_proposal()
+
+        return {"confidence": confidence, "action": normalized_action}
+
+    @staticmethod
+    def _rejected_proposal() -> dict:
+        # Bobby rejects this below its confidence floor before executing it.
+        return {"confidence": 0.0, "action": {"kind": "click", "x": 0.0, "y": 0.0}}
 
     def _extract_json(self, text: str) -> Optional[str]:
         """Extract JSON from model output."""

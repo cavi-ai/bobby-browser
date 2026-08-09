@@ -59,3 +59,7 @@ opencode.jsonc
 crates/interface-conformance/data/
 crates/cli/data/
 /benchmarks/results/
+
+# Python test/import caches.
+__pycache__/
+*.py[cod]

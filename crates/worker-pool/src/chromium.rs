@@ -50,7 +50,8 @@ use types::{
 use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
-        gather_candidates, resolve_target as resolve_browser_target, resolve_target_with_visibility,
+        gather_candidates, inspect_page_scoped_target, resolve_target as resolve_browser_target,
+        resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -952,7 +953,24 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .unwrap_or_default();
-        let (text, html, resolution) = if command.selector.is_some() || command.target.is_some() {
+        let (text, html, resolution) = if command
+            .target
+            .as_ref()
+            .is_some_and(is_page_scoped_text_target)
+        {
+            let target = command.target.as_ref().expect("checked target");
+            let mut browser = self.browser.lock().await;
+            let browser = browser.as_mut().ok_or_else(closed_error)?;
+            let (text, html, resolution) = inspect_page_scoped_target(
+                page_id,
+                &page,
+                target,
+                command.include_html,
+                Some(browser),
+            )
+            .await?;
+            (text, html, Some(resolution))
+        } else if command.selector.is_some() || command.target.is_some() {
             let resolved = self
                 .resolve_target(
                     page_id,
@@ -1878,7 +1896,7 @@ impl BrowserWorker for ChromiumWorker {
             observations += 1;
             let tracker = self.network_trackers.lock().await.get(page_id).cloned();
             let page = self.page_handle(page_id).await?;
-            let poll = wait_condition_satisfied(
+            let poll = match wait_condition_satisfied(
                 &self.browser,
                 page_id,
                 &page,
@@ -1886,7 +1904,19 @@ impl BrowserWorker for ChromiumWorker {
                 &command.condition,
                 &mut quiet_since,
             )
-            .await?;
+            .await
+            {
+                Ok(poll) => poll,
+                // A frame or document navigation can replace its execution
+                // context between target resolution and observation. Waits
+                // are read-only and already bounded, so reacquire the frame
+                // on the next poll instead of converting a successful submit
+                // into an immediate false failure.
+                Err(error) if wait_should_retry_replaced_context(&error) => {
+                    WaitPoll::matched(false)
+                }
+                Err(error) => return Err(error),
+            };
             if poll.satisfied {
                 return Ok(vec![Evidence::Wait {
                     condition: command.condition.clone(),
@@ -1901,7 +1931,9 @@ impl BrowserWorker for ChromiumWorker {
                 // (fetch-then-append). One last body read before timing out.
                 if let types::WaitCondition::Text { target, matcher } = &command.condition {
                     if is_page_scoped_text_target(target) {
-                        if let Ok(value) = read_page_body_text(&page).await {
+                        if let Ok(value) =
+                            read_page_scoped_text(&self.browser, page_id, &page, target).await
+                        {
                             if text_matches(matcher, &value).unwrap_or(false) {
                                 return Ok(vec![Evidence::Wait {
                                     condition: command.condition.clone(),
@@ -2633,7 +2665,7 @@ async fn wait_condition_satisfied(
             // node; read live document.body.innerText via evaluate so polls see
             // async UI updates the same way a whole-page inspect does.
             if !is_value && is_page_scoped_text_target(target) {
-                let value = read_page_body_text(page).await?;
+                let value = read_page_scoped_text(browser, page_id, page, target).await?;
                 return Ok(WaitPoll::saw(text_matches(matcher, &value)?, value));
             }
             let mut browser = browser.lock().await;
@@ -2761,6 +2793,15 @@ fn is_closed_page_message(message: &str) -> bool {
         || message.contains("oneshot canceled")
 }
 
+fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
+    if error.code != ErrorCode::BrowserCommandFailed {
+        return false;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("cannot find context with specified id")
+        || message.contains("execution context was destroyed")
+}
+
 fn nonempty_field(value: &Option<String>) -> Option<&str> {
     value
         .as_deref()
@@ -2794,7 +2835,6 @@ fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
         || nonempty_field(&target.label).is_some()
         || target.text.is_some()
         || !target.attributes.is_empty()
-        || !target.frame_path.is_empty()
         || !target.shadow_path.is_empty()
         || target.ordinal.is_some()
     {
@@ -2825,6 +2865,22 @@ async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {
         .await
         .map_err(command_failed)?
         .unwrap_or_default())
+}
+
+async fn read_page_scoped_text(
+    browser: &Mutex<Option<Browser>>,
+    page_id: &PageId,
+    page: &Page,
+    target: &TargetSpec,
+) -> Result<String, CommandError> {
+    if target.frame_path.is_empty() {
+        return read_page_body_text(page).await;
+    }
+    let mut browser = browser.lock().await;
+    let browser = browser.as_mut().ok_or_else(closed_error)?;
+    inspect_page_scoped_target(page_id, page, target, false, Some(browser))
+        .await
+        .map(|(text, _, _)| text)
 }
 
 fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {
@@ -3215,7 +3271,8 @@ mod tests {
     use super::{
         apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, element_wait_missing_observation,
         is_closed_page_message, is_missing_css_node, should_retry_plain_click_target_drift,
-        snapshot_cookie, text_matches, unscoped_css_wait_selector, ChromiumWorker, HttpBridgeState,
+        snapshot_cookie, text_matches, unscoped_css_wait_selector,
+        wait_should_retry_replaced_context, ChromiumWorker, HttpBridgeState,
     };
     use types::{
         CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec, TextMatch, WorkerId,
@@ -3399,6 +3456,33 @@ mod tests {
             element_wait_missing_observation(&types::ElementState::Visible, &error),
             None
         );
+    }
+
+    #[test]
+    fn waits_retry_only_execution_context_replacement() {
+        let replaced = types::CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "Error -32000: Cannot find context with specified id".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+        assert!(wait_should_retry_replaced_context(&replaced));
+
+        let target_gone = types::CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "the browser target is gone (crashed or closed)".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: true,
+        };
+        assert!(!wait_should_retry_replaced_context(&target_gone));
+
+        let unrelated = types::CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "permission denied".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+        assert!(!wait_should_retry_replaced_context(&unrelated));
     }
 
     #[test]

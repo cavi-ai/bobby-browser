@@ -10,9 +10,9 @@ use gauntlet_server::{ScenarioConfig, ScenarioServer};
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ElementState,
-    IntentCommand, IntentHints, LocateIntent, NavigateCommand, OpenPageRequest, PrimitiveCommand,
-    RuntimeCommand, TargetSpec, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
-    WorkflowId,
+    FormControlKind, FormControlTarget, IntentCommand, IntentHints, LocateIntent, NavigateCommand,
+    OpenPageRequest, PrimitiveCommand, RuntimeCommand, TargetSpec, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 
 fn chrome_executable() -> PathBuf {
@@ -21,6 +21,25 @@ fn chrome_executable() -> PathBuf {
         .unwrap_or_else(|_| {
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         })
+}
+
+fn target_spec(target: &FormControlTarget) -> TargetSpec {
+    let segment = |segment: &types::SemanticTargetSegment| {
+        Box::new(TargetSpec {
+            role: Some(segment.role.clone()),
+            accessible_name: Some(segment.accessible_name.clone()),
+            ordinal: segment.ordinal,
+            ..TargetSpec::default()
+        })
+    };
+    TargetSpec {
+        role: Some(target.role.clone()),
+        accessible_name: Some(target.accessible_name.clone()),
+        ordinal: target.ordinal,
+        frame_path: target.frame_path.iter().map(segment).collect(),
+        shadow_path: target.shadow_path.iter().map(segment).collect(),
+        ..TargetSpec::default()
+    }
 }
 
 #[tokio::test]
@@ -121,9 +140,22 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         "{outcome:?}"
     );
 
+    let form_snapshot = runtime
+        .form_snapshot(&session.id, &page.id, None)
+        .await
+        .unwrap();
+    let file_target = form_snapshot
+        .forms
+        .iter()
+        .flat_map(|form| form.controls.iter())
+        .chain(form_snapshot.unowned_controls.iter())
+        .find(|control| control.control_kind == FormControlKind::File)
+        .and_then(|control| control.target.as_ref())
+        .map(target_spec)
+        .expect("file input target from form snapshot");
     let outcome = submit_primitive(PrimitiveCommand::UploadFiles(UploadFilesCommand {
-        selector: "input[aria-label='Customer document']".into(),
-        target: None,
+        selector: String::new(),
+        target: Some(file_target),
         paths: vec![fixture.to_string_lossy().into_owned()],
     }))
     .await;
@@ -160,10 +192,33 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         "{outcome:?}"
     );
 
+    let outcome = submit_primitive(PrimitiveCommand::Inspect(types::InspectCommand {
+        selector: None,
+        target: Some(TargetSpec {
+            css: Some("body".into()),
+            frame_path: vec![Box::new(TargetSpec {
+                css: Some("#document-preview".into()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        }),
+        include_html: true,
+    }))
+    .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("iframe body inspection failed: {outcome:?}");
+    };
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        types::Evidence::Inspection { text, html, .. }
+            if text.contains("Confirm document")
+                && html.as_deref().is_some_and(|html| html.contains("confirm-preview"))
+    )));
+
     // The confirm button lives inside the preview iframe. No framePath: the
     // gather must descend and resolve it anyway.
     let outcome = submit_intent(IntentCommand::Locate(LocateIntent {
-        purpose: "Confirm document preview".into(),
+        purpose: "Confirm button inside the document preview iframe".into(),
         hints: IntentHints {
             role: Some("button".into()),
             ..IntentHints::default()

@@ -426,6 +426,7 @@ fn control_role(control: &RawFormControl) -> Option<String> {
                 FormControlKind::Submit | FormControlKind::Reset | FormControlKind::Other => {
                     "button"
                 }
+                FormControlKind::File => "button",
                 _ => "textbox",
             }
             .into(),
@@ -637,7 +638,7 @@ const forms=[...document.forms].slice(0,64);const formIds=new Map(forms.map((e,i
 const eligibleControls=controls.filter(e=>!e.form||formIds.has(e.form));let truncated=document.forms.length>64||eligibleControls.length>512||eligibleControls.length!==controls.length;let optionCount=0;
 const visibleControls=eligibleControls.slice(0,512);const controlIds=new Map(visibleControls.map((e,i)=>[e,`control-${i}`]));
 const label=e=>text(e.getAttribute('aria-label'))||text((e.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>document.getElementById(id)?.textContent||'').join(' '))||text(e.labels?.[0]?.textContent)||text(e.closest('label')?.textContent)||text(e.getAttribute('placeholder'));
-const role=e=>{const explicit=text(e.getAttribute('role'));if(explicit)return explicit;const tag=e.tagName.toLowerCase(),type=String(e.type||e.getAttribute('type')||'text').toLowerCase();if(tag==='button'||['submit','reset','button'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(tag==='select')return e.multiple?'listbox':'combobox';if(tag==='textarea'||e.isContentEditable)return 'textbox';return type==='range'?'slider':'textbox'};
+const role=e=>{const explicit=text(e.getAttribute('role'));if(explicit)return explicit;const tag=e.tagName.toLowerCase(),type=String(e.type||e.getAttribute('type')||'text').toLowerCase();if(tag==='button'||['submit','reset','button','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(tag==='select')return e.multiple?'listbox':'combobox';if(tag==='textarea'||e.isContentEditable)return 'textbox';return type==='range'?'slider':'textbox'};
 const kind=e=>{const tag=e.tagName.toLowerCase(),type=String(e.type||e.getAttribute('type')||'text').toLowerCase(),r=e.getAttribute('role');if(r==='switch')return'switch';if(r==='combobox')return'combobox';if(r==='listbox')return'listbox';if(e.isContentEditable)return'contentEditable';if(tag==='button')return type==='reset'?'reset':type==='button'?'other':'submit';if(tag==='select')return e.multiple?'selectMultiple':'selectOne';if(tag==='textarea')return'text';return ({text:'text',email:'email',password:'password',search:'search',number:'number',checkbox:'checkbox',radio:'radio',date:'date',time:'time','datetime-local':'dateTimeLocal',range:'range',file:'file',submit:'submit',reset:'reset'})[type]||'other'};
 const names=new Map();for(const e of visibleControls){const k=`${role(e)}\0${label(e)||''}`;names.set(k,(names.get(k)||0)+1)}const seen=new Map();
 const describe=e=>{const k=kind(e),tag=e.tagName.toLowerCase(),editableCombo=k==='combobox'&&(tag==='input'||tag==='textarea'||e.isContentEditable),name=label(e),rk=`${role(e)}\0${name||''}`,ordinal=seen.get(rk)||0;seen.set(rk,ordinal+1);const target=name?{role:role(e),accessibleName:name,...(names.get(rk)>1?{ordinal}:{}),framePath:[],shadowPath:[]}:null;const selected=e.tagName==='SELECT'?[...e.selectedOptions].map(o=>clip(o.value,4096)):[];let state;if(k==='password')state={kind:'redacted',present:Boolean(e.value)};else if(k==='checkbox'||k==='radio'||k==='switch')state={kind:'checked',checked:Boolean(e.checked||e.getAttribute('aria-checked')==='true')};else if(k==='selectOne'||k==='selectMultiple'||k==='listbox'||(k==='combobox'&&!editableCombo))state={kind:'selection',values:selected};else if(k==='file'){const count=e.files?.length||0;if(count>512)truncated=true;state={kind:'files',count:Math.min(count,512)}}else state=e.value||e.textContent?{kind:'text',value:clip(e.value??e.textContent??'',4096)}:{kind:'empty'};
@@ -810,6 +811,34 @@ mod tests {
             None
         );
         snapshot.validate().unwrap();
+    }
+
+    #[test]
+    fn file_input_target_matches_the_action_resolvers_button_role() {
+        let mut file = raw_control("document", "Customer document");
+        file.input_type = Some("file".into());
+        let snapshot = normalize_form_snapshot(
+            PageId::new(),
+            RawFormSnapshot {
+                forms: Vec::new(),
+                groups: Vec::new(),
+                controls: vec![file],
+                truncated: false,
+            },
+            512,
+        )
+        .unwrap();
+
+        let control = &snapshot.unowned_controls[0];
+        assert_eq!(control.control_kind, FormControlKind::File);
+        assert_eq!(
+            control.target.as_ref().map(|target| target.role.as_str()),
+            Some("button")
+        );
+        assert_eq!(
+            control.supported_operations,
+            vec![FormControlOperation::SetFiles, FormControlOperation::Clear]
+        );
     }
 
     #[test]
