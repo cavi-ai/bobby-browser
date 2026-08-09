@@ -331,6 +331,7 @@ impl Server {
                         url: input.url,
                         expected_content_type: input.expected_content_type,
                         max_bytes: input.max_bytes,
+                        save_as: input.save_as,
                     }),
                 );
                 self.submit_envelope(context, envelope).await

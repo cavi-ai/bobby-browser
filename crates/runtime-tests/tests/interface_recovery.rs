@@ -733,6 +733,7 @@ async fn result_prepared_abort_rebuilds_from_durable_artifact_state() {
             url: download_fixture().await,
             expected_content_type: Some("application/octet-stream".into()),
             max_bytes: 1024,
+            save_as: None,
         })),
     };
     let command_id = envelope.command_id.clone();

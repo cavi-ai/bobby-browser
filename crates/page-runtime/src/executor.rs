@@ -42,6 +42,20 @@ impl PageRuntime {
             .rev()
             .find_map(|record| record.outcome.clone())
         {
+            if let Some(download) = scan
+                .records
+                .iter()
+                .rev()
+                .find_map(|record| record.prepared_result.as_ref())
+                .and_then(|prepared| prepared.download.as_ref())
+            {
+                if let Err(error) = self.adaptive.cleanup_prepared_download(download) {
+                    tracing::warn!(
+                        error = ?error,
+                        "terminal download staging recovery cleanup failed"
+                    );
+                }
+            }
             return outcome;
         }
         if let Some(prepared) = scan
@@ -50,6 +64,32 @@ impl PageRuntime {
             .rev()
             .find_map(|record| record.prepared_result.clone())
         {
+            if let Some(download) = prepared.download.as_ref() {
+                let Some(sha256) = prepared.artifact_sha256.as_deref() else {
+                    return CommandOutcome::NeedsReconciliation {
+                        command_id,
+                        error: internal_error("prepared download is missing its digest"),
+                        evidence: prepared.evidence,
+                    };
+                };
+                let Some(bytes) = prepared.artifact_bytes else {
+                    return CommandOutcome::NeedsReconciliation {
+                        command_id,
+                        error: internal_error("prepared download is missing its byte count"),
+                        evidence: prepared.evidence,
+                    };
+                };
+                if let Err(error) = self
+                    .adaptive
+                    .finalize_prepared_download(download, sha256, bytes)
+                {
+                    return CommandOutcome::NeedsReconciliation {
+                        command_id,
+                        error,
+                        evidence: prepared.evidence,
+                    };
+                }
+            }
             if let (Some(artifact_id), Some(staging_id), Some(sha256), Some(bytes)) = (
                 prepared.artifact_id.as_deref(),
                 prepared.artifact_staging_id.as_deref(),
@@ -268,6 +308,7 @@ impl PageRuntime {
                     .await;
             }
         };
+        let mut committed_download = None;
         if let Some(mut prepared) = execution.prepared_http.take() {
             let artifact = prepared
                 .artifact
@@ -286,16 +327,23 @@ impl PageRuntime {
                     .artifact
                     .as_ref()
                     .and_then(|pending| pending.staging_id().map(str::to_owned)),
+                download: prepared
+                    .download
+                    .as_ref()
+                    .map(|pending| pending.record().clone()),
             };
             let journal = Arc::clone(journal);
             let prepared_record = prepared_record(&envelope, prepared_result);
             let pending = prepared.artifact.take();
+            let pending_download = prepared.download.take();
             let observer = self.phase_observer.clone();
             let durable_prepare = tokio::spawn(async move {
-                journal
-                    .append(prepared_record)
-                    .await
-                    .map_err(journal_error)?;
+                if let Err(error) = journal.append(prepared_record).await {
+                    if let Some(pending) = pending_download {
+                        pending.discard();
+                    }
+                    return Err(journal_error(error));
+                }
                 if let Some(observer) = observer {
                     observer
                         .durable_phase_reached(CommandPhase::ResultPrepared)
@@ -306,10 +354,13 @@ impl PageRuntime {
                         internal_error(format!("prepared artifact publication failed: {error}"))
                     })?;
                 }
-                Ok::<(), CommandError>(())
+                if let Some(pending) = pending_download {
+                    return pending.commit().map(Some);
+                }
+                Ok(None)
             });
             match durable_prepare.await {
-                Ok(Ok(())) => {}
+                Ok(Ok(download)) => committed_download = download,
                 Ok(Err(error)) => {
                     return prepared_failure(&envelope, error, execution.evidence);
                 }
@@ -330,12 +381,16 @@ impl PageRuntime {
                 )
                 .await
             {
-                return self
-                    .finish_failure(
+                let (outcome, terminal_durable) = self
+                    .finish_failure_durable(
                         &envelope,
                         prepared_failure(&envelope, error, execution.evidence.clone()),
                     )
                     .await;
+                if terminal_durable {
+                    cleanup_committed_download(&mut committed_download);
+                }
+                return outcome;
             }
         }
         let evidence = execution.evidence;
@@ -445,13 +500,24 @@ impl PageRuntime {
                     ))
                     .await
                 {
-                    Ok(()) => outcome,
+                    Ok(()) => {
+                        cleanup_committed_download(&mut committed_download);
+                        outcome
+                    }
                     Err(error) => journal_failure(&envelope, error, true),
                 }
             }
             Err(error) => {
-                self.finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
-                    .await
+                let (outcome, terminal_durable) = self
+                    .finish_failure_durable(
+                        &envelope,
+                        classify_failure(&envelope, error, Vec::new()),
+                    )
+                    .await;
+                if terminal_durable {
+                    cleanup_committed_download(&mut committed_download);
+                }
+                outcome
             }
         }
     }
@@ -845,6 +911,14 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
     ) -> CommandOutcome {
+        self.finish_failure_durable(envelope, outcome).await.0
+    }
+
+    async fn finish_failure_durable(
+        &self,
+        envelope: &CommandEnvelope,
+        outcome: CommandOutcome,
+    ) -> (CommandOutcome, bool) {
         // A failed command may still have changed the page (a click that timed
         // out waiting for navigation may have navigated), so the context graph
         // forgets on any non-replayable failure.
@@ -859,7 +933,7 @@ impl PageRuntime {
         self.promote_outcome(envelope, &failure_evidence, false)
             .await;
         let Some(journal) = &self.journal else {
-            return outcome;
+            return (outcome, false);
         };
         match journal
             .append(record(
@@ -870,8 +944,8 @@ impl PageRuntime {
             ))
             .await
         {
-            Ok(()) => outcome,
-            Err(error) => journal_failure(envelope, error, true),
+            Ok(()) => (outcome, true),
+            Err(error) => (journal_failure(envelope, error, true), false),
         }
     }
 
@@ -1040,6 +1114,14 @@ fn is_postcondition_failure(error: &CommandError) -> bool {
 /// when a tab died mid-submit).
 fn is_transient_target_loss(error: &CommandError) -> bool {
     matches!(error.code, ErrorCode::TargetDetached)
+}
+
+fn cleanup_committed_download(committed: &mut Option<crate::adaptive::CommittedDownload>) {
+    if let Some(committed) = committed.take() {
+        if let Err(error) = committed.cleanup() {
+            tracing::warn!(error = ?error, "completed download staging cleanup failed");
+        }
+    }
 }
 
 fn journal_error(error: JournalError) -> CommandError {

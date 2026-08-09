@@ -265,7 +265,8 @@ impl RuntimeService {
                 config.browser.max_screenshot_dimension,
             ),
             network,
-        );
+        )
+        .with_downloads_root(&config.browser.downloads_dir);
         let nodes = Arc::new(NodeRegistry::from_config(config));
         let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> =
             structured_extractor.or_else(|| nodes.http_structured_extractor());

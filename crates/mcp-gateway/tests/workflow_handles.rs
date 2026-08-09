@@ -12,7 +12,7 @@ use types::{Capability, CommandId, CommandPhase, PrincipalId};
 use uuid::uuid;
 use workflow_journal::CommandJournal;
 
-use common::{initialize, live_server, request};
+use common::{create_session_and_page, initialize, live_adaptive_server, live_server, request};
 
 async fn live_with_capabilities(capabilities: Vec<Capability>) -> common::LiveServer {
     let handle = verified_handle(capabilities).await;
@@ -46,6 +46,90 @@ async fn call_tool(server: &Server, id: u64, name: &str, arguments: Value) -> Va
         ))
         .await
         .expect("tools/call response")
+}
+
+async fn download_fixture(body: &'static [u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("download fixture binds");
+    let address = listener.local_addr().expect("download fixture address");
+    tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("HTTP request arrives");
+            let mut request = [0; 2048];
+            let request_bytes = socket.read(&mut request).await.expect("HTTP request reads");
+            assert!(request_bytes > 0, "HTTP request is not empty");
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("HTTP headers write");
+            socket.write_all(body).await.expect("HTTP body writes");
+        }
+    });
+    format!("http://{address}/report.csv")
+}
+
+#[tokio::test]
+async fn download_url_save_as_materializes_through_the_mcp_boundary() {
+    let handle = verified_handle(vec![
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::FileDownload,
+    ])
+    .await;
+    let live = live_adaptive_server(handle).await;
+    initialize(&live.server).await;
+    let mut next_id = 10;
+    let (session_id, page_id) = create_session_and_page(&live.server, &mut next_id).await;
+    let url = download_fixture(b"name,value\nlatency,70.2\n").await;
+    let navigated = call_tool(
+        &live.server,
+        19,
+        "navigate",
+        json!({
+            "sessionId": session_id.0.to_string(),
+            "pageId": page_id.0.to_string(),
+            "url": url
+        }),
+    )
+    .await;
+    assert_eq!(
+        navigated["result"]["structuredContent"]["status"], "completed",
+        "{navigated}"
+    );
+
+    let response = call_tool(
+        &live.server,
+        20,
+        "download_url",
+        json!({
+            "sessionId": session_id.0.to_string(),
+            "pageId": page_id.0.to_string(),
+            "url": url,
+            "expectedContentType": "text/csv",
+            "maxBytes": 1024,
+            "saveAs": "report.csv"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        response["result"]["structuredContent"]["status"], "completed",
+        "{response}"
+    );
+    assert_eq!(
+        tokio::fs::read(live.downloads_dir.join("report.csv"))
+            .await
+            .expect("saveAs output exists"),
+        b"name,value\nlatency,70.2\n"
+    );
 }
 
 async fn start(server: &Server, id: u64, arguments: Value) -> Value {

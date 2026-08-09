@@ -118,6 +118,7 @@ async fn downloads_with_metadata_hash_and_exact_bound() {
         url: format!("{}/download", site.base_url()),
         expected_content_type: Some("application/octet-stream".into()),
         max_bytes: 20,
+        save_as: None,
     };
     let candidate = DirectHttpExecutor::new(policy())
         .download(&snapshot(site.base_url()), &command)
@@ -199,6 +200,7 @@ async fn sanitizes_download_filenames_and_parses_filename_star() {
             url: format!("{}/{route}", site.base_url()),
             expected_content_type: None,
             max_bytes: 64,
+            save_as: None,
         };
         let candidate = DirectHttpExecutor::new(policy())
             .download(&snapshot(site.base_url()), &command)
@@ -218,6 +220,7 @@ async fn rejects_exact_download_header_redirect_and_compressed_limits() {
         url: format!("{}/download", site.base_url()),
         expected_content_type: None,
         max_bytes: 19,
+        save_as: None,
     };
     assert_eq!(
         expect_error(
@@ -510,6 +513,7 @@ async fn rejects_nonportable_download_device_and_drive_names() {
             url: format!("{}/{route}", site.base_url()),
             expected_content_type: None,
             max_bytes: 64,
+            save_as: None,
         };
         let candidate = DirectHttpExecutor::new(policy())
             .download(&snapshot(site.base_url()), &command)

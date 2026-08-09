@@ -144,7 +144,11 @@ the handle stops resolving.
    duplicate role/name pairs.
 7. **Artifacts are evidence.** Screenshots, PDFs, HAR captures, and downloads
    come back as digest-verified artifacts (`artifact://<id>` via
-   `artifact:read`). The `bobby://` docs are readable by any principal.
+   `artifact:read`). When a downloaded URL must also land as a file, pass
+   `saveAs` to `download_url`; it writes a non-existing direct child of the
+   configured downloads root and rejects escapes or overwrites before fetching.
+   This avoids copying the artifact through a separate read/write hop. The
+   `bobby://` docs are readable by any principal.
 8. **Handles expire with the server generation.** Any accepted reinitialize or
    new server generation invalidates existing workflow handles. Repair with
    explicit IDs, then start a fresh workflow binding if needed. Streamable HTTP

@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+};
 
 use artifact_store::{ArtifactStore, PendingArtifact};
 use async_trait::async_trait;
@@ -6,6 +9,8 @@ use intent_engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, Vi
 use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ControlActionCommand,
     ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason, PageId, PageState,
@@ -13,6 +18,7 @@ use types::{
     WaitForCommand,
 };
 use worker_pool::WorkerLease;
+use workflow_journal::PreparedDownload;
 
 /// Session + capability flags for vision escalation. Provider lives on
 /// [`AdaptivePageEngine`]; IntentEngine enforces the deny-by-default double gate.
@@ -244,6 +250,473 @@ pub struct PreparedHttpResult {
     pub state_version: u64,
     pub state: network_engine::ResponseStateDelta,
     pub artifact: Option<PendingArtifact>,
+    pub download: Option<PendingDownload>,
+}
+
+#[derive(Debug)]
+pub struct PendingDownload {
+    root: SecureDownloadRoot,
+    record: PreparedDownload,
+    filename: String,
+    sha256: String,
+    bytes: u64,
+}
+
+#[derive(Debug)]
+pub struct CommittedDownload {
+    root: SecureDownloadRoot,
+    record: PreparedDownload,
+}
+
+#[derive(Debug)]
+struct DownloadDestination {
+    root: SecureDownloadRoot,
+    filename: String,
+    staging_id: String,
+}
+
+#[derive(Debug)]
+struct SecureDownloadRoot {
+    #[cfg(unix)]
+    directory: std::fs::File,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StagedDownloadMetadata {
+    filename: String,
+}
+
+struct StagingCleanup<'a> {
+    root: &'a SecureDownloadRoot,
+    staging_name: String,
+    metadata_name: String,
+    armed: bool,
+}
+
+impl Drop for StagingCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.root.remove_if_exists(&self.staging_name);
+        let _ = self.root.remove_if_exists(&self.metadata_name);
+        let _ = self.root.sync();
+    }
+}
+
+impl DownloadDestination {
+    async fn validate(
+        downloads_root: &Path,
+        save_as: &str,
+        command_id: &types::CommandId,
+    ) -> Result<Self, CommandError> {
+        tokio::fs::create_dir_all(downloads_root)
+            .await
+            .map_err(download_storage_error)?;
+        let canonical_root = tokio::fs::canonicalize(downloads_root)
+            .await
+            .map_err(download_storage_error)?;
+        let requested = PathBuf::from(save_as);
+        let destination = if requested.is_absolute() {
+            requested
+        } else {
+            canonical_root.join(requested)
+        };
+        let parent = destination
+            .parent()
+            .ok_or_else(|| download_policy_error("download destination has no parent"))?;
+        let canonical_parent = tokio::fs::canonicalize(parent)
+            .await
+            .map_err(|_| download_policy_error("download destination parent is unavailable"))?;
+        if canonical_parent != canonical_root {
+            return Err(download_policy_error(
+                "download destination must be a file directly below the configured downloads root",
+            ));
+        }
+        let filename = single_filename(
+            destination
+                .file_name()
+                .and_then(|filename| filename.to_str())
+                .ok_or_else(|| {
+                    download_policy_error("download destination has no valid filename")
+                })?,
+        )?;
+        let root = SecureDownloadRoot::open(&canonical_root)?;
+        if root.exists(&filename)? {
+            return Err(download_policy_error("download destination already exists"));
+        }
+        let staging_id = command_id.0.to_string();
+        Ok(Self {
+            root,
+            filename,
+            staging_id,
+        })
+    }
+
+    async fn stage(self, bytes: &[u8]) -> Result<PendingDownload, CommandError> {
+        let staging_name = staging_name(&self.staging_id)?;
+        let metadata_name = metadata_name(&self.staging_id)?;
+        let mut file = self.root.create_file(&staging_name)?;
+        let mut cleanup = StagingCleanup {
+            root: &self.root,
+            staging_name: staging_name.clone(),
+            metadata_name: metadata_name.clone(),
+            armed: true,
+        };
+        if let Err(error) = async {
+            file.write_all(bytes).await?;
+            file.flush().await?;
+            file.sync_all().await
+        }
+        .await
+        {
+            return Err(download_storage_error(error));
+        }
+        let metadata = serde_json::to_vec(&StagedDownloadMetadata {
+            filename: self.filename.clone(),
+        })
+        .map_err(|error| download_storage_error(std::io::Error::other(error)))?;
+        let record = PreparedDownload {
+            staging_id: self.staging_id,
+            metadata_sha256: hex::encode(Sha256::digest(&metadata)),
+        };
+        let mut metadata_file = match self.root.create_file(&metadata_name) {
+            Ok(file) => file,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = async {
+            metadata_file.write_all(&metadata).await?;
+            metadata_file.flush().await?;
+            metadata_file.sync_all().await
+        }
+        .await
+        {
+            return Err(download_storage_error(error));
+        }
+        self.root.sync()?;
+        cleanup.armed = false;
+        drop(cleanup);
+        Ok(PendingDownload {
+            root: self.root,
+            record,
+            filename: self.filename,
+            sha256: hex::encode(Sha256::digest(bytes)),
+            bytes: bytes.len() as u64,
+        })
+    }
+}
+
+impl PendingDownload {
+    pub fn record(&self) -> &PreparedDownload {
+        &self.record
+    }
+
+    pub fn commit(self) -> Result<CommittedDownload, CommandError> {
+        self.root
+            .publish(&self.record, &self.filename, &self.sha256, self.bytes)?;
+        Ok(CommittedDownload {
+            root: self.root,
+            record: self.record,
+        })
+    }
+
+    pub fn discard(self) {
+        let _ = self.root.cleanup(&self.record);
+    }
+}
+
+impl CommittedDownload {
+    pub fn cleanup(self) -> Result<(), CommandError> {
+        self.root.cleanup(&self.record)
+    }
+}
+
+impl SecureDownloadRoot {
+    #[cfg(unix)]
+    fn open(root: &Path) -> Result<Self, CommandError> {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::DIRECTORY;
+        let root_fd = rustix::fs::open("/", flags, Mode::empty())
+            .map_err(|error| download_storage_error(std::io::Error::from(error)))?;
+        let mut directory = std::fs::File::from(root_fd);
+        for component in root.components() {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => {
+                    let fd = rustix::fs::openat(&directory, name, flags, Mode::empty())
+                        .map_err(|error| download_storage_error(std::io::Error::from(error)))?;
+                    directory = std::fs::File::from(fd);
+                }
+                _ => {
+                    return Err(download_policy_error(
+                        "downloads root contains an unsupported path component",
+                    ))
+                }
+            }
+        }
+        Ok(Self { directory })
+    }
+
+    #[cfg(not(unix))]
+    fn open(_root: &Path) -> Result<Self, CommandError> {
+        Err(download_policy_error(
+            "saveAs requires secure directory-relative file operations on this platform",
+        ))
+    }
+
+    #[cfg(unix)]
+    fn exists(&self, filename: &str) -> Result<bool, CommandError> {
+        use rustix::fs::AtFlags;
+        match rustix::fs::statat(&self.directory, filename, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => Ok(true),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+            Err(error) => Err(download_storage_error(std::io::Error::from(error))),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn exists(&self, _filename: &str) -> Result<bool, CommandError> {
+        unreachable!("non-Unix saveAs is rejected while opening the root")
+    }
+
+    #[cfg(unix)]
+    fn create_file(&self, name: &str) -> Result<tokio::fs::File, CommandError> {
+        use rustix::fs::{Mode, OFlags};
+        let fd = rustix::fs::openat(
+            &self.directory,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        )
+        .map_err(|error| download_storage_error(std::io::Error::from(error)))?;
+        Ok(tokio::fs::File::from_std(std::fs::File::from(fd)))
+    }
+
+    #[cfg(not(unix))]
+    fn create_file(&self, _name: &str) -> Result<tokio::fs::File, CommandError> {
+        unreachable!("non-Unix saveAs is rejected while opening the root")
+    }
+
+    #[cfg(unix)]
+    fn file_matches(
+        &self,
+        name: &str,
+        expected_sha256: &str,
+        expected_bytes: u64,
+    ) -> Result<Option<(u64, u64)>, CommandError> {
+        use rustix::fs::{Mode, OFlags};
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let fd = rustix::fs::openat(
+            &self.directory,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|error| download_storage_error(std::io::Error::from(error)))?;
+        let mut file = std::fs::File::from(fd);
+        let metadata = file.metadata().map_err(download_storage_error)?;
+        if !metadata.file_type().is_file() || metadata.len() != expected_bytes {
+            return Ok(None);
+        }
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(download_storage_error)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        if hex::encode(digest.finalize()) != expected_sha256 {
+            return Ok(None);
+        }
+        Ok(Some((metadata.dev(), metadata.ino())))
+    }
+
+    #[cfg(not(unix))]
+    fn file_matches(
+        &self,
+        _name: &str,
+        _expected_sha256: &str,
+        _expected_bytes: u64,
+    ) -> Result<Option<(u64, u64)>, CommandError> {
+        unreachable!("non-Unix saveAs is rejected while opening the root")
+    }
+
+    #[cfg(unix)]
+    fn identity(&self, name: &str) -> Result<(u64, u64), CommandError> {
+        use rustix::fs::{Mode, OFlags};
+        use std::os::unix::fs::MetadataExt;
+        let fd = rustix::fs::openat(
+            &self.directory,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|error| download_storage_error(std::io::Error::from(error)))?;
+        let metadata = std::fs::File::from(fd)
+            .metadata()
+            .map_err(download_storage_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(download_policy_error(
+                "download staging entry is not a regular file",
+            ));
+        }
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    #[cfg(unix)]
+    fn read_metadata(&self, record: &PreparedDownload) -> Result<String, CommandError> {
+        use rustix::fs::{Mode, OFlags};
+        use std::io::Read;
+        let name = metadata_name(&record.staging_id)?;
+        let fd = rustix::fs::openat(
+            &self.directory,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|error| download_storage_error(std::io::Error::from(error)))?;
+        let mut file = std::fs::File::from(fd);
+        let metadata = file.metadata().map_err(download_storage_error)?;
+        if !metadata.file_type().is_file() || metadata.len() > 4096 {
+            return Err(download_policy_error("invalid prepared download metadata"));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut bytes)
+            .map_err(download_storage_error)?;
+        if hex::encode(Sha256::digest(&bytes)) != record.metadata_sha256 {
+            return Err(download_policy_error(
+                "prepared download metadata digest mismatch",
+            ));
+        }
+        let metadata: StagedDownloadMetadata = serde_json::from_slice(&bytes)
+            .map_err(|_| download_policy_error("invalid prepared download metadata"))?;
+        single_filename(&metadata.filename)
+    }
+
+    #[cfg(not(unix))]
+    fn read_metadata(&self, _record: &PreparedDownload) -> Result<String, CommandError> {
+        unreachable!("non-Unix saveAs is rejected while opening the root")
+    }
+
+    #[cfg(unix)]
+    fn publish(
+        &self,
+        record: &PreparedDownload,
+        filename: &str,
+        sha256: &str,
+        bytes: u64,
+    ) -> Result<(), CommandError> {
+        let staging = staging_name(&record.staging_id)?;
+        let expected_identity = self
+            .file_matches(&staging, sha256, bytes)?
+            .ok_or_else(|| download_policy_error("prepared download staging digest mismatch"))?;
+        rustix::fs::linkat(
+            &self.directory,
+            staging.as_str(),
+            &self.directory,
+            filename,
+            rustix::fs::AtFlags::empty(),
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
+                download_policy_error("download destination already exists")
+            } else {
+                download_storage_error(std::io::Error::from(error))
+            }
+        })?;
+        if self.identity(filename)? != expected_identity {
+            let _ = self.remove(filename);
+            let _ = self.sync();
+            return Err(download_policy_error(
+                "download staging entry changed during publication",
+            ));
+        }
+        // Persist the destination before removing recovery state. A durable
+        // Completed record must never outlive the directory entry it reports.
+        self.sync()?;
+        self.remove(&staging)?;
+        self.sync()
+    }
+
+    #[cfg(not(unix))]
+    fn publish(
+        &self,
+        _record: &PreparedDownload,
+        _filename: &str,
+        _sha256: &str,
+        _bytes: u64,
+    ) -> Result<(), CommandError> {
+        unreachable!("non-Unix saveAs is rejected while opening the root")
+    }
+
+    #[cfg(unix)]
+    fn remove(&self, name: &str) -> Result<(), CommandError> {
+        rustix::fs::unlinkat(&self.directory, name, rustix::fs::AtFlags::empty())
+            .map_err(|error| download_storage_error(std::io::Error::from(error)))
+    }
+
+    #[cfg(not(unix))]
+    fn remove(&self, _name: &str) -> Result<(), CommandError> {
+        unreachable!("non-Unix saveAs is rejected while opening the root")
+    }
+
+    fn remove_if_exists(&self, name: &str) -> Result<(), CommandError> {
+        if self.exists(name)? {
+            self.remove(name)?;
+        }
+        Ok(())
+    }
+
+    fn cleanup(&self, record: &PreparedDownload) -> Result<(), CommandError> {
+        self.remove_if_exists(&staging_name(&record.staging_id)?)?;
+        self.remove_if_exists(&metadata_name(&record.staging_id)?)?;
+        self.sync()
+    }
+
+    #[cfg(unix)]
+    fn sync(&self) -> Result<(), CommandError> {
+        rustix::fs::fsync(&self.directory)
+            .map_err(|error| download_storage_error(std::io::Error::from(error)))
+    }
+
+    #[cfg(not(unix))]
+    fn sync(&self) -> Result<(), CommandError> {
+        unreachable!("non-Unix saveAs is rejected while opening the root")
+    }
+}
+
+fn staging_name(staging_id: &str) -> Result<String, CommandError> {
+    opaque_staging_name(staging_id, ".tmp")
+}
+
+fn metadata_name(staging_id: &str) -> Result<String, CommandError> {
+    opaque_staging_name(staging_id, ".meta")
+}
+
+fn opaque_staging_name(staging_id: &str, suffix: &str) -> Result<String, CommandError> {
+    if staging_id.is_empty()
+        || !staging_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(download_policy_error(
+            "invalid prepared download staging id",
+        ));
+    }
+    Ok(format!(".bobby-download-{staging_id}{suffix}"))
+}
+
+fn single_filename(value: &str) -> Result<String, CommandError> {
+    let mut components = Path::new(value).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(value.to_owned()),
+        _ => Err(download_policy_error(
+            "download destination must be a single filename",
+        )),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -271,6 +744,7 @@ struct DirectComponents {
     eligibility: EligibilityPolicy,
     executor: DirectHttpExecutor,
     artifacts: ArtifactStore,
+    downloads_root: Option<PathBuf>,
     network: NetworkPolicy,
 }
 
@@ -290,6 +764,7 @@ impl AdaptivePageEngine {
                 eligibility,
                 executor,
                 artifacts,
+                downloads_root: None,
                 network,
             }),
             taints: Default::default(),
@@ -299,6 +774,13 @@ impl AdaptivePageEngine {
             context_graph: None,
             corpus: None,
         }
+    }
+
+    pub fn with_downloads_root(mut self, downloads_root: impl Into<PathBuf>) -> Self {
+        if let Some(direct) = self.direct.as_mut() {
+            direct.downloads_root = Some(downloads_root.into());
+        }
+        self
     }
 
     /// Enables lazy batch prefill against this proposal cache (the
@@ -353,6 +835,52 @@ impl AdaptivePageEngine {
             .artifacts
             .finalize_staged(session_id, artifact_id, staging_id, sha256, bytes)
             .map_err(artifact_error)
+    }
+
+    pub fn finalize_prepared_download(
+        &self,
+        prepared: &PreparedDownload,
+        sha256: &str,
+        bytes: u64,
+    ) -> Result<(), CommandError> {
+        staging_name(&prepared.staging_id)?;
+        metadata_name(&prepared.staging_id)?;
+        let root = self
+            .direct
+            .as_ref()
+            .and_then(|direct| direct.downloads_root.as_deref())
+            .ok_or_else(|| {
+                download_policy_error("download destination storage is not configured")
+            })?;
+        let canonical_root = std::fs::canonicalize(root).map_err(download_storage_error)?;
+        let root = SecureDownloadRoot::open(&canonical_root)?;
+        let filename = root.read_metadata(prepared)?;
+        if root.exists(&filename)? {
+            if root.file_matches(&filename, sha256, bytes)?.is_some() {
+                root.cleanup(prepared)?;
+                return Ok(());
+            }
+            return Err(download_policy_error(
+                "prepared download destination exists with different contents",
+            ));
+        }
+        root.publish(prepared, &filename, sha256, bytes)?;
+        root.cleanup(prepared)
+    }
+
+    pub fn cleanup_prepared_download(
+        &self,
+        prepared: &PreparedDownload,
+    ) -> Result<(), CommandError> {
+        let root = self
+            .direct
+            .as_ref()
+            .and_then(|direct| direct.downloads_root.as_deref())
+            .ok_or_else(|| {
+                download_policy_error("download destination storage is not configured")
+            })?;
+        let canonical_root = std::fs::canonicalize(root).map_err(download_storage_error)?;
+        SecureDownloadRoot::open(&canonical_root)?.cleanup(prepared)
     }
 
     pub async fn execute(
@@ -496,6 +1024,24 @@ impl AdaptivePageEngine {
                 browser_execute(envelope, lease, ExecutionPath::Chromium, reason, 0).await
             }
             EligibilityDecision::DirectHttp(reason) => {
+                let download_destination = match command {
+                    PrimitiveCommand::DownloadUrl(command) => {
+                        match (&direct.downloads_root, command.save_as.as_deref()) {
+                            (_, None) => None,
+                            (Some(root), Some(save_as)) => Some(
+                                DownloadDestination::validate(root, save_as, &envelope.command_id)
+                                    .await?,
+                            ),
+                            (None, Some(_)) => {
+                                return Err(download_policy_error(
+                                    "download destination storage is not configured",
+                                )
+                                .into())
+                            }
+                        }
+                    }
+                    _ => None,
+                };
                 let page_id = envelope.page_id.as_ref().expect("validated page id");
                 let snapshot = lease.worker().http_state(page_id).await?;
                 let version = snapshot.version;
@@ -560,6 +1106,7 @@ impl AdaptivePageEngine {
                             state_version: version,
                             state,
                             artifact: None,
+                            download: None,
                         }),
                     }),
                     HttpCandidate::Download {
@@ -582,6 +1129,10 @@ impl AdaptivePageEngine {
                             )
                             .await
                             .map_err(artifact_error)?;
+                        let download = match download_destination {
+                            Some(destination) => Some(destination.stage(&bytes).await?),
+                            None => None,
+                        };
                         let record = pending.record().clone();
                         Ok(AdaptiveExecution {
                             evidence: vec![
@@ -603,6 +1154,7 @@ impl AdaptivePageEngine {
                                 state_version: version,
                                 state,
                                 artifact: Some(pending),
+                                download,
                             }),
                         })
                     }
@@ -641,6 +1193,24 @@ fn artifact_error(error: artifact_store::ArtifactError) -> CommandError {
     CommandError {
         code: ErrorCode::Internal,
         message: format!("download artifact persistence failed: {error}"),
+        layer: ErrorLayer::Page,
+        retryable: false,
+    }
+}
+
+fn download_policy_error(message: impl Into<String>) -> CommandError {
+    CommandError {
+        code: ErrorCode::PolicyDenied,
+        message: message.into(),
+        layer: ErrorLayer::Page,
+        retryable: false,
+    }
+}
+
+fn download_storage_error(error: impl std::fmt::Display) -> CommandError {
+    CommandError {
+        code: ErrorCode::Internal,
+        message: format!("download destination storage failed: {error}"),
         layer: ErrorLayer::Page,
         retryable: false,
     }
@@ -1089,7 +1659,62 @@ async fn extract_structured(
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_utf8;
+    use super::{metadata_name, staging_name, truncate_utf8, SecureDownloadRoot, StagingCleanup};
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_unjournaled_staging_cleans_every_private_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+        let secure = SecureDownloadRoot::open(&canonical_root).unwrap();
+        let staging = staging_name("cancelled-command").unwrap();
+        let metadata = metadata_name("cancelled-command").unwrap();
+        drop(secure.create_file(&staging).unwrap());
+        drop(secure.create_file(&metadata).unwrap());
+
+        drop(StagingCleanup {
+            root: &secure,
+            staging_name: staging.clone(),
+            metadata_name: metadata.clone(),
+            armed: true,
+        });
+
+        assert!(!secure.exists(&staging).unwrap());
+        assert!(!secure.exists(&metadata).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_fifo_entries_fail_closed_without_blocking() {
+        use std::ffi::CString;
+
+        let root = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+        let secure = SecureDownloadRoot::open(&canonical_root).unwrap();
+        let fifo = canonical_root.join("staging-fifo");
+        let fifo_c = CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        // SAFETY: the path is NUL-terminated and points into this test's private directory.
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        assert!(secure
+            .file_matches("staging-fifo", "00", 1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_download_root_rejects_a_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let linked = root.path().join("linked");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &linked).unwrap();
+
+        assert!(SecureDownloadRoot::open(&linked).is_err());
+    }
 
     #[test]
     fn truncation_never_splits_a_codepoint() {

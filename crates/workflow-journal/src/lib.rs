@@ -25,6 +25,17 @@ pub struct PreparedResult {
     pub artifact_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_staging_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<PreparedDownload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedDownload {
+    /// Opaque identifier for implementation-owned state below the downloads root.
+    pub staging_id: String,
+    /// Digest of the protected sidecar needed to recover caller-selected metadata.
+    pub metadata_sha256: String,
 }
 
 #[async_trait]

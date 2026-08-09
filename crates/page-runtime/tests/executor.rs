@@ -15,7 +15,9 @@ use types::{
     WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
-use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan, PreparedResult};
+use workflow_journal::{
+    CommandJournal, JournalError, JournalRecord, JournalScan, JsonlJournal, PreparedResult,
+};
 
 #[derive(Clone, Copy)]
 enum DriverMode {
@@ -53,6 +55,29 @@ impl page_runtime::ExecutionPhaseObserver for RecordingPhaseObserver {
 
 struct RecoveryJournal {
     records: Vec<JournalRecord>,
+}
+
+struct DurablePausingJournal {
+    inner: JsonlJournal,
+    paused: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl CommandJournal for DurablePausingJournal {
+    async fn append(&self, record: JournalRecord) -> Result<(), JournalError> {
+        let phase = record.phase;
+        self.inner.append(record).await?;
+        if phase == CommandPhase::ResultPrepared {
+            self.paused.notify_one();
+            self.resume.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn history(&self, id: CommandId) -> Result<JournalScan, JournalError> {
+        self.inner.history(id).await
+    }
 }
 
 #[async_trait]
@@ -374,7 +399,8 @@ async fn adaptive_runtime_with_failure(
         network_engine::DirectHttpExecutor::new(network.clone()),
         artifact_store::ArtifactStore::new(root.path(), network.max_download_bytes, 16_384),
         network,
-    );
+    )
+    .with_downloads_root(root.path().join("downloads"));
     let runtime = page_runtime::PageRuntime::new_adaptive(journal, workers, None, adaptive);
     let session = SessionId::new();
     let page = runtime.open_browser(session.clone()).await.unwrap();
@@ -420,7 +446,8 @@ async fn adaptive_runtime_paused(
         network_engine::DirectHttpExecutor::new(network.clone()),
         artifact_store::ArtifactStore::new(root.path(), network.max_download_bytes, 16_384),
         network,
-    );
+    )
+    .with_downloads_root(root.path().join("downloads"));
     let runtime = page_runtime::PageRuntime::new_adaptive(journal, workers, None, adaptive);
     let session = SessionId::new();
     let page = runtime.open_browser(session.clone()).await.unwrap();
@@ -448,6 +475,30 @@ async fn http_fixture(body: &'static str, content_type: &'static str) -> String 
         }
     });
     format!("http://{address}/")
+}
+
+async fn counted_http_fixture() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let requests = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let observed = requests.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0; 2048];
+            if socket.read(&mut request).await.is_err() {
+                continue;
+            }
+            observed.fetch_add(1, Ordering::SeqCst);
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\n\r\nprivate";
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{address}/"), requests)
 }
 
 fn completed_evidence(outcome: CommandOutcome) -> Vec<Evidence> {
@@ -1445,6 +1496,7 @@ async fn a_side_band_download_does_not_taint_the_page() {
                 url: download_url,
                 expected_content_type: Some("application/octet-stream".into()),
                 max_bytes: 1024,
+                save_as: None,
             }),
         ))
         .await;
@@ -1626,6 +1678,7 @@ async fn download_url_persists_then_returns_download_and_execution_evidence() {
                     url,
                     expected_content_type: Some("application/octet-stream".into()),
                     max_bytes: 1024,
+                    save_as: None,
                 }),
             ))
             .await,
@@ -1662,6 +1715,317 @@ async fn download_url_persists_then_returns_download_and_execution_evidence() {
 }
 
 #[tokio::test]
+async fn download_url_materializes_requested_file_below_downloads_root() {
+    let url = http_fixture("customer,priority\nAtlas Labs,high\n", "text/csv").await;
+    let (runtime, session, page, _events, root) = adaptive_runtime(DriverMode::Succeed).await;
+    let destination = root.path().join("downloads/atlas-operations.csv");
+
+    completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                    url,
+                    expected_content_type: Some("text/csv".into()),
+                    max_bytes: 1024,
+                    save_as: Some(destination.to_string_lossy().into_owned()),
+                }),
+            ))
+            .await,
+    );
+
+    assert_eq!(
+        std::fs::read(destination).unwrap(),
+        b"customer,priority\nAtlas Labs,high\n"
+    );
+    assert_eq!(
+        std::fs::read_dir(root.path().join("downloads"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_publishes_save_as_from_a_durable_prepared_result() {
+    use std::os::unix::fs::symlink;
+
+    let url = http_fixture("restart-safe", "application/octet-stream").await;
+    let root = tempfile::tempdir().unwrap();
+    let journal_path = root.path().join("journal.jsonl");
+    let downloads_root = root.path().join("downloads");
+    let destination = downloads_root.join("recovered.bin");
+    let paused = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let durable = JsonlJournal::open(&journal_path).await.unwrap();
+    let journal = Arc::new(DurablePausingJournal {
+        inner: durable,
+        paused: paused.clone(),
+        resume,
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+            launches: Default::default(),
+        }),
+    ));
+    let network = network_engine::NetworkPolicy {
+        allow_loopback: true,
+        ..Default::default()
+    };
+    let store = artifact_store::ArtifactStore::new(root.path(), network.max_download_bytes, 16_384);
+    let adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        store.clone(),
+        network.clone(),
+    )
+    .with_downloads_root(&downloads_root);
+    let runtime = page_runtime::PageRuntime::new_adaptive(journal, workers.clone(), None, adaptive);
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let command = envelope(
+        session,
+        page.id,
+        PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+            url,
+            expected_content_type: None,
+            max_bytes: 1024,
+            save_as: Some(destination.to_string_lossy().into_owned()),
+        }),
+    );
+    let command_id = command.command_id.clone();
+    let task = tokio::spawn(async move { runtime.execute(command).await });
+    paused.notified().await;
+    task.abort();
+    let _ = task.await;
+
+    assert!(!destination.exists());
+    let durable_json = std::fs::read_to_string(&journal_path).unwrap();
+    assert!(!durable_json.contains("recovered.bin"));
+    assert!(!durable_json.contains(downloads_root.to_string_lossy().as_ref()));
+    let recovered_journal = Arc::new(JsonlJournal::open(&journal_path).await.unwrap());
+    let recovered_adaptive = page_runtime::AdaptivePageEngine::new(
+        network_engine::EligibilityPolicy::new(network.clone()),
+        network_engine::DirectHttpExecutor::new(network.clone()),
+        store,
+        network,
+    )
+    .with_downloads_root(&downloads_root);
+    let recovered = page_runtime::PageRuntime::new_adaptive(
+        recovered_journal,
+        workers,
+        None,
+        recovered_adaptive,
+    );
+
+    let staging = std::fs::read_dir(&downloads_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .unwrap();
+    let original_staging = downloads_root.join("original-staging");
+    std::fs::rename(&staging, &original_staging).unwrap();
+    let attacker_file = root.path().join("attacker-controlled");
+    std::fs::write(&attacker_file, b"wrong-bytes").unwrap();
+    symlink(&attacker_file, &staging).unwrap();
+    assert!(matches!(
+        recovered.recover_command(command_id.clone()).await,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert!(!destination.exists());
+    std::fs::remove_file(&staging).unwrap();
+    std::fs::rename(&original_staging, &staging).unwrap();
+
+    assert!(matches!(
+        recovered.recover_command(command_id.clone()).await,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert_eq!(std::fs::read(destination).unwrap(), b"restart-safe");
+    let remaining: Vec<_> = std::fs::read_dir(&downloads_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(remaining, [std::ffi::OsString::from("recovered.bin")]);
+    assert!(matches!(
+        recovered.recover_command(command_id).await,
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn save_as_publication_stays_bound_to_the_validated_directory() {
+    use std::os::unix::fs::symlink;
+
+    let url = http_fixture("directory-bound", "application/octet-stream").await;
+    let (runtime, session, page, _events, root, paused, resume) =
+        adaptive_runtime_paused(CommandPhase::ResultPrepared).await;
+    let downloads_root = root.path().join("downloads");
+    let original_root = root.path().join("original-downloads");
+    let replacement_root = root.path().join("replacement-downloads");
+    let destination = downloads_root.join("bound.bin");
+    let task = tokio::spawn(async move {
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                    url,
+                    expected_content_type: None,
+                    max_bytes: 1024,
+                    save_as: Some(destination.to_string_lossy().into_owned()),
+                }),
+            ))
+            .await
+    });
+    paused.notified().await;
+    std::fs::rename(&downloads_root, &original_root).unwrap();
+    std::fs::create_dir(&replacement_root).unwrap();
+    symlink(&replacement_root, &downloads_root).unwrap();
+    resume.notify_one();
+
+    completed_evidence(task.await.unwrap());
+    assert_eq!(
+        std::fs::read(original_root.join("bound.bin")).unwrap(),
+        b"directory-bound"
+    );
+    assert!(!replacement_root.join("bound.bin").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn save_as_rejects_a_staging_entry_swapped_before_publication() {
+    use std::os::unix::fs::symlink;
+
+    let url = http_fixture("verified-stage", "application/octet-stream").await;
+    let (runtime, session, page, _events, root, paused, resume) =
+        adaptive_runtime_paused(CommandPhase::ResultPrepared).await;
+    let downloads_root = root.path().join("downloads");
+    let destination = downloads_root.join("verified.bin");
+    let task_destination = destination.clone();
+    let task = tokio::spawn(async move {
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                    url,
+                    expected_content_type: None,
+                    max_bytes: 1024,
+                    save_as: Some(task_destination.to_string_lossy().into_owned()),
+                }),
+            ))
+            .await
+    });
+    paused.notified().await;
+    let staging = std::fs::read_dir(&downloads_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .unwrap();
+    let original_staging = downloads_root.join("original-staging");
+    std::fs::rename(&staging, &original_staging).unwrap();
+    let attacker_file = root.path().join("attacker-stage");
+    std::fs::write(&attacker_file, b"verified-stage").unwrap();
+    symlink(&attacker_file, &staging).unwrap();
+    resume.notify_one();
+
+    assert!(matches!(
+        task.await.unwrap(),
+        CommandOutcome::NeedsReconciliation { .. }
+    ));
+    assert!(!destination.exists());
+}
+
+#[tokio::test]
+async fn download_url_denies_save_path_outside_downloads_root() {
+    let url = http_fixture("private", "text/plain").await;
+    let (runtime, session, page, _events, root) = adaptive_runtime(DriverMode::Succeed).await;
+    let escaped = root.path().join("escaped.txt");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: Some("text/plain".into()),
+                max_bytes: 1024,
+                save_as: Some(escaped.to_string_lossy().into_owned()),
+            }),
+        ))
+        .await;
+
+    assert!(matches!(
+        outcome,
+        CommandOutcome::PolicyDenied { error, .. } if error.code == ErrorCode::PolicyDenied
+    ));
+    assert!(!escaped.exists());
+}
+
+#[tokio::test]
+async fn download_url_denies_invalid_save_path_before_network_fetch() {
+    use std::sync::atomic::Ordering;
+    let (url, requests) = counted_http_fixture().await;
+    let (runtime, session, page, _events, root) = adaptive_runtime(DriverMode::Succeed).await;
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: Some("text/plain".into()),
+                max_bytes: 1024,
+                save_as: Some(
+                    root.path()
+                        .join("escaped.txt")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            }),
+        ))
+        .await;
+
+    assert!(matches!(outcome, CommandOutcome::PolicyDenied { .. }));
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn download_url_does_not_overwrite_existing_destination() {
+    let url = http_fixture("replacement", "text/plain").await;
+    let (runtime, session, page, _events, root) = adaptive_runtime(DriverMode::Succeed).await;
+    let destination = root.path().join("downloads/existing.txt");
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::write(&destination, b"original").unwrap();
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: Some("text/plain".into()),
+                max_bytes: 1024,
+                save_as: Some(destination.to_string_lossy().into_owned()),
+            }),
+        ))
+        .await;
+
+    assert!(matches!(
+        outcome,
+        CommandOutcome::PolicyDenied { error, .. } if error.code == ErrorCode::PolicyDenied
+    ));
+    assert_eq!(std::fs::read(destination).unwrap(), b"original");
+}
+
+#[tokio::test]
 async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatch() {
     let url = http_fixture("not-the-expected-type", "text/plain").await;
     let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
@@ -1674,6 +2038,7 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
                 url,
                 expected_content_type: Some("application/octet-stream".into()),
                 max_bytes: 1024,
+                save_as: None,
             }),
         ))
         .await;
@@ -1689,6 +2054,7 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
 async fn download_state_commit_failure_keeps_prepared_artifact_recoverable() {
     let url = http_fixture("guarded-download", "application/octet-stream").await;
     let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitFail).await;
+    let destination = root.path().join("downloads/commit-failed.bin");
     events.lock().await.push(format!("url:{url}"));
     let outcome = runtime
         .execute(envelope(
@@ -1698,6 +2064,7 @@ async fn download_state_commit_failure_keeps_prepared_artifact_recoverable() {
                 url,
                 expected_content_type: None,
                 max_bytes: 1024,
+                save_as: Some(destination.to_string_lossy().into_owned()),
             }),
         ))
         .await;
@@ -1706,10 +2073,54 @@ async fn download_state_commit_failure_keeps_prepared_artifact_recoverable() {
         CommandOutcome::NeedsReconciliation { .. }
     ));
     assert_single_download_readable(root.path(), &session, b"guarded-download").await;
+    assert_eq!(std::fs::read(destination).unwrap(), b"guarded-download");
+    assert_eq!(
+        std::fs::read_dir(root.path().join("downloads"))
+            .unwrap()
+            .count(),
+        1
+    );
     assert!(
         matches!(outcome, CommandOutcome::NeedsReconciliation { evidence, .. }
         if evidence.iter().any(|item| matches!(item, Evidence::Download { .. })))
     );
+}
+
+#[tokio::test]
+async fn failed_terminal_journal_append_keeps_save_as_recovery_sidecar() {
+    let url = http_fixture("journal-recovery", "application/octet-stream").await;
+    let (runtime, session, page, _events, root) =
+        adaptive_runtime_with_failure(DriverMode::CommitFail, Some(CommandPhase::Failed)).await;
+    let downloads_root = root.path().join("downloads");
+    let destination = downloads_root.join("journal-failed.bin");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 1024,
+                save_as: Some(destination.to_string_lossy().into_owned()),
+            }),
+        ))
+        .await;
+
+    assert!(matches!(
+        outcome,
+        CommandOutcome::RetryableFailure { error, .. }
+            | CommandOutcome::NeedsReconciliation { error, .. }
+            if error.code == ErrorCode::JournalFailed
+    ));
+    assert_eq!(std::fs::read(destination).unwrap(), b"journal-recovery");
+    assert!(std::fs::read_dir(downloads_root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "meta")
+    }));
 }
 
 #[tokio::test]
@@ -1728,6 +2139,7 @@ async fn download_state_commit_cancellation_keeps_prepared_artifact_recoverable(
                     url,
                     expected_content_type: None,
                     max_bytes: 1024,
+                    save_as: None,
                 }),
             ))
             .await
@@ -1754,6 +2166,7 @@ async fn prepared_result_journal_failure_prevents_state_commit_without_deleting_
     let (runtime, session, page, events, root) =
         adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::ResultPrepared))
             .await;
+    let destination = root.path().join("downloads/prepared-failure.bin");
     let outcome = runtime
         .execute(envelope(
             session.clone(),
@@ -1762,6 +2175,7 @@ async fn prepared_result_journal_failure_prevents_state_commit_without_deleting_
                 url,
                 expected_content_type: None,
                 max_bytes: 1024,
+                save_as: Some(destination.to_string_lossy().into_owned()),
             }),
         ))
         .await;
@@ -1772,6 +2186,10 @@ async fn prepared_result_journal_failure_prevents_state_commit_without_deleting_
     assert!(!events.lock().await.contains(&"http:commit".to_string()));
     let directory = root.path().join(session.0.to_string());
     assert!(!directory.exists() || std::fs::read_dir(directory).unwrap().next().is_none());
+    assert!(
+        !destination.exists(),
+        "saveAs must not publish before ResultPrepared is durable"
+    );
 }
 
 #[tokio::test]
@@ -1804,6 +2222,7 @@ async fn completed_journal_failure_keeps_prepared_state_and_artifact_reconcilabl
     let url = http_fixture("completion-failure", "application/octet-stream").await;
     let (runtime, session, page, events, root) =
         adaptive_runtime_with_failure(DriverMode::Succeed, Some(CommandPhase::Completed)).await;
+    let destination = root.path().join("downloads/completion-failure.bin");
     let outcome = runtime
         .execute(envelope(
             session.clone(),
@@ -1812,6 +2231,7 @@ async fn completed_journal_failure_keeps_prepared_state_and_artifact_reconcilabl
                 url,
                 expected_content_type: None,
                 max_bytes: 1024,
+                save_as: Some(destination.to_string_lossy().into_owned()),
             }),
         ))
         .await;
@@ -1821,6 +2241,7 @@ async fn completed_journal_failure_keeps_prepared_state_and_artifact_reconcilabl
     ));
     assert!(events.lock().await.contains(&"http:commit".to_string()));
     assert_single_download_readable(root.path(), &session, b"completion-failure").await;
+    assert_eq!(std::fs::read(destination).unwrap(), b"completion-failure");
 }
 
 #[tokio::test]
@@ -1851,6 +2272,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
                 artifact_sha256: Some("abc".into()),
                 artifact_bytes: Some(1),
                 artifact_staging_id: None,
+                download: None,
             }),
         }],
     });
@@ -1898,6 +2320,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
             url: "https://example.test/recover.bin".into(),
             expected_content_type: None,
             max_bytes: 1024,
+            save_as: None,
         }),
     );
     let command_id = command.command_id.clone();
@@ -1916,6 +2339,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
         artifact_sha256: Some(sha256),
         artifact_bytes: Some(16),
         artifact_staging_id: Some(staging_id),
+        download: None,
     };
     let records = vec![
         JournalRecord {
@@ -1992,6 +2416,7 @@ async fn cancellation_at_each_post_response_journal_await_preserves_durable_arti
                         url,
                         expected_content_type: None,
                         max_bytes: 1024,
+                        save_as: None,
                     }),
                 ))
                 .await
@@ -2065,6 +2490,7 @@ async fn terminal_policy_denial_never_calls_chromium() {
                 url: "file:///secret".into(),
                 expected_content_type: None,
                 max_bytes: 1024,
+                save_as: None,
             }),
         ))
         .await;

@@ -67,6 +67,7 @@ pub struct LiveProbe {
     pub worker_closes: AtomicUsize,
     pub delete_failures_remaining: AtomicUsize,
     pub opened_page: std::sync::Mutex<Option<PageId>>,
+    pub current_url: std::sync::Mutex<Option<String>>,
 }
 
 #[async_trait::async_trait]
@@ -107,6 +108,11 @@ impl BrowserWorker for LiveWorker {
         _: &PageId,
         command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        *self
+            .probe
+            .current_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.url.clone());
         self.probe.navigation_entered.notify_one();
         if matches!(
             command.url.as_str(),
@@ -290,6 +296,39 @@ impl BrowserWorker for LiveWorker {
         // with the engine's own domain error (e.g. targetNotFound), which is
         // exactly the deterministic terminal outcome tests assert against.
         Ok(Vec::new())
+    }
+
+    fn supports_http_state(&self) -> bool {
+        true
+    }
+
+    async fn http_state(
+        &self,
+        _: &PageId,
+    ) -> Result<network_engine::state::HttpStateSnapshot, CommandError> {
+        Ok(network_engine::state::HttpStateSnapshot {
+            version: 0,
+            current_url: self
+                .probe
+                .current_url
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_default(),
+            cookies: Vec::new(),
+            cache_validators: Default::default(),
+            user_agent: "live-harness".into(),
+            language: "en".into(),
+        })
+    }
+
+    async fn commit_http_state(
+        &self,
+        _: &PageId,
+        _: u64,
+        _: network_engine::state::ResponseStateDelta,
+    ) -> Result<(), CommandError> {
+        Ok(())
     }
 
     async fn close(&self) -> Result<(), CommandError> {
@@ -541,6 +580,7 @@ pub struct LiveServer {
     pub probe: Arc<LiveProbe>,
     pub runtime: RuntimeService,
     pub handle: CapabilityHandle,
+    pub downloads_dir: PathBuf,
     _root: TempDir,
 }
 
@@ -579,39 +619,43 @@ impl CommandJournal for LiveJournal {
 }
 
 pub async fn live_server(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false, false, false).await
+}
+
+pub async fn live_adaptive_server(handle: CapabilityHandle) -> LiveServer {
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false, false, true).await
 }
 
 pub async fn live_server_restarting_accessibility(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, true, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, true, false, false).await
 }
 
 pub async fn live_server_failing_navigation_interface(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false, true).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 0, false, true, false).await
 }
 
 pub async fn live_server_blocking_open(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Block, false, 0, false, false).await
+    live_server_with_modes(handle, LiveOpenMode::Block, false, 0, false, false, false).await
 }
 
 pub async fn live_server_failing_open(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Fail, false, 0, false, false).await
+    live_server_with_modes(handle, LiveOpenMode::Fail, false, 0, false, false, false).await
 }
 
 pub async fn live_server_failing_open_and_delete_once(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Fail, false, 1, false, false).await
+    live_server_with_modes(handle, LiveOpenMode::Fail, false, 1, false, false, false).await
 }
 
 pub async fn live_server_blocking_delete(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 0, false, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 0, false, false, false).await
 }
 
 pub async fn live_server_failing_delete_once(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 1, false, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, false, 1, false, false, false).await
 }
 
 pub async fn live_server_blocking_failing_delete_once(handle: CapabilityHandle) -> LiveServer {
-    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 1, false, false).await
+    live_server_with_modes(handle, LiveOpenMode::Succeed, true, 1, false, false, false).await
 }
 
 async fn live_server_with_modes(
@@ -621,6 +665,7 @@ async fn live_server_with_modes(
     delete_failures: usize,
     restart_accessibility: bool,
     fail_navigation_interface: bool,
+    adaptive_http: bool,
 ) -> LiveServer {
     let root = tempfile::tempdir().expect("harness tempdir");
     let journal = Arc::new(LiveJournal {
@@ -647,9 +692,30 @@ async fn live_server_with_modes(
     let checkpoints = checkpoint_store::CheckpointStore::open(root.path().join("checkpoints"))
         .await
         .expect("harness checkpoint store opens");
+    let downloads_dir = root.path().join("downloads");
+    let pages = if adaptive_http {
+        let network = network_engine::NetworkPolicy {
+            allow_loopback: true,
+            ..Default::default()
+        };
+        let adaptive = page_runtime::AdaptivePageEngine::new(
+            network_engine::EligibilityPolicy::new(network.clone()),
+            network_engine::DirectHttpExecutor::new(network.clone()),
+            artifact_store::ArtifactStore::new(
+                root.path().join("artifacts"),
+                network.max_download_bytes,
+                16_384,
+            ),
+            network,
+        )
+        .with_downloads_root(&downloads_dir);
+        PageRuntime::new_adaptive(journal.clone(), workers.clone(), None, adaptive)
+    } else {
+        PageRuntime::new(journal.clone(), workers.clone())
+    };
     let runtime = RuntimeService::with_recovery(
         SessionManager::new(workers.clone()),
-        PageRuntime::new(journal.clone(), workers),
+        pages,
         RecoveryCoordinator::new(checkpoints),
     );
     let authenticated = Arc::new(AuthenticatedRuntime::new(runtime.clone(), handle.clone()));
@@ -677,6 +743,7 @@ async fn live_server_with_modes(
         probe,
         runtime,
         handle,
+        downloads_dir,
         _root: root,
     }
 }

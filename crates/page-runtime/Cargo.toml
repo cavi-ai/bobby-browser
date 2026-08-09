@@ -35,5 +35,9 @@ url.workspace = true
 worker-pool = { path = "../worker-pool", version = "0.7.0" }
 workflow-journal = { path = "../workflow-journal", version = "0.7.0" }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+rustix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
