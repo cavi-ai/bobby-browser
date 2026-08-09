@@ -328,10 +328,12 @@ async fn persist_evidence(
     server: &ScenarioServer,
     runtime: &ModernRuntime,
 ) -> TestResult<()> {
+    let scorecard = runtime.emit_scorecard(true)?;
     runtime.capture_diagnostics(journey).await?;
     let bundle = EvidenceBundle::create(journey, server.run_id())?;
     bundle.write_json("server-state.json", &server.snapshot().await)?;
     bundle.write_json("request-log.json", &server.request_log().await)?;
+    bundle.write_json("scorecard.json", &scorecard)?;
     bundle.write_json("run-manifest.json", &serde_json::json!({ "journey": journey, "runId": server.run_id(), "browser": "installed-chromium", "console": "unavailable", "network": "request-log.json" }))?;
     bundle.copy_if_present("commands.jsonl", runtime.journal_path())?;
     Ok(())

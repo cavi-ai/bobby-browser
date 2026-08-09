@@ -4,4 +4,5 @@
 pub mod collector;
 pub mod driver;
 pub mod evidence;
+pub mod scorecard;
 pub use gauntlet_server as scenario;

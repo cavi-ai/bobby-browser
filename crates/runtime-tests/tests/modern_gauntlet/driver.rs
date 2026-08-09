@@ -15,6 +15,7 @@ use types::{
 };
 
 use super::scenario::ScenarioServer;
+use super::scorecard::Scorecard;
 
 pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -73,6 +74,7 @@ pub struct ModernRuntime {
     downloads_dir: PathBuf,
     artifacts_dir: PathBuf,
     profile: String,
+    journey: String,
 }
 
 impl fmt::Debug for ModernRuntime {
@@ -199,6 +201,7 @@ impl ModernRuntime {
             downloads_dir,
             artifacts_dir,
             profile,
+            journey: journey.to_owned(),
         })
     }
 
@@ -561,6 +564,7 @@ impl ModernRuntime {
             downloads_dir,
             artifacts_dir,
             profile,
+            journey,
             ..
         } = self;
         drop(runtime);
@@ -595,6 +599,7 @@ impl ModernRuntime {
             downloads_dir,
             artifacts_dir,
             profile,
+            journey,
         };
         replacement.navigate(application_url).await?;
         Ok((replacement, decision))
@@ -606,6 +611,31 @@ impl ModernRuntime {
 
     pub fn artifacts_dir(&self) -> &Path {
         &self.artifacts_dir
+    }
+
+    pub fn scorecard(&self, passed: bool) -> TestResult<Scorecard> {
+        let engine = std::env::var("BOBBY_GAUNTLET_ENGINE").unwrap_or_else(|_| "chromium".into());
+        Ok(Scorecard::from_journal(
+            &self.journey,
+            engine,
+            &self.journal_path,
+            passed,
+        )?)
+    }
+
+    pub fn emit_scorecard(&self, passed: bool) -> TestResult<Scorecard> {
+        let scorecard = self.scorecard(passed)?;
+        std::fs::write(
+            self.root.join("scorecard.json"),
+            serde_json::to_vec_pretty(&scorecard)?,
+        )?;
+        let directory = scorecard_directory().join(&scorecard.engine);
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join(format!("{}.json", scorecard.station)),
+            serde_json::to_vec_pretty(&scorecard)?,
+        )?;
+        Ok(scorecard)
     }
 
     pub async fn capture_diagnostics(&self, journey: &str) -> TestResult<()> {
@@ -637,6 +667,7 @@ impl ModernRuntime {
     }
 
     async fn capture_failure_state(&self, page_id: &PageId, operation: &str, outcome: &str) {
+        let _ = self.emit_scorecard(false);
         let mut evidence = Vec::new();
         for command in [
             PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
@@ -774,6 +805,14 @@ fn repository_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("runtime-tests is nested beneath repository root")
         .to_path_buf()
+}
+
+fn scorecard_directory() -> PathBuf {
+    match std::env::var_os("BOBBY_GAUNTLET_SCORECARD_DIR").map(PathBuf::from) {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => repository_root().join(path),
+        None => repository_root().join("benchmarks/results/p0-baseline"),
+    }
 }
 
 #[cfg(test)]
