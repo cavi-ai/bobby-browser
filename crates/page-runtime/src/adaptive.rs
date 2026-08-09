@@ -566,11 +566,6 @@ impl SecureDownloadRoot {
         Ok((metadata.dev(), metadata.ino()))
     }
 
-    #[cfg(not(unix))]
-    fn identity(&self, _name: &str) -> Result<(u64, u64), CommandError> {
-        unreachable!("non-Unix saveAs is rejected while opening the root")
-    }
-
     #[cfg(unix)]
     fn read_metadata(&self, record: &PreparedDownload) -> Result<String, CommandError> {
         use rustix::fs::{Mode, OFlags};
