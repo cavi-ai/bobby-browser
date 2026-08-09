@@ -208,6 +208,30 @@ async fn locate_uses_descriptive_purpose_to_break_a_unique_role_only_tie() {
 }
 
 #[tokio::test]
+async fn locate_uses_a_single_word_purpose_for_a_unique_exact_name() {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Continue"), button("Resume")]),
+        wait_ok: true,
+    };
+    let outcome = IntentEngine::execute(
+        &locate_with_purpose("Continue"),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Resolution { fingerprint, .. }
+            if fingerprint.name.as_deref() == Some("Continue")
+    )));
+}
+
+#[tokio::test]
 async fn locate_uses_descriptive_purpose_for_a_unique_candidate_in_an_explicit_frame() {
     let browser = FakeBrowser {
         candidates: Arc::new(vec![button("Confirm document preview")]),

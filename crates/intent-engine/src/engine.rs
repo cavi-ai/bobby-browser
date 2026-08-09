@@ -515,12 +515,8 @@ fn disambiguate_by_purpose(
         return None;
     }
 
-    let purpose_tokens = semantic_tokens(purpose);
-    if purpose_tokens.len() < 2 {
-        return None;
-    }
     let wanted_role = target.role.as_deref();
-    let mut ranked = candidates
+    let eligible = candidates
         .iter()
         .enumerate()
         .filter(|(_, candidate)| {
@@ -533,6 +529,49 @@ fn disambiguate_by_purpose(
                         .is_some_and(|role| role.eq_ignore_ascii_case(wanted))
                 })
         })
+        .collect::<Vec<_>>();
+    let exact_matches = eligible
+        .iter()
+        .filter_map(|(_, candidate)| {
+            let purpose = purpose.trim();
+            (candidate
+                .name
+                .as_deref()
+                .is_some_and(|name| name.trim().eq_ignore_ascii_case(purpose))
+                || candidate
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.trim().eq_ignore_ascii_case(purpose))
+                || candidate.text.trim().eq_ignore_ascii_case(purpose))
+            .then_some(*candidate)
+        })
+        .collect::<Vec<_>>();
+    if let [candidate] = exact_matches.as_slice() {
+        let mut reasons = Vec::new();
+        let mut score = 100;
+        if wanted_role.is_some() {
+            reasons.push("exactRole".into());
+            score += 30;
+        }
+        reasons.push("exactPurposeName".into());
+        return Some(ResolutionDecision::Resolved {
+            candidate: Box::new((*candidate).clone()),
+            evidence: types::CandidateEvidence {
+                role: candidate.role.clone(),
+                name: candidate.name.clone(),
+                score,
+                reasons,
+            },
+            best_match_authorized: false,
+        });
+    }
+
+    let purpose_tokens = semantic_tokens(purpose);
+    if purpose_tokens.len() < 2 {
+        return None;
+    }
+    let mut ranked = eligible
+        .into_iter()
         .map(|(index, candidate)| {
             let candidate_tokens = semantic_tokens(&format!(
                 "{} {} {}",
