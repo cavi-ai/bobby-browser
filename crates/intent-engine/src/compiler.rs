@@ -87,7 +87,7 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         IntentCommand::Locate(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
             Ok(IntentPlan::Locate {
-                target: compile_target(purpose, &intent.hints)?,
+                target: compile_locate_target(purpose, &intent.hints)?,
             })
         }
         IntentCommand::Fill(intent) => {
@@ -190,6 +190,18 @@ fn validate_purpose(purpose: &str) -> Result<&str, CompileError> {
 }
 
 fn compile_target(purpose: &str, hints: &IntentHints) -> Result<TargetSpec, CompileError> {
+    compile_target_with_purpose_fallback(purpose, hints, true)
+}
+
+fn compile_locate_target(purpose: &str, hints: &IntentHints) -> Result<TargetSpec, CompileError> {
+    compile_target_with_purpose_fallback(purpose, hints, false)
+}
+
+fn compile_target_with_purpose_fallback(
+    purpose: &str,
+    hints: &IntentHints,
+    purpose_names_role_target: bool,
+) -> Result<TargetSpec, CompileError> {
     let mut target = TargetSpec {
         role: hints.role.clone(),
         ordinal: hints.ordinal,
@@ -217,11 +229,12 @@ fn compile_target(purpose: &str, hints: &IntentHints) -> Result<TargetSpec, Comp
         Some(matcher) => {
             target.text = Some(matcher.clone());
         }
-        // `purpose` is audit/explanation prose, not an exact accessible name.
-        // A caller that supplies only a role is deliberately asking for
-        // role-only resolution; exact names must come from accessibleName or
-        // nearText. Conflating the two makes descriptive purposes impossible
-        // to use (especially for controls discovered inside frames).
+        // Locate purposes may be descriptive prose and use semantic token
+        // overlap later. Other intents historically use purpose as the exact
+        // control name; dropping that fallback makes ordinary forms ambiguous.
+        None if hints.role.is_some() && purpose_names_role_target => {
+            target.accessible_name = Some(purpose.to_owned());
+        }
         None if hints.role.is_some() => {}
         None => {
             target.text = Some(TextMatch::Contains(purpose.to_owned()));

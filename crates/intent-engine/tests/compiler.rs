@@ -113,6 +113,28 @@ fn compile_fill_maps_purpose_to_text_when_role_absent() {
 }
 
 #[test]
+fn compile_fill_uses_purpose_as_accessible_name_when_role_is_present() {
+    let plan = compile_intent(&IntentCommand::Fill(FillIntent {
+        purpose: "Full name".into(),
+        hints: IntentHints {
+            role: Some("textbox".into()),
+            ..IntentHints::default()
+        },
+        value: FillValue::Text {
+            text: "Ada Lovelace".into(),
+            clear_first: true,
+        },
+    }))
+    .expect("compile");
+    let IntentPlan::Fill { target, .. } = plan else {
+        panic!("expected Fill plan");
+    };
+    assert_eq!(target.role.as_deref(), Some("textbox"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Full name"));
+    assert_eq!(target.text, None);
+}
+
+#[test]
 fn compile_fill_uses_near_text_as_the_control_name_without_conflating_task_purpose() {
     let plan = compile_intent(&IntentCommand::Fill(FillIntent {
         purpose: "enter the applicant email".into(),
@@ -185,7 +207,7 @@ fn compile_follow_carries_target_expected_destination_and_boundary_flag() {
         panic!("expected Follow plan");
     };
     assert_eq!(target.role.as_deref(), Some("link"));
-    assert_eq!(target.accessible_name, None);
+    assert_eq!(target.accessible_name.as_deref(), Some("Details"));
     assert_eq!(target.text, None);
     assert_eq!(expected_destination.timeout_ms, 5_000);
     assert!(boundary);
@@ -208,7 +230,10 @@ fn compile_dismiss_obstruction_carries_target_and_timeout() {
         panic!("expected DismissObstruction plan");
     };
     assert_eq!(target.role.as_deref(), Some("button"));
-    assert_eq!(target.accessible_name, None);
+    assert_eq!(
+        target.accessible_name.as_deref(),
+        Some("Cookie notice close button")
+    );
     assert_eq!(target.text, None);
     assert_eq!(timeout_ms, 3_000);
 }
@@ -248,7 +273,10 @@ fn compile_extract_resolves_each_field_to_its_own_target_and_value_kind() {
     assert!(matches!(fields[0].value, ExtractValueKind::Text));
     assert_eq!(fields[1].name, "profileLink");
     assert_eq!(fields[1].target.role.as_deref(), Some("link"));
-    assert_eq!(fields[1].target.accessible_name, None);
+    assert_eq!(
+        fields[1].target.accessible_name.as_deref(),
+        Some("Profile link")
+    );
     assert_eq!(fields[1].target.text, None);
     assert!(matches!(fields[1].value, ExtractValueKind::Href));
 }
