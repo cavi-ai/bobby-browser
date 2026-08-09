@@ -2589,31 +2589,43 @@ async fn wait_condition_satisfied(
                 }
             };
             let resolved = match resolved {
-                Ok(resolved) => Some(resolved),
-                Err(error)
-                    if matches!(error.code, ErrorCode::TargetNotFound)
-                        || is_missing_css_node(&error) =>
-                {
-                    None
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    if let Some(satisfied) = element_wait_missing_observation(state, &error) {
+                        return Ok(WaitPoll::matched(satisfied));
+                    }
+                    return Err(error);
                 }
-                Err(error) => return Err(error),
             };
-            let Some(resolved) = resolved else {
-                return Ok(WaitPoll::matched(matches!(
-                    state,
-                    types::ElementState::Detached
-                )));
-            };
-            let visible = resolved.visible(page).await?;
-            let enabled = resolved.enabled(page).await?;
-            Ok(WaitPoll::matched(match state {
+            let observation = match state {
                 types::ElementState::Attached => true,
-                types::ElementState::Detached => false,
-                types::ElementState::Visible => visible,
-                types::ElementState::Hidden => !visible,
-                types::ElementState::Enabled => enabled,
-                types::ElementState::Disabled => !enabled,
-            }))
+                types::ElementState::Detached => match resolved.visible(page).await {
+                    Ok(_) => false,
+                    Err(error) => match element_wait_missing_observation(state, &error) {
+                        Some(satisfied) => satisfied,
+                        None => return Err(error),
+                    },
+                },
+                types::ElementState::Visible | types::ElementState::Hidden => {
+                    match resolved.visible(page).await {
+                        Ok(visible) => matches!(state, types::ElementState::Visible) == visible,
+                        Err(error) => match element_wait_missing_observation(state, &error) {
+                            Some(satisfied) => satisfied,
+                            None => return Err(error),
+                        },
+                    }
+                }
+                types::ElementState::Enabled | types::ElementState::Disabled => {
+                    match resolved.enabled(page).await {
+                        Ok(enabled) => matches!(state, types::ElementState::Enabled) == enabled,
+                        Err(error) => match element_wait_missing_observation(state, &error) {
+                            Some(satisfied) => satisfied,
+                            None => return Err(error),
+                        },
+                    }
+                }
+            };
+            Ok(WaitPoll::matched(observation))
         }
         WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
             let is_value = matches!(condition, WaitCondition::Value { .. });
@@ -2726,6 +2738,20 @@ fn unscoped_css_wait_selector(target: &TargetSpec) -> Option<&str> {
 fn is_missing_css_node(error: &CommandError) -> bool {
     error.code == ErrorCode::BrowserCommandFailed
         && error.message.contains("Could not find node with given id")
+}
+
+fn element_wait_missing_observation(
+    state: &types::ElementState,
+    error: &CommandError,
+) -> Option<bool> {
+    let target_missing = matches!(error.code, ErrorCode::TargetNotFound)
+        || is_missing_css_node(error)
+        || (matches!(error.code, ErrorCode::BrowserCommandFailed)
+            && error
+                .message
+                .to_ascii_lowercase()
+                .contains("target detached"));
+    target_missing.then_some(matches!(state, types::ElementState::Detached))
 }
 
 fn is_closed_page_message(message: &str) -> bool {
@@ -3187,9 +3213,9 @@ mod tests {
     };
 
     use super::{
-        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, is_closed_page_message,
-        is_missing_css_node, should_retry_plain_click_target_drift, snapshot_cookie, text_matches,
-        unscoped_css_wait_selector, ChromiumWorker, HttpBridgeState,
+        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, element_wait_missing_observation,
+        is_closed_page_message, is_missing_css_node, should_retry_plain_click_target_drift,
+        snapshot_cookie, text_matches, unscoped_css_wait_selector, ChromiumWorker, HttpBridgeState,
     };
     use types::{
         CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec, TextMatch, WorkerId,
@@ -3335,6 +3361,44 @@ mod tests {
         };
 
         assert!(is_missing_css_node(&error));
+    }
+
+    #[test]
+    fn detached_element_wait_accepts_target_loss_between_resolution_and_probe() {
+        let error = types::CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "ExceptionDetails: Error: target detached".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Detached, &error),
+            Some(true)
+        );
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Visible, &error),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn element_wait_does_not_swallow_page_target_loss() {
+        let error = types::CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "the browser target is gone (crashed or closed)".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: true,
+        };
+
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Detached, &error),
+            None
+        );
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Visible, &error),
+            None
+        );
     }
 
     #[test]
