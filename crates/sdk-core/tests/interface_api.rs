@@ -1015,6 +1015,7 @@ fn download_url_envelope() -> CommandEnvelope {
                 url: "https://example.com/file.bin".into(),
                 expected_content_type: None,
                 max_bytes: 1024,
+                save_as: None,
             },
         )),
         ..submit_request()

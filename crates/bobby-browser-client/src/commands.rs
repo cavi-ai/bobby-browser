@@ -315,7 +315,12 @@ impl PrimitiveCommand {
         }
         match self {
             Self::Navigate(command) => sanitize(&mut command.url),
-            Self::DownloadUrl(command) => sanitize(&mut command.url),
+            Self::DownloadUrl(command) => {
+                sanitize(&mut command.url);
+                if let Some(save_as) = &mut command.save_as {
+                    *save_as = "[redacted-download-path]".into();
+                }
+            }
             Self::UploadFiles(command) => {
                 for (index, path) in command.paths.iter_mut().enumerate() {
                     *path = format!("upload://input/{index}");
@@ -459,6 +464,7 @@ pub struct DownloadUrlCommand {
     pub url: String,
     pub expected_content_type: Option<String>,
     pub max_bytes: u64,
+    pub save_as: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

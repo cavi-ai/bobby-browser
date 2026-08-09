@@ -84,6 +84,7 @@ fn adaptive_http_download_command_is_reconciliable_and_round_trips() {
         url: "https://example.test/report.bin".into(),
         expected_content_type: Some("application/octet-stream".into()),
         max_bytes: 1_048_576,
+        save_as: None,
     });
 
     assert_eq!(command.class(), CommandClass::Reconciliable);
@@ -91,6 +92,23 @@ fn adaptive_http_download_command_is_reconciliable_and_round_trips() {
     assert_eq!(value["kind"], "downloadUrl");
     let round_tripped: PrimitiveCommand = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+#[test]
+fn adaptive_http_download_preserves_requested_save_path() {
+    let value = json!({
+        "kind": "downloadUrl",
+        "input": {
+            "url": "https://example.test/report.csv",
+            "expectedContentType": "text/csv",
+            "maxBytes": 1_048_576,
+            "saveAs": "/allowed/downloads/report.csv"
+        }
+    });
+
+    let command: PrimitiveCommand = serde_json::from_value(value.clone()).unwrap();
+
+    assert_eq!(serde_json::to_value(command).unwrap(), value);
 }
 
 #[test]
@@ -291,6 +309,7 @@ fn journal_safe_envelope_removes_all_url_secrets_without_mutating_live_command()
                 url: "https://alice:pw@example.com/file?token=signed#secret".into(),
                 expected_content_type: None,
                 max_bytes: 10,
+                save_as: Some("/private/downloads/report.csv".into()),
             },
         )),
     };
@@ -299,11 +318,16 @@ fn journal_safe_envelope_removes_all_url_secrets_without_mutating_live_command()
     assert!(!safe_json.contains("alice"));
     assert!(!safe_json.contains("signed"));
     assert!(!safe_json.contains("secret"));
+    assert!(!safe_json.contains("/private/downloads"));
     let RuntimeCommand::Primitive(PrimitiveCommand::DownloadUrl(live)) = &mut envelope.command
     else {
         unreachable!()
     };
     assert!(live.url.contains("token=signed"));
+    assert_eq!(
+        live.save_as.as_deref(),
+        Some("/private/downloads/report.csv")
+    );
 }
 
 #[test]

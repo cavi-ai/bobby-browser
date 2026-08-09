@@ -68,6 +68,7 @@ fn classifies_the_required_command_matrix() {
         url: "https://example.test/report.bin".into(),
         expected_content_type: Some("application/octet-stream".into()),
         max_bytes: 1_048_576,
+        save_as: None,
     }));
     assert_chromium(
         PrimitiveCommand::ClickAndWaitForDownload(ClickAndWaitForDownloadCommand {
@@ -91,6 +92,7 @@ fn rejects_unsafe_urls_and_download_limits() {
                 url: "https://example.test/report.bin".into(),
                 expected_content_type: None,
                 max_bytes,
+                save_as: None,
             }),
             "https://example.test/",
         );

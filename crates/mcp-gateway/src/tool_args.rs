@@ -494,6 +494,8 @@ pub(crate) struct DownloadUrlArgs {
     pub(crate) expected_content_type: Option<String>,
     pub(crate) max_bytes: u64,
     #[serde(default)]
+    pub(crate) save_as: Option<String>,
+    #[serde(default)]
     pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 

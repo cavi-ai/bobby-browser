@@ -287,6 +287,7 @@ async fn adaptive_http() {
             url: format!("{}/download", fixture.base_url()),
             expected_content_type: Some("application/octet-stream".into()),
             max_bytes: 20,
+            save_as: None,
         }),
     )
     .await;

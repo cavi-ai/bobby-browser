@@ -342,7 +342,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "pageId": id(),
                 "url": string(1, MAX_URL_BYTES),
                 "expectedContentType": nullable(string(1, 256)),
-                "maxBytes": {"type":"integer","minimum":1,"maximum":1099511627776_u64}
+                "maxBytes": {"type":"integer","minimum":1,"maximum":1099511627776_u64},
+                "saveAs": nullable(string(1, 4096))
             }),
             vec!["sessionId", "pageId", "url", "maxBytes"],
         ),

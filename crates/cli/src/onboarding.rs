@@ -1094,6 +1094,10 @@ mod install_tests {
         let path = install_skill(SkillKind::Agents, true, root.path()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("---\nname: bobby-browser"));
+        assert!(
+            text.contains("saveAs"),
+            "installed skill must teach the direct download path"
+        );
         assert!(path.ends_with(".agents/skills/bobby-browser/SKILL.md"));
     }
 

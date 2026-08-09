@@ -213,6 +213,7 @@ async fn real_runtime_sessions_isolate_direct_http_cookie_state() {
             url: format!("{}/download", site.base_url()),
             expected_content_type: Some("application/octet-stream".into()),
             max_bytes: 20,
+            save_as: None,
         }),
     )
     .await;
@@ -266,6 +267,7 @@ async fn runtime_download_failures_clean_real_artifact_store_and_redact_secret_j
                     url: format!("{}/{route}", site.base_url()),
                     expected_content_type: Some("application/octet-stream".into()),
                     max_bytes,
+                    save_as: None,
                 }),
             ))
             .await;
@@ -291,6 +293,7 @@ async fn runtime_download_failures_clean_real_artifact_store_and_redact_secret_j
                 url: format!("{}/download-secret-cookie", site.base_url()),
                 expected_content_type: Some("application/octet-stream".into()),
                 max_bytes: 64,
+                save_as: None,
             }),
         ))
         .await;
