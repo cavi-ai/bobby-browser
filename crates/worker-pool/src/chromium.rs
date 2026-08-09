@@ -2313,7 +2313,14 @@ return [role, name.slice(0, 200)];
         self.pages.lock().await.clear();
         self.network_trackers.lock().await.clear();
         let close_result = if let Some(mut browser) = self.browser.lock().await.take() {
-            browser.close().await.map(|_| ()).map_err(command_failed)
+            match browser.close().await {
+                Ok(_) => Ok(()),
+                Err(error) if is_closed_page_message(&error.to_string()) => {
+                    tracing::info!("browser already gone during termination: {error}");
+                    Ok(())
+                }
+                Err(error) => Err(command_failed(error)),
+            }
         } else {
             Ok(())
         };
