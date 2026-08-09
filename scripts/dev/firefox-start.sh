@@ -75,8 +75,28 @@ bidi_reachable() {
   fi
 }
 
+listener_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true
+  fi
+}
+
+endpoint_is_fresh() {
+  local endpoint="$1"
+  [[ -f "$endpoint" ]] || return 1
+  grep -Eq '"ws_port"[[:space:]]*:[[:space:]]*'"$PORT"'([[:space:]]*[,}])' "$endpoint"
+}
+
+print_startup_log() {
+  local log_file="$1"
+  if [[ -s "$log_file" ]]; then
+    printf '%s\n' "--- Firefox startup log: $log_file ---" >&2
+    tail -n 40 "$log_file" >&2
+  fi
+}
+
 start_firefox() {
-  local bin profile pids
+  local bin profile pids listener endpoint log_file firefox_pid status
   bin="$(discover_firefox)"
   profile="${BOBBY_FIREFOX_PROFILE:-$(state_dir)/firefox-profile}"
 
@@ -93,19 +113,45 @@ start_firefox() {
 $(lsof "$profile/.parentlock" 2>/dev/null || true)"
   fi
 
+  listener="$(listener_pids)"
+  if [[ -n "$listener" ]] || bidi_reachable; then
+    die "port $PORT is already in use by another process (listener pids: ${listener:-unknown}); stop it or set BOBBY_FIREFOX_DEBUG_PORT"
+  fi
+
+  endpoint="$profile/WebDriverBiDiServer.json"
+  rm -f "$endpoint"
+  log_file="${BOBBY_FIREFOX_LOG:-$(state_dir)/logs/firefox-start.log}"
+  mkdir -p "$(dirname "$log_file")"
+  : >"$log_file"
+
   log "starting Bobby Firefox"
   note "bin:     $bin"
   note "profile: $profile"
   note "BiDi:    --remote-debugging-port=$PORT"
-  "$bin" --no-remote \
+  "$bin" --no-remote --foreground \
     --profile "$profile" \
     --remote-debugging-port="$PORT" \
-    about:blank >/dev/null 2>&1 &
+    about:blank >"$log_file" 2>&1 &
+  firefox_pid=$!
   disown || true
 
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    if bidi_reachable; then
+    if ! kill -0 "$firefox_pid" 2>/dev/null; then
+      set +e
+      wait "$firefox_pid"
+      status=$?
+      set -e
+      print_startup_log "$log_file"
+      die "Firefox exited during startup (status $status)"
+    fi
+
+    pids="$(profile_lock_pids "$profile")"
+    listener="$(listener_pids)"
+    if endpoint_is_fresh "$endpoint" \
+      && bidi_reachable \
+      && [[ " $pids " == *" $firefox_pid "* ]] \
+      && [[ " $listener " == *" $firefox_pid "* ]]; then
       log "BiDi listening on 127.0.0.1:$PORT"
       note "Next: Pair from the companion toolbar popup."
       note "Local agents use bobby mcp-stdio — bobby serve is optional (HTTP only)."
@@ -114,7 +160,8 @@ $(lsof "$profile/.parentlock" 2>/dev/null || true)"
     sleep 0.5
   done
 
-  die "Firefox started but BiDi :$PORT did not come up — check the profile window"
+  print_startup_log "$log_file"
+  die "Firefox is running but did not establish a fresh, owned BiDi endpoint on :$PORT"
 }
 
 stop_firefox() {
