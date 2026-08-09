@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use config::{AppConfig, BrowserConfig, NodeConfig, NodeKind, ServerConfig, StorageConfig};
 use intent_engine::{VisionAction, VisionAssist, VisionProposal, VisionProposeRequest};
 use sdk_core::RuntimeService;
 use types::{
@@ -189,4 +190,138 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
     assert_eq!(record.resolution_path, IntentResolutionPath::VisionFallback);
     assert_eq!(record.verification, "visionFallback");
     assert!(record.vision_proposal_sha256.is_some());
+}
+
+/// Opt-in dogfood proof for a real loopback vision node. The test deliberately
+/// gives deterministic targeting an impossible role so the runtime must
+/// capture a screenshot, call the configured local provider, and record the
+/// returned proposal. Model accuracy is not asserted here: the durable corpus
+/// record is the proof that the local node actually participated.
+#[tokio::test]
+#[ignore = "requires installed Chrome and BOBBY_LOCAL_VISION_ENDPOINT"]
+async fn stuck_locate_records_a_real_local_vision_proposal() {
+    let endpoint = std::env::var("BOBBY_LOCAL_VISION_ENDPOINT")
+        .expect("set BOBBY_LOCAL_VISION_ENDPOINT to a loopback /propose endpoint");
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let corpus_dir = root.path().join("vision-corpus");
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+        "local".to_owned(),
+        NodeConfig {
+            kind: NodeKind::Vision,
+            endpoint_url: endpoint,
+            token_env: None,
+            timeout_ms: 120_000,
+        },
+    );
+    let config = AppConfig {
+        cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            shutdown_timeout_ms: 10_000,
+        },
+        browser: BrowserConfig {
+            executable: Some(chrome_executable()),
+            profiles_dir: root.path().join("profiles"),
+            headless: true,
+            max_active: 1,
+            upload_roots: vec![root.path().to_path_buf()],
+            downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
+        },
+        storage: StorageConfig {
+            journal_path: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+        },
+        interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig {
+            corpus_dir: Some(corpus_dir.clone()),
+            ..config::VisionConfig::default()
+        },
+        context: Default::default(),
+        nodes,
+    };
+
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "local-vision".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy {
+                vision_assist: true,
+                vision_node: Some("local".into()),
+                ..ExecutionPolicy::default()
+            },
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let navigation = runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
+                url: fixture.base_url(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            })),
+        })
+        .await;
+    assert!(matches!(navigation, CommandOutcome::Completed { .. }));
+
+    let outcome = runtime
+        .submit_with_vision_capability(
+            intent_envelope(
+                &session.id,
+                &page.id,
+                IntentCommand::Locate(LocateIntent {
+                    purpose: "Click the visible Continue button".into(),
+                    hints: IntentHints {
+                        role: Some("checkbox".into()),
+                        ..IntentHints::default()
+                    },
+                }),
+            ),
+            true,
+        )
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "local vision action did not complete: {outcome:?}"
+    );
+
+    let corpus = std::fs::read_to_string(corpus_dir.join("vision-corpus.jsonl"))
+        .expect("local vision proposal must produce a corpus record");
+    let records: Vec<serde_json::Value> = corpus
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("valid corpus JSONL"))
+        .collect();
+    assert_eq!(records.len(), 1, "{corpus}");
+    assert_eq!(records[0]["purpose"], "Click the visible Continue button");
+    assert!(records[0]["modelResponse"]["confidence"].is_number());
+    assert_eq!(records[0]["modelResponse"]["action"]["kind"], "click");
 }

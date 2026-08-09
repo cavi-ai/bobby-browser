@@ -128,6 +128,16 @@ fn locate_continue() -> IntentCommand {
     })
 }
 
+fn locate_with_purpose(purpose: &str) -> IntentCommand {
+    IntentCommand::Locate(LocateIntent {
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: Some("button".into()),
+            ..IntentHints::default()
+        },
+    })
+}
+
 #[tokio::test]
 async fn locate_resolves_single_candidate_deterministically() {
     let browser = FakeBrowser {
@@ -161,6 +171,100 @@ async fn locate_resolves_single_candidate_deterministically() {
     assert_eq!(record.purpose.as_deref(), Some("Continue"));
     assert_eq!(record.resolution_path, IntentResolutionPath::Deterministic);
     assert_eq!(record.verification, "resolved");
+}
+
+#[tokio::test]
+async fn locate_uses_descriptive_purpose_to_break_a_unique_role_only_tie() {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![
+            button("Customer document"),
+            button("Upload document"),
+            button("Confirm document preview"),
+        ]),
+        wait_ok: true,
+    };
+    let outcome = IntentEngine::execute(
+        &locate_with_purpose("Confirm button inside the document preview iframe"),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    let Evidence::Resolution { fingerprint, .. } = evidence
+        .iter()
+        .find(|item| matches!(item, Evidence::Resolution { .. }))
+        .expect("resolution evidence")
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        fingerprint.name.as_deref(),
+        Some("Confirm document preview")
+    );
+}
+
+#[tokio::test]
+async fn locate_uses_descriptive_purpose_for_a_unique_candidate_in_an_explicit_frame() {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Confirm document preview")]),
+        wait_ok: true,
+    };
+    let intent = IntentCommand::Locate(LocateIntent {
+        purpose: "Confirm button inside the document preview iframe".into(),
+        hints: IntentHints {
+            frame_path: vec![TargetSpec {
+                css: Some("#document-preview".into()),
+                ..TargetSpec::default()
+            }],
+            ..IntentHints::default()
+        },
+    });
+    let outcome =
+        IntentEngine::execute(&intent, &PageId::new(), &browser, &VisionContext::default()).await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Resolution { fingerprint, .. }
+            if fingerprint.name.as_deref() == Some("Confirm document preview")
+    )));
+}
+
+#[tokio::test]
+async fn locate_keeps_equal_purpose_overlap_ambiguous() {
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![
+            button("Choose personal account"),
+            button("Choose business account"),
+        ]),
+        wait_ok: true,
+    };
+    let outcome = IntentEngine::execute(
+        &locate_with_purpose("Choose account button"),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    let record = evidence.iter().find_map(|item| match item {
+        Evidence::IntentExecution { record } => Some(record),
+        _ => None,
+    });
+    assert_eq!(
+        record.expect("intent evidence").verification,
+        "targetAmbiguous"
+    );
 }
 
 #[tokio::test]

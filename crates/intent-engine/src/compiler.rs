@@ -217,9 +217,12 @@ fn compile_target(purpose: &str, hints: &IntentHints) -> Result<TargetSpec, Comp
         Some(matcher) => {
             target.text = Some(matcher.clone());
         }
-        None if hints.role.is_some() => {
-            target.accessible_name = Some(purpose.to_owned());
-        }
+        // `purpose` is audit/explanation prose, not an exact accessible name.
+        // A caller that supplies only a role is deliberately asking for
+        // role-only resolution; exact names must come from accessibleName or
+        // nearText. Conflating the two makes descriptive purposes impossible
+        // to use (especially for controls discovered inside frames).
+        None if hints.role.is_some() => {}
         None => {
             target.text = Some(TextMatch::Contains(purpose.to_owned()));
         }
