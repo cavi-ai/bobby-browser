@@ -20,6 +20,7 @@ struct FakeBrowser {
     candidates: Arc<Vec<Candidate>>,
     calls: Arc<Mutex<CallLog>>,
     click_evidence: Vec<Evidence>,
+    click_error: Option<CommandError>,
     wait_evidence: Vec<Evidence>,
 }
 
@@ -43,6 +44,9 @@ impl IntentBrowser for FakeBrowser {
             .expect("call log")
             .clicks
             .push(command.clone());
+        if let Some(error) = &self.click_error {
+            return Err(error.clone());
+        }
         Ok(self.click_evidence.clone())
     }
 
@@ -152,6 +156,7 @@ async fn submit_and_verify_clicks_boundary_then_waits() {
             selector: "#Submit application".into(),
             text: None,
         }],
+        click_error: None,
         wait_evidence: vec![Evidence::Wait {
             condition: expected_state.condition.clone(),
             elapsed_ms: 12,
@@ -211,6 +216,7 @@ async fn submit_and_verify_sets_expected_url_from_exact_wait() {
             selector: "#Submit".into(),
             text: None,
         }],
+        click_error: None,
         wait_evidence: vec![Evidence::Wait {
             condition: expected_state.condition.clone(),
             elapsed_ms: 3,
@@ -244,6 +250,7 @@ async fn submit_and_verify_missing_target_is_stuck() {
         candidates: Arc::new(Vec::new()),
         calls: Arc::clone(&calls),
         click_evidence: Vec::new(),
+        click_error: None,
         wait_evidence: Vec::new(),
     };
     let page_id = PageId::new();
@@ -271,4 +278,44 @@ async fn submit_and_verify_missing_target_is_stuck() {
     let record = record.expect("IntentExecution on stuck");
     assert_eq!(record.verification, "targetNotFound");
     assert_eq!(record.intent_kind, "submitAndVerify");
+}
+
+#[tokio::test]
+async fn submit_and_verify_checks_post_state_after_navigation_destroys_click_context() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_state = thanks_wait();
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        click_error: Some(CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "Error -32000: Cannot find context with specified id".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        }),
+        wait_evidence: vec![Evidence::Wait {
+            condition: expected_state.condition.clone(),
+            elapsed_ms: 4,
+            observations: 1,
+            excluded_classes: Vec::new(),
+            observed: Some("https://example.test/thanks".into()),
+        }],
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit", Some("button"), expected_state),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks.len(), 1);
+    assert_eq!(log.waits.len(), 1);
 }

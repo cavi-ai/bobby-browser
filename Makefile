@@ -163,7 +163,7 @@ behavioral-e2e:
 # competitor gamut stays explicit:
 # pnpm --dir benchmarks/competitor-gauntlet run run -- --tool all
 agent-eval:
-	cargo build -p bobby-browser -p gauntlet-server
+	cargo build -p bobby-browser -p mcp-gateway -p gauntlet-server
 	pnpm --filter @cavi-ai/bobby-gauntlet build
 	BOBBY_MCP_COMMAND=$(REPO_ROOT)target/debug/bobby pnpm --dir benchmarks/competitor-gauntlet run run -- --tool bobby --timebox-seconds 300
 	pnpm --dir benchmarks/competitor-gauntlet run score check

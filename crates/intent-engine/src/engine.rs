@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
@@ -367,9 +367,12 @@ async fn execute_locate(
     vision: &VisionContext,
     target: TargetSpec,
 ) -> IntentOutcome {
-    let purpose = match intent {
-        IntentCommand::Locate(locate) => Some(locate.purpose.clone()),
-        _ => None,
+    let (purpose, purpose_is_implicit_match) = match intent {
+        IntentCommand::Locate(locate) => (
+            Some(locate.purpose.clone()),
+            locate.hints.accessible_name.is_none() && locate.hints.near_text.is_none(),
+        ),
+        _ => (None, false),
     };
     let plan_summary = summarize_target(&target);
     let candidates = match browser.collect_candidates(page_id, &target).await {
@@ -409,6 +412,17 @@ async fn execute_locate(
                 ))],
             };
         }
+    };
+    let decision = match decision {
+        unresolved @ (ResolutionDecision::NotFound | ResolutionDecision::Ambiguous { .. })
+            if purpose_is_implicit_match =>
+        {
+            purpose
+                .as_deref()
+                .and_then(|purpose| disambiguate_by_purpose(&target, &candidates, purpose))
+                .unwrap_or(unresolved)
+        }
+        decision => decision,
     };
 
     match decision {
@@ -484,6 +498,127 @@ async fn execute_locate(
             .await
         }
     }
+}
+
+fn disambiguate_by_purpose(
+    target: &TargetSpec,
+    candidates: &[Candidate],
+    purpose: &str,
+) -> Option<ResolutionDecision> {
+    if target.css.is_some()
+        || target.test_id.is_some()
+        || target.accessible_name.is_some()
+        || target.label.is_some()
+        || !target.attributes.is_empty()
+        || target.ordinal.is_some()
+    {
+        return None;
+    }
+
+    let wanted_role = target.role.as_deref();
+    let eligible = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate.state.attached
+                && candidate.state.visible
+                && wanted_role.is_none_or(|wanted| {
+                    candidate
+                        .role
+                        .as_deref()
+                        .is_some_and(|role| role.eq_ignore_ascii_case(wanted))
+                })
+        })
+        .collect::<Vec<_>>();
+    let exact_matches = eligible
+        .iter()
+        .filter_map(|(_, candidate)| {
+            let purpose = purpose.trim();
+            (candidate
+                .name
+                .as_deref()
+                .is_some_and(|name| name.trim().eq_ignore_ascii_case(purpose))
+                || candidate
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.trim().eq_ignore_ascii_case(purpose))
+                || candidate.text.trim().eq_ignore_ascii_case(purpose))
+            .then_some(*candidate)
+        })
+        .collect::<Vec<_>>();
+    if let [candidate] = exact_matches.as_slice() {
+        let mut reasons = Vec::new();
+        let mut score = 100;
+        if wanted_role.is_some() {
+            reasons.push("exactRole".into());
+            score += 30;
+        }
+        reasons.push("exactPurposeName".into());
+        return Some(ResolutionDecision::Resolved {
+            candidate: Box::new((*candidate).clone()),
+            evidence: types::CandidateEvidence {
+                role: candidate.role.clone(),
+                name: candidate.name.clone(),
+                score,
+                reasons,
+            },
+            best_match_authorized: false,
+        });
+    }
+
+    let purpose_tokens = semantic_tokens(purpose);
+    if purpose_tokens.len() < 2 {
+        return None;
+    }
+    let mut ranked = eligible
+        .into_iter()
+        .map(|(index, candidate)| {
+            let candidate_tokens = semantic_tokens(&format!(
+                "{} {} {}",
+                candidate.name.as_deref().unwrap_or_default(),
+                candidate.label.as_deref().unwrap_or_default(),
+                candidate.text
+            ));
+            let overlap = purpose_tokens.intersection(&candidate_tokens).count();
+            (index, candidate, overlap)
+        })
+        .filter(|(_, _, overlap)| *overlap > 0)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(&right.0)));
+    let (_, candidate, overlap) = ranked.first()?;
+    let runner_up = ranked.get(1).map(|item| item.2).unwrap_or_default();
+    if *overlap < 2 || *overlap <= runner_up {
+        return None;
+    }
+    let mut reasons = Vec::new();
+    let mut score = *overlap as i32 * 10;
+    if wanted_role.is_some() {
+        reasons.push("exactRole".into());
+        score += 30;
+    }
+    reasons.push(format!("purposeTokenOverlap:{overlap}"));
+    Some(ResolutionDecision::Resolved {
+        candidate: Box::new((*candidate).clone()),
+        evidence: types::CandidateEvidence {
+            role: candidate.role.clone(),
+            name: candidate.name.clone(),
+            score,
+            reasons,
+        },
+        best_match_authorized: false,
+    })
+}
+
+fn semantic_tokens(value: &str) -> BTreeSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "a", "an", "the", "in", "inside", "within", "on", "of", "for", "to", "button", "control",
+        "element", "field", "iframe", "frame", "link",
+    ];
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| token.len() > 1 && !STOP_WORDS.contains(&token.as_str()))
+        .collect()
 }
 
 async fn execute_fill(
@@ -937,6 +1072,16 @@ async fn execute_submit_and_verify(
     };
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
+        Err(error) if post_navigation_context_loss(&error) => {
+            // The browser destroyed the frame execution context while the
+            // click was returning. The side effect may already have landed;
+            // only the caller's expected state can decide. Continue to that
+            // verification instead of reporting an unverified act failure.
+            vec![Evidence::Configuration {
+                name: "clickDispatch".into(),
+                value: "execution context replaced; verifying expected post-state".into(),
+            }]
+        }
         Err(error) => {
             return IntentOutcome::Failed {
                 error,
@@ -1047,6 +1192,15 @@ async fn execute_submit_and_verify(
         "submitted",
     )));
     IntentOutcome::Completed { evidence }
+}
+
+fn post_navigation_context_loss(error: &CommandError) -> bool {
+    if error.code != ErrorCode::BrowserCommandFailed {
+        return false;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("cannot find context with specified id")
+        || message.contains("execution context was destroyed")
 }
 
 async fn execute_follow(

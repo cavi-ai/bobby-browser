@@ -5,8 +5,7 @@ use std::time::{Duration, Instant};
 
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, Node as CdpNode, RequestNodeParams, SetFileInputFilesParams,
-    ShadowRootType,
+    BackendNodeId, DescribeNodeParams, Node as CdpNode, SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, GetFrameTreeParams, Viewport,
@@ -324,7 +323,17 @@ impl ResolvedTarget {
 
     pub async fn set_files(&self, page: &Page, paths: Vec<String>) -> Result<(), CommandError> {
         let page = self.execution_page(page);
-        if let Some(element) = &self.native {
+        // Raw selectors own a stable native element handle. Semantic targets,
+        // however, are gathered and then re-resolved; using the opportunistic
+        // native handle here can hand DOM.setFileInputFiles an already-invalid
+        // backend node even when the freshly stamped JS locator still resolves.
+        if self.locator.id.is_empty() {
+            let element = self.native.as_ref().ok_or_else(|| {
+                target_error(
+                    ErrorCode::TargetNotFound,
+                    "file input selector did not resolve to a native element",
+                )
+            })?;
             page.execute(
                 SetFileInputFilesParams::builder()
                     .files(paths)
@@ -338,16 +347,17 @@ impl ResolvedTarget {
         }
         let expression = locator_expression(&self.locator, "return el")?;
         let object_id = resolve_object_id_scoped(page, &self.locator.scope, expression).await?;
-        let node_id = page
-            .execute(RequestNodeParams::new(object_id))
+        let backend_node_id = page
+            .execute(DescribeNodeParams::builder().object_id(object_id).build())
             .await
             .map_err(cdp_error)?
             .result
-            .node_id;
+            .node
+            .backend_node_id;
         page.execute(
             SetFileInputFilesParams::builder()
                 .files(paths)
-                .node_id(node_id)
+                .backend_node_id(backend_node_id)
                 .build()
                 .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
         )
@@ -463,6 +473,46 @@ pub async fn gather_candidates(
         }
     }
     Ok(candidates)
+}
+
+/// Reads the document body after resolving only the target's frame/shadow
+/// scope. Page-scoped targets such as `body` are not interactive candidates,
+/// so ordinary candidate selection would falsely report `targetNotFound`.
+pub async fn inspect_page_scoped_target(
+    page_id: &PageId,
+    page: &Page,
+    target: &TargetSpec,
+    include_html: bool,
+    browser: Option<&mut Browser>,
+) -> Result<(String, Option<String>, Evidence), CommandError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ScopedInspection {
+        text: String,
+        html: Option<String>,
+    }
+
+    validate_target_spec(target)?;
+    let scope = open_target_scope(page, target, browser).await?;
+    let expression = format!(
+        "(()=>{{const el=document.body;return {{text:el?(el.innerText||''):'',html:{}&&el?el.outerHTML:null}}}})()",
+        if include_html { "true" } else { "false" }
+    );
+    let observed: ScopedInspection =
+        evaluate_in_context(&scope.execution_page, scope.context_id, expression).await?;
+    let evidence = Evidence::Resolution {
+        target: Box::new(target.clone()),
+        fingerprint: Box::new(TargetFingerprint {
+            page_id: page_id.clone(),
+            frame: (!target.frame_path.is_empty()).then(|| format!("{:?}", scope.frame_id)),
+            role: target.role.clone(),
+            name: target.accessible_name.clone(),
+            stable_attributes: BTreeMap::new(),
+        }),
+        candidates: scope.frame_trace,
+        best_match_authorized: false,
+    };
+    Ok((observed.text, observed.html, evidence))
 }
 
 /// A re-resolvable hop for a frame element: real-id CSS, then test id, then
