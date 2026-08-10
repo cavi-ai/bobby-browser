@@ -892,6 +892,7 @@ async fn checkpoint_save_resolves_javascript_and_actionable_accessibility_eviden
                     role: "textbox".into(),
                     accessible_name: "Email".into(),
                     ordinal: Some(1),
+                    frame_path: Vec::new(),
                 }),
                 ..types::AccessibilityNode::default()
             }],

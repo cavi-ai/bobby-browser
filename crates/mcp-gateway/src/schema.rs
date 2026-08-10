@@ -3193,6 +3193,7 @@ fn accessibility_node() -> Value {
             "invalid":{"type":"boolean"},
             "checked":{"type":"boolean"},
             "autocomplete":string(0, 256),
+            "url":string(1, 4096),
             "valueMin":string(0, 256),
             "valueMax":string(0, 256)
         }),
@@ -3202,12 +3203,17 @@ fn accessibility_node() -> Value {
     schema
 }
 
+/// Must match `types::AccessibilityTarget`. `framePath` (an array of
+/// `SemanticTargetSegment`) stays generic rather than a `$ref`, mirroring
+/// `form_control_target`: rarely populated, and present only on nodes that
+/// live inside an iframe.
 fn accessibility_target() -> Value {
     object(
         json!({
             "role":string(1, 256),
             "accessibleName":string(1, 4096),
-            "ordinal":{"type":"integer","minimum":0,"maximum":2047}
+            "ordinal":{"type":"integer","minimum":0,"maximum":2047},
+            "framePath":array(json!({"type":"object"}), 8)
         }),
         &["role", "accessibleName"],
     )

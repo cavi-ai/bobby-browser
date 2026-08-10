@@ -118,8 +118,11 @@ async fn the_default_is_explore() {
         .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
         .collect();
     assert!(
-        !names.contains(&"click".to_owned()) && names.contains(&"a11y_snapshot".to_owned()),
-        "unset startup must advertise explore, not the full surface: {names:?}"
+        names.contains(&"click".to_owned())
+            && names.contains(&"a11y_snapshot".to_owned())
+            && !names.contains(&"intent_fill".to_owned())
+            && !names.contains(&"command_execute".to_owned()),
+        "unset startup must advertise the explore loop, not the full surface: {names:?}"
     );
 }
 
@@ -205,9 +208,11 @@ async fn selecting_a_phase_changes_what_is_advertised() {
         .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
         .collect();
     assert!(names.contains(&"a11y_snapshot".to_owned()));
+    assert!(names.contains(&"click".to_owned()));
     assert!(
-        !names.contains(&"click".to_owned()),
-        "the explore phase advertised a mutating tool: {names:?}"
+        !names.contains(&"intent_fill".to_owned())
+            && !names.contains(&"command_execute".to_owned()),
+        "the explore phase advertised the intent family or an escape hatch: {names:?}"
     );
 }
 

@@ -13,8 +13,10 @@ An agent pays for every token it reads and every round trip it makes. The
 runtime is shaped around both.
 
 **A catalog you can afford.** `tools/list` opens on a phase, not the whole
-surface. The default `explore` phase is 39,094 bytes against 116,204 for
-`full`. `toolset_select` widens at any time, and hidden tools stay callable —
+surface. The default `explore` phase is 63 KiB and already covers the
+standard loop — observe, navigate, click, type, upload, download — so there
+is no `toolset_select` before the first action; `full` is 124 KiB.
+`toolset_select` widens at any time, and hidden tools stay callable —
 phases change what is advertised, never what is permitted. Capability gates
 remain the only enforcement boundary. Set the opening phase with
 `BOBBY_MCP_TOOLSET` or `[mcp] startup_toolset`.
@@ -98,8 +100,9 @@ Homebrew rejects a formula outside a tap, so there is no
 straight from the [release assets](https://github.com/cavi-ai/bobby-browser/releases/latest).
 
 Release archives are three binaries on purpose: the CLI plus the two stdio
-gateways agents spawn. Prefer MCP Explore (`BOBBY_MCP_TOOLSET=explore` or
-`toolset_select`) so `tools/list` stays small.
+gateways agents spawn. The default MCP Explore phase already includes the
+base controls; widen with `toolset_select` only for intents, jobs, or escape
+hatches.
 Use `workflow_start` and `workflow_observe` for lifecycle-safe setup and
 retained-first compact context in every MCP phase.
 

@@ -656,3 +656,384 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
     assert_eq!(snapshot.atlas_priority, "high");
     runtime.sessions.delete(&session.id).await.unwrap();
 }
+
+/// Shared setup: seeded gauntlet server, headless installed-Chromium runtime,
+/// documents page with the upload flow completed so the preview iframe is live.
+#[allow(dead_code)]
+struct DocumentsPageProbe {
+    server: ScenarioServer,
+    runtime: RuntimeService,
+    session_id: types::SessionId,
+    page_id: types::PageId,
+    _root: tempfile::TempDir,
+}
+
+#[allow(dead_code)]
+async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
+    let server = ScenarioServer::start(ScenarioConfig::seeded(seed)).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
+    let config = AppConfig {
+        cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            shutdown_timeout_ms: 10_000,
+        },
+        browser: BrowserConfig {
+            executable: Some(chrome_executable()),
+            profiles_dir: root.path().join("profiles"),
+            headless: true,
+            max_active: 8,
+            upload_roots: vec![fixture.parent().unwrap().to_path_buf()],
+            downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
+        },
+        storage: StorageConfig {
+            journal_path: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+        },
+        interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
+        context: Default::default(),
+        nodes: Default::default(),
+    };
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: seed.into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let submit = |command: PrimitiveCommand| {
+        runtime.submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(command),
+        })
+    };
+    let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
+        url: server.application_url("/customers/cus_atlas/documents"),
+        wait_until: WaitUntil::Interactive,
+        timeout_ms: 30_000,
+    }))
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    let form_snapshot = runtime
+        .form_snapshot(&session.id, &page.id, None)
+        .await
+        .unwrap();
+    let file_target = form_snapshot
+        .forms
+        .iter()
+        .flat_map(|form| form.controls.iter())
+        .chain(form_snapshot.unowned_controls.iter())
+        .find(|control| control.control_kind == FormControlKind::File)
+        .and_then(|control| control.target.as_ref())
+        .map(target_spec)
+        .expect("file input target from form snapshot");
+    let outcome = submit(PrimitiveCommand::UploadFiles(UploadFilesCommand {
+        selector: String::new(),
+        target: Some(file_target),
+        paths: vec![fixture.to_string_lossy().into_owned()],
+    }))
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    let outcome = submit(PrimitiveCommand::Click(types::ClickCommand {
+        selector: "form[aria-label='Upload customer document'] button".into(),
+        target: None,
+        boundary: false,
+        expected_url: None,
+    }))
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    let outcome = submit(PrimitiveCommand::WaitFor(WaitForCommand {
+        condition: WaitCondition::Element {
+            target: Box::new(TargetSpec {
+                css: Some("iframe#document-preview".into()),
+                ..TargetSpec::default()
+            }),
+            state: ElementState::Attached,
+        },
+        timeout_ms: 15_000,
+    }))
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    DocumentsPageProbe {
+        server,
+        runtime,
+        session_id: session.id,
+        page_id: page.id,
+        _root: root,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a11y_snapshot_exposes_link_urls() {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("a11y-link-urls"))
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
+    let config = AppConfig {
+        cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            shutdown_timeout_ms: 10_000,
+        },
+        browser: BrowserConfig {
+            executable: Some(chrome_executable()),
+            profiles_dir: root.path().join("profiles"),
+            headless: true,
+            max_active: 8,
+            upload_roots: vec![fixture.parent().unwrap().to_path_buf()],
+            downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
+        },
+        storage: StorageConfig {
+            journal_path: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+        },
+        interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
+        context: Default::default(),
+        nodes: Default::default(),
+    };
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "a11y-link-urls".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let submit = |command: PrimitiveCommand| {
+        runtime.submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(45),
+            command: RuntimeCommand::Primitive(command),
+        })
+    };
+    let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
+        url: server.application_url("/reports"),
+        wait_until: WaitUntil::Interactive,
+        timeout_ms: 30_000,
+    }))
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    let outcome = submit(PrimitiveCommand::Click(types::ClickCommand {
+        selector: "form[aria-label='Generate report'] button".into(),
+        target: None,
+        boundary: false,
+        expected_url: None,
+    }))
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    let outcome = submit(PrimitiveCommand::WaitFor(WaitForCommand {
+        condition: WaitCondition::Text {
+            target: Box::new(TargetSpec {
+                css: Some("body".into()),
+                ..TargetSpec::default()
+            }),
+            matcher: types::TextMatch::Contains("Report ready".into()),
+        },
+        timeout_ms: 30_000,
+    }))
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+
+    let outcome = submit(PrimitiveCommand::AccessibilitySnapshot(
+        types::AccessibilitySnapshotCommand { max_nodes: None },
+    ))
+    .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("a11y snapshot failed: {outcome:?}");
+    };
+    let nodes = evidence
+        .iter()
+        .find_map(|item| match item {
+            types::Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("snapshot evidence");
+    fn flatten<'a>(
+        nodes: &'a [types::AccessibilityNode],
+        out: &mut Vec<&'a types::AccessibilityNode>,
+    ) {
+        for node in nodes {
+            out.push(node);
+            flatten(&node.children, out);
+        }
+    }
+    let mut flat = Vec::new();
+    flatten(nodes, &mut flat);
+    let link = flat
+        .iter()
+        .find(|node| {
+            node.role.as_deref() == Some("link")
+                && node
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.contains("atlas-operations.csv"))
+        })
+        .expect("download link missing from a11y snapshot");
+    let url = link
+        .url
+        .as_deref()
+        .expect("download link carries no url");
+    assert!(
+        url.contains("/api/reports/") && url.ends_with("/download"),
+        "unexpected link url: {url}"
+    );
+    runtime.sessions.delete(&session.id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a11y_snapshot_descends_into_iframes() {
+    let probe = documents_page_with_preview("a11y-frames").await;
+    let evidence = probe
+        .runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: probe.session_id.clone(),
+            page_id: Some(probe.page_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::AccessibilitySnapshot(
+                types::AccessibilitySnapshotCommand { max_nodes: None },
+            )),
+        })
+        .await;
+    let CommandOutcome::Completed { evidence, .. } = evidence else {
+        panic!("a11y snapshot failed: {evidence:?}");
+    };
+    let nodes = evidence
+        .iter()
+        .find_map(|item| match item {
+            types::Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("snapshot evidence");
+    fn flatten<'a>(
+        nodes: &'a [types::AccessibilityNode],
+        out: &mut Vec<&'a types::AccessibilityNode>,
+    ) {
+        for node in nodes {
+            out.push(node);
+            flatten(&node.children, out);
+        }
+    }
+    let mut flat = Vec::new();
+    flatten(nodes, &mut flat);
+    for node in &flat {
+        if node.role.is_some() || node.name.is_some() {
+            println!(
+                "role={:?} name={:?} target={:?}",
+                node.role, node.name, node.target
+            );
+        }
+    }
+    let confirm = flat.iter().find(|node| {
+        node.name.as_deref() == Some("Confirm document preview")
+            && node.role.as_deref() == Some("button")
+    });
+    let confirm = confirm.expect("in-frame confirm button missing from a11y snapshot");
+    let target = confirm.target.as_ref().expect("confirm button has no target");
+    assert!(
+        !target.frame_path.is_empty(),
+        "in-frame target must carry its frame hop: {target:?}"
+    );
+
+    // The whole point: pass the stamped target verbatim to control_action
+    // and have the activation land inside the frame.
+    let outcome = probe
+        .runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: probe.session_id.clone(),
+            page_id: Some(probe.page_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::ControlAction(
+                types::ControlActionCommand {
+                    target: types::FormControlTarget {
+                        role: target.role.clone(),
+                        accessible_name: target.accessible_name.clone(),
+                        ordinal: target.ordinal,
+                        frame_path: target.frame_path.clone(),
+                        shadow_path: Vec::new(),
+                    },
+                    action: types::ControlAction::Activate,
+                },
+            )),
+        })
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "control_action with the snapshot target failed: {outcome:?}"
+    );
+    probe
+        .server
+        .wait_for_preview_confirmation()
+        .await
+        .expect("in-frame activation did not land");
+    probe.runtime.sessions.delete(&probe.session_id).await.unwrap();
+}

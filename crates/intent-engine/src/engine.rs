@@ -1103,6 +1103,24 @@ async fn execute_submit_and_verify(
     let mut wait_evidence = match browser.wait_for(page_id, &expected_state).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            // The boundary click already landed; only the post-state
+            // verification failed. Reporting the raw wait error would read as
+            // "the submit failed" and invite a blind resubmit that duplicates
+            // the POST. Rewrap so the effect and the safe next step are
+            // explicit.
+            let error = CommandError {
+                code: ErrorCode::VerificationFailed,
+                message: format!(
+                    "submit click landed but the expected post-state did not hold ({}): {}. \
+                     Do not resubmit blindly — inspect the page for a server rejection or \
+                     confirmation, then re-verify with intent_wait_for_state or correct the \
+                     rejected fields",
+                    wait_condition_kind(&expected_state.condition),
+                    error.message
+                ),
+                layer: error.layer,
+                retryable: false,
+            };
             return IntentOutcome::Failed {
                 error,
                 evidence: {

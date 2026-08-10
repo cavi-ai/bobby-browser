@@ -165,6 +165,7 @@ impl ContextPromotion {
                 role: control.role.clone(),
                 accessible_name: control.accessible_name.clone(),
                 ordinal: control.ordinal.map(|ordinal| ordinal as usize),
+                frame_path: Vec::new(),
             },
             confidence,
             observed_at: types::ContextObservedAt::Persisted,

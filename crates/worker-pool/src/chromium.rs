@@ -1679,7 +1679,15 @@ impl BrowserWorker for ChromiumWorker {
             .max_nodes
             .unwrap_or(DEFAULT_A11Y_MAX_NODES)
             .clamp(1, MAX_A11Y_NODES) as usize;
-        let (nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
+        let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
+        // The main-frame AX tree stops at `Iframe` nodes; descend one level
+        // (cap 8, same-process frames) so in-frame controls are visible and
+        // their targets carry the frame hop control_action can re-resolve.
+        let emitted = count_a11y_nodes(&nodes);
+        if emitted < max_nodes {
+            truncated |=
+                descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
+        }
         Ok(vec![Evidence::AccessibilitySnapshot {
             page_id: page_id.clone(),
             nodes,
@@ -3033,6 +3041,161 @@ const MAX_A11Y_NODES: u32 = 2048;
 /// Collapses Chrome's flat AXNode list into the engine-shared compact tree.
 /// Nodes Chrome marks ignored are skipped (their children are re-parented
 /// upward); generic containers without names are kept only as structure.
+fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
+    nodes
+        .iter()
+        .map(|node| 1 + count_a11y_nodes(&node.children))
+        .sum()
+}
+
+fn stamp_a11y_frame_path(
+    nodes: &mut [types::AccessibilityNode],
+    segment: &types::SemanticTargetSegment,
+) {
+    for node in nodes {
+        if let Some(target) = &mut node.target {
+            target.frame_path = vec![segment.clone()];
+        }
+        stamp_a11y_frame_path(&mut node.children, segment);
+    }
+}
+
+/// Moves `frame_roots` under the `occurrence`-th main-tree `Iframe` node with
+/// `name`; hands the roots back when no such node exists.
+fn splice_under_iframe(
+    nodes: &mut [types::AccessibilityNode],
+    name: Option<&str>,
+    occurrence: usize,
+    frame_roots: Vec<types::AccessibilityNode>,
+) -> Result<(), Vec<types::AccessibilityNode>> {
+    fn go(
+        nodes: &mut [types::AccessibilityNode],
+        name: Option<&str>,
+        seen: &mut usize,
+        occurrence: usize,
+        frame_roots: Vec<types::AccessibilityNode>,
+    ) -> Result<(), Vec<types::AccessibilityNode>> {
+        let mut frame_roots = frame_roots;
+        for node in nodes.iter_mut() {
+            if node.role.as_deref() == Some("Iframe") && node.name.as_deref() == name {
+                if *seen == occurrence {
+                    node.children = frame_roots;
+                    return Ok(());
+                }
+                *seen += 1;
+            }
+            frame_roots = match go(&mut node.children, name, seen, occurrence, frame_roots) {
+                Ok(()) => return Ok(()),
+                Err(roots) => roots,
+            };
+        }
+        Err(frame_roots)
+    }
+    go(nodes, name, &mut 0, occurrence, frame_roots)
+}
+
+/// Descends one level into same-process iframes (cap 8, shared node budget)
+/// so the snapshot does not stop at `Iframe` nodes. Each frame's compacted
+/// tree is spliced under its main-tree `Iframe` node and every in-frame
+/// target is stamped with the role/name/ordinal hop that re-resolves the
+/// iframe element at action time. Returns whether any frame was truncated.
+async fn descend_a11y_iframes(
+    page: &Page,
+    nodes: &mut Vec<types::AccessibilityNode>,
+    mut budget: usize,
+) -> bool {
+    let Ok(Some(main_frame)) = page.mainframe().await else {
+        return false;
+    };
+    let Ok(iframes) = crate::targeting::main_frame_iframe_candidates(page).await else {
+        return false;
+    };
+    if iframes.is_empty() {
+        return false;
+    }
+    let Ok(frames) = page.frames().await else {
+        return false;
+    };
+    let mut truncated = false;
+    for frame in frames {
+        if budget == 0 {
+            truncated = true;
+            break;
+        }
+        let is_child = page
+            .frame_parent(frame.clone())
+            .await
+            .ok()
+            .flatten()
+            .as_ref()
+            == Some(&main_frame);
+        if !is_child {
+            continue;
+        }
+        let frame_name = page.frame_name(frame.clone()).await.ok().flatten();
+        let frame_url = page.frame_url(frame.clone()).await.ok().flatten();
+        let candidate = iframes
+            .iter()
+            .find(|candidate| {
+                frame_name.as_ref().is_some_and(|name| {
+                    candidate.attributes.get("name") == Some(name)
+                }) || frame_url.as_ref().is_some_and(|url| {
+                    candidate
+                        .attributes
+                        .get("src")
+                        .is_some_and(|src| url == src || url.ends_with(src))
+                })
+            })
+            .or(if iframes.len() == 1 {
+                iframes.first()
+            } else {
+                None
+            });
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        let Ok(tree) = page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
+                    .frame_id(frame)
+                    .build(),
+            )
+            .await
+        else {
+            continue;
+        };
+        let (mut frame_roots, frame_truncated) = compact_ax_tree(&tree.result.nodes, budget);
+        truncated |= frame_truncated;
+        let same_name: Vec<&dom_engine::Candidate> = iframes
+            .iter()
+            .filter(|other| other.name == candidate.name)
+            .collect();
+        let occurrence = same_name
+            .iter()
+            .position(|other| other.id == candidate.id)
+            .unwrap_or(0);
+        let segment = types::SemanticTargetSegment {
+            role: "iframe".into(),
+            accessible_name: candidate.name.clone().unwrap_or_default(),
+            ordinal: (same_name.len() > 1).then_some(occurrence),
+        };
+        stamp_a11y_frame_path(&mut frame_roots, &segment);
+        budget = budget.saturating_sub(count_a11y_nodes(&frame_roots));
+        match splice_under_iframe(nodes, candidate.name.as_deref(), occurrence, frame_roots) {
+            Ok(()) => {}
+            Err(frame_roots) => {
+                nodes.push(types::AccessibilityNode {
+                    role: Some("Iframe".into()),
+                    name: candidate.name.clone(),
+                    children: frame_roots,
+                    ..types::AccessibilityNode::default()
+                });
+            }
+        }
+    }
+    truncated
+}
+
 fn compact_ax_tree(
     raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
     max_nodes: usize,
@@ -3171,6 +3334,7 @@ fn compact_ax_tree(
             invalid: property_text(node, "invalid").map(|value| value != "false"),
             checked: property_bool(node, "checked"),
             autocomplete,
+            url: property_text(node, "url"),
             value_min: property_text(node, "valuemin"),
             value_max: property_text(node, "valuemax"),
             children,
