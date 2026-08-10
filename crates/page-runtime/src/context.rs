@@ -565,7 +565,10 @@ mod tests {
                 include_html: false,
             })),
             primitive(PrimitiveCommand::AccessibilitySnapshot(
-                AccessibilitySnapshotCommand { max_nodes: None },
+                AccessibilitySnapshotCommand {
+                    max_nodes: None,
+                    target: None,
+                },
             )),
             primitive(PrimitiveCommand::CaptureScreenshot(
                 CaptureScreenshotCommand {

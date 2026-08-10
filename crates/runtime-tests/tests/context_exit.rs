@@ -258,6 +258,7 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
     cold.submit(RuntimeCommand::Primitive(
         PrimitiveCommand::AccessibilitySnapshot(types::AccessibilitySnapshotCommand {
             max_nodes: Some(256),
+            target: None,
         }),
     ))
     .await;

@@ -237,6 +237,72 @@ async fn page_open_with_url_requires_browser_mutate_before_opening_a_page() {
 }
 
 #[tokio::test]
+async fn control_action_accepts_a_two_field_snapshot_target() {
+    let server = fixture_server(Capability::ALL.to_vec()).await;
+    let created = server
+        .handle_message(request(
+            2,
+            "tools/call",
+            json!({"name":"session_create","arguments":{"profile":"fixture"}}),
+        ))
+        .await
+        .unwrap();
+    let session_id = created["result"]["structuredContent"]["id"].clone();
+    let page_id = json!("00000000-0000-4000-8000-000000000099");
+
+    // role + accessibleName only: ordinal/framePath/shadowPath default. The
+    // call must clear schema validation; the runtime then reports the unknown
+    // page, not a malformed-arguments rejection.
+    let outcome = server
+        .handle_message(request(
+            3,
+            "tools/call",
+            json!({
+                "name":"control_action",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "target":{"role":"button","accessibleName":"Save priority"},
+                    "action":{"kind":"activate"}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    let code = outcome["error"]["data"]["interfaceError"]["code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        code != "invalidRequest" && code != "malformedArguments",
+        "two-field target was rejected at the schema layer: {outcome}"
+    );
+
+    // accessibleName is still required.
+    let rejected = server
+        .handle_message(request(
+            4,
+            "tools/call",
+            json!({
+                "name":"control_action",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "target":{"role":"button"},
+                    "action":{"kind":"activate"}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        rejected["error"]["data"]["reason"],
+        json!("schemaViolation"),
+        "target without accessibleName must be rejected: {rejected}"
+    );
+}
+
+#[tokio::test]
 async fn page_open_closes_the_new_page_when_navigation_returns_an_interface_error() {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority

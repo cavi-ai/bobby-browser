@@ -380,6 +380,8 @@ pub(crate) struct A11ySnapshotArgs {
     #[serde(default)]
     pub(crate) max_nodes: Option<u32>,
     #[serde(default)]
+    pub(crate) target: Option<types::TargetSpec>,
+    #[serde(default)]
     pub(crate) workflow_id: Option<types::WorkflowId>,
 }
 

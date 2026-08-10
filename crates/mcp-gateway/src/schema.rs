@@ -120,7 +120,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
-                "maxNodes": {"type":"integer","minimum":1,"maximum":2048}
+                "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
+                "target": {"type":"object","description":"Scope the tree to this target's subtree (e.g. the form being worked on) instead of the whole page; same shape as wait_for targets"}
             }),
             vec!["sessionId", "pageId"],
         ),
@@ -143,7 +144,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                         "framePath":array(any_value(),8),
                         "shadowPath":array(any_value(),8)
                     },
-                    "required":["role","accessibleName","ordinal","framePath","shadowPath"]
+                    "required":["role","accessibleName"]
                 },
                 "action": {"oneOf":[
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096)},"required":["kind","value"]},
@@ -1022,11 +1023,13 @@ fn advertised_workflow_start_output_schema() -> Value {
             "workflowId":{"$ref":"#/$defs/I"},
             "session":{"oneOf":[{"$ref":"#/$defs/S"},{"type":"null"}]},
             "navigationOutcome":{"$ref":"#/$defs/N"},
+            "reason":{"type":"string"},
+            "detail":{"type":["string","null"],"minLength":1,"maxLength":512},
             "pageClosed":{"type":"boolean"},
             "sessionDeleted":{"type":"boolean"},
             "cleanupErrorCode":{"type":["string","null"],"minLength":1,"maxLength":128}
         },
-        "required":["status","workflowHandle","sessionId","workflowId","session","navigationOutcome","pageClosed","sessionDeleted","cleanupErrorCode"]
+        "required":["status","workflowHandle","sessionId","workflowId","session","navigationOutcome","reason","detail","pageClosed","sessionDeleted","cleanupErrorCode"]
     });
     let page_open_failed = json!({
         "$ref":"#/$defs/F",
@@ -1096,6 +1099,7 @@ fn workflow_start_output_schema() -> Value {
         "session":nullable(json!({"$ref":"#/$defs/SessionState"})),
         "navigationOutcome":navigation_outcome,
         "reason":{"type":"string","enum":["pageOpenFailed","navigationFailed","workflowGenerationChanged","workflowSupervisorLost"]},
+        "detail":nullable(string(1, 512)),
         "pageClosed":{"type":"boolean"},
         "sessionDeleted":{"type":"boolean"},
         "cleanupErrorCode":nullable(string(1, 128))
@@ -2554,6 +2558,11 @@ fn form_control() -> Value {
 /// Must match `types::FormControlTarget`. `framePath`/`shadowPath` (arrays of
 /// `SemanticTargetSegment`) stay generic rather than a `$ref`: rarely populated, and the
 /// same three scalar fields as `role`/`accessibleName`/`ordinal` here.
+/// Must match `types::FormControlTarget`. Only `role`/`accessibleName` are
+/// required: an a11y snapshot's `target` passes verbatim, with ordinal and
+/// the frame/shadow hops defaulting to empty. `framePath`/`shadowPath`
+/// (arrays of `SemanticTargetSegment`) stay generic rather than a `$ref`:
+/// rarely populated, and the same three scalar fields as here.
 fn form_control_target() -> Value {
     object(
         json!({
@@ -2563,13 +2572,7 @@ fn form_control_target() -> Value {
             "framePath":array(json!({"type":"object"}), 8),
             "shadowPath":array(json!({"type":"object"}), 8)
         }),
-        &[
-            "role",
-            "accessibleName",
-            "ordinal",
-            "framePath",
-            "shadowPath",
-        ],
+        &["role", "accessibleName"],
     )
 }
 

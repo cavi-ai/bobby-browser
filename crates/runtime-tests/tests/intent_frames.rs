@@ -919,7 +919,10 @@ async fn a11y_snapshot_exposes_link_urls() {
     );
 
     let outcome = submit(PrimitiveCommand::AccessibilitySnapshot(
-        types::AccessibilitySnapshotCommand { max_nodes: None },
+        types::AccessibilitySnapshotCommand {
+            max_nodes: None,
+            target: None,
+        },
     ))
     .await;
     let CommandOutcome::Completed { evidence, .. } = outcome else {
@@ -963,6 +966,103 @@ async fn a11y_snapshot_exposes_link_urls() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn a11y_snapshot_scopes_to_a_target_subtree() {
+    let probe = documents_page_with_preview("a11y-scoped").await;
+    let snapshot = |target: TargetSpec| {
+        probe.runtime.submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: probe.session_id.clone(),
+            page_id: Some(probe.page_id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::AccessibilitySnapshot(
+                types::AccessibilitySnapshotCommand {
+                    max_nodes: None,
+                    target: Some(target),
+                },
+            )),
+        })
+    };
+    fn flatten_owned(nodes: &[types::AccessibilityNode], out: &mut Vec<types::AccessibilityNode>) {
+        for node in nodes {
+            out.push(node.clone());
+            flatten_owned(&node.children, out);
+        }
+    }
+    let nodes_of = |outcome: CommandOutcome| {
+        let CommandOutcome::Completed { evidence, .. } = outcome else {
+            panic!("scoped snapshot failed: {outcome:?}");
+        };
+        let nodes = evidence
+            .iter()
+            .find_map(|item| match item {
+                types::Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes.clone()),
+                _ => None,
+            })
+            .expect("snapshot evidence");
+        let mut flat = Vec::new();
+        flatten_owned(&nodes, &mut flat);
+        flat
+    };
+
+    // Main-frame scope: the upload form subtree carries its controls and none
+    // of the page chrome around it.
+    let flat = nodes_of(
+        snapshot(TargetSpec {
+            role: Some("form".into()),
+            accessible_name: Some("Upload customer document".into()),
+            ..TargetSpec::default()
+        })
+        .await,
+    );
+    assert!(
+        flat.iter()
+            .any(|node| node.name.as_deref() == Some("Upload document")),
+        "scoped form snapshot lost its submit button: {flat:?}"
+    );
+    assert!(
+        !flat
+            .iter()
+            .any(|node| node.name.as_deref() == Some("CUSTOMER RECORDS")),
+        "scoped snapshot leaked page chrome: {flat:?}"
+    );
+
+    // In-frame scope: the preview document's main element carries the confirm
+    // button without the outer page.
+    let flat = nodes_of(
+        snapshot(TargetSpec {
+            role: Some("main".into()),
+            frame_path: vec![Box::new(TargetSpec {
+                css: Some("#document-preview".into()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        })
+        .await,
+    );
+    assert!(
+        flat.iter()
+            .any(|node| node.name.as_deref() == Some("Confirm document preview")),
+        "in-frame scoped snapshot lost the confirm button: {flat:?}"
+    );
+    assert!(
+        !flat
+            .iter()
+            .any(|node| node.name.as_deref() == Some("Upload document")),
+        "in-frame scoped snapshot leaked the outer page: {flat:?}"
+    );
+    probe
+        .runtime
+        .sessions
+        .delete(&probe.session_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn a11y_snapshot_descends_into_iframes() {
     let probe = documents_page_with_preview("a11y-frames").await;
     let evidence = probe
@@ -976,7 +1076,10 @@ async fn a11y_snapshot_descends_into_iframes() {
             page_id: Some(probe.page_id.clone()),
             deadline: Utc::now() + Duration::seconds(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::AccessibilitySnapshot(
-                types::AccessibilitySnapshotCommand { max_nodes: None },
+                types::AccessibilitySnapshotCommand {
+                    max_nodes: None,
+                    target: None,
+                },
             )),
         })
         .await;

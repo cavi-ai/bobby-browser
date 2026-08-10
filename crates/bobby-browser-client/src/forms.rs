@@ -36,8 +36,11 @@ pub struct SemanticTargetSegment {
 pub struct FormControlTarget {
     pub role: String,
     pub accessible_name: String,
+    #[serde(default)]
     pub ordinal: Option<usize>,
+    #[serde(default)]
     pub frame_path: Vec<SemanticTargetSegment>,
+    #[serde(default)]
     pub shadow_path: Vec<SemanticTargetSegment>,
 }
 

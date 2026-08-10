@@ -146,7 +146,10 @@ async fn run(runtime: &PageRuntime, envelope: CommandEnvelope) {
 }
 
 fn snapshot() -> PrimitiveCommand {
-    PrimitiveCommand::AccessibilitySnapshot(AccessibilitySnapshotCommand { max_nodes: None })
+    PrimitiveCommand::AccessibilitySnapshot(AccessibilitySnapshotCommand {
+        max_nodes: None,
+        target: None,
+    })
 }
 
 fn click() -> PrimitiveCommand {

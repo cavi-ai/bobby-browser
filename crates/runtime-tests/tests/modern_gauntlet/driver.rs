@@ -263,6 +263,7 @@ impl ModernRuntime {
         self.submit(PrimitiveCommand::AccessibilitySnapshot(
             AccessibilitySnapshotCommand {
                 max_nodes: Some(256),
+                target: None,
             },
         ))
         .await
@@ -646,6 +647,7 @@ impl ModernRuntime {
             }),
             PrimitiveCommand::AccessibilitySnapshot(AccessibilitySnapshotCommand {
                 max_nodes: Some(512),
+                target: None,
             }),
             PrimitiveCommand::Inspect(InspectCommand {
                 selector: Some("body".into()),
@@ -675,6 +677,7 @@ impl ModernRuntime {
             }),
             PrimitiveCommand::AccessibilitySnapshot(AccessibilitySnapshotCommand {
                 max_nodes: Some(512),
+                target: None,
             }),
             PrimitiveCommand::Inspect(InspectCommand {
                 selector: Some("body".into()),
