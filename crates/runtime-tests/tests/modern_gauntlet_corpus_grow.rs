@@ -12,9 +12,7 @@ mod modern_gauntlet;
 
 use modern_gauntlet::collector::{CorpusCollector, GroundTruth};
 use modern_gauntlet::driver::{Journey, ModernRuntime};
-use modern_gauntlet::scenario::{
-    GauntletLevel, LevelTwoTrapPlan, ScenarioConfig, ScenarioServer,
-};
+use modern_gauntlet::scenario::{GauntletLevel, LevelTwoTrapPlan, ScenarioConfig, ScenarioServer};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -124,10 +122,7 @@ async fn grow_documents_traps_corpus() -> TestResult<()> {
                     )
                     .await?;
                 runtime
-                    .click(
-                        "section[aria-label='Workflow interruption'] button",
-                        false,
-                    )
+                    .click("section[aria-label='Workflow interruption'] button", false)
                     .await?;
             }
         }
@@ -221,10 +216,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
                     )
                     .await?;
                 runtime
-                    .click(
-                        "section[aria-label='Workflow interruption'] button",
-                        false,
-                    )
+                    .click("section[aria-label='Workflow interruption'] button", false)
                     .await?;
             }
         }
@@ -261,7 +253,9 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
         runtime
             .click("form[aria-label='Customer search'] button", false)
             .await?;
-        runtime.wait_visible("a[href='/customers/cus_atlas']").await?;
+        runtime
+            .wait_visible("a[href='/customers/cus_atlas']")
+            .await?;
 
         collector
             .capture(
@@ -275,7 +269,9 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
                 &step("open_customer"),
             )
             .await?;
-        runtime.click("a[href='/customers/cus_atlas']", false).await?;
+        runtime
+            .click("a[href='/customers/cus_atlas']", false)
+            .await?;
         runtime
             .wait_visible("select[aria-label='Customer priority']")
             .await?;
