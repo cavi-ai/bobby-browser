@@ -91,11 +91,21 @@ Wider capabilities when required:
 bobby openshell provision --sandbox demo-1 --capabilities-preset agent
 ```
 
+`rotate` is the same operation as `provision`: it revokes the prior principal
+and mints a fresh one. `list` and `status --sandbox <id>` report the locally
+recorded sandboxes from non-secret `.status.json` sidecars — neither prints a
+token.
+
 When the sandbox ends:
 
 ```bash
 bobby openshell revoke --sandbox demo-1
 ```
+
+The secrets root is `<os-config-dir>/bobby-browser/openshell/` —
+`~/.config/…` on Linux, `~/Library/Application Support/…` on macOS.
+`BOBBY_OPENSHELL_SECRETS_DIR` overrides it for tests and alternate secret roots;
+it is process-global, so set it for the whole command rather than per-sandbox.
 
 ## Shared `/v1` client behavior
 

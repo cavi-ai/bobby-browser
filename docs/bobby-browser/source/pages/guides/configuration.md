@@ -134,6 +134,13 @@ auth = "advertised"
 | Field | Default | Meaning |
 |---|---|---|
 | `prefill` | `false` | Lazy batch prefill: one screenshot proposes for every remaining stuck field in a form, cached for the page's generation |
+| `corpus_dir` | unset | When set, every vision escalation — executed or rejected — appends one JSONL record to `<corpus_dir>/vision-corpus.jsonl`: the screenshot, the exact candidate list sent to the model, the proposal, the terminal outcome, and, for verified clicks, the resolved target index. Unset writes nothing |
+| `collect_training_data` | `false` | Capture proxy request/proposal pairs for the local training pipeline. Independent of `corpus_dir` |
+| `training_data_dir` | `vision-training-data` | Destination for `collect_training_data` captures |
+
+`corpus_dir` and `training_data_dir` write page screenshots and candidate text
+to disk. Point them at a path you control, and treat their contents as page
+data with the same sensitivity as the pages Bobby visited.
 
 Supported auth paths are `advertised`, `oauth-authorization-code`,
 `oauth-device-code`, `environment`, `existing-session`, and `none`. Bobby maps
