@@ -16,6 +16,11 @@ use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+// Each test launches five real browser runtimes. Running all five collectors
+// concurrently exhausts the local browser worker pool and cancels in-flight
+// oneshot replies, so serialize this one heavyweight test binary.
+static CORPUS_GROW_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Runs per journey; override with BOBBY_CORPUS_RUNS_PER_JOURNEY for
 /// bigger collection passes (e.g. 10 -> ~200 records).
 fn runs_per_journey() -> usize {
@@ -73,6 +78,7 @@ where
 
 #[tokio::test]
 async fn grow_customer_update_corpus() -> TestResult<()> {
+    let _guard = CORPUS_GROW_LOCK.lock().await;
     let count = grow_journey(
         "customer-update",
         async |runtime, collector, _server, run_idx| {
@@ -172,6 +178,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
 
 #[tokio::test]
 async fn grow_onboarding_corpus() -> TestResult<()> {
+    let _guard = CORPUS_GROW_LOCK.lock().await;
     let count = grow_journey(
         "onboarding",
         async |runtime, collector, _server, run_idx| {
@@ -307,6 +314,7 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
 
 #[tokio::test]
 async fn grow_authorization_corpus() -> TestResult<()> {
+    let _guard = CORPUS_GROW_LOCK.lock().await;
     let count = grow_journey(
         "authorization",
         async |runtime, collector, _server, run_idx| {
@@ -360,6 +368,7 @@ async fn grow_authorization_corpus() -> TestResult<()> {
 
 #[tokio::test]
 async fn grow_documents_corpus() -> TestResult<()> {
+    let _guard = CORPUS_GROW_LOCK.lock().await;
     let count = grow_journey("documents", async |runtime, collector, _server, run_idx| {
         let step = |name: &str| format!("{name}_r{run_idx}");
         let fixture = runtime.fixture_path("approved-upload.txt");
@@ -413,6 +422,7 @@ async fn grow_documents_corpus() -> TestResult<()> {
 
 #[tokio::test]
 async fn grow_report_recovery_corpus() -> TestResult<()> {
+    let _guard = CORPUS_GROW_LOCK.lock().await;
     let count = grow_journey(
         "report-recovery",
         async |runtime, collector, server, run_idx| {
