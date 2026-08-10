@@ -190,6 +190,7 @@ pub struct ManagedVisionProxy {
 impl ManagedVisionProxy {
     pub fn spawn_from_current_exe(
         decision: &VisionChildDecision,
+        provider_name: &str,
         profile: &VisionProviderConfig,
         token_env: &str,
         collect_training_data: bool,
@@ -229,6 +230,7 @@ impl ManagedVisionProxy {
         configure_vision_proxy_command(
             &mut cmd,
             decision,
+            provider_name,
             profile,
             collect_training_data,
             training_data_dir,
@@ -252,9 +254,10 @@ impl ManagedVisionProxy {
     }
 }
 
-fn configure_vision_proxy_command(
+pub(crate) fn configure_vision_proxy_command(
     cmd: &mut Command,
     decision: &VisionChildDecision,
+    provider_name: &str,
     profile: &VisionProviderConfig,
     collect_training_data: bool,
     training_data_dir: &Path,
@@ -264,10 +267,8 @@ fn configure_vision_proxy_command(
         .arg(decision.bind.to_string())
         .arg("--path")
         .arg(&decision.path);
-    let is_ollama = profile.base_url.contains("127.0.0.1:11434")
-        || profile.base_url.contains("localhost:11434");
-    let is_mlx =
-        profile.base_url.contains("127.0.0.1:9101") || profile.base_url.contains("localhost:9101");
+    let is_ollama = provider_name.eq_ignore_ascii_case("ollama");
+    let is_mlx = provider_name.eq_ignore_ascii_case("mlx");
     if is_ollama {
         cmd.arg("--upstream").arg("ollama");
     } else if is_mlx {
@@ -329,6 +330,7 @@ mod tests {
         configure_vision_proxy_command(
             &mut command,
             &decision,
+            "mlx",
             &profile,
             true,
             Path::new("training"),
