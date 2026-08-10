@@ -272,7 +272,7 @@ impl RuntimeService {
         let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> =
             structured_extractor.or_else(|| nodes.http_structured_extractor());
         let vision_assist_present = vision_assist.is_some();
-        let provider_present = provider.is_some() || !nodes.is_empty();
+        let provider_present = vision_assist_present || provider.is_some() || !nodes.is_empty();
         if let Some(assist) = vision_assist {
             adaptive = adaptive.with_vision_assist(assist);
         }
