@@ -174,7 +174,7 @@ impl ModernRuntime {
             },
             interface: config::InterfaceConfig::default(),
             observability: config::ObservabilityConfig::default(),
-            vision: config::VisionConfig::default(),
+            vision: gauntlet_vision_config(),
             context: Default::default(),
             nodes: Default::default(),
         };
@@ -184,7 +184,7 @@ impl ModernRuntime {
             .create_session(CreateSessionRequest {
                 profile: profile.clone(),
                 proxy: None,
-                execution_policy: Default::default(),
+                execution_policy: gauntlet_execution_policy(),
             })
             .await?;
         let page = runtime
@@ -748,6 +748,34 @@ fn chrome_executable() -> PathBuf {
         .unwrap_or_else(|| {
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         })
+}
+
+/// Env-gated vision config for collection runs (mirrors the Level 2
+/// `BOBBY_GAUNTLET_*` pattern). Set `BOBBY_GAUNTLET_VISION_ENDPOINT` to the
+/// loopback proxy URL and `BOBBY_GAUNTLET_VISION_TOKEN_ENV` to the env var
+/// holding its bearer; the harness then runs with vision assist enabled and
+/// every stuck escalation flows through the configured provider.
+fn gauntlet_vision_config() -> config::VisionConfig {
+    match std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT") {
+        Ok(endpoint) if !endpoint.trim().is_empty() => config::VisionConfig {
+            endpoint_url: Some(endpoint),
+            token_env: Some(
+                std::env::var("BOBBY_GAUNTLET_VISION_TOKEN_ENV")
+                    .unwrap_or_else(|_| "BOBBY_VISION_TOKEN".to_string()),
+            ),
+            ..config::VisionConfig::default()
+        },
+        _ => config::VisionConfig::default(),
+    }
+}
+
+fn gauntlet_execution_policy() -> types::ExecutionPolicy {
+    let vision_assist = std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT")
+        .is_ok_and(|endpoint| !endpoint.trim().is_empty());
+    types::ExecutionPolicy {
+        vision_assist,
+        ..Default::default()
+    }
 }
 
 fn runtime_config(

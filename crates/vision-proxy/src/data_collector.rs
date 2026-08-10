@@ -147,6 +147,7 @@ impl VisionTrainingExample {
 pub struct VisionDataCollector {
     config: DataCollectorConfig,
     buffer: Arc<Mutex<Vec<VisionTrainingExample>>>,
+    last_flush: Mutex<Option<std::time::Instant>>,
 }
 
 impl VisionDataCollector {
@@ -159,6 +160,7 @@ impl VisionDataCollector {
         Self {
             config,
             buffer: Arc::new(Mutex::new(Vec::new())),
+            last_flush: Mutex::new(None),
         }
     }
 
@@ -200,9 +202,12 @@ impl VisionDataCollector {
 
         let mut buffer = self.buffer.lock().unwrap();
         buffer.push(example);
-
-        // Flush if buffer is large enough
-        if buffer.len() >= 100 {
+        let should_flush = buffer.len() >= 100
+            || self.last_flush.lock().unwrap().is_none_or(|last| {
+                last.elapsed().as_millis() as u64 >= self.config.flush_interval_ms
+            });
+        if should_flush {
+            *self.last_flush.lock().unwrap() = Some(std::time::Instant::now());
             drop(buffer);
             self.flush();
         }

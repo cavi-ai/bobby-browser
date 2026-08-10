@@ -163,7 +163,8 @@ class VisionProvider(ABC):
 
     @staticmethod
     def parse_json_content(content: str) -> dict:
-        """Extract a JSON object from model output, stripping markdown fences."""
+        """Extract a JSON object from model output, stripping markdown fences
+        and tolerating trailing junk after the closing brace."""
         text = content.strip()
         if text.startswith("```json"):
             text = text[7:]
@@ -176,11 +177,39 @@ class VisionProvider(ABC):
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                return json.loads(text[start:end])
-            raise
+            pass
+
+        start = text.find("{")
+        if start < 0:
+            raise ValueError("no JSON object in model output")
+
+        # Depth-aware scan for the matching closing brace; ignores braces
+        # inside string literals.
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                if in_string:
+                    escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(text[start : i + 1])
+
+        raise ValueError("unbalanced braces in model output")
 
     @classmethod
     def normalize_action(cls, action: Any) -> dict:
