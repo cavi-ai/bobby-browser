@@ -78,6 +78,33 @@ async fn post(app: &mut Router, auth: Option<&str>, body: &str) -> (StatusCode, 
 }
 
 #[tokio::test]
+async fn get_vision_identifies_the_bobby_service_without_calling_upstream() {
+    let upstream = Arc::new(MockUpstream::new(
+        ProposeResponse {
+            confidence: 0.9,
+            action: VisionAction::Click { x: 1.0, y: 2.0 },
+        },
+        ExtractResponse {
+            value: serde_json::json!("ok"),
+        },
+    ));
+    let response = test_app(upstream.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/vision")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("x-bobby-vision").unwrap(), "ready");
+    assert_eq!(upstream.propose_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(upstream.extract_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn missing_bearer_returns_401_without_calling_upstream() {
     let upstream = Arc::new(MockUpstream::new(
         ProposeResponse {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::Value;
 
@@ -147,10 +147,14 @@ fn validate_error_message(error: ValidateError) -> String {
     error.to_string()
 }
 
+async fn handle_status() -> impl IntoResponse {
+    ([("x-bobby-vision", "ready")], StatusCode::OK)
+}
+
 pub fn router(state: AppState) -> Router {
     let path = state.path.clone();
     Router::new()
-        .route(&path, post(handle_vision))
+        .route(&path, get(handle_status).post(handle_vision))
         .with_state(state)
 }
 

@@ -578,7 +578,10 @@ const DOCTOR_PROBE_PNG: &[u8] = &[
 /// One propose round-trip against the registry-resolved HTTP vision node.
 /// Runs on its own thread+runtime because `run_doctor` is sync inside an
 /// async process.
-fn check_vision_propose_probe(config: &AppConfig) -> Option<DoctorCheck> {
+fn check_vision_propose_probe(
+    config: &AppConfig,
+    bootstrap_path: Option<&Path>,
+) -> Option<DoctorCheck> {
     if matches!(config.vision.backend, Some(config::VisionBackendKind::Acp)) {
         return None;
     }
@@ -611,9 +614,7 @@ fn check_vision_propose_probe(config: &AppConfig) -> Option<DoctorCheck> {
         .as_ref()
         .and_then(|name| std::env::var(name).ok())
         .or_else(|| {
-            bootstrap_local::default_bootstrap_path()
-                .ok()
-                .and_then(|path| crate::vision_token::resolve_vision_token(&path).ok())
+            bootstrap_path.and_then(|path| crate::vision_token::resolve_vision_token(path).ok())
         });
     let timeout = std::time::Duration::from_millis(node.timeout_ms.max(1_000));
     let probe = std::thread::spawn(move || {
@@ -856,6 +857,7 @@ pub(crate) fn run_doctor(
     let mut report = DoctorReport::default();
 
     let config_path = resolve_config_path(config_cli);
+    let bootstrap_path = resolve_bootstrap_path(bootstrap_cli.clone()).ok();
     let config = match AppConfig::load(&config_path) {
         Ok(config) => {
             let source = if config_path.exists() {
@@ -888,7 +890,7 @@ pub(crate) fn run_doctor(
         if let Some(check) = check_vision_upstream_key(&config.vision) {
             push_doctor_check(&mut report, check);
         }
-        if let Some(check) = check_vision_propose_probe(config) {
+        if let Some(check) = check_vision_propose_probe(config, bootstrap_path.as_deref()) {
             push_doctor_check(&mut report, check);
         }
 
@@ -907,10 +909,10 @@ pub(crate) fn run_doctor(
                         let available = std::env::var(env_name)
                             .ok()
                             .is_some_and(|value| !value.is_empty())
-                            || bootstrap_local::default_bootstrap_path()
-                                .ok()
+                            || bootstrap_path
+                                .as_deref()
                                 .and_then(|path| {
-                                    crate::vision_token::resolve_vision_token(&path).ok()
+                                    crate::vision_token::resolve_vision_token(path).ok()
                                 })
                                 .is_some();
                         if available {
@@ -1260,8 +1262,7 @@ pub(crate) fn run_doctor(
         if broker::StartupCredential::from_env().is_ok() {
             Some(std::collections::BTreeMap::new())
         } else {
-            resolve_bootstrap_path(bootstrap_cli.clone())
-                .ok()
+            bootstrap_path
                 .filter(|path| path.exists())
                 .and_then(|path| bootstrap_local::load_bootstrap_env_map(&path).ok())
         };
@@ -1269,21 +1270,15 @@ pub(crate) fn run_doctor(
     // `[mcp] startup_toolset` (and the rest of the file) apply to handshake —
     // without this, doctor always probes explore defaults while gauntlet/agent
     // hosts that set BOBBY_BROWSER_CONFIG see a different surface.
-    let firefox_enrollment_missing = selection
-        .as_ref()
-        .is_some_and(|selection| selection.firefox.is_empty());
-    let handshake_env = (!firefox_enrollment_missing)
-        .then_some(handshake_env)
-        .flatten()
-        .map(|mut env| {
-            if config_path.exists() {
-                env.insert(
-                    "BOBBY_BROWSER_CONFIG".into(),
-                    config_path.display().to_string(),
-                );
-            }
-            env
-        });
+    let handshake_env = handshake_env.map(|mut env| {
+        if config_path.exists() {
+            env.insert(
+                "BOBBY_BROWSER_CONFIG".into(),
+                config_path.display().to_string(),
+            );
+        }
+        env
+    });
     match handshake_env {
         Some(env) => match onboarding::mcp_handshake(&env) {
             Ok(handshake) => {
@@ -1314,12 +1309,6 @@ pub(crate) fn run_doctor(
                 report.record(handshake_error_status(&message), "mcp-handshake", message);
             }
         },
-        None if firefox_enrollment_missing => {
-            report.warn(
-                "mcp-handshake",
-                "deferred until Firefox is paired; run `bobby doctor` after enrollment".to_string(),
-            );
-        }
         None => {
             report.warn(
                 "mcp-handshake",
