@@ -16,7 +16,15 @@ use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const RUNS_PER_JOURNEY: usize = 5;
+/// Runs per journey; override with BOBBY_CORPUS_RUNS_PER_JOURNEY for
+/// bigger collection passes (e.g. 10 -> ~200 records).
+fn runs_per_journey() -> usize {
+    std::env::var("BOBBY_CORPUS_RUNS_PER_JOURNEY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(5)
+}
 
 fn corpus_path(journey: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +42,7 @@ where
     ) -> TestResult<ModernRuntime>,
 {
     let mut collector = CorpusCollector::new();
-    for run_idx in 0..RUNS_PER_JOURNEY {
+    for run_idx in 0..runs_per_journey() {
         let seed = format!("{journey}-grow-{run_idx}");
         let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
         let runtime = ModernRuntime::launch(
@@ -55,9 +63,10 @@ where
     let path = corpus_path(journey);
     collector.save(&path)?;
     println!(
-        "wrote {} examples to {} ({RUNS_PER_JOURNEY} runs)",
+        "wrote {} examples to {} ({} runs)",
         collector.len(),
-        path.display()
+        path.display(),
+        runs_per_journey()
     );
     Ok(collector.len())
 }
@@ -157,7 +166,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 5 * RUNS_PER_JOURNEY);
+    assert_eq!(count, 5 * runs_per_journey());
     Ok(())
 }
 
@@ -292,7 +301,7 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 9 * RUNS_PER_JOURNEY);
+    assert_eq!(count, 9 * runs_per_journey());
     Ok(())
 }
 
@@ -345,7 +354,7 @@ async fn grow_authorization_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 2 * RUNS_PER_JOURNEY);
+    assert_eq!(count, 2 * runs_per_journey());
     Ok(())
 }
 
@@ -398,7 +407,7 @@ async fn grow_documents_corpus() -> TestResult<()> {
         Ok(runtime)
     })
     .await?;
-    assert_eq!(count, 2 * RUNS_PER_JOURNEY);
+    assert_eq!(count, 2 * runs_per_journey());
     Ok(())
 }
 
@@ -451,6 +460,6 @@ async fn grow_report_recovery_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 2 * RUNS_PER_JOURNEY);
+    assert_eq!(count, 2 * runs_per_journey());
     Ok(())
 }
