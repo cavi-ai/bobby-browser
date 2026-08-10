@@ -43,12 +43,21 @@ pub struct ProposeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum VisionAction {
-    Click { x: f64, y: f64 },
-    TypeText { text: String },
-    ExtractValue { value: String },
+    Click {
+        x: f64,
+        y: f64,
+    },
+    TypeText {
+        text: String,
+    },
+    ExtractValue {
+        value: String,
+    },
     /// Click the candidate at this index in the prompt's candidate list;
     /// the runtime resolves the element and owns spatial grounding.
-    ClickCandidate { index: u32 },
+    ClickCandidate {
+        index: u32,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]

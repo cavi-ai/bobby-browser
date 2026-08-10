@@ -146,11 +146,7 @@ async fn open_fixture(runtime: &RuntimeService, url: &str) -> (SessionId, PageId
 /// Reopen a page in an EXISTING session after the current page dies — the
 /// sweep submits against the original session id, so a fresh session's page
 /// would be rejected with "page does not belong to session".
-async fn reopen_page(
-    runtime: &RuntimeService,
-    session_id: &SessionId,
-    url: &str,
-) -> PageId {
+async fn reopen_page(runtime: &RuntimeService, session_id: &SessionId, url: &str) -> PageId {
     let page = runtime
         .open_page(OpenPageRequest {
             session_id: session_id.clone(),
@@ -383,5 +379,8 @@ async fn v1_positive_control_picks_the_matching_candidate() {
     let verified = evidence.iter().any(|item| {
         matches!(item, Evidence::IntentExecution { record } if record.verification == "visionFallback")
     });
-    assert!(verified, "expected visionFallback verification in {evidence:?}");
+    assert!(
+        verified,
+        "expected visionFallback verification in {evidence:?}"
+    );
 }
