@@ -2349,6 +2349,14 @@ fn record_escalation(
     let (Some(corpus), Some((image_b64, context_url, candidates))) = (corpus, inputs) else {
         return;
     };
+    // An empty candidate window is not selection signal: the model was asked
+    // to pick from nothing, so any outcome — especially a floor rejection —
+    // says nothing about its judgment. Recording it would mislabel backend
+    // or gather failure as an ambiguous-negative and poison the corpus.
+    if candidates.is_empty() {
+        tracing::info!(intent = intent_kind, stage, "vision.corpus_skipped_empty_candidates");
+        return;
+    }
     let resolved_element = resolved.map(|(role, name)| crate::ResolvedElement { role, name });
     let target_index = resolved_element.as_ref().and_then(|element| {
         crate::corpus::match_resolved(candidates, &(element.role.clone(), element.name.clone()))

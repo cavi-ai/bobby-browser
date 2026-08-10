@@ -143,6 +143,42 @@ async fn open_fixture(runtime: &RuntimeService, url: &str) -> (SessionId, PageId
     (session.id, page.id)
 }
 
+/// Reopen a page in an EXISTING session after the current page dies — the
+/// sweep submits against the original session id, so a fresh session's page
+/// would be rejected with "page does not belong to session".
+async fn reopen_page(
+    runtime: &RuntimeService,
+    session_id: &SessionId,
+    url: &str,
+) -> PageId {
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    match runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session_id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
+                url: url.into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            })),
+        })
+        .await
+    {
+        CommandOutcome::Completed { .. } => page.id,
+        outcome => panic!("reopen navigate failed: {outcome:?}"),
+    }
+}
+
 async fn submit_intent(
     runtime: &RuntimeService,
     session_id: &SessionId,
@@ -216,10 +252,13 @@ fn vague_locate(purpose: &str) -> IntentCommand {
 #[tokio::test]
 #[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn collect_stuck_form_proposals() {
-    if vision_endpoint().is_none() {
-        eprintln!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; skipping collection");
-        return;
-    }
+    // Explicitly run without the endpoint must fail, not pass green with
+    // zero rows collected. A collection run that produced nothing is a
+    // failure, not a skip.
+    let endpoint = vision_endpoint().unwrap_or_else(|| {
+        panic!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; this harness collects nothing without it")
+    });
+    let _ = endpoint;
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
     let config = base_config(root.path());
@@ -256,8 +295,7 @@ async fn collect_stuck_form_proposals() {
 #[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn collect_vague_locate_proposals() {
     if vision_endpoint().is_none() {
-        eprintln!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; skipping collection");
-        return;
+        panic!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; this harness collects nothing without it");
     }
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
@@ -266,8 +304,9 @@ async fn collect_vague_locate_proposals() {
     let runtime = RuntimeService::build_with_vision_assist(&config, assist)
         .await
         .unwrap();
-    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+    let (session, mut page) = open_fixture(&runtime, &fixture.base_url()).await;
 
+    let mut attempted = 0usize;
     for purpose in [
         // Genuinely ambiguous on this page: no model should answer these
         // confidently, so every proposal lands below the floor and records
@@ -283,6 +322,7 @@ async fn collect_vague_locate_proposals() {
         "the widget in the corner",
         "the thing that looks like a button",
     ] {
+        attempted += 1;
         let outcome = submit_intent(&runtime, &session, &page, vague_locate(purpose)).await;
         match outcome {
             CommandOutcome::Completed { evidence, .. } => {
@@ -291,8 +331,57 @@ async fn collect_vague_locate_proposals() {
             }
             CommandOutcome::Failed { error, .. } => {
                 eprintln!("{purpose}: failed as {error:?}");
+                // A dead page ends the sweep silently: reopen in the same
+                // session so later purposes still reach the model.
+                if error.message.contains("page is not open") {
+                    eprintln!("page died; reopening");
+                    page = reopen_page(&runtime, &session, &fixture.base_url()).await;
+                }
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
+    // A run that never reached the model is not evidence of anything.
+    assert!(attempted >= 10, "sweep attempted {attempted} purposes");
+}
+
+/// Positive control: the purpose matches a candidate that the deterministic
+/// path cannot resolve (role hint says link, the page has buttons), so the
+/// engine escalates and the provider must pick the right element.
+#[tokio::test]
+#[ignore = "requires installed Chrome and a running vision-proxy"]
+async fn v1_positive_control_picks_the_matching_candidate() {
+    if vision_endpoint().is_none() {
+        panic!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; this harness collects nothing without it");
+    }
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let config = base_config(root.path());
+    let assist = real_http_assist();
+    let runtime = RuntimeService::build_with_vision_assist(&config, assist)
+        .await
+        .unwrap();
+    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+
+    // Purpose embeds the exact candidate name (the phrasing the adapter was
+    // trained on) but the near-miss path is forced by naming a non-button
+    // kind of control: no exact resolution, so the provider must pick
+    // "Continue" from the near-miss list.
+    let intent = IntentCommand::Locate(LocateIntent {
+        purpose: "Click the Continue button".into(),
+        hints: IntentHints::default(),
+    });
+    let outcome = submit_intent(&runtime, &session, &page, intent).await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("positive control did not complete: {outcome:?}");
+    };
+    let paths = vision_paths(&evidence);
+    assert!(
+        paths.contains(&IntentResolutionPath::VisionFallback),
+        "expected vision fallback resolution: {paths:?}"
+    );
+    let verified = evidence.iter().any(|item| {
+        matches!(item, Evidence::IntentExecution { record } if record.verification == "visionFallback")
+    });
+    assert!(verified, "expected visionFallback verification in {evidence:?}");
 }
