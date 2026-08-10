@@ -10,7 +10,7 @@
   },
   "devDependencies": {
     "@types/node": "26.1.2",
-    "@types/jsdom": "28.0.3",
+    "@types/jsdom": "30.0.0",
     "esbuild": "0.28.1",
     "jsdom": "30.0.1",
     "tsx": "4.23.1",
