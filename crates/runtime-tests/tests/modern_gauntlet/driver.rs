@@ -65,7 +65,35 @@ impl fmt::Display for HarnessError {
 
 impl std::error::Error for HarnessError {}
 
+async fn acquire_live_browser_lock() -> TestResult<std::fs::File> {
+    let lock_path = repository_root().join("target/modern-gauntlet-browser.lock");
+    tokio::task::spawn_blocking(move || -> TestResult<std::fs::File> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(&lock_path)?;
+        // Separate Cargo test binaries share the same installed browser. Hold
+        // one advisory lock for the runtime lifetime so one test cannot detach
+        // another test's target while the workspace suite runs concurrently.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(file)
+    })
+    .await?
+}
+
 pub struct ModernRuntime {
+    _browser_lock: std::fs::File,
     runtime: RuntimeService,
     session_id: SessionId,
     page_id: PageId,
@@ -125,6 +153,7 @@ impl ModernRuntime {
         if !chrome.is_file() {
             return Err(Box::new(HarnessError::MissingBrowser { path: chrome }));
         }
+        let browser_lock = acquire_live_browser_lock().await?;
         let root = repository_root()
             .join("target/modern-gauntlet-artifacts/runtime")
             .join(format!(
@@ -193,6 +222,7 @@ impl ModernRuntime {
             })
             .await?;
         Ok(Self {
+            _browser_lock: browser_lock,
             runtime,
             session_id: session.id,
             page_id: page.id,
@@ -559,6 +589,7 @@ impl ModernRuntime {
         application_url: &str,
     ) -> TestResult<(Self, RecoveryDecision)> {
         let Self {
+            _browser_lock,
             runtime,
             root,
             journal_path,
@@ -592,6 +623,7 @@ impl ModernRuntime {
             })
             .await?;
         let replacement = Self {
+            _browser_lock,
             runtime,
             session_id: session.id,
             page_id: page.id,
