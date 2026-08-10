@@ -124,8 +124,10 @@ class VisionProvider(ABC):
 
     PROPOSE_SYSTEM = (
         "You are a vision assistant for a browser automation agent. "
-        "Analyze the screenshot and return ONLY valid JSON matching this schema: "
-        '{"confidence": 0.0..1.0, "action": {"kind": "click" | "typeText" | "extractValue", ...}}. '
+        "Analyze the screenshot and return ONLY valid JSON matching one of these shapes:\n"
+        '{"confidence": 0.0..1.0, "action": {"kind": "click", "x": number, "y": number}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "typeText", "text": string}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "extractValue", "value": string}}\n'
         "Click coordinates are CSS pixels relative to the screenshot image. "
         "Do not include markdown fences, comments, or any text outside the JSON object."
     )
@@ -221,6 +223,12 @@ class VisionProvider(ABC):
             action = {"kind": "click"}
 
         kind = action.get("kind", "click")
+        if kind in ("terminate", "abort", "refuse", "none", "noop"):
+            # Model abstained: emit a zero-coordinate click; the low
+            # confidence (prefilled 0.0) fails the runtime floor, which is
+            # the correct abstention path.
+            kind = "click"
+            action = {"kind": kind, "x": 0.0, "y": 0.0}
         if kind in ("left_click", "leftClick", "mouse_click", "press"):
             kind = "click"
         elif kind in ("type", "inputText", "enterText", "text"):
