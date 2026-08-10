@@ -269,9 +269,19 @@ async fn collect_vague_locate_proposals() {
     let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
 
     for purpose in [
+        // Genuinely ambiguous on this page: no model should answer these
+        // confidently, so every proposal lands below the floor and records
+        // an abstain-labeled negative (target_index=None -> v1 "-1").
         "the button that moves forward",
         "the place to type a name",
         "the control for continuing",
+        "the thing that submits",
+        "where the email goes",
+        "the link to the next page",
+        "the option everyone picks",
+        "the field at the bottom",
+        "the widget in the corner",
+        "the thing that looks like a button",
     ] {
         let outcome = submit_intent(&runtime, &session, &page, vague_locate(purpose)).await;
         match outcome {
