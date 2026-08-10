@@ -142,7 +142,7 @@ fn resolve_non_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("--yes requires --provider (openai|ollama|lmstudio|custom)"))?;
+        .ok_or_else(|| anyhow!("--yes requires --provider (openai|ollama|lmstudio|mlx|custom)"))?;
 
     if provider.eq_ignore_ascii_case("custom") {
         let base_url = opts
@@ -173,7 +173,7 @@ fn resolve_non_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
     }
 
     Err(anyhow!(
-        "unknown provider {provider:?}; expected openai, ollama, lmstudio, or custom"
+        "unknown provider {provider:?}; expected openai, ollama, lmstudio, mlx, or custom"
     ))
 }
 
@@ -258,7 +258,7 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
             return Ok(resolved);
         }
         anyhow::bail!(
-            "unknown provider {provider:?}; expected openai, ollama, lmstudio, or custom"
+            "unknown provider {provider:?}; expected openai, ollama, lmstudio, mlx, or custom"
         );
     }
 
@@ -266,8 +266,9 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
     println!("  1) openai   — OpenAI cloud API");
     println!("  2) ollama   — local Ollama");
     println!("  3) lmstudio — local LM Studio");
-    println!("  4) custom   — other OpenAI-compatible endpoint");
-    let choice = prompt_line("Choice [1-4]", Some("3"))?;
+    println!("  4) mlx      — local MLX vision (canonical server, Apple Silicon)");
+    println!("  5) custom   — other OpenAI-compatible endpoint");
+    let choice = prompt_line("Choice [1-5]", Some("4"))?;
     let resolved = match choice.trim() {
         "1" | "openai" => preset("openai")
             .map(|(name, profile)| ResolvedProfile {
@@ -287,7 +288,13 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
                 profile,
             })
             .ok_or_else(|| anyhow!("lmstudio preset unavailable"))?,
-        "4" | "custom" => ResolvedProfile {
+        "4" | "mlx" => preset("mlx")
+            .map(|(name, profile)| ResolvedProfile {
+                provider_name: name,
+                profile,
+            })
+            .ok_or_else(|| anyhow!("mlx preset unavailable"))?,
+        "5" | "custom" => ResolvedProfile {
             provider_name: prompt_line("Provider name", Some("custom"))?,
             profile: VisionProviderConfig {
                 base_url: prompt_line("Base URL", None)?,
@@ -317,6 +324,11 @@ fn preset(name: &str) -> Option<(String, VisionProviderConfig)> {
         "lmstudio" => VisionProviderConfig {
             base_url: "http://127.0.0.1:1234/v1".into(),
             model: "local-model".into(),
+            api_key_env: None,
+        },
+        "mlx" => VisionProviderConfig {
+            base_url: "http://127.0.0.1:9101".into(),
+            model: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit".into(),
             api_key_env: None,
         },
         _ => return None,
