@@ -46,7 +46,7 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
-      - uses: pnpm/action-setup@v6.0.10
+      - uses: pnpm/action-setup@v6
 
       - uses: actions/setup-node@v7
         with:
@@ -144,7 +144,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - uses: pnpm/action-setup@v6.0.10
+      - uses: pnpm/action-setup@v6
 
       - uses: actions/setup-node@v7
         with:
@@ -247,7 +247,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - uses: pnpm/action-setup@v6.0.10
+      - uses: pnpm/action-setup@v6
 
       - uses: actions/setup-node@v7
         with:
@@ -299,7 +299,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v6.0.10
+      - uses: pnpm/action-setup@v6
 
       - uses: actions/setup-node@v7
         with:
