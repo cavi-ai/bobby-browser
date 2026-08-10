@@ -1203,7 +1203,7 @@ impl CdpConnection {
                         return match outcome {
                             Ok(CommandOutcome::Completed { evidence, .. }) => {
                                 let Some((filename, path, expected_bytes, expected_sha)) = evidence.iter().find_map(|item| match item {
-                                    types::Evidence::Download { filename, path, bytes, sha256 } => Some((filename.clone(), path.clone(), *bytes, sha256.clone())),
+                                    types::Evidence::Download { filename, path, bytes, sha256, .. } => Some((filename.clone(), path.clone(), *bytes, sha256.clone())),
                                     _ => None,
                                 }) else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime download did not produce download evidence")); };
                                 let Some(store) = self.artifacts.as_ref() else { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "artifact reader is not configured")); };
@@ -1388,7 +1388,7 @@ impl CdpConnection {
                         return match self.submit_boundary(ctx.clone(), session_id.clone(), page_id.clone(), command).await {
                             Ok(CommandOutcome::Completed { evidence, .. }) => {
                                 let download = evidence.iter().find_map(|item| match item {
-                                    types::Evidence::Download { filename, path, bytes, sha256 } => Some((filename.clone(), path.clone(), *bytes, sha256.clone())),
+                                    types::Evidence::Download { filename, path, bytes, sha256, .. } => Some((filename.clone(), path.clone(), *bytes, sha256.clone())),
                                     _ => None,
                                 });
                                 let Some((filename, path, expected_bytes, expected_sha)) = download else {

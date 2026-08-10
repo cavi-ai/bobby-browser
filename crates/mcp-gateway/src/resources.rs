@@ -163,6 +163,7 @@ impl ArtifactResources {
                     path,
                     bytes,
                     sha256,
+                    ..
                 } => {
                     admission.attempted += 1;
                     admission.download_uris.insert(sha256.clone(), None);

@@ -1955,6 +1955,10 @@ impl BrowserWorker for ChromiumWorker {
                 path: path.to_string_lossy().into_owned(),
                 bytes: bytes.len() as u64,
                 sha256: hex::encode(Sha256::digest(&bytes)),
+                saved_to: path
+                    .strip_prefix(&self.download_dir)
+                    .ok()
+                    .map(|relative| relative.to_string_lossy().into_owned()),
             },
             resolved.evidence,
         ])

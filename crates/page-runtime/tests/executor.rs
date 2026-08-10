@@ -1726,7 +1726,7 @@ async fn download_url_materializes_requested_file_below_downloads_root() {
     let (runtime, session, page, _events, root) = adaptive_runtime(DriverMode::Succeed).await;
     let destination = root.path().join("downloads/atlas-operations.csv");
 
-    completed_evidence(
+    let evidence = completed_evidence(
         runtime
             .execute(envelope(
                 session,
@@ -1740,6 +1740,11 @@ async fn download_url_materializes_requested_file_below_downloads_root() {
             ))
             .await,
     );
+    let saved_to = evidence.iter().find_map(|item| match item {
+        Evidence::Download { saved_to, .. } => saved_to.clone(),
+        _ => None,
+    });
+    assert_eq!(saved_to.as_deref(), Some("atlas-operations.csv"));
 
     assert_eq!(
         std::fs::read(destination).unwrap(),
@@ -2259,6 +2264,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
         path: "abc".into(),
         bytes: 1,
         sha256: "abc".into(),
+        saved_to: None,
     }];
     let journal = Arc::new(RecoveryJournal {
         records: vec![JournalRecord {
@@ -2340,6 +2346,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
             path: artifact_id.clone(),
             bytes: 16,
             sha256: sha256.clone(),
+            saved_to: None,
         }],
         artifact_id: Some(artifact_id.clone()),
         artifact_sha256: Some(sha256),

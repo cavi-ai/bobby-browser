@@ -423,11 +423,13 @@ fn workflow_evidence_is_typed_and_camel_case() {
         path: "/downloads/session/fixture.bin".into(),
         bytes: 4,
         sha256: "9f64a747".into(),
+        saved_to: Some("fixture.bin".into()),
     };
     let value = serde_json::to_value(evidence).unwrap();
     assert_eq!(value["kind"], json!("download"));
     assert_eq!(value["sha256"], json!("9f64a747"));
     assert_eq!(value["bytes"], json!(4));
+    assert_eq!(value["savedTo"], json!("fixture.bin"));
 }
 
 #[test]

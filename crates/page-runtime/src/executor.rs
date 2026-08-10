@@ -319,7 +319,20 @@ impl PageRuntime {
                 attempt_id: envelope.attempt_id.clone(),
                 state_version: prepared.state_version,
                 state_delta: serde_json::Value::Null,
-                evidence: execution.evidence.clone(),
+                // The durable record keeps the raw evidence minus the save_as
+                // landing path: the journal must never carry it, and recovery
+                // republishes from the download record, not the evidence.
+                evidence: execution
+                    .evidence
+                    .iter()
+                    .cloned()
+                    .map(|mut item| {
+                        if let Evidence::Download { saved_to, .. } = &mut item {
+                            *saved_to = None;
+                        }
+                        item
+                    })
+                    .collect(),
                 artifact_id: artifact.as_ref().map(|record| record.artifact_id.clone()),
                 artifact_sha256: artifact.as_ref().map(|record| record.sha256.clone()),
                 artifact_bytes: artifact.as_ref().map(|record| record.bytes),

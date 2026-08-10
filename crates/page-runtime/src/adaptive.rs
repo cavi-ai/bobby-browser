@@ -1129,8 +1129,12 @@ impl AdaptivePageEngine {
                             )
                             .await
                             .map_err(artifact_error)?;
+                        let mut saved_to: Option<String> = None;
                         let download = match download_destination {
-                            Some(destination) => Some(destination.stage(&bytes).await?),
+                            Some(destination) => {
+                                saved_to = Some(destination.filename.clone());
+                                Some(destination.stage(&bytes).await?)
+                            }
                             None => None,
                         };
                         let record = pending.record().clone();
@@ -1141,6 +1145,7 @@ impl AdaptivePageEngine {
                                     path: record.artifact_id,
                                     bytes: record.bytes,
                                     sha256: record.sha256.clone(),
+                                    saved_to,
                                 },
                                 execution_evidence(
                                     ExecutionPath::DirectHttp,

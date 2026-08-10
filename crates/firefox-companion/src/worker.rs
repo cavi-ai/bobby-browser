@@ -3655,6 +3655,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             path: format!("artifact://{}", record.artifact_id),
             bytes: record.bytes,
             sha256: record.sha256,
+            saved_to: Some(safe_name.to_owned()),
         }];
         evidence.extend(click_evidence);
         Ok(evidence)

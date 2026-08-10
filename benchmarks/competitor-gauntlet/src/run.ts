@@ -291,7 +291,10 @@ async function main() {
               "max_concurrent_requests = 8",
               "",
               "[mcp]",
-              'startup_toolset = "full"',
+              // Measure the default experience: explore advertises the
+              // standard loop (observe, navigate, base controls), which is
+              // what a user who never touches toolset_select gets.
+              'startup_toolset = "explore"',
               "",
             ].join("\n"),
           );
