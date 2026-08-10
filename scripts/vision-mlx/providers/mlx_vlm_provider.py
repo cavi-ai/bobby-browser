@@ -25,8 +25,13 @@ DEFAULT_MODEL = "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
 class MlxVlmProvider(VisionProvider):
     name = "mlx-vlm"
 
-    def __init__(self, model_name: str = DEFAULT_MODEL):
+    # Prefill forces the response to begin inside the JSON skeleton, so the
+    # model fills values semantically instead of choosing to fence or waffle.
+    PROPOSE_PREFILL = '{"confidence": '
+
+    def __init__(self, model_name: str = DEFAULT_MODEL, prefill: bool = True):
         self.model_name = model_name
+        self.prefill = prefill
         self._model = None
         self._processor = None
 
@@ -58,16 +63,17 @@ class MlxVlmProvider(VisionProvider):
                 f"{self.PROPOSE_SYSTEM}\n\n{prompt_text}",
                 num_images=1,
             )
+            prefill = self.PROPOSE_PREFILL if self.prefill else ""
             result = generate(
                 self._model,
                 self._processor,
-                full_prompt,
+                full_prompt + prefill,
                 image=[image_path],
                 max_tokens=256,
                 temp=0.1,
                 verbose=False,
             )
-            raw_text = result.text if hasattr(result, "text") else str(result)
+            raw_text = prefill + (result.text if hasattr(result, "text") else str(result))
             log.debug("model raw output: %s", raw_text)
             raw = self.parse_json_content(raw_text)
             log.debug("parsed: %s", raw)
