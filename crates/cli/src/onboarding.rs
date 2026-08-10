@@ -681,6 +681,19 @@ fn use_install_defaults(options: &InstallOptions) -> bool {
         && !options.force
 }
 
+fn bootstrap_item_enabled(
+    credential_exists: bool,
+    force: bool,
+    use_defaults: bool,
+    hosts: &[HostKind],
+) -> bool {
+    force || (!credential_exists && (use_defaults || !hosts.is_empty()))
+}
+
+fn agents_skill_item_enabled(skill: bool, project_skill: bool, use_defaults: bool) -> bool {
+    skill || project_skill || use_defaults
+}
+
 const MLX_MODELS: [(&str, &str); 3] = [
     ("Small (3B)", "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"),
     ("Balanced (7B)", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"),
@@ -1054,7 +1067,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
 
     items.push(InstallItem {
         label: credential_label,
-        enabled: force || (!credential_exists && use_defaults),
+        enabled: bootstrap_item_enabled(credential_exists, force, use_defaults, hosts),
         run: Box::new({
             let path = bootstrap_path.to_path_buf();
             move || {
@@ -1154,7 +1167,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             "Agent skill (agents): install into ~/.agents/skills/".to_owned()
         },
         // `--project-skill` alone means "install agents skill into the project".
-        enabled: skill || project_skill,
+        enabled: agents_skill_item_enabled(skill, project_skill, use_defaults),
         run: Box::new({
             let root = project_root.clone();
             move || {
@@ -1257,15 +1270,41 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }
     }
 
+    let companion_selected = items
+        .iter()
+        .any(|item| item.enabled && item.label.starts_with("Firefox companion:"));
+    if companion_selected {
+        find_companion_dist(extension)?;
+    }
+
     let mut ran = 0;
     if configure_vision || interactive {
-        println!("ok: {}", apply_vision_install(&config_path, &vision_state)?);
+        drop(crate::vision_token::ensure_managed_vision_token(
+            bootstrap_path,
+        )?);
+        println!(
+            "applied: {}",
+            apply_vision_install(&config_path, &vision_state)?
+        );
         ran += 1;
     }
-    for item in items.iter().filter(|item| item.enabled) {
-        let outcome = (item.run)()?;
-        println!("ok: {outcome}");
-        ran += 1;
+    let mut selected = items.iter().filter(|item| item.enabled).peekable();
+    while let Some(item) = selected.next() {
+        match (item.run)() {
+            Ok(outcome) => {
+                println!("applied: {outcome}");
+                ran += 1;
+            }
+            Err(error) => {
+                eprintln!("failed: {}: {error:#}", item.label);
+                for pending in selected {
+                    eprintln!("not run: {}", pending.label);
+                }
+                anyhow::bail!(
+                    "installation incomplete; resolve the failed item and re-run the same `bobby install` command"
+                );
+            }
+        }
     }
     if vision_state.enabled && (readiness_requested || interactive) {
         let profile = vision_state.profile()?;
@@ -1288,7 +1327,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     if ran == 0 {
         println!("nothing selected; nothing changed");
     } else {
-        println!("done. `bobby doctor` verifies the whole setup, including the MCP handshake.");
+        println!("installation applied. Next: run `bobby doctor`.");
     }
     Ok(())
 }
@@ -1300,6 +1339,24 @@ mod install_tests {
     /// Companion install tests mutate process-global `HOME` (and sometimes
     /// `XDG_CONFIG_HOME`); serialize so parallel `cargo test` stays deterministic.
     static INSTALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn named_hosts_require_a_missing_bootstrap_and_defaults_include_the_agent_skill() {
+        assert!(bootstrap_item_enabled(
+            false,
+            false,
+            false,
+            &[HostKind::Claude]
+        ));
+        assert!(!bootstrap_item_enabled(
+            true,
+            false,
+            false,
+            &[HostKind::Claude]
+        ));
+        assert!(agents_skill_item_enabled(false, false, true));
+        assert!(!agents_skill_item_enabled(false, false, false));
+    }
 
     #[test]
     fn companion_only_flag_does_not_use_full_install_defaults() {
@@ -1855,6 +1912,9 @@ fn firefox_present() -> bool {
 fn find_companion_dist(explicit: Option<&Path>) -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = explicit.into_iter().map(Path::to_path_buf).collect();
     if let Ok(exe) = std::env::current_exe() {
+        if let Some(prefix) = exe.parent().and_then(Path::parent) {
+            candidates.push(prefix.join("share/bobby-browser/firefox-companion"));
+        }
         if let Some(root) = exe.parent().and_then(Path::parent).and_then(Path::parent) {
             candidates.push(root.join("packages/firefox-companion/dist"));
         }
@@ -1867,7 +1927,7 @@ fn find_companion_dist(explicit: Option<&Path>) -> Result<PathBuf> {
         .find(|candidate| candidate.join("manifest.json").is_file())
         .ok_or_else(|| {
             anyhow!(
-                "companion extension build not found; run `pnpm --filter @bobby-browser/firefox-companion build` or pass --extension <dir>"
+                "companion extension build not found; run `pnpm --filter @cavi-ai/bobby-firefox-companion build` or pass --extension <dir>"
             )
         })
 }

@@ -22,6 +22,23 @@ cargo build -p bobby-browser --release
 
 Package name: `bobby-browser`. Binary name: `bobby`.
 
+After the binary is available, run the dependency-aware installer:
+
+```bash
+bobby install
+bobby doctor
+```
+
+For a non-interactive host-specific install:
+
+```bash
+bobby install --host claude --yes
+```
+
+Selecting an agent host generates a missing agent bootstrap credential.
+Vision setup generates a separate owner-only local vision credential. Bobby
+does not print either secret during routine install or doctor output.
+
 ## Install from registries (when published)
 
 ```bash
@@ -99,7 +116,7 @@ Pick `linux-x64`, `linux-arm64`, `macos-x64`, or `windows-x64` to match your
 host. Release archives are stripped on Unix; see the repository Releases page
 for every asset.
 
-## Bootstrap credential
+## Manual bootstrap credential
 
 ```bash
 ./target/release/bobby init
@@ -109,6 +126,9 @@ for every asset.
 Writes a dotenv with `AUTOMATION_RUNTIME_BOOTSTRAP_*` under the OS config dir
 (or `--path`). Prints the plaintext bearer once — map it to
 `AUTOMATION_RUNTIME_TOKEN` for clients. Never commit secrets into `config.toml`.
+
+`bobby install` and `bobby doctor --fix` normally create this file when needed;
+manual `bobby init` is intended for explicit credential rotation or custom paths.
 
 ## Next
 

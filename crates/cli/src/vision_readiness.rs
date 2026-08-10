@@ -185,19 +185,25 @@ fn openai_compatible_models_probe(
     api_key: Option<&str>,
     timeout: Duration,
 ) -> bool {
-    let Ok(client) = reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .build()
-    else {
-        return false;
-    };
-    let mut request = client.get(format!("{}/models", profile.base_url.trim_end_matches('/')));
-    if let Some(api_key) = api_key {
-        request = request.bearer_auth(api_key);
-    }
-    request
-        .send()
-        .is_ok_and(|response| response.status().is_success())
+    let base_url = profile.base_url.clone();
+    let api_key = api_key.map(str::to_owned);
+    std::thread::spawn(move || {
+        let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+        else {
+            return false;
+        };
+        let mut request = client.get(format!("{}/models", base_url.trim_end_matches('/')));
+        if let Some(api_key) = api_key {
+            request = request.bearer_auth(api_key);
+        }
+        request
+            .send()
+            .is_ok_and(|response| response.status().is_success())
+    })
+    .join()
+    .unwrap_or(false)
 }
 
 fn configure_mlx_readiness_command(
@@ -352,6 +358,25 @@ mod tests {
         };
         let openai = check_provider_readiness("openai", &openai, &options).unwrap();
         assert!(openai.detail().contains("BOBBY_TEST_MISSING_OPENAI_KEY"));
+    }
+
+    #[tokio::test]
+    async fn external_readiness_is_safe_inside_the_cli_async_runtime() {
+        let profile = VisionProviderConfig {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "llava".into(),
+            api_key_env: None,
+        };
+        let outcome = check_provider_readiness(
+            "ollama",
+            &profile,
+            &ReadinessOptions {
+                timeout: Duration::from_millis(10),
+                allow_download: false,
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, ReadinessOutcome::NeedsAction { .. }));
     }
 
     #[test]

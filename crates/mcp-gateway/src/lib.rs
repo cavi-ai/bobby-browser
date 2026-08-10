@@ -30,12 +30,11 @@ mod workflow_handles;
 ///
 /// Kept under ~500 characters so it does not push connect payloads.
 pub const INITIALIZE_INSTRUCTIONS: &str = "\
-Startup tools/list is explore: observe, navigate, and base controls (click, \
-type_text, control_action, upload_files, dialog, download_url) are ready — no \
-toolset_select needed. Call toolset_select (act|intent|verify|full) then \
-re-read tools/list for intents, jobs, or escape hatches. Failures carry \
-error.repair {action,doc} — follow action. Boundary intents: autoCheckpoint \
-defaults true. Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
+Start with workflow_start using profile \"default\" and an optional url, then \
+call workflow_observe. Startup tools/list is explore; call toolset_select \
+(act|intent|verify|full) and re-read tools/list for broader tools. Failures \
+carry error.repair {action,doc} — follow action. Boundary intents default \
+autoCheckpoint true. Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
 
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {

@@ -125,6 +125,13 @@ To configure and load-check a selected MLX model directly, run
 `bobby vision connect --yes --provider mlx --model <id> --activate`; add
 `--download-model` only when the CLI may fetch a missing cache.
 
+Vision is the user-facing feature; Bobby runs its local service on demand:
+
+```bash
+bobby vision status   # selected provider/model and service state
+bobby vision start    # optional foreground run for debugging
+```
+
 Local agents already point at `bobby mcp-stdio` from install — no daemon.
 Optional HTTP / CDP:
 

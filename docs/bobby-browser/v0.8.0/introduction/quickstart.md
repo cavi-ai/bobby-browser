@@ -4,36 +4,56 @@ documentedVersion: 0.8.0
 
 # Quickstart
 
-## Run the server
+## Install for an agent
 
 ```bash
-cargo build -p bobby-browser
-./target/debug/bobby init
-./target/debug/bobby serve
+bobby install
+bobby doctor
 ```
 
-Or without a pre-built binary:
+`bobby install` creates missing private bootstrap and vision credentials,
+installs the agent skill, and configures the selected host. It preserves valid
+existing credentials and host configuration.
+
+If you selected Firefox, start the dedicated Bobby profile and click **Pair**
+in the companion toolbar popup before running doctor:
 
 ```bash
-cargo run -p bobby-browser -- init
-cargo run -p bobby-browser -- serve
-# or with an explicit config file:
-BOBBY_BROWSER_CONFIG=/path/to/config.toml cargo run -p bobby-browser -- serve
+make firefox-start
 ```
 
-Then open:
+## First agent calls
+
+The agent should call:
+
+1. `workflow_start` with `profile: "default"` and an optional `url`.
+2. `workflow_observe` with the returned workflow handle.
+3. `click`, `type_text`, `navigate`, or an `intent_*` tool for the next action.
+
+The MCP `start_browsing` prompt teaches the same flow without requiring a
+session, page, or workflow ID.
+
+## Vision
+
+Users configure vision; Bobby runs the local vision service on demand:
+
+```bash
+bobby vision connect
+bobby vision status
+# Optional foreground run for debugging:
+bobby vision start
+```
+
+## Advanced: HTTP and SDK applications
+
+Application developers can run the HTTP runtime explicitly:
+
+```bash
+bobby serve
+```
 
 - `http://127.0.0.1:7777/healthz` — unauthenticated liveness
-- Authenticated HTTP under `/v1/*` (for example `GET /v1/runtime`) — requires a bearer and interface headers (see [Authentication](../guides/auth.md))
-
-There is no `/runtime` route. Use `/v1/runtime`.
-
-On loopback, if no bootstrap env or secret file exists, `bobby serve` auto-generates
-one and prints the bearer once. Export that value as `AUTOMATION_RUNTIME_TOKEN` for
-SDK clients (same plaintext bearer). Keep the runtime on loopback or an
-operator-controlled boundary. Do not expose it to untrusted networks.
-
-## TypeScript client
+- Authenticated HTTP under `/v1/*` — see [Authentication](../guides/auth.md)
 
 ```ts
 import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
@@ -45,28 +65,7 @@ const client = new BrowserRuntimeClient({
 const info = await client.runtimeInfo();
 ```
 
-The SDK sets `Authorization`, `x-interface-version` (`2026-07-23`),
-`x-correlation-id`, `x-deadline`, and `idempotency-key` on mutating POSTs. Raw
-HTTP callers must send those headers themselves — see [Authentication](../guides/auth.md).
+The SDK sets the required interface, correlation, deadline, authorization, and
+idempotency headers. Raw HTTP callers must set them explicitly.
 
-For a full session → page → navigate loop, see [First browser session](first-session.md).
-
-## Rust authority sketch
-
-```rust,no_run
-use chrono::{Duration, Utc};
-use interface_core::AuthorityStore;
-use types::{Capability, PrincipalId};
-
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let authority = AuthorityStore::in_memory();
-let issued = authority.issue(
-    PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-    [Capability::SessionRead, Capability::SessionWrite],
-    Utc::now() + Duration::minutes(5),
-).await?;
-let handle = authority.verify(&issued.expose_once()).await?;
-let context = handle.context(Utc::now() + Duration::seconds(30), None);
-# let _ = context;
-# Ok(()) }
-```
+Next: [First browser session](first-session.md) · [CLI reference](../guides/cli.md)

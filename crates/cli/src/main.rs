@@ -9,6 +9,7 @@ mod vision_collect;
 mod vision_connect;
 mod vision_login;
 mod vision_readiness;
+mod vision_token;
 
 use anyhow::{Context, Result};
 use companion_core::{
@@ -32,7 +33,7 @@ use firefox_companion::selection::{
 };
 use std::{
     future::Future,
-    net::SocketAddr,
+    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -288,6 +289,7 @@ enum CliCommand {
     #[command(name = "vision-connect", hide = true)]
     VisionConnect(VisionConnectArgs),
     /// Run the loopback vision proxy (propose/extract → OpenAI, Ollama, or MLX)
+    #[command(hide = true)]
     VisionProxy {
         /// Bind address (loopback default)
         #[arg(long, default_value = "127.0.0.1:9100")]
@@ -396,6 +398,18 @@ enum VisionCommands {
     Connect(VisionConnectArgs),
     /// Establish or verify the configured ACP harness login
     Login(VisionLoginArgs),
+    /// Show the selected provider, model, and local service state
+    Status {
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Run the configured local vision service in the foreground
+    Start {
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Collect training data from gauntlet runs
     Collect {
         /// Output directory (default: data/vision/)
@@ -563,12 +577,15 @@ struct JobsCommonArgs {
 }
 
 pub async fn run() -> Result<()> {
-    match Cli::parse_args().command.unwrap_or(CliCommand::Serve {
-        config: None,
-        bootstrap_env: None,
-        vision: false,
-        no_vision: false,
-    }) {
+    let cli = Cli::parse_args();
+    let Some(command) = cli.command else {
+        use clap::CommandFactory;
+        Cli::command().print_help()?;
+        println!();
+        println!("\nFirst run: `bobby install`, then `bobby doctor`.");
+        return Ok(());
+    };
+    match command {
         CliCommand::Init {
             force,
             ttl_days,
@@ -583,6 +600,7 @@ pub async fn run() -> Result<()> {
             no_vision,
         } => {
             let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+            load_managed_vision_token(&bootstrap_path, "BOBBY_VISION_TOKEN")?;
             let config_path = resolve_config_path(config);
             let policy = policy_from_flags(vision, no_vision);
             let config = AppConfig::load(&config_path)
@@ -605,6 +623,7 @@ pub async fn run() -> Result<()> {
             no_vision,
         } => {
             let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+            load_managed_vision_token(&bootstrap_path, "BOBBY_VISION_TOKEN")?;
             let config_path = resolve_config_path(config);
             let policy = policy_from_flags(vision, no_vision);
             let config = AppConfig::load(&config_path)
@@ -742,6 +761,8 @@ pub async fn run() -> Result<()> {
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
             VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
+            VisionCommands::Status { config } => vision_status(config)?,
+            VisionCommands::Start { config } => run_configured_vision_service(config).await?,
             VisionCommands::Collect {
                 output,
                 examples,
@@ -800,6 +821,8 @@ async fn run_broker_serve(
     cdp_port: Option<u16>,
 ) -> Result<()> {
     let config_path = resolve_config_path(config_cli);
+    let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
+    load_managed_vision_token(&bootstrap_path, "BOBBY_VISION_TOKEN")?;
     let config_existed = config_path.exists();
     let config = AppConfig::load(&config_path)
         .with_context(|| format!("failed to load config from {}", config_path.display()))?;
@@ -820,7 +843,6 @@ async fn run_broker_serve(
     } else if matches!(policy, VisionSpawnPolicy::ForceOn) {
         tracing::info!(reason = %decision.reason, "vision sidecar not spawned");
     }
-    let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
     let heal = bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap_path)
         .context("failed to heal bootstrap capabilities")?;
     if heal.changed() {
@@ -931,13 +953,8 @@ fn prepare_vision_child(
             .ok()
             .is_none_or(|value| value.is_empty())
         {
-            let token = format!(
-                "bobby-local-{}{}",
-                uuid::Uuid::new_v4().simple(),
-                uuid::Uuid::new_v4().simple()
-            );
-            // The managed proxy and the in-process node client share this
-            // ephemeral bearer through inheritance. It is never persisted.
+            let bootstrap_path = bootstrap_local::default_bootstrap_path()?;
+            let token = vision_token::ensure_managed_vision_token(&bootstrap_path)?;
             unsafe { std::env::set_var(token_env, token) };
         }
         Some(ManagedVisionProxy::spawn_from_current_exe(
@@ -955,11 +972,21 @@ fn prepare_vision_child(
     Ok((config, decision, vision_child))
 }
 
-fn require_vision_proxy_bearer() -> Result<String> {
-    std::env::var("BOBBY_VISION_TOKEN")
+fn load_managed_vision_token(bootstrap_path: &Path, token_env: &str) -> Result<()> {
+    if std::env::var(token_env)
         .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("BOBBY_VISION_TOKEN is missing or empty"))
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+    if let Ok(token) = vision_token::resolve_vision_token(bootstrap_path) {
+        unsafe { std::env::set_var(token_env, token) };
+    }
+    Ok(())
+}
+
+fn require_vision_proxy_bearer() -> Result<String> {
+    vision_token::resolve_vision_token(&bootstrap_local::default_bootstrap_path()?)
 }
 
 fn require_upstream_api_key(api_key_env: Option<&str>) -> Result<String> {
@@ -983,6 +1010,76 @@ struct VisionProxyRunArgs {
     collect_training_data: bool,
     training_data_dir: String,
     api_key_env: Option<String>,
+}
+
+fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionProxyRunArgs> {
+    let config_path = resolve_config_path(config_cli);
+    let config = AppConfig::load(&config_path)
+        .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+    let (provider, profile) = config
+        .vision
+        .selected_provider()
+        .context("no vision provider configured; run `bobby vision connect` first")?;
+    let endpoint = config
+        .vision
+        .endpoint_url
+        .as_deref()
+        .unwrap_or("http://127.0.0.1:9100/vision");
+    let url = Url::parse(endpoint).context("configured vision endpoint is invalid")?;
+    let host = url
+        .host_str()
+        .context("configured vision endpoint has no host")?;
+    let port = url
+        .port_or_known_default()
+        .context("configured vision endpoint has no port")?;
+    Ok(VisionProxyRunArgs {
+        bind: format!("{host}:{port}"),
+        path: if url.path().is_empty() {
+            "/vision".to_string()
+        } else {
+            url.path().to_string()
+        },
+        upstream: provider.to_string(),
+        model: Some(profile.model.clone()),
+        vision_base_url: Some(profile.base_url.clone()),
+        spawn_server: provider.eq_ignore_ascii_case("mlx"),
+        server_script: None,
+        collect_training_data: config.vision.collect_training_data,
+        training_data_dir: config.vision.training_data_dir.display().to_string(),
+        api_key_env: profile.api_key_env.clone(),
+    })
+}
+
+fn vision_status(config_cli: Option<PathBuf>) -> Result<()> {
+    let args = configured_vision_proxy_args(config_cli)?;
+    let address: SocketAddr = args
+        .bind
+        .parse()
+        .context("vision bind address is invalid")?;
+    let running = TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok();
+    println!(
+        "vision-config: {} / {}",
+        args.upstream,
+        args.model.as_deref().unwrap_or("default")
+    );
+    println!(
+        "vision-service: {} at http://{}{}",
+        if running {
+            "running"
+        } else {
+            "stopped (starts on demand)"
+        },
+        args.bind,
+        args.path
+    );
+    Ok(())
+}
+
+async fn run_configured_vision_service(config_cli: Option<PathBuf>) -> Result<()> {
+    drop(vision_token::ensure_managed_vision_token(
+        &bootstrap_local::default_bootstrap_path()?,
+    )?);
+    run_vision_proxy(configured_vision_proxy_args(config_cli)?).await
 }
 
 async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
@@ -2217,9 +2314,9 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
 mod tests {
     use super::doctor::{
         check_bootstrap_expiry, check_vision_acp, check_vision_provider, check_vision_upstream_key,
-        handshake_error_status, run_doctor, vision_auth_discovery_check,
-        vision_endpoint_unreachable_detail, DoctorColorMode, DoctorReport, DoctorStatus,
-        BOOTSTRAP_EXPIRY_WARN_DAYS,
+        handshake_error_status, run_doctor, run_doctor_fix, vision_auth_discovery_check,
+        vision_endpoint_unreachable_detail, DoctorColorMode, DoctorFixOptions, DoctorFixStatus,
+        DoctorReport, DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
     };
     use super::*;
     use auth_broker::{AuthCapabilities, AuthStrategy};
@@ -3436,7 +3533,7 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         };
         let check = check_vision_provider(&vision).unwrap();
         assert_eq!(check.status, DoctorStatus::Warn);
-        assert_eq!(check.name, "vision-provider");
+        assert_eq!(check.name, "vision-config");
         assert!(check.detail.contains("ghost"));
     }
 
@@ -3493,8 +3590,9 @@ auth = "oauth-device-code"
     #[test]
     fn vision_endpoint_unreachable_detail_distinguishes_loopback_from_external() {
         let loopback = vision_endpoint_unreachable_detail("http://127.0.0.1:9100/vision");
-        assert!(loopback.contains("bobby serve --vision"));
-        assert!(loopback.contains("bobby vision-proxy"));
+        assert!(loopback.contains("starts the vision service on demand"));
+        assert!(loopback.contains("bobby vision start"));
+        assert!(!loopback.contains("vision-proxy"));
 
         let external = vision_endpoint_unreachable_detail("https://vision.example.com/propose");
         assert!(external.contains("external vision endpoint"));
@@ -3615,6 +3713,37 @@ endpoint_url = "http://127.0.0.1:8080/propose"
     }
 
     #[test]
+    fn doctor_fix_generates_missing_private_credentials() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let bootstrap = root.path().join("bootstrap.env");
+        let config = root.path().join("config.toml");
+
+        let report = run_doctor_fix(DoctorFixOptions {
+            config: Some(config),
+            bootstrap_env: Some(bootstrap.clone()),
+            check_health: false,
+            download_model: false,
+        })
+        .unwrap();
+
+        assert!(bootstrap.is_file());
+        assert!(root.path().join("vision.env").is_file());
+        for name in ["bootstrap", "vision-token"] {
+            assert_eq!(
+                report
+                    .actions
+                    .iter()
+                    .find(|action| action.name == name)
+                    .unwrap()
+                    .status,
+                DoctorFixStatus::Fixed
+            );
+        }
+    }
+
+    #[test]
     fn doctor_warns_on_missing_vision_provider_profile() {
         let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
         let _env = DoctorEnvGuard::clear();
@@ -3637,7 +3766,7 @@ endpoint_url = "http://127.0.0.1:9100/vision"
         .unwrap();
 
         assert_eq!(
-            report.check("vision-provider").unwrap().status,
+            report.check("vision-config").unwrap().status,
             DoctorStatus::Warn
         );
         assert!(report.check("vision-upstream-key").is_none());

@@ -137,25 +137,15 @@ load/readiness-test the selection immediately. For MLX, add
 `--download-model` only when Bobby may download the selected model if its cache
 is missing; that flag requires `--activate`.
 
-### `bobby vision-proxy`
+### `bobby vision status` / `bobby vision start`
 
-Run the loopback vision proxy that serves `propose` / `extract` against an
-upstream provider.
+`bobby vision status` reports the configured provider/model and whether the
+local vision service is running. Bobby starts that service on demand during
+normal agent use. `bobby vision start` runs it in the foreground for manual
+inspection and debugging.
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--bind <addr>` | `127.0.0.1:9100` | Bind address |
-| `--path <path>` | `/vision` | HTTP path for the propose/extract POST |
-| `--upstream <kind>` | `openai` | `openai`, `ollama`, or `mlx` |
-| `--model <id>` | per upstream | Model id passed to the upstream |
-| `--vision-base-url <url>` | per upstream | Upstream base URL |
-| `--spawn-server` | off | Run the canonical Python vision server as a managed child (`mlx` upstream); the child is killed when the proxy exits |
-| `--server-script <path>` | auto-detect | `vision_server.py` path when spawning (else `BOBBY_VISION_SERVER_SCRIPT`) |
-| `--api-key-env <var>` | `OPENAI_API_KEY` | Env var holding the upstream API key; an empty value skips the key |
-| `--collect-training-data` | off | Log vision proposals to disk |
-| `--training-data-dir <dir>` | `data/vision/` | Destination for those logs |
-
-`bobby serve --vision` starts the proxy alongside the runtime.
+The former top-level `vision-proxy` command remains a hidden compatibility
+alias for scripts. New user workflows should use the `bobby vision` commands.
 
 ### `bobby openshell`
 
