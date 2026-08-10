@@ -1,11 +1,11 @@
 {
-  "note": "bobby-only gauntlet baseline, measured on main after the friction-fix arc (2026-08-09). score check evaluates only the latest invocation batch and requires every baseline task; pass must hold, wall time <= 2x, tool errors <= +3. Update deliberately when the product improves or the app changes; never to sneak a regression through.",
-  "measuredAt": "2026-08-09",
+  "note": "bobby-only gauntlet baseline, measured on main at 1688938 after the explore/a11y friction batch (2026-08-10). score check evaluates only the latest invocation batch and requires every baseline task; pass must hold, wall time <= 2x, tool errors <= +3. Update deliberately when the product improves or the app changes; never to sneak a regression through.",
+  "measuredAt": "2026-08-10",
   "tasks": {
-    "customer-update": { "pass": true, "wallSeconds": 67, "toolErrors": 0 },
-    "onboarding": { "pass": true, "wallSeconds": 109, "toolErrors": 1 },
-    "documents": { "pass": true, "wallSeconds": 69, "toolErrors": 0 },
-    "authorization": { "pass": true, "wallSeconds": 74, "toolErrors": 0 },
-    "report-recovery": { "pass": true, "wallSeconds": 70, "toolErrors": 0 }
+    "customer-update": { "pass": true, "wallSeconds": 43, "toolErrors": 0 },
+    "onboarding": { "pass": true, "wallSeconds": 65, "toolErrors": 0 },
+    "documents": { "pass": true, "wallSeconds": 45, "toolErrors": 0 },
+    "authorization": { "pass": true, "wallSeconds": 48, "toolErrors": 0 },
+    "report-recovery": { "pass": true, "wallSeconds": 50, "toolErrors": 0 }
   }
 }
