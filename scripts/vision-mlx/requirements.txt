@@ -2,14 +2,10 @@
 
 # Core
 pillow>=10.0.0
+requests>=2.32.0
 
-# Vision model loading (transformers fallback)
-transformers>=4.45.0
-torch>=2.2.0
-accelerate>=0.28.0
+# Direct local vision inference (canonical mlx-vlm provider)
+mlx-vlm>=0.6.0
 
-# HTTP server (standard library, no extra deps)
-
-# Optional: MLX when vision support lands
-# mlx>=0.20.0
-# mlx-lm>=0.20.0
+# Optional: training / fine-tuning
+numpy>=1.26.0
