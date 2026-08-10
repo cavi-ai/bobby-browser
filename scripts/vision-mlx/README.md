@@ -61,7 +61,7 @@ VISION_PROVIDER=ollama python vision_server.py
 
 | Env var | Default | Description |
 |---|---|---|
-| `VISION_PROVIDER` | `mlx-vlm` | Backend selection |
+| `VISION_PROVIDER` | `ollama` | Backend selection |
 | `VISION_MLX_MODEL` | `mlx-community/Qwen2.5-VL-3B-Instruct-4bit` | mlx-vlm model |
 | `VISION_OLLAMA_MODEL` | `llava:7b` | Ollama model |
 | `VISION_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama URL |

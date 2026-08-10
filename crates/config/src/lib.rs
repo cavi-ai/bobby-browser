@@ -9,8 +9,8 @@ pub use vision::{
     VisionBackendSelection, VisionConfig, VisionDirectProfile, VisionProviderConfig,
 };
 pub use vision_write::{
-    ensure_loopback_vision_defaults, upsert_vision_acp_profile, upsert_vision_platform,
-    ConfigWriteError,
+    ensure_loopback_vision_defaults, set_vision_install_state, upsert_vision_acp_profile,
+    upsert_vision_platform, ConfigWriteError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

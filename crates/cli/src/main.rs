@@ -117,6 +117,7 @@ enum CliCommand {
         no_vision: bool,
     },
     /// One-command agent setup: credential, host MCP config, agent skill
+    #[command(visible_alias = "setup")]
     Install {
         /// Host to wire (repeatable; non-interactive when given)
         #[arg(long)]
@@ -142,6 +143,33 @@ enum CliCommand {
         /// Install `bobby` (+ `mcp-gateway`, `acp-gateway`) onto PATH (~/.cargo/bin or ~/.local/bin)
         #[arg(long)]
         cli: bool,
+        /// Enable managed vision (Ollama when --vision-provider is omitted)
+        #[arg(long, conflicts_with = "no_vision")]
+        vision: bool,
+        /// Disable the active vision node while retaining provider/model settings
+        #[arg(long, conflicts_with = "vision")]
+        no_vision: bool,
+        /// Vision upstream: ollama, mlx, lmstudio, or openai
+        #[arg(long, value_name = "PROVIDER")]
+        vision_provider: Option<String>,
+        /// Override the provider model (required to select a non-default MLX model)
+        #[arg(long, value_name = "MODEL")]
+        vision_model: Option<String>,
+        /// Explicitly allow downloading the selected MLX model
+        #[arg(long, requires = "vision_model")]
+        download_vision_model: bool,
+        /// Capture proxy examples for the training pipeline
+        #[arg(long, conflicts_with = "no_collect_training_data")]
+        collect_training_data: bool,
+        /// Disable proxy training-data capture
+        #[arg(long, conflicts_with = "collect_training_data")]
+        no_collect_training_data: bool,
+        /// Training-data output directory
+        #[arg(long, default_value = "data/vision")]
+        training_data_dir: PathBuf,
+        /// Bobby config file updated by vision setup
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Regenerate the bootstrap credential even if one exists
         #[arg(long)]
         force: bool,
@@ -586,6 +614,15 @@ pub async fn run() -> Result<()> {
             companion,
             extension,
             cli,
+            vision,
+            no_vision,
+            vision_provider,
+            vision_model,
+            download_vision_model,
+            collect_training_data,
+            no_collect_training_data,
+            training_data_dir,
+            config,
             force,
             yes,
             path,
@@ -605,6 +642,15 @@ pub async fn run() -> Result<()> {
                     companion,
                     extension,
                     cli,
+                    vision,
+                    no_vision,
+                    vision_provider,
+                    vision_model,
+                    download_vision_model,
+                    collect_training_data,
+                    no_collect_training_data,
+                    training_data_dir,
+                    config,
                     force,
                     yes,
                 },
@@ -846,12 +892,30 @@ fn prepare_vision_child(
             .selected_provider()
             .context("no vision provider configured; run `bobby vision connect` first")?;
         let token_env = config
-            .vision
-            .token_env
-            .as_deref()
+            .nodes
+            .get("vision")
+            .and_then(|node| node.token_env.as_deref())
+            .or(config.vision.token_env.as_deref())
             .context("vision token_env not configured")?;
+        if std::env::var(token_env)
+            .ok()
+            .is_none_or(|value| value.is_empty())
+        {
+            let token = format!(
+                "bobby-local-{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            // The managed proxy and the in-process node client share this
+            // ephemeral bearer through inheritance. It is never persisted.
+            unsafe { std::env::set_var(token_env, token) };
+        }
         Some(ManagedVisionProxy::spawn_from_current_exe(
-            &decision, profile, token_env,
+            &decision,
+            profile,
+            token_env,
+            config.vision.collect_training_data,
+            &config.vision.training_data_dir,
         )?)
     } else {
         None
@@ -946,10 +1010,11 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
                 (Arc::new(upstream), UpstreamKind::Ollama)
             }
             "mlx" => {
+                let model = model.unwrap_or_else(|| vision_proxy::MLX_DEFAULT_MODEL.to_string());
                 let base_url = vision_base_url
                     .unwrap_or_else(|| vision_proxy::MLX_DEFAULT_BASE_URL.to_string());
                 if spawn_server {
-                    _python_child = Some(spawn_mlx_server(&base_url, server_script)?);
+                    _python_child = Some(spawn_mlx_server(&base_url, &model, server_script)?);
                 }
                 let mut upstream = MlxUpstream::new(base_url);
                 if let Some(collector) = &collector {
@@ -978,7 +1043,11 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
 
 /// Spawn the canonical Python vision server as a managed child and wait for
 /// it to accept connections. The child is killed when it goes out of scope.
-fn spawn_mlx_server(base_url: &str, server_script: Option<PathBuf>) -> Result<ManagedPythonServer> {
+fn spawn_mlx_server(
+    base_url: &str,
+    model: &str,
+    server_script: Option<PathBuf>,
+) -> Result<ManagedPythonServer> {
     let script = server_script
         .or_else(|| std::env::var_os("BOBBY_VISION_SERVER_SCRIPT").map(PathBuf::from))
         .map(Ok)
@@ -1001,7 +1070,9 @@ fn spawn_mlx_server(base_url: &str, server_script: Option<PathBuf>) -> Result<Ma
         .arg("--bind")
         .arg(&bind)
         .arg("--provider")
-        .arg("mlx-vlm");
+        .arg("mlx-vlm")
+        .arg("--model")
+        .arg(model);
     // Homebrew Python + MLX both link libomp; without this the child dies
     // on startup with a duplicate-runtime abort.
     cmd.env("KMP_DUPLICATE_LIB_OK", "TRUE");
@@ -2116,6 +2187,7 @@ mod tests {
     };
     use super::*;
     use auth_broker::{AuthCapabilities, AuthStrategy};
+    use clap::Parser;
     use companion_protocol::{
         BrowserEngine, BrowserIdentity, CompanionCapabilities, PROTOCOL_VERSION,
     };
@@ -3058,6 +3130,63 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         assert_eq!(policy_from_flags(false, false), VisionSpawnPolicy::Auto);
         assert_eq!(policy_from_flags(true, false), VisionSpawnPolicy::ForceOn);
         assert_eq!(policy_from_flags(false, true), VisionSpawnPolicy::Off);
+    }
+
+    #[test]
+    fn install_and_setup_parse_vision_provider_training_and_download_flags() {
+        for command in ["install", "setup"] {
+            let cli = Cli::try_parse_from([
+                "bobby",
+                command,
+                "--vision",
+                "--vision-provider",
+                "mlx",
+                "--vision-model",
+                "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+                "--download-vision-model",
+                "--collect-training-data",
+                "--training-data-dir",
+                "training",
+                "--yes",
+            ])
+            .unwrap();
+            match cli.command {
+                Some(CliCommand::Install {
+                    vision,
+                    no_vision,
+                    vision_provider,
+                    vision_model,
+                    download_vision_model,
+                    collect_training_data,
+                    training_data_dir,
+                    ..
+                }) => {
+                    assert!(vision);
+                    assert!(!no_vision);
+                    assert_eq!(vision_provider.as_deref(), Some("mlx"));
+                    assert_eq!(
+                        vision_model.as_deref(),
+                        Some("mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
+                    );
+                    assert!(download_vision_model);
+                    assert!(collect_training_data);
+                    assert_eq!(training_data_dir, PathBuf::from("training"));
+                }
+                _ => panic!("unexpected install/setup parse"),
+            }
+        }
+    }
+
+    #[test]
+    fn install_rejects_conflicting_vision_switches_at_parse_time() {
+        assert!(Cli::try_parse_from(["bobby", "install", "--vision", "--no-vision"]).is_err());
+        assert!(Cli::try_parse_from([
+            "bobby",
+            "install",
+            "--collect-training-data",
+            "--no-collect-training-data"
+        ])
+        .is_err());
     }
 
     #[test]

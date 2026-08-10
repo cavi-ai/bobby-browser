@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 /// Vision-assist provider configuration. Deny by default: no endpoint means
 /// vision escalation is unavailable even when sessions and tokens opt in.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisionConfig {
     #[serde(default, alias = "endpointUrl")]
     pub endpoint_url: Option<String>,
@@ -45,6 +45,34 @@ pub struct VisionConfig {
     /// index. Default unset: no records are written.
     #[serde(default, alias = "corpusDir")]
     pub corpus_dir: Option<std::path::PathBuf>,
+    /// Capture proxy request/proposal pairs for the local training pipeline.
+    /// This is independent from runtime corpus evidence and remains off unless
+    /// the operator explicitly enables it.
+    #[serde(default, alias = "collectTrainingData")]
+    pub collect_training_data: bool,
+    #[serde(default = "default_training_data_dir", alias = "trainingDataDir")]
+    pub training_data_dir: std::path::PathBuf,
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            endpoint_url: None,
+            token_env: None,
+            timeout_ms: default_vision_timeout_ms(),
+            provider: None,
+            providers: BTreeMap::new(),
+            backend: None,
+            profile: None,
+            fallback_profile: None,
+            acp_profiles: BTreeMap::new(),
+            provider_profiles: BTreeMap::new(),
+            prefill: false,
+            corpus_dir: None,
+            collect_training_data: false,
+            training_data_dir: default_training_data_dir(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +170,10 @@ impl VisionConfig {
 
 fn default_vision_timeout_ms() -> u64 {
     15_000
+}
+
+fn default_training_data_dir() -> std::path::PathBuf {
+    "data/vision".into()
 }
 
 /// One addressable node: a separate process with a bounded contract, reached

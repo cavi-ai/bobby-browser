@@ -6,7 +6,7 @@ training set and reports action accuracy, coordinate error, and
 per-journey success rates.
 
 Usage:
-    python eval_provider.py                                    # mlx-vlm, default data
+    python eval_provider.py                                    # ollama, default data
     python eval_provider.py --provider ollama --limit 50
     python eval_provider.py --provider mlx-vlm --model mlx-community/Qwen2.5-VL-7B-Instruct-4bit
 """
