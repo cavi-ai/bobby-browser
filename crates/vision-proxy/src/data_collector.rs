@@ -203,11 +203,9 @@ impl VisionDataCollector {
         let mut buffer = self.buffer.lock().unwrap();
         buffer.push(example);
         let should_flush = buffer.len() >= 100
-            || self
-                .last_flush
-                .lock()
-                .unwrap()
-                .map_or(true, |last| last.elapsed().as_millis() as u64 >= self.config.flush_interval_ms);
+            || self.last_flush.lock().unwrap().map_or(true, |last| {
+                last.elapsed().as_millis() as u64 >= self.config.flush_interval_ms
+            });
         if should_flush {
             *self.last_flush.lock().unwrap() = Some(std::time::Instant::now());
             drop(buffer);

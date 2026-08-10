@@ -148,8 +148,8 @@ pub enum MlxConfigError {
 
 /// Build an MLX upstream from environment variables.
 pub fn mlx_upstream_from_env() -> Result<MlxUpstream, MlxConfigError> {
-    let base_url = std::env::var("VISION_MLX_BASE_URL")
-        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    let base_url =
+        std::env::var("VISION_MLX_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
     if base_url.is_empty() {
         return Err(MlxConfigError::MissingBaseUrl);
     }

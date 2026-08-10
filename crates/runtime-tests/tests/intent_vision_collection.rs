@@ -48,12 +48,8 @@ fn real_http_assist() -> std::sync::Arc<dyn intent_engine::VisionAssist> {
         .ok()
         .filter(|token| !token.is_empty());
     std::sync::Arc::new(
-        intent_engine::HttpVisionAssist::new(
-            endpoint,
-            bearer,
-            std::time::Duration::from_secs(60),
-        )
-        .expect("http vision assist"),
+        intent_engine::HttpVisionAssist::new(endpoint, bearer, std::time::Duration::from_secs(60))
+            .expect("http vision assist"),
     )
 }
 

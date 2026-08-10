@@ -905,44 +905,48 @@ async fn run_vision_proxy(
     let upstream_kind = upstream.trim().to_ascii_lowercase();
     // Managed Python child (mlx --spawn-server) must outlive serve.
     let mut _python_child: Option<ManagedPythonServer> = None;
-    let (upstream, kind): (Arc<dyn vision_proxy::Upstream>, UpstreamKind) = match upstream_kind.as_str() {
-        "openai" => {
-            let api_key = match api_key_env {
-                None => require_upstream_api_key(Some("OPENAI_API_KEY"))?,
-                Some(name) if name.trim().is_empty() => require_upstream_api_key(None)?,
-                Some(name) => require_upstream_api_key(Some(name.trim()))?,
-            };
-            let model = model.unwrap_or_else(|| vision_proxy::OPENAI_DEFAULT_MODEL.to_string());
-            let base_url = vision_base_url
-                .unwrap_or_else(|| vision_proxy::OPENAI_DEFAULT_BASE_URL.to_string());
-            (Arc::new(OpenAiUpstream::new(api_key, model, base_url)), UpstreamKind::OpenAi)
-        }
-        "ollama" => {
-            let model = model.unwrap_or_else(|| vision_proxy::OLLAMA_DEFAULT_MODEL.to_string());
-            let base_url = vision_base_url
-                .unwrap_or_else(|| vision_proxy::OLLAMA_DEFAULT_BASE_URL.to_string());
-            let mut upstream = OllamaUpstream::new(model, base_url);
-            if let Some(collector) = &collector {
-                upstream = upstream.with_data_collector(collector.clone());
+    let (upstream, kind): (Arc<dyn vision_proxy::Upstream>, UpstreamKind) =
+        match upstream_kind.as_str() {
+            "openai" => {
+                let api_key = match api_key_env {
+                    None => require_upstream_api_key(Some("OPENAI_API_KEY"))?,
+                    Some(name) if name.trim().is_empty() => require_upstream_api_key(None)?,
+                    Some(name) => require_upstream_api_key(Some(name.trim()))?,
+                };
+                let model = model.unwrap_or_else(|| vision_proxy::OPENAI_DEFAULT_MODEL.to_string());
+                let base_url = vision_base_url
+                    .unwrap_or_else(|| vision_proxy::OPENAI_DEFAULT_BASE_URL.to_string());
+                (
+                    Arc::new(OpenAiUpstream::new(api_key, model, base_url)),
+                    UpstreamKind::OpenAi,
+                )
             }
-            (Arc::new(upstream), UpstreamKind::Ollama)
-        }
-        "mlx" => {
-            let base_url = vision_base_url
-                .unwrap_or_else(|| vision_proxy::MLX_DEFAULT_BASE_URL.to_string());
-            if spawn_server {
-                _python_child = Some(spawn_mlx_server(&base_url, server_script)?);
+            "ollama" => {
+                let model = model.unwrap_or_else(|| vision_proxy::OLLAMA_DEFAULT_MODEL.to_string());
+                let base_url = vision_base_url
+                    .unwrap_or_else(|| vision_proxy::OLLAMA_DEFAULT_BASE_URL.to_string());
+                let mut upstream = OllamaUpstream::new(model, base_url);
+                if let Some(collector) = &collector {
+                    upstream = upstream.with_data_collector(collector.clone());
+                }
+                (Arc::new(upstream), UpstreamKind::Ollama)
             }
-            let mut upstream = MlxUpstream::new(base_url);
-            if let Some(collector) = &collector {
-                upstream = upstream.with_data_collector(collector.clone());
+            "mlx" => {
+                let base_url = vision_base_url
+                    .unwrap_or_else(|| vision_proxy::MLX_DEFAULT_BASE_URL.to_string());
+                if spawn_server {
+                    _python_child = Some(spawn_mlx_server(&base_url, server_script)?);
+                }
+                let mut upstream = MlxUpstream::new(base_url);
+                if let Some(collector) = &collector {
+                    upstream = upstream.with_data_collector(collector.clone());
+                }
+                (Arc::new(upstream), UpstreamKind::Mlx)
             }
-            (Arc::new(upstream), UpstreamKind::Mlx)
-        }
-        _other => anyhow::bail!(
-            "unsupported upstream {upstream:?}; expected \"openai\", \"ollama\", or \"mlx\""
-        ),
-    };
+            _other => anyhow::bail!(
+                "unsupported upstream {upstream:?}; expected \"openai\", \"ollama\", or \"mlx\""
+            ),
+        };
 
     let config = ProxyConfig {
         bind,
