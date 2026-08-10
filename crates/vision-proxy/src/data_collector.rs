@@ -203,7 +203,7 @@ impl VisionDataCollector {
         let mut buffer = self.buffer.lock().unwrap();
         buffer.push(example);
         let should_flush = buffer.len() >= 100
-            || self.last_flush.lock().unwrap().map_or(true, |last| {
+            || self.last_flush.lock().unwrap().is_none_or(|last| {
                 last.elapsed().as_millis() as u64 >= self.config.flush_interval_ms
             });
         if should_flush {

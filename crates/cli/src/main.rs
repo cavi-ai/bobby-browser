@@ -687,7 +687,7 @@ pub async fn run() -> Result<()> {
             training_data_dir,
             api_key_env,
         } => {
-            run_vision_proxy(
+            run_vision_proxy(VisionProxyRunArgs {
                 bind,
                 path,
                 upstream,
@@ -698,7 +698,7 @@ pub async fn run() -> Result<()> {
                 collect_training_data,
                 training_data_dir,
                 api_key_env,
-            )
+            })
             .await?;
         }
     }
@@ -877,7 +877,7 @@ fn require_upstream_api_key(api_key_env: Option<&str>) -> Result<String> {
     }
 }
 
-async fn run_vision_proxy(
+struct VisionProxyRunArgs {
     bind: String,
     path: String,
     upstream: String,
@@ -888,7 +888,21 @@ async fn run_vision_proxy(
     collect_training_data: bool,
     training_data_dir: String,
     api_key_env: Option<String>,
-) -> Result<()> {
+}
+
+async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
+    let VisionProxyRunArgs {
+        bind,
+        path,
+        upstream,
+        model,
+        vision_base_url,
+        spawn_server,
+        server_script,
+        collect_training_data,
+        training_data_dir,
+        api_key_env,
+    } = args;
     let bind: SocketAddr = bind.parse().context("invalid --bind address")?;
     let bearer_token = require_vision_proxy_bearer()?;
 
