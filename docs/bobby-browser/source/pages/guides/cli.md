@@ -95,6 +95,61 @@ Shared flags on all `jobs` subcommands:
 `--payload-file`, `--priority` (`low|normal|high|critical`, default `normal`),
 `--max-retries`, `--timeout-ms`, `--idempotency-key`.
 
+### `bobby vision`
+
+Vision provider setup. `connect` writes a provider profile into `config.toml`,
+`login` establishes or verifies the configured ACP harness login, and `collect`
+gathers training data from gauntlet runs.
+
+```bash
+bobby vision connect --yes --provider mlx
+bobby vision connect --yes --backend acp --provider codex \
+  --command codex --arg acp --auth advertised
+bobby vision login
+```
+
+`bobby install` also offers vision configuration during onboarding. Field
+reference: [Configuration](configuration.md#vision).
+
+### `bobby vision-proxy`
+
+Run the loopback vision proxy that serves `propose` / `extract` against an
+upstream provider.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--bind <addr>` | `127.0.0.1:9100` | Bind address |
+| `--path <path>` | `/vision` | HTTP path for the propose/extract POST |
+| `--upstream <kind>` | `openai` | `openai`, `ollama`, or `mlx` |
+| `--model <id>` | per upstream | Model id passed to the upstream |
+| `--vision-base-url <url>` | per upstream | Upstream base URL |
+| `--spawn-server` | off | Run the canonical Python vision server as a managed child (`mlx` upstream); the child is killed when the proxy exits |
+| `--server-script <path>` | auto-detect | `vision_server.py` path when spawning (else `BOBBY_VISION_SERVER_SCRIPT`) |
+| `--api-key-env <var>` | `OPENAI_API_KEY` | Env var holding the upstream API key; an empty value skips the key |
+| `--collect-training-data` | off | Log vision proposals to disk |
+| `--training-data-dir <dir>` | `data/vision/` | Destination for those logs |
+
+`bobby serve --vision` starts the proxy alongside the runtime.
+
+### `bobby openshell`
+
+NVIDIA OpenShell host: write the pack, and mint or revoke one agent-scoped
+principal per sandbox.
+
+| Subcommand | Meaning |
+|---|---|
+| `install` | Write the `openshell/` pack (policy, `mcp.json`, skill, README) |
+| `provision --sandbox <id>` | Mint one agent-scoped principal and write its injection env at mode 0600 |
+| `rotate --sandbox <id>` | Revoke the prior principal and mint a fresh one |
+| `list` | List locally recorded sandboxes (no secrets) |
+| `status --sandbox <id>` | Non-secret status for one sandbox |
+| `revoke --sandbox <id>` | Revoke the principal provisioned for a sandbox |
+
+`bobby install --host openshell` writes the same pack, `bobby init --emit
+openshell` prints the MCP fragment, and `bobby doctor` reports `openshell-pack`
+and the related checks when a pack is present. See
+[OpenShell](openshell.md).
+
 ### Firefox companion
 
 ```bash
@@ -121,6 +176,9 @@ See [Firefox companion](firefox-companion.md).
 | `AUTOMATION_RUNTIME_BOOTSTRAP_*` | Direct bootstrap env contract (see [Authentication](auth.md)) |
 | `AUTOMATION_RUNTIME_TOKEN` | Client bearer (SDK / curl) |
 | `AUTOMATION_RUNTIME_BROWSER_SELECTION` | JSON engine/profile selection override (else the persisted enrollment, else the Firefox default) |
+| `BOBBY_MCP_TOOLSET` | Startup MCP phase, overriding `[mcp] startup_toolset` |
+| `BOBBY_OPENSHELL_SECRETS_DIR` | Root for per-sandbox OpenShell injection env files (default: OS config dir) |
+| `BOBBY_VISION_SERVER_SCRIPT` | `vision_server.py` path for `vision-proxy --spawn-server` |
 
 ## Next
 

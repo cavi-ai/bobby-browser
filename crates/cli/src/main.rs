@@ -280,7 +280,7 @@ enum CliCommand {
     /// Configure a vision provider profile in config.toml (deprecated alias)
     #[command(name = "vision-connect", hide = true)]
     VisionConnect(VisionConnectArgs),
-    /// Run the loopback vision proxy (propose/extract → OpenAI or Ollama)
+    /// Run the loopback vision proxy (propose/extract → OpenAI, Ollama, or MLX)
     VisionProxy {
         /// Bind address (loopback default)
         #[arg(long, default_value = "127.0.0.1:9100")]
