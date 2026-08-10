@@ -1522,13 +1522,13 @@ async fn locate_intent_does_not_require_vision_assist_upfront() {
             proxy: None,
             execution_policy: types::ExecutionPolicy {
                 javascript_evaluation: false,
-                vision_assist: true,
+                vision_assist: false,
                 ..types::ExecutionPolicy::default()
             },
         })
         .await
         .unwrap();
-    assert!(session.execution_policy.vision_assist);
+    assert!(!session.execution_policy.vision_assist);
 
     let (api, handle) = authenticated_with(
         runtime,
@@ -1552,27 +1552,6 @@ async fn locate_intent_does_not_require_vision_assist_upfront() {
         "vision:assist must not be required upfront for intents; got {outcome:?}"
     );
     // MissingCapability would surface as Err; Ok proves the auth gate cleared.
-}
-
-#[tokio::test]
-async fn create_session_stores_vision_assist_execution_policy() {
-    let runtime = RuntimeService::default();
-    let session = runtime
-        .create_session(CreateSessionRequest {
-            profile: "default".into(),
-            proxy: None,
-            execution_policy: types::ExecutionPolicy {
-                javascript_evaluation: false,
-                vision_assist: true,
-                ..types::ExecutionPolicy::default()
-            },
-        })
-        .await
-        .unwrap();
-
-    assert!(session.execution_policy.vision_assist);
-    let stored = runtime.sessions.get(&session.id).await.unwrap();
-    assert!(stored.execution_policy.vision_assist);
 }
 
 #[tokio::test]
@@ -1830,6 +1809,24 @@ fn request_profile(profile: &str) -> CreateSessionRequest {
         proxy: None,
         execution_policy: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn vision_enabled_session_is_rejected_when_runtime_has_no_provider() {
+    let runtime = RuntimeService::default();
+    let error = runtime
+        .create_session(CreateSessionRequest {
+            profile: "vision-without-provider".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy {
+                vision_assist: true,
+                ..ExecutionPolicy::default()
+            },
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, types::RuntimeError::InvalidRequest(_)));
+    assert!(error.to_string().contains("vision provider"), "{error}");
 }
 
 #[tokio::test]

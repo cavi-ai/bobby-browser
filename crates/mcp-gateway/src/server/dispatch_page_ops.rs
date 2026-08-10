@@ -342,6 +342,63 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let target = if let Some(control_id) = input.control_id.as_deref() {
+                    let snapshot = match self
+                        .runtime
+                        .form_snapshot(
+                            context.clone(),
+                            input.session_id.clone(),
+                            input.page_id.clone(),
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => return interface_error_response(id, error),
+                    };
+                    let control = snapshot
+                        .forms
+                        .iter()
+                        .flat_map(|form| form.controls.iter())
+                        .chain(snapshot.unowned_controls.iter())
+                        .find(|control| control.id == control_id);
+                    let Some(control_target) = control.and_then(|control| control.target.as_ref())
+                    else {
+                        return invalid_params_reason(id, "controlIdNotFound");
+                    };
+                    Some(types::TargetSpec {
+                        role: Some(control_target.role.clone()),
+                        accessible_name: Some(control_target.accessible_name.clone()),
+                        ordinal: control_target.ordinal,
+                        frame_path: control_target
+                            .frame_path
+                            .iter()
+                            .map(|segment| {
+                                Box::new(types::TargetSpec {
+                                    role: Some(segment.role.clone()),
+                                    accessible_name: Some(segment.accessible_name.clone()),
+                                    ordinal: segment.ordinal,
+                                    ..Default::default()
+                                })
+                            })
+                            .collect(),
+                        shadow_path: control_target
+                            .shadow_path
+                            .iter()
+                            .map(|segment| {
+                                Box::new(types::TargetSpec {
+                                    role: Some(segment.role.clone()),
+                                    accessible_name: Some(segment.accessible_name.clone()),
+                                    ordinal: segment.ordinal,
+                                    ..Default::default()
+                                })
+                            })
+                            .collect(),
+                        ..Default::default()
+                    })
+                } else {
+                    input.target
+                };
                 let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
@@ -349,7 +406,7 @@ impl Server {
                     input.workflow_id,
                     types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
                         selector: input.selector.unwrap_or_default(),
-                        target: input.target,
+                        target,
                         paths: input.paths,
                     }),
                 );

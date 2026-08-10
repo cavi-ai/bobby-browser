@@ -8,6 +8,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from providers import DEFAULT_PROVIDER, create_provider
 from providers.ollama_provider import OllamaProvider
+from providers.mlx_vlm_provider import MlxVlmProvider
 
 
 class ProviderRegistryTests(unittest.TestCase):
@@ -17,6 +18,13 @@ class ProviderRegistryTests(unittest.TestCase):
 
         self.assertEqual(DEFAULT_PROVIDER, "ollama")
         self.assertIsInstance(provider, OllamaProvider)
+
+    def test_explicit_mlx_model_override_reaches_provider(self):
+        with mock.patch.dict(os.environ, {"VISION_MLX_MODEL": "env-model"}, clear=True):
+            provider = create_provider("mlx-vlm", model="requested-model")
+
+        self.assertIsInstance(provider, MlxVlmProvider)
+        self.assertEqual(provider.model_name, "requested-model")
 
 
 if __name__ == "__main__":

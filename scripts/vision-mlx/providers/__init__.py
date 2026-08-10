@@ -40,12 +40,12 @@ _PROVIDERS = {
 }
 
 
-def create_provider(kind: str | None = None) -> VisionProvider:
+def create_provider(kind: str | None = None, model: str | None = None) -> VisionProvider:
     """Build a vision provider from explicit choice, env, or default."""
     kind = (kind or os.environ.get("VISION_PROVIDER") or DEFAULT_PROVIDER).strip()
 
     if kind == "mlx-vlm":
-        return MlxVlmProvider(model_name=os.environ.get("VISION_MLX_MODEL", MLX_MODEL))
+        return MlxVlmProvider(model_name=model or os.environ.get("VISION_MLX_MODEL", MLX_MODEL))
     if kind == "ollama":
         return OllamaProvider(
             model=os.environ.get("VISION_OLLAMA_MODEL", OLLAMA_MODEL),

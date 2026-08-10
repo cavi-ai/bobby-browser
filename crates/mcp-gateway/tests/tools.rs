@@ -887,7 +887,7 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
 }
 
 #[tokio::test]
-async fn session_create_accepts_and_preserves_a_named_vision_node() {
+async fn session_create_rejects_a_named_vision_node_when_runtime_has_no_provider() {
     let server = fixture_server(vec![Capability::SessionWrite]).await;
     let response = server
         .handle_message(request(
@@ -907,9 +907,8 @@ async fn session_create_accepts_and_preserves_a_named_vision_node() {
         .await
         .unwrap();
 
-    assert_eq!(response["result"]["isError"], false, "{response}");
     assert_eq!(
-        response["result"]["structuredContent"]["execution_policy"]["visionNode"], "acp-codex",
+        response["error"]["data"]["interfaceError"]["code"], "invalidRequest",
         "{response}"
     );
 }

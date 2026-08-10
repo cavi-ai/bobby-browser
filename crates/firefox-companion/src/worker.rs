@@ -4235,14 +4235,38 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .a11y_snapshot(&self.current_lease(), page_id, max_nodes)
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);
-        Ok(vec![
+        let controls_omitted = if accessibility_contains_form_control(&nodes) {
+            false
+        } else {
+            self.form_snapshot(page_id, Some(512))
+                .await
+                .ok()
+                .is_some_and(|evidence| {
+                    evidence.iter().any(|item| {
+                        matches!(
+                            item,
+                            Evidence::FormSnapshot { snapshot }
+                                if !snapshot.unowned_controls.is_empty()
+                                    || snapshot.forms.iter().any(|form| !form.controls.is_empty())
+                        )
+                    })
+                })
+        };
+        let mut evidence = vec![
             Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),
                 nodes,
                 truncated,
             },
             self.evidence(InteractionPath::EngineNative),
-        ])
+        ];
+        if controls_omitted {
+            evidence.push(Evidence::Configuration {
+                name: "accessibilityControlsOmitted".into(),
+                value: "true: form controls exist but were absent from the accessibility tree; use form_snapshot".into(),
+            });
+        }
+        Ok(evidence)
     }
 
     async fn network_log(
@@ -4763,6 +4787,27 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
     let mut candidates = Vec::new();
     collect(nodes, &mut candidates);
     candidates
+}
+
+fn accessibility_contains_form_control(nodes: &[types::AccessibilityNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.role.as_deref().is_some_and(|role| {
+            matches!(
+                role.to_ascii_lowercase().as_str(),
+                "button"
+                    | "checkbox"
+                    | "combobox"
+                    | "listbox"
+                    | "option"
+                    | "radio"
+                    | "searchbox"
+                    | "slider"
+                    | "spinbutton"
+                    | "switch"
+                    | "textbox"
+            )
+        }) || accessibility_contains_form_control(&node.children)
+    })
 }
 
 impl Drop for FirefoxCompanionWorker {

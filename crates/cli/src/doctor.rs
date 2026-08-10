@@ -1,6 +1,7 @@
 //! `bobby doctor` checks and report rendering.
 
 use std::{
+    io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -692,28 +693,20 @@ pub(crate) fn run_doctor(
         for profile in &selection.firefox {
             match Url::parse(&profile.bidi_url) {
                 Ok(url) if matches!(url.scheme(), "ws" | "wss") => {
-                    let reachable = url
-                        .socket_addrs(|| Some(if url.scheme() == "wss" { 443 } else { 80 }))
-                        .map(|addrs| {
-                            addrs.iter().any(|addr| {
-                                std::net::TcpStream::connect_timeout(
-                                    addr,
-                                    Duration::from_millis(500),
-                                )
-                                .is_ok()
-                            })
-                        })
-                        .unwrap_or(false);
-                    if reachable {
-                        report.ok("firefox-bidi", format!("{} reachable", profile.bidi_url));
-                    } else {
-                        report.warn(
+                    match probe_firefox_bidi(&profile.bidi_url) {
+                        Ok(()) => report.ok(
+                            "firefox-bidi",
+                            format!("{} accepted a WebDriver BiDi handshake", profile.bidi_url),
+                        ),
+                        Err(error) => {
+                            report.warn(
                             "firefox-bidi",
                             format!(
-                                "{} not reachable (is Firefox running with --remote-debugging-port?)",
-                                profile.bidi_url
+                                "{} is not a Firefox WebDriver BiDi endpoint ({error:#}); another service may own the port",
+                                profile.bidi_url,
                             ),
                         );
+                        }
                     }
                 }
                 _ => {
@@ -1106,6 +1099,42 @@ pub(crate) fn run_doctor(
     Ok(report)
 }
 
+fn probe_firefox_bidi(endpoint: &str) -> Result<()> {
+    let url = Url::parse(endpoint).context("invalid WebDriver BiDi URL")?;
+    if url.scheme() != "ws" {
+        anyhow::bail!("doctor currently probes loopback ws:// BiDi endpoints only");
+    }
+    let host = url.host_str().context("BiDi URL has no host")?;
+    let port = url
+        .port_or_known_default()
+        .context("BiDi URL has no port")?;
+    let address = url
+        .socket_addrs(|| Some(port))?
+        .into_iter()
+        .next()
+        .context("BiDi host resolved to no addresses")?;
+    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let path = if url.path().is_empty() {
+        "/"
+    } else {
+        url.path()
+    };
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )?;
+    let mut response = [0_u8; 4096];
+    let read = stream.read(&mut response)?;
+    let head = String::from_utf8_lossy(&response[..read]);
+    let status = head.lines().next().unwrap_or("empty response");
+    if !status.contains(" 101 ") {
+        anyhow::bail!("WebSocket handshake returned {status}");
+    }
+    Ok(())
+}
+
 fn probe_healthz(url: &str) -> Result<()> {
     let url = url.to_owned();
     match std::thread::spawn(move || probe_healthz_blocking(&url)).join() {
@@ -1153,4 +1182,28 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(_path: &Path) -> bool {
     true
+}
+
+#[cfg(test)]
+mod bidi_probe_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn firefox_bidi_probe_rejects_an_http_service_on_the_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let error = probe_firefox_bidi(&format!("ws://{address}/session")).unwrap_err();
+        assert!(error.to_string().contains("404"), "{error:#}");
+        server.join().unwrap();
+    }
 }

@@ -32,10 +32,16 @@ impl SessionManager {
             execution_policy: req.execution_policy,
         };
         if let Some(workers) = &self.workers {
-            workers
-                .lease(session.id.clone())
-                .await
-                .map_err(|error| RuntimeError::Internal(error.message))?;
+            workers.lease(session.id.clone()).await.map_err(|error| {
+                if error.code == types::ErrorCode::BrowserLaunchFailed {
+                    RuntimeError::InvalidRequest(
+                        "browser launch failed; run `bobby doctor` to verify the Firefox BiDi endpoint and detect another service occupying its configured port"
+                            .to_owned(),
+                    )
+                } else {
+                    RuntimeError::Internal(error.message)
+                }
+            })?;
         }
         self.inner
             .write()

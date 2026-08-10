@@ -1727,11 +1727,41 @@ impl BrowserWorker for ChromiumWorker {
         if emitted < max_nodes {
             truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
         }
-        Ok(vec![Evidence::AccessibilitySnapshot {
+        let controls_omitted = if a11y_contains_form_control(&nodes) {
+            false
+        } else {
+            match page
+                .evaluate(crate::form_snapshot_expression(page_id))
+                .await
+            {
+                Ok(remote) => {
+                    let value: Result<serde_json::Value, _> = remote.into_value();
+                    value
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .and_then(|encoded| {
+                            crate::decode_form_snapshot(page_id.clone(), &encoded, 512).ok()
+                        })
+                        .is_some_and(|snapshot| {
+                            !snapshot.unowned_controls.is_empty()
+                                || snapshot.forms.iter().any(|form| !form.controls.is_empty())
+                        })
+                }
+                Err(_) => false,
+            }
+        };
+        let mut evidence = vec![Evidence::AccessibilitySnapshot {
             page_id: page_id.clone(),
             nodes,
             truncated,
-        }])
+        }];
+        if controls_omitted {
+            evidence.push(Evidence::Configuration {
+                name: "accessibilityControlsOmitted".into(),
+                value: "true: form controls exist but were absent from the accessibility tree; use form_snapshot".into(),
+            });
+        }
+        Ok(evidence)
     }
 
     async fn form_snapshot(
@@ -3085,6 +3115,26 @@ fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
         .iter()
         .map(|node| 1 + count_a11y_nodes(&node.children))
         .sum()
+}
+
+fn a11y_contains_form_control(nodes: &[types::AccessibilityNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.role.as_deref().is_some_and(|role| {
+            matches!(
+                role.to_ascii_lowercase().as_str(),
+                "button"
+                    | "checkbox"
+                    | "combobox"
+                    | "listbox"
+                    | "radio"
+                    | "searchbox"
+                    | "slider"
+                    | "spinbutton"
+                    | "switch"
+                    | "textbox"
+            )
+        }) || a11y_contains_form_control(&node.children)
+    })
 }
 
 fn stamp_a11y_frame_path(

@@ -44,8 +44,12 @@ pub enum ResolutionError {
     RegexTooLong,
     #[error("invalid target regular expression: {0}")]
     InvalidRegex(String),
-    #[error("candidate limit exceeded")]
-    CandidateLimitExceeded,
+    #[error("candidate limit exceeded: {count} candidates (limit {limit}); first matches: {matches}. Narrow the target with role + accessibleName, label, testId, CSS, or ordinal")]
+    CandidateLimitExceeded {
+        count: usize,
+        limit: usize,
+        matches: String,
+    },
 }
 
 pub fn resolve_candidates(
@@ -54,7 +58,24 @@ pub fn resolve_candidates(
     policy: &ResolutionPolicy,
 ) -> Result<ResolutionDecision, ResolutionError> {
     if candidates.len() > policy.max_candidates {
-        return Err(ResolutionError::CandidateLimitExceeded);
+        let matches = candidates
+            .iter()
+            .take(10)
+            .map(|candidate| {
+                format!(
+                    "id={},role={},name={}",
+                    bounded_candidate_field(&candidate.id),
+                    bounded_candidate_field(candidate.role.as_deref().unwrap_or("-")),
+                    bounded_candidate_field(candidate.name.as_deref().unwrap_or("-"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(ResolutionError::CandidateLimitExceeded {
+            count: candidates.len(),
+            limit: policy.max_candidates,
+            matches,
+        });
     }
     let regex = match &target.text {
         Some(TextMatch::Regex(pattern)) => {
@@ -116,6 +137,17 @@ pub fn resolve_candidates(
             .map(|(_, _, evidence)| evidence)
             .collect(),
     })
+}
+
+fn bounded_candidate_field(value: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let mut chars = value.chars();
+    let bounded = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
 }
 
 fn score<'a>(

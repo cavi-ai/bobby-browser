@@ -118,6 +118,7 @@ impl RuntimeService {
 
     /// Installs the node registry a session's `visionNode` resolves against.
     pub fn with_nodes(mut self, nodes: Arc<NodeRegistry>) -> Self {
+        self.vision_provider_configured = !nodes.is_empty();
         self.nodes = nodes;
         self
     }
@@ -271,7 +272,7 @@ impl RuntimeService {
         let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> =
             structured_extractor.or_else(|| nodes.http_structured_extractor());
         let vision_assist_present = vision_assist.is_some();
-        let provider_present = provider.is_some();
+        let provider_present = provider.is_some() || !nodes.is_empty();
         if let Some(assist) = vision_assist {
             adaptive = adaptive.with_vision_assist(assist);
         }
@@ -334,6 +335,12 @@ impl RuntimeService {
         &self,
         req: CreateSessionRequest,
     ) -> Result<SessionState, RuntimeError> {
+        if req.execution_policy.vision_assist && !self.vision_provider_configured {
+            return Err(RuntimeError::InvalidRequest(
+                "executionPolicy.visionAssist requires a configured vision provider; run `bobby vision connect` and start with managed vision enabled"
+                    .into(),
+            ));
+        }
         self.sessions.create(req).await
     }
 

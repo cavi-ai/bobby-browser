@@ -320,7 +320,7 @@ struct VisionConnectArgs {
     /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Provider preset: openai, ollama, lmstudio, or custom
+    /// Provider preset: openai, ollama, lmstudio, mlx, or custom
     #[arg(long)]
     provider: Option<String>,
     /// Backend transport: direct or acp
@@ -887,7 +887,7 @@ fn prepare_vision_child(
     enforce_force_on_spawn(policy, &decision)?;
 
     let vision_child = if decision.should_spawn {
-        let (_, profile) = config
+        let (provider_name, profile) = config
             .vision
             .selected_provider()
             .context("no vision provider configured; run `bobby vision connect` first")?;
@@ -912,6 +912,7 @@ fn prepare_vision_child(
         }
         Some(ManagedVisionProxy::spawn_from_current_exe(
             &decision,
+            provider_name,
             profile,
             token_env,
             config.vision.collect_training_data,
@@ -1108,9 +1109,13 @@ fn spawn_mlx_server(
 fn find_vision_server_script() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     for ancestor in exe.ancestors().skip(1) {
-        let candidate = ancestor.join("scripts/vision-mlx/vision_server.py");
-        if candidate.is_file() {
-            return Ok(candidate);
+        for candidate in [
+            ancestor.join("scripts/vision-mlx/vision_server.py"),
+            ancestor.join("share/bobby-browser/scripts/vision-mlx/vision_server.py"),
+        ] {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
     }
     let cwd_candidate = PathBuf::from("scripts/vision-mlx/vision_server.py");
