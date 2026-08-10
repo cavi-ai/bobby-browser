@@ -1261,29 +1261,29 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     if configure_vision || interactive {
         println!("ok: {}", apply_vision_install(&config_path, &vision_state)?);
         ran += 1;
-        if vision_state.enabled && (readiness_requested || interactive) {
-            let profile = vision_state.profile()?;
-            match crate::vision_readiness::check_provider_readiness(
-                &vision_state.provider,
-                &profile,
-                &crate::vision_readiness::ReadinessOptions {
-                    timeout: std::time::Duration::from_secs(45),
-                    allow_download: false,
-                },
-            )? {
-                crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
-                    println!("ok: configured and readiness-tested {provider} / {model}");
-                }
-                outcome @ crate::vision_readiness::ReadinessOutcome::NeedsAction { .. } => {
-                    anyhow::bail!("vision readiness: {}", outcome.detail());
-                }
-            }
-        }
     }
     for item in items.iter().filter(|item| item.enabled) {
         let outcome = (item.run)()?;
         println!("ok: {outcome}");
         ran += 1;
+    }
+    if vision_state.enabled && (readiness_requested || interactive) {
+        let profile = vision_state.profile()?;
+        match crate::vision_readiness::check_provider_readiness(
+            &vision_state.provider,
+            &profile,
+            &crate::vision_readiness::ReadinessOptions {
+                timeout: std::time::Duration::from_secs(45),
+                allow_download: false,
+            },
+        )? {
+            crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
+                println!("ok: configured and readiness-tested {provider} / {model}");
+            }
+            outcome @ crate::vision_readiness::ReadinessOutcome::NeedsAction { .. } => {
+                anyhow::bail!("vision readiness: {}", outcome.detail());
+            }
+        }
     }
     if ran == 0 {
         println!("nothing selected; nothing changed");
@@ -1452,6 +1452,52 @@ mod install_tests {
             loaded.vision.selected_provider().unwrap().1.model,
             "gpt-4o-mini"
         );
+    }
+
+    #[test]
+    fn unavailable_vision_does_not_prevent_selected_firefox_companion_install() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
+        std::fs::write(dist.path().join("background.js"), "//").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join("config.toml");
+        let previous_home = std::env::var_os("HOME");
+        let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            #[cfg(not(target_os = "macos"))]
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+        }
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(home.path().join("Library/Application Support")).unwrap();
+        let companion_dir = bobby_config_dir().unwrap().join("firefox-companion");
+
+        let result = run_install(
+            &home.path().join("bootstrap.env"),
+            InstallOptions {
+                companion: true,
+                extension: Some(dist.path().to_path_buf()),
+                vision_provider: Some("openai".into()),
+                yes: true,
+                config: Some(config_path),
+                training_data_dir: home.path().join("training"),
+                ..InstallOptions::default()
+            },
+        );
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+
+        assert!(result.unwrap_err().to_string().contains("readiness"));
+        assert!(companion_dir.join("manifest.json").is_file());
+        assert!(companion_dir.join("background.js").is_file());
     }
 
     #[test]
