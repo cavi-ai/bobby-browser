@@ -89,6 +89,10 @@ fn base_config(root: &std::path::Path) -> AppConfig {
             endpoint_url: vision_endpoint(),
             token_env: Some("BOBBY_VISION_TOKEN".into()),
             prefill: true,
+            corpus_dir: Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/vision-escalations"),
+            ),
             ..config::VisionConfig::default()
         },
         context: Default::default(),
