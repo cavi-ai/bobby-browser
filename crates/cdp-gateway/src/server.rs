@@ -1525,12 +1525,7 @@ impl CdpConnection {
                 }
             }
             Some(Handler::PageAddScript) => {
-                let source = request.params.get("source").and_then(Value::as_str);
-                let world = request.params.get("worldName").and_then(Value::as_str);
-                let playwright = source == Some("") && world.is_some_and(|name| !name.is_empty() && name.len() <= 256);
-                let puppeteer = source == Some("//# sourceURL=pptr:internal")
-                    && world == Some("__puppeteer_utility_world__25.4.0");
-                if request.params.as_object().is_none_or(|params| params.len() != 2) || !(playwright || puppeteer) {
+                if !supported_client_initialization(&request.params) {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "only pinned bounded client initialization signatures are supported"));
                 }
                 Ok(json!({"identifier": Uuid::new_v4().simple().to_string()}))
@@ -2150,6 +2145,16 @@ impl CdpConnection {
     }
 }
 
+fn supported_client_initialization(params: &Value) -> bool {
+    let source = params.get("source").and_then(Value::as_str);
+    let world = params.get("worldName").and_then(Value::as_str);
+    let playwright =
+        source == Some("") && world.is_some_and(|name| !name.is_empty() && name.len() <= 256);
+    let puppeteer = source == Some("//# sourceURL=pptr:internal")
+        && world == Some("__puppeteer_utility_world__25.5.0");
+    params.as_object().is_some_and(|params| params.len() == 2) && (playwright || puppeteer)
+}
+
 fn download_events(
     frame_id: &str,
     guid: &str,
@@ -2180,9 +2185,27 @@ fn remote_object_valid(object: &RemoteObject, scope: &str, generation: u64) -> b
 #[cfg(test)]
 mod security_tests {
     use super::{
-        consume_pending_boundary, download_events, remote_object_valid, AutomationBoundary,
-        AutomationBoundaryPhase, DownloadStreamStore, RemoteObject, UploadStaging,
+        consume_pending_boundary, download_events, remote_object_valid,
+        supported_client_initialization, AutomationBoundary, AutomationBoundaryPhase,
+        DownloadStreamStore, RemoteObject, UploadStaging,
     };
+
+    #[test]
+    fn client_initialization_is_pinned_to_the_supported_puppeteer_version() {
+        assert!(supported_client_initialization(&serde_json::json!({
+            "source": "//# sourceURL=pptr:internal",
+            "worldName": "__puppeteer_utility_world__25.5.0"
+        })));
+        assert!(!supported_client_initialization(&serde_json::json!({
+            "source": "//# sourceURL=pptr:internal",
+            "worldName": "__puppeteer_utility_world__25.4.0"
+        })));
+        assert!(!supported_client_initialization(&serde_json::json!({
+            "source": "//# sourceURL=pptr:internal",
+            "worldName": "__puppeteer_utility_world__25.5.0",
+            "runImmediately": true
+        })));
+    }
 
     #[test]
     fn remote_objects_reject_cross_context_stale_and_forged_identity() {

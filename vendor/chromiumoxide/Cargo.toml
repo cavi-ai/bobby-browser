@@ -136,7 +136,7 @@ path = "examples/wiki.rs"
 # harness = true
 
 [dependencies.async-tungstenite]
-version = "0.32"
+version = "0.35"
 features = ["tokio-runtime"]
 
 [dependencies.base64]

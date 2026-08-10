@@ -8,7 +8,7 @@ use types::{
     AccessibilitySnapshotCommand, AttemptId, CaptureScreenshotCommand, CheckpointId,
     CheckpointInvariant, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
     CommandClass, CommandEnvelope, CommandId, CommandOutcome, ControlAction, ControlActionCommand,
-    CreateSessionRequest, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
+    CreateSessionRequest, ErrorCode, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
     NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision, RuntimeCommand,
     ScreenshotMode, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
     WaitForCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
@@ -431,6 +431,49 @@ impl ModernRuntime {
         self.submit_on(&self.page_id, command).await
     }
 
+    pub async fn capture_viewport_screenshot(&self) -> TestResult<Vec<Evidence>> {
+        const MAX_ATTEMPTS: usize = 2;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            let command = PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            });
+            let outcome = self
+                .runtime
+                .submit(CommandEnvelope {
+                    schema_version: CommandEnvelope::SCHEMA_VERSION,
+                    command_id: CommandId::new(),
+                    workflow_id: WorkflowId::new(),
+                    attempt_id: AttemptId::new(),
+                    session_id: self.session_id.clone(),
+                    page_id: Some(self.page_id.clone()),
+                    deadline: Utc::now() + Duration::seconds(30),
+                    command: RuntimeCommand::Primitive(command),
+                })
+                .await;
+            match outcome {
+                CommandOutcome::Completed { evidence, .. } => return Ok(evidence),
+                other if retryable_screenshot_failure(&other) && attempt + 1 < MAX_ATTEMPTS => {
+                    tokio::task::yield_now().await;
+                }
+                other => {
+                    self.capture_failure_state(
+                        &self.page_id,
+                        "CaptureScreenshot(Viewport)",
+                        &format!("{other:?}"),
+                    )
+                    .await;
+                    return Err(format!(
+                        "public runtime screenshot failed after {} attempt(s): {other:?}",
+                        attempt + 1
+                    )
+                    .into());
+                }
+            }
+        }
+        unreachable!("bounded screenshot retry loop always returns")
+    }
+
     async fn submit_on(
         &self,
         page_id: &PageId,
@@ -770,6 +813,14 @@ impl ModernRuntime {
     }
 }
 
+fn retryable_screenshot_failure(outcome: &CommandOutcome) -> bool {
+    matches!(
+        outcome,
+        CommandOutcome::RetryableFailure { error, .. }
+            if error.retryable && error.code == ErrorCode::ScreenshotCaptureFailed
+    )
+}
+
 pub fn css_target(selector: &str) -> TargetSpec {
     TargetSpec {
         css: Some(selector.into()),
@@ -882,7 +933,9 @@ fn scorecard_directory() -> PathBuf {
 mod tests {
     use std::path::Path;
 
-    use super::{HarnessError, ModernRuntime};
+    use types::{CommandError, CommandId, CommandOutcome, ErrorCode, ErrorLayer};
+
+    use super::{retryable_screenshot_failure, HarnessError, ModernRuntime};
 
     #[tokio::test]
     async fn missing_bundle_is_a_typed_startup_failure() {
@@ -893,5 +946,30 @@ mod tests {
             error.downcast_ref::<HarnessError>(),
             Some(HarnessError::MissingBundle { .. })
         ));
+    }
+
+    #[test]
+    fn only_retryable_screenshot_failures_are_retried() {
+        let outcome = |code, retryable| CommandOutcome::RetryableFailure {
+            command_id: CommandId::new(),
+            error: CommandError {
+                code,
+                message: "oneshot canceled".into(),
+                layer: ErrorLayer::Page,
+                retryable,
+            },
+        };
+        assert!(retryable_screenshot_failure(&outcome(
+            ErrorCode::ScreenshotCaptureFailed,
+            true
+        )));
+        assert!(!retryable_screenshot_failure(&outcome(
+            ErrorCode::ScreenshotCaptureFailed,
+            false
+        )));
+        assert!(!retryable_screenshot_failure(&outcome(
+            ErrorCode::TargetDetached,
+            true
+        )));
     }
 }

@@ -45,6 +45,7 @@ enum ActionBody {
     Click { x: f64, y: f64 },
     TypeText { text: String },
     ExtractValue { value: String },
+    ClickCandidate { index: u32 },
 }
 
 impl HttpVisionAssist {
@@ -196,6 +197,7 @@ impl VisionAssist for HttpVisionAssist {
             ActionBody::ExtractValue { .. } => {
                 return Err(provider_error("vision extract value exceeded its bound"));
             }
+            ActionBody::ClickCandidate { index } => VisionAction::ClickCandidate { index },
         };
         Ok(VisionProposal {
             confidence: proposal.confidence,

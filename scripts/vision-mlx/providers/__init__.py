@@ -28,15 +28,17 @@ from .base import ProposeRequest, ProposeResponse, VisionProvider
 from .lmstudio_provider import LmStudioProvider, DEFAULT_BASE_URL as LMSTUDIO_URL, DEFAULT_MODEL as LMSTUDIO_MODEL
 from .mlx_vlm_provider import MlxVlmProvider, DEFAULT_MODEL as MLX_MODEL
 from .ollama_provider import OllamaProvider, DEFAULT_BASE_URL as OLLAMA_URL, DEFAULT_MODEL as OLLAMA_MODEL
+from .v1_provider import MlxV1Provider, DEFAULT_MODEL as V1_MODEL
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PROVIDER = "ollama"
+DEFAULT_PROVIDER = "mlx-vlm"
 
 _PROVIDERS = {
     "mlx-vlm": MlxVlmProvider,
     "ollama": OllamaProvider,
     "lmstudio": LmStudioProvider,
+    "v1": MlxV1Provider,
 }
 
 
@@ -56,6 +58,11 @@ def create_provider(kind: str | None = None, model: str | None = None) -> Vision
             model=os.environ.get("VISION_LMSTUDIO_MODEL", LMSTUDIO_MODEL),
             base_url=os.environ.get("VISION_LMSTUDIO_BASE_URL", LMSTUDIO_URL),
         )
+    if kind == "v1":
+        return MlxV1Provider(
+            model_name=os.environ.get("VISION_V1_MODEL", V1_MODEL),
+            adapter_path=os.environ.get("VISION_V1_ADAPTER") or None,
+        )
 
     available = ", ".join(sorted(_PROVIDERS))
     raise ValueError(f"unknown vision provider {kind!r}; expected one of: {available}")
@@ -69,4 +76,5 @@ __all__ = [
     "MlxVlmProvider",
     "OllamaProvider",
     "LmStudioProvider",
+    "MlxV1Provider",
 ]

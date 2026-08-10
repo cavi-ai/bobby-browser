@@ -9,10 +9,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
-use types::{
-    AccessibilitySnapshotCommand, CaptureScreenshotCommand, Evidence, InspectCommand,
-    PrimitiveCommand, ScreenshotMode,
-};
+use types::{AccessibilitySnapshotCommand, Evidence, InspectCommand, PrimitiveCommand};
 
 use super::driver::{ModernRuntime, TestResult};
 
@@ -170,7 +167,12 @@ impl CorpusCollector {
             out.push_str(&serde_json::to_string(record)?);
             out.push('\n');
         }
-        std::fs::write(path, out)?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+        use std::io::Write;
+        pending.write_all(out.as_bytes())?;
+        pending.as_file().sync_all()?;
+        pending.persist(path)?;
         Ok(())
     }
 }
@@ -284,13 +286,7 @@ fn find_candidate(
 }
 
 async fn capture_screenshot_b64(runtime: &ModernRuntime) -> TestResult<String> {
-    let evidence = runtime
-        .submit(PrimitiveCommand::CaptureScreenshot(
-            CaptureScreenshotCommand {
-                mode: ScreenshotMode::Viewport,
-            },
-        ))
-        .await?;
+    let evidence = runtime.capture_viewport_screenshot().await?;
     for item in &evidence {
         if let Evidence::Screenshot { artifact_id, .. } = item {
             let path = find_artifact_file(runtime.artifacts_dir(), artifact_id, "png")
@@ -391,5 +387,23 @@ mod tests {
             aria_label_from_html("<button type=\"submit\">Create</button>"),
             None
         );
+    }
+
+    #[test]
+    fn save_atomically_replaces_the_visible_corpus() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("onboarding.jsonl");
+        let mut collector = CorpusCollector::new();
+        collector.records.push(json!({"run": 1}));
+        collector.save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"run\":1}\n");
+
+        collector.records.push(json!({"run": 2}));
+        collector.save(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"run\":1}\n{\"run\":2}\n"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }
