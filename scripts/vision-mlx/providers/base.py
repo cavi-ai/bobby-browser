@@ -93,12 +93,16 @@ class ProposeResponse:
         if not (0.0 <= self.confidence <= 1.0):
             raise ValueError(f"confidence out of range: {self.confidence}")
         kind = self.action.get("kind")
-        if kind not in ("click", "typeText", "extractValue"):
+        if kind not in ("click", "typeText", "extractValue", "clickCandidate"):
             raise ValueError(f"invalid action kind: {kind}")
         if kind == "click":
             x, y = self.action.get("x"), self.action.get("y")
             if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
                 raise ValueError(f"click coordinates not finite: x={x}, y={y}")
+        if kind == "clickCandidate":
+            index = self.action.get("index")
+            if not isinstance(index, int) or index < 0:
+                raise ValueError(f"clickCandidate index invalid: {index}")
 
 
 # ---------------------------------------------------------------------------

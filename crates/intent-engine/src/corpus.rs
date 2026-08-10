@@ -132,7 +132,7 @@ pub fn match_resolved(
 }
 
 /// Serialize a vision action into the raw action shape the training format
-/// expects (`click`/`typeText`/`extractValue`).
+/// expects (`click`/`typeText`/`extractValue`/`clickCandidate`).
 pub fn raw_action(action: &VisionAction) -> serde_json::Value {
     match action {
         VisionAction::Click { x, y } => serde_json::json!({"kind": "click", "x": x, "y": y}),
@@ -141,6 +141,9 @@ pub fn raw_action(action: &VisionAction) -> serde_json::Value {
         }
         VisionAction::ExtractValue { value } => {
             serde_json::json!({"kind": "extractValue", "value": value})
+        }
+        VisionAction::ClickCandidate { index } => {
+            serde_json::json!({"kind": "clickCandidate", "index": index})
         }
     }
 }

@@ -33,6 +33,7 @@ struct FakeBrowser {
     candidates: Vec<dom_engine::Candidate>,
     gather_error: Option<CommandError>,
     click_xy_calls: Arc<AtomicUsize>,
+    click_targets: Arc<std::sync::Mutex<Vec<Option<types::TargetSpec>>>>,
     screenshot_png: Vec<u8>,
 }
 
@@ -52,9 +53,16 @@ impl IntentBrowser for FakeBrowser {
     async fn click(
         &self,
         _page_id: &PageId,
-        _command: &ClickCommand,
+        command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported("click"))
+        self.click_targets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(command.target.clone());
+        Ok(vec![Evidence::Configuration {
+            name: "visionClick".into(),
+            value: "ok".into(),
+        }])
     }
 
     async fn click_xy(
@@ -182,6 +190,154 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
     });
     let record = record.expect("stuck IntentExecution evidence");
     assert_eq!(record.verification, "targetNotFound");
+}
+
+#[tokio::test]
+async fn click_candidate_proposal_clicks_the_referenced_element() {
+    fn candidate(name: &str) -> dom_engine::Candidate {
+        dom_engine::Candidate {
+            id: format!("btn-{name}"),
+            css: Some(format!("[data-name=\"{name}\"]")),
+            test_id: None,
+            role: Some("button".into()),
+            name: Some(name.into()),
+            label: None,
+            text: name.into(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        }
+    }
+
+    // Ask for a link; the page only has buttons, so resolution fails with
+    // candidates present and the escalation carries them.
+    let locate_link = IntentCommand::Locate(LocateIntent {
+        purpose: "Continue to checkout".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+    });
+
+    let called = Arc::new(AtomicBool::new(false));
+    let click_xy_calls = Arc::new(AtomicUsize::new(0));
+    let click_targets: Arc<std::sync::Mutex<Vec<Option<types::TargetSpec>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::ClickCandidate { index: 0 },
+        },
+    });
+    let browser = FakeBrowser {
+        candidates: vec![candidate("Continue"), candidate("Cancel")],
+        click_xy_calls: click_xy_calls.clone(),
+        click_targets: click_targets.clone(),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let page_id = PageId::new();
+
+    let outcome = IntentEngine::execute(
+        &locate_link,
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { .. } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(called.load(Ordering::SeqCst), "propose must be called");
+    assert_eq!(
+        click_xy_calls.load(Ordering::SeqCst),
+        0,
+        "clickCandidate must not fall to pixel clicking"
+    );
+    let targets = click_targets.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(targets.len(), 1, "exactly one DOM click expected");
+    let target = targets[0].as_ref().expect("click must carry a target spec");
+    assert_eq!(target.role.as_deref(), Some("button"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Continue"));
+}
+
+#[tokio::test]
+async fn click_candidate_index_outside_the_prompt_list_fails_closed() {
+    fn candidate(name: &str) -> dom_engine::Candidate {
+        dom_engine::Candidate {
+            id: format!("btn-{name}"),
+            css: Some(format!("[data-name=\"{name}\"]")),
+            test_id: None,
+            role: Some("button".into()),
+            name: Some(name.into()),
+            label: None,
+            text: name.into(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        }
+    }
+
+    let locate_link = IntentCommand::Locate(LocateIntent {
+        purpose: "Continue to checkout".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+    });
+
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::ClickCandidate { index: 7 },
+        },
+    });
+    let browser = FakeBrowser {
+        candidates: vec![candidate("Cancel")],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &locate_link,
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VisionAssistFailed);
 }
 
 #[tokio::test]
