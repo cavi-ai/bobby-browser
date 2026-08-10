@@ -63,3 +63,7 @@ crates/cli/data/
 # Python test/import caches.
 __pycache__/
 *.py[cod]
+
+
+models/
+.worktrees/
