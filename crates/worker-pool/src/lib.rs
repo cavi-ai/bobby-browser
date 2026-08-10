@@ -104,6 +104,7 @@ pub(crate) fn annotate_accessibility_targets_with_totals(
                             accessible_name: name.clone(),
                             ordinal: (totals.get(&key).copied().unwrap_or_default() > 1)
                                 .then_some(*index),
+                            frame_path: Vec::new(),
                         });
                     }
                     *index += 1;

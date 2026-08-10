@@ -1202,7 +1202,9 @@ async fn boundary_pre_effect_resolution_failure_is_failed_not_needs_reconciliati
 
 /// A Boundary act whose postcondition wait times out already reached the
 /// browser; keep it as plain `failed` (inspect/retry guidance) instead of
-/// the never-retry `needsReconciliation` path.
+/// the never-retry `needsReconciliation` path. The click landed, so the
+/// error is rewrapped as a non-retryable verification failure that says so —
+/// never the bare wait timeout that would invite a duplicate POST.
 #[tokio::test]
 async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -1268,8 +1270,12 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
         .await
         .unwrap();
     let outcome = runtime.execute(request).await;
-    assert!(matches!(outcome, CommandOutcome::Failed { error, .. }
-        if error.code == ErrorCode::WaitConditionTimedOut));
+    let CommandOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VerificationFailed);
+    assert!(!error.retryable);
+    assert!(error.message.contains("click landed"), "{error:?}");
 }
 
 #[tokio::test]

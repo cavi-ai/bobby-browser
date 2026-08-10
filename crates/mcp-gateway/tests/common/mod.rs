@@ -244,6 +244,7 @@ impl BrowserWorker for LiveWorker {
                     role: "textbox".into(),
                     accessible_name: "Email address".into(),
                     ordinal: Some(1),
+                    frame_path: Vec::new(),
                 }),
                 ..types::AccessibilityNode::default()
             }],

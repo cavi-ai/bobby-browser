@@ -27,6 +27,7 @@ fn node(role: &str, name: &str) -> AccessibilityNode {
             role: role.to_owned(),
             accessible_name: name.to_owned(),
             ordinal: Some(1),
+            frame_path: Vec::new(),
         }),
         ..AccessibilityNode::default()
     }

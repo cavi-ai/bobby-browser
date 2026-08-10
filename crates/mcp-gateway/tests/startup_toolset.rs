@@ -64,21 +64,19 @@ async fn tool_names(server: &Server) -> Vec<String> {
         .collect()
 }
 
-fn payload_bytes(names: &[String]) -> usize {
-    serde_json::to_string(names).expect("serializable").len()
-}
-
 /// One test, because each arm mutates the same process-wide variable.
 #[tokio::test]
 async fn startup_phase_resolves_env_then_config_then_explore() {
-    // Unset: explore — small first tools/list; widen with toolset_select.
+    // Unset: explore — the standard working loop; widen with toolset_select.
     unsafe { std::env::remove_var("BOBBY_MCP_TOOLSET") };
     let default_names = tool_names(&initialized_server(|server| server).await).await;
     assert_workflow_controls("explore", &default_names);
     assert!(
-        !default_names.contains(&"click".to_owned())
-            && !default_names.contains(&"intent_fill".to_owned()),
-        "the default surface should hide act and intent tools"
+        default_names.contains(&"click".to_owned())
+            && default_names.contains(&"type_text".to_owned())
+            && !default_names.contains(&"intent_fill".to_owned())
+            && !default_names.contains(&"command_execute".to_owned()),
+        "the default surface should cover base controls but hide intents and escape hatches"
     );
     assert!(
         default_names.contains(&"a11y_snapshot".to_owned())
@@ -104,10 +102,15 @@ async fn startup_phase_resolves_env_then_config_then_explore() {
         configured.contains(&"toolset_select".to_owned()),
         "a narrowed agent must always be able to widen again"
     );
-    assert!(
-        payload_bytes(&configured) > payload_bytes(&default_names),
-        "act should advertise more than the explore default"
-    );
+    // Explore already covers the base controls, so act's identity is the
+    // escape hatches and niche mutations explore deliberately omits.
+    for escape_hatch in ["command_execute", "evaluate_javascript", "emulate"] {
+        assert!(
+            configured.contains(&escape_hatch.to_owned())
+                && !default_names.contains(&escape_hatch.to_owned()),
+            "act should distinguish itself with {escape_hatch}"
+        );
+    }
 
     let full =
         tool_names(&initialized_server(|server| server.with_startup_toolset(Toolset::Full)).await)
@@ -181,6 +184,8 @@ fn narrow_phases_hide_without_forbidding() {
             "{phase} must keep session lifecycle so an agent can clean up"
         );
     }
-    assert!(!Toolset::Explore.advertises("click"));
+    assert!(Toolset::Explore.advertises("click"));
+    assert!(!Toolset::Explore.advertises("intent_fill"));
+    assert!(!Toolset::Explore.advertises("command_execute"));
     assert!(Toolset::Full.advertises("click"));
 }

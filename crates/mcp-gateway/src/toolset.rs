@@ -1,16 +1,21 @@
 //! Phase-scoped toolsets: `tools/list` advertises only the tools a phase needs,
 //! keeping the response inside the 131,072-byte budget.
 //!
-//! [`Toolset::Explore`] is the default so the first `tools/list` stays small
-//! (~42 KiB). An agent widens with `toolset_select` (or starts on `full` via
-//! `BOBBY_MCP_TOOLSET` / `[mcp] startup_toolset`), which also emits
+//! [`Toolset::Explore`] is the default so the first `tools/list` covers the
+//! standard working loop (~58 KiB): observe, navigate, and act with the base
+//! control primitives. An agent widens with `toolset_select` (or starts on
+//! `full` via `BOBBY_MCP_TOOLSET` / `[mcp] startup_toolset`), which also emits
 //! `notifications/tools/list_changed` so the client re-reads.
 //!
 //! Phases follow the runtime's working loop:
 //!
-//! - [`Toolset::Explore`]: observation, lifecycle setup, and navigation; no
-//!   action or intent tools.
-//! - [`Toolset::Act`]: the primitives that change the page.
+//! - [`Toolset::Explore`]: observation, lifecycle, navigation, and the base
+//!   controls (click, type, upload, dialog, download). Only the heavyweight
+//!   `intent_*` family, escape hatches, and niche mutations stay out, so a
+//!   client that defers schemas for hidden tools pays no discovery round trip
+//!   before its first click.
+//! - [`Toolset::Act`]: the primitives that change the page, plus the
+//!   `command_execute` / `evaluate_javascript` escape hatches.
 //! - [`Toolset::Intent`]: the `intent_*` family.
 //! - [`Toolset::Verify`]: evidence, checkpoints, recovery.
 //! - [`Toolset::Full`]: everything the principal's capabilities allow.
@@ -29,8 +34,9 @@ use std::fmt;
 pub enum Toolset {
     /// Everything the principal's capabilities allow.
     Full,
-    /// Default: observation, lifecycle setup, and navigation; no action or
-    /// intent tools.
+    /// Default: the standard working loop — observation, lifecycle,
+    /// navigation, and the base control primitives. The `intent_*` family and
+    /// escape hatches stay out.
     #[default]
     Explore,
     Act,
@@ -146,6 +152,16 @@ const EXPLORE: &[&str] = &[
     "wait_for",
     "network_log",
     "cookie_get",
+    // Base controls: the default loop must click, type, upload, answer
+    // dialogs, and download without a toolset_select + schema-discovery
+    // round trip first. Escape hatches and niche mutations stay in `act`.
+    "click",
+    "click_and_wait_for_popup",
+    "type_text",
+    "control_action",
+    "upload_files",
+    "dialog",
+    "download_url",
 ];
 
 /// Raw primitives. `command_execute` is the escape hatch for a caller minting
@@ -336,25 +352,37 @@ mod tests {
         }
     }
 
-    /// Explore permits observation, lifecycle setup, and navigation, but no
-    /// page action or intent tool.
+    /// Explore covers the standard loop — observation, navigation, and the
+    /// base controls — but never the intent family, escape hatches, or niche
+    /// mutations.
     #[test]
-    fn the_explore_phase_advertises_no_action_or_intent_tool() {
+    fn the_explore_phase_advertises_base_controls_but_no_intent_or_escape_hatch() {
         for tool in [
             "click",
             "click_and_wait_for_popup",
             "type_text",
             "control_action",
             "upload_files",
+            "dialog",
+            "download_url",
+        ] {
+            assert!(
+                Toolset::Explore.advertises(tool),
+                "explore omits the base control {tool}"
+            );
+        }
+        for tool in [
             "intent_fill",
             "intent_submit_and_verify",
             "cookie_set",
             "cookie_delete",
             "evaluate_javascript",
+            "command_execute",
+            "emulate",
         ] {
             assert!(
                 !Toolset::Explore.advertises(tool),
-                "explore advertises the mutating tool {tool}"
+                "explore advertises {tool}, which belongs to a widening phase"
             );
         }
     }

@@ -25,6 +25,12 @@ pub struct AccessibilityTarget {
     pub accessible_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinal: Option<usize>,
+    /// Frame hops from the main frame to the document holding this node;
+    /// empty for main-frame nodes. Segments are the same role/name/ordinal
+    /// shape `FormControlTarget.frame_path` resolves, so the target can be
+    /// passed verbatim to `control_action`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_path: Vec<crate::forms::SemanticTargetSegment>,
 }
 
 /// Where the retained page context says a described control is.
@@ -152,6 +158,10 @@ pub struct AccessibilityNode {
     pub checked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autocomplete: Option<String>,
+    /// Link destination, when the engine reports one for this node. Lets an
+    /// agent feed `download_url` (or navigate) without an HTML round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_min: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

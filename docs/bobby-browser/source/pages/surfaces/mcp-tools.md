@@ -394,16 +394,16 @@ compare hand-bounded `kind` variant sets to schemars output from the
 
 ## Toolset phases
 
-`tools/list` for a principal holding every capability is ~88,000 bytes. An
+`tools/list` for a principal holding every capability is ~127,000 bytes. An
 agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page, navigate, wait (default) | ~28 KB |
-| `act` | raw primitives, `command_execute`, and job tools | ~44 KB |
-| `intent` | the `intent_*` family and `extract_structured` | ~46 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~37 KB |
-| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~88 KB |
+| `explore` | read the page, navigate, wait, and the base controls (`click`, `type_text`, `control_action`, `upload_files`, `dialog`, `download_url`) — the standard loop with no `toolset_select` first (default) | ~63 KB |
+| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), niche mutations, and job tools | ~67 KB |
+| `intent` | the `intent_*` family and `extract_structured` | ~72 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~40 KB |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~124 KB |
 
 Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
 `workflow_observe` appear in every phase. This includes servers configured to

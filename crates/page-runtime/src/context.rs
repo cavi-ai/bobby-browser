@@ -497,6 +497,7 @@ mod tests {
                 role: role.to_owned(),
                 accessible_name: name.to_owned(),
                 ordinal,
+                frame_path: Vec::new(),
             }),
             ..AccessibilityNode::default()
         }
