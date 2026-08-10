@@ -984,6 +984,8 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let no_collect_training_data = *no_collect_training_data;
     let force = *force;
     let yes = *yes;
+    let readiness_requested =
+        vision_provider.is_some() || vision_model.is_some() || download_vision_model;
     let project_root = std::env::current_dir()?;
     let mut items: Vec<InstallItem> = Vec::new();
     let use_defaults = use_install_defaults(&options);
@@ -1259,7 +1261,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     if configure_vision || interactive {
         println!("ok: {}", apply_vision_install(&config_path, &vision_state)?);
         ran += 1;
-        if vision_state.enabled && (vision_named || interactive) {
+        if vision_state.enabled && (readiness_requested || interactive) {
             let profile = vision_state.profile()?;
             match crate::vision_readiness::check_provider_readiness(
                 &vision_state.provider,
