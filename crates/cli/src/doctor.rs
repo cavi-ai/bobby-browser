@@ -127,14 +127,48 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
             }),
         }
     } else {
-        actions.push(DoctorFixAction {
-            status: DoctorFixStatus::NeedsAction,
-            name: "bootstrap".to_string(),
+        match bootstrap_local::generate_bootstrap(chrono::Duration::days(
+            bootstrap_local::DEFAULT_TTL_DAYS,
+        ))
+        .and_then(|material| {
+            bootstrap_local::write_bootstrap_env(&bootstrap_path, &material, false)
+        }) {
+            Ok(()) => actions.push(DoctorFixAction {
+                status: DoctorFixStatus::Fixed,
+                name: "bootstrap".to_string(),
+                detail: format!("generated agent credential at {}", bootstrap_path.display()),
+            }),
+            Err(error) => actions.push(DoctorFixAction {
+                status: DoctorFixStatus::Failed,
+                name: "bootstrap".to_string(),
+                detail: error.to_string(),
+            }),
+        }
+    }
+
+    let vision_token_existed = crate::vision_token::managed_vision_token_path(&bootstrap_path)
+        .exists()
+        || std::env::var("BOBBY_VISION_TOKEN")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+    match crate::vision_token::ensure_managed_vision_token(&bootstrap_path) {
+        Ok(_) => actions.push(DoctorFixAction {
+            status: if vision_token_existed {
+                DoctorFixStatus::Noop
+            } else {
+                DoctorFixStatus::Fixed
+            },
+            name: "vision-token".to_string(),
             detail: format!(
-                "{} does not exist; run `bobby init` to create a credential",
-                bootstrap_path.display()
+                "private vision credential is available at {}",
+                crate::vision_token::managed_vision_token_path(&bootstrap_path).display()
             ),
-        });
+        }),
+        Err(error) => actions.push(DoctorFixAction {
+            status: DoctorFixStatus::Failed,
+            name: "vision-token".to_string(),
+            detail: error.to_string(),
+        }),
     }
 
     if config_path.exists() {
@@ -414,7 +448,7 @@ fn vision_endpoint_is_loopback(endpoint: &str) -> bool {
 pub(crate) fn vision_endpoint_unreachable_detail(endpoint: &str) -> String {
     if vision_endpoint_is_loopback(endpoint) {
         format!(
-            "{endpoint} not reachable (start with `bobby serve --vision` to auto-spawn the proxy, or run `bobby vision-proxy` manually)"
+            "{endpoint} is stopped; Bobby starts the vision service on demand (`bobby vision start` runs it manually)"
         )
     } else {
         format!("{endpoint} not reachable (verify the external vision endpoint is running)")
@@ -551,10 +585,36 @@ fn check_vision_propose_probe(config: &AppConfig) -> Option<DoctorCheck> {
     let registry = node_registry::NodeRegistry::from_config(config);
     let (_, node) = registry.primary_http_vision_node()?;
     let endpoint = node.endpoint_url.clone();
+    if vision_endpoint_is_loopback(&endpoint) {
+        let running = Url::parse(&endpoint)
+            .ok()
+            .and_then(|url| {
+                url.socket_addrs(|| Some(url.port_or_known_default().unwrap_or(80)))
+                    .ok()
+            })
+            .is_some_and(|addresses| {
+                addresses.iter().any(|address| {
+                    std::net::TcpStream::connect_timeout(address, Duration::from_millis(250))
+                        .is_ok()
+                })
+            });
+        if !running {
+            return Some(DoctorCheck {
+                status: DoctorStatus::Ok,
+                name: "vision-service".to_string(),
+                detail: vision_endpoint_unreachable_detail(&endpoint),
+            });
+        }
+    }
     let bearer = node
         .token_env
         .as_ref()
-        .and_then(|name| std::env::var(name).ok());
+        .and_then(|name| std::env::var(name).ok())
+        .or_else(|| {
+            bootstrap_local::default_bootstrap_path()
+                .ok()
+                .and_then(|path| crate::vision_token::resolve_vision_token(&path).ok())
+        });
     let timeout = std::time::Duration::from_millis(node.timeout_ms.max(1_000));
     let probe = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -585,12 +645,12 @@ fn check_vision_propose_probe(config: &AppConfig) -> Option<DoctorCheck> {
     Some(match probe {
         Some(elapsed) => DoctorCheck {
             status: DoctorStatus::Ok,
-            name: "vision-probe".to_string(),
+            name: "vision-service".to_string(),
             detail: format!("propose round-trip ok in {}ms", elapsed.as_millis()),
         },
         None => DoctorCheck {
             status: DoctorStatus::Warn,
-            name: "vision-probe".to_string(),
+            name: "vision-service".to_string(),
             detail:
                 "propose round-trip failed (endpoint unreachable, auth rejected, or invalid reply)"
                     .to_string(),
@@ -606,16 +666,49 @@ pub(crate) fn check_vision_provider(vision: &VisionConfig) -> Option<DoctorCheck
     if vision.providers.contains_key(name) {
         Some(DoctorCheck {
             status: DoctorStatus::Ok,
-            name: "vision-provider".to_string(),
+            name: "vision-config".to_string(),
             detail: format!("provider \"{name}\" configured"),
         })
     } else {
         Some(DoctorCheck {
             status: DoctorStatus::Warn,
-            name: "vision-provider".to_string(),
+            name: "vision-config".to_string(),
             detail: format!("provider \"{name}\" is set but missing from [vision.providers]"),
         })
     }
+}
+
+fn check_vision_model(vision: &VisionConfig) -> Option<DoctorCheck> {
+    let (provider, profile) = vision.selected_provider()?;
+    if provider.eq_ignore_ascii_case("mlx") {
+        return Some(
+            match crate::vision_readiness::cached_hugging_face_model(&profile.model) {
+                Ok(true) => DoctorCheck {
+                    status: DoctorStatus::Ok,
+                    name: "vision-model".to_string(),
+                    detail: format!("{} is cached and loadable", profile.model),
+                },
+                Ok(false) => DoctorCheck {
+                    status: DoctorStatus::Warn,
+                    name: "vision-model".to_string(),
+                    detail: format!(
+                        "{} is not cached; run `bobby doctor --fix --download-model`",
+                        profile.model
+                    ),
+                },
+                Err(error) => DoctorCheck {
+                    status: DoctorStatus::Warn,
+                    name: "vision-model".to_string(),
+                    detail: error.to_string(),
+                },
+            },
+        );
+    }
+    Some(DoctorCheck {
+        status: DoctorStatus::Ok,
+        name: "vision-model".to_string(),
+        detail: format!("{} / {} is configured", provider, profile.model),
+    })
 }
 
 pub(crate) fn check_vision_upstream_key(vision: &VisionConfig) -> Option<DoctorCheck> {
@@ -789,6 +882,9 @@ pub(crate) fn run_doctor(
         if let Some(check) = check_vision_provider(&config.vision) {
             push_doctor_check(&mut report, check);
         }
+        if let Some(check) = check_vision_model(&config.vision) {
+            push_doctor_check(&mut report, check);
+        }
         if let Some(check) = check_vision_upstream_key(&config.vision) {
             push_doctor_check(&mut report, check);
         }
@@ -805,49 +901,34 @@ pub(crate) fn run_doctor(
 
         if !matches!(config.vision.backend, Some(config::VisionBackendKind::Acp)) {
             let registry = node_registry::NodeRegistry::from_config(config);
-            if let Some((name, node)) = registry.primary_http_vision_node() {
-                let endpoint = node.endpoint_url.as_str();
-                match Url::parse(endpoint) {
-                    Ok(url) => {
-                        let reachable = url
-                            .socket_addrs(|| Some(url.port_or_known_default().unwrap_or(80)))
-                            .map(|addrs| {
-                                addrs.iter().any(|addr| {
-                                    std::net::TcpStream::connect_timeout(
-                                        addr,
-                                        Duration::from_millis(500),
-                                    )
-                                    .is_ok()
+            if let Some((_name, node)) = registry.primary_http_vision_node() {
+                match node.token_env.as_deref() {
+                    Some(env_name) if !env_name.is_empty() => {
+                        let available = std::env::var(env_name)
+                            .ok()
+                            .is_some_and(|value| !value.is_empty())
+                            || bootstrap_local::default_bootstrap_path()
+                                .ok()
+                                .and_then(|path| {
+                                    crate::vision_token::resolve_vision_token(&path).ok()
                                 })
-                            })
-                            .unwrap_or(false);
-                        if reachable {
-                            report.ok("vision-endpoint", format!("{name} → {endpoint}"));
+                                .is_some();
+                        if available {
+                            report.ok(
+                                "vision-token",
+                                "private vision credential is available".to_string(),
+                            );
                         } else {
                             report.warn(
-                                "vision-endpoint",
-                                vision_endpoint_unreachable_detail(endpoint),
+                                "vision-token",
+                                "private vision credential is missing; run `bobby doctor --fix`"
+                                    .to_string(),
                             );
                         }
                     }
-                    Err(error) => {
-                        report.warn("vision-endpoint", format!("invalid URL: {error}"));
-                    }
-                }
-
-                match node.token_env.as_deref() {
-                    Some(env_name) if !env_name.is_empty() => match std::env::var(env_name) {
-                        Ok(value) if !value.is_empty() => {
-                            report.ok("vision-token-env", format!("{env_name} is set"));
-                        }
-                        _ => {
-                            report
-                                .warn("vision-token-env", format!("{env_name} is unset or empty"));
-                        }
-                    },
                     _ => {
                         report.warn(
-                            "vision-token-env",
+                            "vision-token",
                             "token_env unset; bobby will call the provider without a bearer"
                                 .to_string(),
                         );
@@ -937,7 +1018,15 @@ pub(crate) fn run_doctor(
                 "engine preference can be satisfied by configured registrations".to_string(),
             ),
             Err(error) => {
-                report.fail("engine-satisfiability", format!("{error:#}"));
+                if selection.firefox.is_empty() && format!("{error:#}").contains("Firefox") {
+                    report.warn(
+                        "firefox-enrollment",
+                        "Firefox is not paired yet. Run `bobby install --companion`, then `make firefox-start`, and click Pair in the Bobby companion toolbar popup. Re-run `bobby doctor` afterward."
+                            .to_string(),
+                    );
+                } else {
+                    report.fail("engine-satisfiability", format!("{error:#}"));
+                }
             }
         }
         for profile in &selection.firefox {
@@ -1180,15 +1269,21 @@ pub(crate) fn run_doctor(
     // `[mcp] startup_toolset` (and the rest of the file) apply to handshake —
     // without this, doctor always probes explore defaults while gauntlet/agent
     // hosts that set BOBBY_BROWSER_CONFIG see a different surface.
-    let handshake_env = handshake_env.map(|mut env| {
-        if config_path.exists() {
-            env.insert(
-                "BOBBY_BROWSER_CONFIG".into(),
-                config_path.display().to_string(),
-            );
-        }
-        env
-    });
+    let firefox_enrollment_missing = selection
+        .as_ref()
+        .is_some_and(|selection| selection.firefox.is_empty());
+    let handshake_env = (!firefox_enrollment_missing)
+        .then_some(handshake_env)
+        .flatten()
+        .map(|mut env| {
+            if config_path.exists() {
+                env.insert(
+                    "BOBBY_BROWSER_CONFIG".into(),
+                    config_path.display().to_string(),
+                );
+            }
+            env
+        });
     match handshake_env {
         Some(env) => match onboarding::mcp_handshake(&env) {
             Ok(handshake) => {
@@ -1219,6 +1314,12 @@ pub(crate) fn run_doctor(
                 report.record(handshake_error_status(&message), "mcp-handshake", message);
             }
         },
+        None if firefox_enrollment_missing => {
+            report.warn(
+                "mcp-handshake",
+                "deferred until Firefox is paired; run `bobby doctor` after enrollment".to_string(),
+            );
+        }
         None => {
             report.warn(
                 "mcp-handshake",

@@ -159,7 +159,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "cookie_get" => "Read cookies visible to a page, optionally filtered by URL. Requires browser:mutate.",
         "checkpoint_save" => "Persist a verified checkpoint from evidenceRefs. Requires recovery:write. Save before Boundary commands with pinned boundary IDs. On failure, confirm each referenced command completed.",
         "workflow_recover" => "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
-        "workflow_start" => "Start workflow. Requires session:read, session:write, page:write. On failure, inspect session_list.",
+        "workflow_start" => "Create and bind a browser session, page, and retained workflow, optionally navigating to url. This is the canonical first browser call. Requires session:read, session:write, page:write. On failure, inspect session_list.",
         "workflow_observe" => "Observe retained or live accessibility evidence. Requires browser:mutate; forms require page:read.",
         "session_create" => "Create a browser session with a profile, optional proxy, and execution policy. Requires session:write. Produces the session's id and initial state. On failure with resourceExhausted, this principal already holds its session limit -- close an idle one first.",
         "session_close" => "Close a session and release its pages, workers, and artifacts. Requires session:write. Destructive: in-flight commands on the session are cancelled. On failure, the session may already be closed -- confirm with session_list.",

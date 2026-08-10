@@ -46,3 +46,17 @@ test("reusable docs workflow preserves caller dry-run through every publish guar
     "both release upload and consumer dispatch must be disabled by caller dry-run",
   );
 });
+
+test("binary releases carry the Firefox companion through supported installers", async () => {
+  const [workflow, installer, formula] = await Promise.all([
+    readFile(new URL("../../.github/workflows/release-binaries.yml", import.meta.url), "utf8"),
+    readFile(new URL("../install.sh", import.meta.url), "utf8"),
+    readFile(new URL("../../Formula/bobby-browser.rb", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(workflow, /@cavi-ai\/bobby-firefox-companion build/);
+  assert.match(workflow, /packages\/firefox-companion\/dist \"\$STAGE\/firefox-companion\"/);
+  assert.match(workflow, /firefox-companion\/manifest\.json/);
+  assert.match(installer, /share\/bobby-browser\/firefox-companion/);
+  assert.match(formula, /install \"firefox-companion\"/);
+});

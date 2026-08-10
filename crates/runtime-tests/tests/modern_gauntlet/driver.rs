@@ -8,7 +8,7 @@ use types::{
     AccessibilitySnapshotCommand, AttemptId, CaptureScreenshotCommand, CheckpointId,
     CheckpointInvariant, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
     CommandClass, CommandEnvelope, CommandId, CommandOutcome, ControlAction, ControlActionCommand,
-    CreateSessionRequest, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
+    CreateSessionRequest, ErrorCode, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
     NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision, RuntimeCommand,
     ScreenshotMode, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
     WaitForCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
@@ -65,7 +65,35 @@ impl fmt::Display for HarnessError {
 
 impl std::error::Error for HarnessError {}
 
+async fn acquire_live_browser_lock() -> TestResult<std::fs::File> {
+    let lock_path = repository_root().join("target/modern-gauntlet-browser.lock");
+    tokio::task::spawn_blocking(move || -> TestResult<std::fs::File> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(&lock_path)?;
+        // Separate Cargo test binaries share the same installed browser. Hold
+        // one advisory lock for the runtime lifetime so one test cannot detach
+        // another test's target while the workspace suite runs concurrently.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(file)
+    })
+    .await?
+}
+
 pub struct ModernRuntime {
+    _browser_lock: std::fs::File,
     runtime: RuntimeService,
     session_id: SessionId,
     page_id: PageId,
@@ -125,6 +153,7 @@ impl ModernRuntime {
         if !chrome.is_file() {
             return Err(Box::new(HarnessError::MissingBrowser { path: chrome }));
         }
+        let browser_lock = acquire_live_browser_lock().await?;
         let root = repository_root()
             .join("target/modern-gauntlet-artifacts/runtime")
             .join(format!(
@@ -193,6 +222,7 @@ impl ModernRuntime {
             })
             .await?;
         Ok(Self {
+            _browser_lock: browser_lock,
             runtime,
             session_id: session.id,
             page_id: page.id,
@@ -401,6 +431,49 @@ impl ModernRuntime {
         self.submit_on(&self.page_id, command).await
     }
 
+    pub async fn capture_viewport_screenshot(&self) -> TestResult<Vec<Evidence>> {
+        const MAX_ATTEMPTS: usize = 2;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            let command = PrimitiveCommand::CaptureScreenshot(CaptureScreenshotCommand {
+                mode: ScreenshotMode::Viewport,
+            });
+            let outcome = self
+                .runtime
+                .submit(CommandEnvelope {
+                    schema_version: CommandEnvelope::SCHEMA_VERSION,
+                    command_id: CommandId::new(),
+                    workflow_id: WorkflowId::new(),
+                    attempt_id: AttemptId::new(),
+                    session_id: self.session_id.clone(),
+                    page_id: Some(self.page_id.clone()),
+                    deadline: Utc::now() + Duration::seconds(30),
+                    command: RuntimeCommand::Primitive(command),
+                })
+                .await;
+            match outcome {
+                CommandOutcome::Completed { evidence, .. } => return Ok(evidence),
+                other if retryable_screenshot_failure(&other) && attempt + 1 < MAX_ATTEMPTS => {
+                    tokio::task::yield_now().await;
+                }
+                other => {
+                    self.capture_failure_state(
+                        &self.page_id,
+                        "CaptureScreenshot(Viewport)",
+                        &format!("{other:?}"),
+                    )
+                    .await;
+                    return Err(format!(
+                        "public runtime screenshot failed after {} attempt(s): {other:?}",
+                        attempt + 1
+                    )
+                    .into());
+                }
+            }
+        }
+        unreachable!("bounded screenshot retry loop always returns")
+    }
+
     async fn submit_on(
         &self,
         page_id: &PageId,
@@ -559,6 +632,7 @@ impl ModernRuntime {
         application_url: &str,
     ) -> TestResult<(Self, RecoveryDecision)> {
         let Self {
+            _browser_lock,
             runtime,
             root,
             journal_path,
@@ -592,6 +666,7 @@ impl ModernRuntime {
             })
             .await?;
         let replacement = Self {
+            _browser_lock,
             runtime,
             session_id: session.id,
             page_id: page.id,
@@ -738,6 +813,14 @@ impl ModernRuntime {
     }
 }
 
+fn retryable_screenshot_failure(outcome: &CommandOutcome) -> bool {
+    matches!(
+        outcome,
+        CommandOutcome::RetryableFailure { error, .. }
+            if error.retryable && error.code == ErrorCode::ScreenshotCaptureFailed
+    )
+}
+
 pub fn css_target(selector: &str) -> TargetSpec {
     TargetSpec {
         css: Some(selector.into()),
@@ -850,7 +933,9 @@ fn scorecard_directory() -> PathBuf {
 mod tests {
     use std::path::Path;
 
-    use super::{HarnessError, ModernRuntime};
+    use types::{CommandError, CommandId, CommandOutcome, ErrorCode, ErrorLayer};
+
+    use super::{retryable_screenshot_failure, HarnessError, ModernRuntime};
 
     #[tokio::test]
     async fn missing_bundle_is_a_typed_startup_failure() {
@@ -861,5 +946,30 @@ mod tests {
             error.downcast_ref::<HarnessError>(),
             Some(HarnessError::MissingBundle { .. })
         ));
+    }
+
+    #[test]
+    fn only_retryable_screenshot_failures_are_retried() {
+        let outcome = |code, retryable| CommandOutcome::RetryableFailure {
+            command_id: CommandId::new(),
+            error: CommandError {
+                code,
+                message: "oneshot canceled".into(),
+                layer: ErrorLayer::Page,
+                retryable,
+            },
+        };
+        assert!(retryable_screenshot_failure(&outcome(
+            ErrorCode::ScreenshotCaptureFailed,
+            true
+        )));
+        assert!(!retryable_screenshot_failure(&outcome(
+            ErrorCode::ScreenshotCaptureFailed,
+            false
+        )));
+        assert!(!retryable_screenshot_failure(&outcome(
+            ErrorCode::TargetDetached,
+            true
+        )));
     }
 }

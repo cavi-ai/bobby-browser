@@ -12,6 +12,18 @@ pub(crate) fn list_prompts() -> Value {
     json!({
         "prompts": [
             {
+                "name": "start_browsing",
+                "title": "Start browsing",
+                "description": "Create and bind a browser session, page, and retained workflow, then observe it. No existing IDs are required.",
+                "arguments": [
+                    {
+                        "name": "url",
+                        "description": "Optional URL to open in the new workflow.",
+                        "required": false
+                    }
+                ]
+            },
+            {
                 "name": "fill_and_submit_form",
                 "title": "Fill and submit a form",
                 "description": "Snapshot a page's form, fill it, submit and verify, then checkpoint the verified result. On needsReconciliation call recovery_status — do not blind-retry the Boundary submit.",
@@ -73,11 +85,26 @@ pub(crate) fn list_prompts() -> Value {
 
 pub(crate) fn get_prompt(name: &str, arguments: &Value) -> Option<Value> {
     match name {
+        "start_browsing" => start_browsing(arguments),
         "fill_and_submit_form" => fill_and_submit_form(arguments),
         "extract_from_page" => extract_from_page(arguments),
         "recover_workflow" => recover_workflow(arguments),
         _ => None,
     }
+}
+
+fn start_browsing(arguments: &Value) -> Option<Value> {
+    let url = argument(arguments, "url");
+    let start = match url {
+        Some(url) => format!("Call workflow_start with profile=\"default\" and url=\"{url}\"."),
+        None => "Call workflow_start with profile=\"default\".".to_string(),
+    };
+    Some(json!({
+        "description": "Start a retained browser workflow and observe its first state.",
+        "messages": [message(format!(
+            "{start} It creates and binds the session, page, and workflow. Then call workflow_observe with the returned handle before taking the next action."
+        ))]
+    }))
 }
 
 /// A required prompt argument, per the MCP prompts contract, arrives as a

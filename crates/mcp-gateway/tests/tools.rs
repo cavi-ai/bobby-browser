@@ -3318,6 +3318,40 @@ async fn initialize_carries_agent_instructions() {
     assert!(instructions.contains("toolset_select"), "{instructions}");
     assert!(instructions.contains("error.repair"), "{instructions}");
     assert!(instructions.contains("autoCheckpoint"), "{instructions}");
+    assert!(instructions.contains("workflow_start"), "{instructions}");
+}
+
+#[tokio::test]
+async fn start_browsing_prompt_requires_no_existing_ids() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let listed = server
+        .handle_message(request(2, "prompts/list", json!({})))
+        .await
+        .unwrap();
+    let prompt = listed["result"]["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|prompt| prompt["name"] == "start_browsing")
+        .expect("start_browsing prompt");
+    assert!(prompt["arguments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|arg| arg["required"] != true));
+
+    let got = server
+        .handle_message(request(
+            3,
+            "prompts/get",
+            json!({"name":"start_browsing","arguments":{"url":"https://example.com"}}),
+        ))
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&got["result"]["messages"]).unwrap();
+    assert!(text.contains("workflow_start"), "{text}");
+    assert!(text.contains("workflow_observe"), "{text}");
+    assert!(text.contains("https://example.com"), "{text}");
 }
 
 #[tokio::test]

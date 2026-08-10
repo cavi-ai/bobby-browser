@@ -61,6 +61,7 @@ where
     ) -> TestResult<ModernRuntime>,
 {
     let mut collector = CorpusCollector::new();
+    let path = corpus_path(journey);
     for run_idx in 0..runs_per_journey() {
         let seed = format!("{journey}-grow-{run_idx}");
         let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
@@ -78,9 +79,10 @@ where
         let mark = format!("{journey}-grow-{run_idx}");
         let runtime = run(runtime, &mut collector, &server, run_idx).await?;
         runtime.mark_completed(&mark)?;
+        // Publish each completed run atomically. A later retryable browser
+        // failure must not hide the usable corpus already collected.
+        collector.save(&path)?;
     }
-    let path = corpus_path(journey);
-    collector.save(&path)?;
     println!(
         "wrote {} examples to {} ({} runs)",
         collector.len(),

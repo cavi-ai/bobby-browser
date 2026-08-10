@@ -88,6 +88,13 @@ if [[ -d "${src_dir}/scripts/vision-mlx" ]]; then
   echo "install.sh: installed ${vision_share}/vision-mlx"
 fi
 
+companion_share="$(dirname "$INSTALL_DIR")/share/bobby-browser/firefox-companion"
+if [[ -d "${src_dir}/firefox-companion" ]]; then
+  mkdir -p "$companion_share"
+  cp -R "${src_dir}/firefox-companion/." "$companion_share/"
+  echo "install.sh: installed ${companion_share}"
+fi
+
 if ! command -v bobby >/dev/null 2>&1; then
   echo "install.sh: add ${INSTALL_DIR} to PATH, then run: bobby doctor" >&2
 else

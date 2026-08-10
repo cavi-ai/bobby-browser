@@ -49,6 +49,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.1
+          cache: pnpm
+      - name: Build Firefox companion bundle
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @cavi-ai/bobby-firefox-companion build
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -68,6 +79,7 @@ jobs:
           mkdir -p "$STAGE"
           mkdir -p "$STAGE/scripts"
           cp -R scripts/vision-mlx "$STAGE/scripts/vision-mlx"
+          cp -R packages/firefox-companion/dist "$STAGE/firefox-companion"
           if [[ "${{ matrix.asset_os }}" == "windows" ]]; then
             cp "$OUT/bobby.exe" "$STAGE/bobby.exe"
             cp "$OUT/mcp-gateway.exe" "$STAGE/mcp-gateway.exe"
@@ -90,6 +102,7 @@ jobs:
           set -euo pipefail
           test -f "${STAGE_DIR}/scripts/vision-mlx/vision_server.py"
           test -f "${STAGE_DIR}/scripts/vision-mlx/providers/__init__.py"
+          test -f "${STAGE_DIR}/firefox-companion/manifest.json"
           if [[ "${{ matrix.asset_os }}" == "windows" ]]; then
             "./${STAGE_DIR}/bobby.exe" --help
             "./${STAGE_DIR}/mcp-gateway.exe" --help >/dev/null || true

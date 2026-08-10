@@ -4,26 +4,42 @@ documentedVersion: 0.8.0
 
 # First browser session
 
-End-to-end path from a cold checkout to one navigate command. Prefer the
-TypeScript SDK for application code; the MCP path mirrors the same operations
-for agent hosts.
+End-to-end path from a fresh install to one agent-controlled browser workflow.
+The MCP path is primary for agents; HTTP and SDK setup is an advanced
+application integration.
 
-## 1. Bootstrap and serve
+## 1. Install and verify
 
 ```bash
-cargo build -p bobby-browser
-./target/debug/bobby init
-# copy the printed bearer, then:
-export AUTOMATION_RUNTIME_TOKEN='…plaintext bearer…'
-./target/debug/bobby serve
+bobby install
+# If Firefox was selected: start the Bobby profile and click Pair.
+make firefox-start
+bobby doctor
 ```
 
-Confirm liveness: `curl -sS http://127.0.0.1:7777/healthz` → `{"ok":true}`.
+Restart or reconnect the configured agent host after installation.
 
 Authenticated routes live under `/v1/*` only (for example `GET /v1/runtime`).
 See [Authentication](../guides/auth.md).
 
-### Optional: raw HTTP smoke (`GET /v1/runtime`)
+## 2. MCP: start → observe → act
+
+The first call is `workflow_start`:
+
+```json
+{"profile":"default","url":"https://example.com"}
+```
+
+It creates and binds the session, page, and retained workflow. Call
+`workflow_observe` with the returned handle, then use `navigate`, `click`,
+`type_text`, or an `intent_*` tool. The `start_browsing` MCP prompt provides
+the same zero-ID working loop.
+
+## 3. Advanced: HTTP and SDK applications
+
+Run `bobby serve` before using the HTTP examples below.
+
+### Raw HTTP smoke (`GET /v1/runtime`)
 
 ```bash
 CORRELATION=$(uuidgen | tr '[:upper:]' '[:lower:]')
@@ -35,7 +51,7 @@ curl -sS http://127.0.0.1:7777/v1/runtime \
   -H "x-deadline: ${DEADLINE}"
 ```
 
-## 2. TypeScript: session → page → navigate
+### TypeScript: session → page → navigate
 
 Install the published package, or use the workspace package from this repo:
 
@@ -134,7 +150,7 @@ For goal-oriented steps, use intent helpers (`locateEnvelope`, …) from
 `@cavi-ai/bobby-browser` — they still submit via `client.submit` and need
 `intent:execute` (included in default bootstrap). See [Intent commands](../guides/intents.md).
 
-## 3. Parallel MCP path
+### Streamable HTTP MCP path
 
 With `bobby serve` running, point an MCP client at streamable HTTP
 (`POST /v1/mcp`) with `Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}`, or
@@ -144,8 +160,8 @@ run `mcp-gateway` stdio with the four bootstrap env vars
 Order:
 
 1. `initialize` (protocol `2025-11-25`) — required before tools
-2. `tools/call` → `session_create` with `{ "profile": "default" }`
-3. `tools/call` → `page_open` with `{ "sessionId": "…", "url": "https://…" }`
+2. `tools/call` → `workflow_start` with `{ "profile": "default", "url": "https://…" }`
+3. `tools/call` → `workflow_observe` with the returned handle
 4. Prefer flat tools: `navigate`, `a11y_snapshot`, `click` / `type_text` /
    `upload_files` (selector or snapshot `target`), and `intent_*` for
    goal-oriented steps — they mint the envelope server-side
