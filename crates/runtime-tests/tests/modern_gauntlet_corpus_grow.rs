@@ -36,7 +36,7 @@ fn trap_config(seed: &str, run_idx: usize) -> ScenarioConfig {
         reject_postal_once: true,
         level: GauntletLevel::Two,
         traps: LevelTwoTrapPlan {
-            extra_modal: run_idx % 2 == 0,
+            extra_modal: run_idx.is_multiple_of(2),
             extra_popup: false,
             reversed_identity_fields: run_idx % 3 == 1,
             delayed_control_ms: 150 + (run_idx as u64) * 100,
@@ -103,28 +103,27 @@ async fn grow_documents_traps_corpus() -> TestResult<()> {
         let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
         let step = |name: &str| format!("{name}_t{run_idx}");
 
-        if run_idx % 2 == 0 {
-            if runtime
+        if run_idx.is_multiple_of(2)
+            && runtime
                 .wait_visible("section[aria-label='Workflow interruption'] button")
                 .await
                 .is_ok()
-            {
-                collector
-                    .capture(
-                        &runtime,
-                        &GroundTruth::Click {
-                            selector: "section[aria-label='Workflow interruption'] button",
-                            purpose: "Dismiss the workflow interruption".into(),
-                            ordinal: None,
-                        },
-                        "documents-traps",
-                        &step("dismiss_interruption"),
-                    )
-                    .await?;
-                runtime
-                    .click("section[aria-label='Workflow interruption'] button", false)
-                    .await?;
-            }
+        {
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Click {
+                        selector: "section[aria-label='Workflow interruption'] button",
+                        purpose: "Dismiss the workflow interruption".into(),
+                        ordinal: None,
+                    },
+                    "documents-traps",
+                    &step("dismiss_interruption"),
+                )
+                .await?;
+            runtime
+                .click("section[aria-label='Workflow interruption'] button", false)
+                .await?;
         }
 
         let fixture = runtime.fixture_path("approved-upload.txt");
@@ -197,28 +196,27 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
         let step = |name: &str| format!("{name}_t{run_idx}");
 
         // Dismiss the interruption modal when this trap combo shows one.
-        if run_idx % 2 == 0 {
-            if runtime
+        if run_idx.is_multiple_of(2)
+            && runtime
                 .wait_visible("section[aria-label='Workflow interruption'] button")
                 .await
                 .is_ok()
-            {
-                collector
-                    .capture(
-                        &runtime,
-                        &GroundTruth::Click {
-                            selector: "section[aria-label='Workflow interruption'] button",
-                            purpose: "Dismiss the workflow interruption".into(),
-                            ordinal: None,
-                        },
-                        "customer-update-traps",
-                        &step("dismiss_interruption"),
-                    )
-                    .await?;
-                runtime
-                    .click("section[aria-label='Workflow interruption'] button", false)
-                    .await?;
-            }
+        {
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Click {
+                        selector: "section[aria-label='Workflow interruption'] button",
+                        purpose: "Dismiss the workflow interruption".into(),
+                        ordinal: None,
+                    },
+                    "customer-update-traps",
+                    &step("dismiss_interruption"),
+                )
+                .await?;
+            runtime
+                .click("section[aria-label='Workflow interruption'] button", false)
+                .await?;
         }
 
         collector
