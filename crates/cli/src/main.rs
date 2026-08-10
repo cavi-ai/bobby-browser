@@ -275,6 +275,12 @@ enum CliCommand {
         /// Path to vision_server.py when spawning (env BOBBY_VISION_SERVER_SCRIPT; auto-detect from repo layout)
         #[arg(long)]
         server_script: Option<PathBuf>,
+        /// Enable training data collection (logs all vision proposals to disk)
+        #[arg(long)]
+        collect_training_data: bool,
+        /// Output directory for training data (default: data/vision/)
+        #[arg(long, default_value = "data/vision/")]
+        training_data_dir: String,
         /// Upstream API key env var (default OPENAI_API_KEY; empty value skips key)
         #[arg(long)]
         api_key_env: Option<String>,
@@ -677,6 +683,8 @@ pub async fn run() -> Result<()> {
             vision_base_url,
             spawn_server,
             server_script,
+            collect_training_data,
+            training_data_dir,
             api_key_env,
         } => {
             run_vision_proxy(
@@ -687,6 +695,8 @@ pub async fn run() -> Result<()> {
                 vision_base_url,
                 spawn_server,
                 server_script,
+                collect_training_data,
+                training_data_dir,
                 api_key_env,
             )
             .await?;
@@ -875,10 +885,22 @@ async fn run_vision_proxy(
     vision_base_url: Option<String>,
     spawn_server: bool,
     server_script: Option<PathBuf>,
+    collect_training_data: bool,
+    training_data_dir: String,
     api_key_env: Option<String>,
 ) -> Result<()> {
     let bind: SocketAddr = bind.parse().context("invalid --bind address")?;
     let bearer_token = require_vision_proxy_bearer()?;
+
+    let collector = collect_training_data.then(|| {
+        Arc::new(vision_proxy::VisionDataCollector::new(
+            vision_proxy::DataCollectorConfig {
+                output_dir: PathBuf::from(training_data_dir),
+                enabled: true,
+                flush_interval_ms: 1000,
+            },
+        ))
+    });
 
     let upstream_kind = upstream.trim().to_ascii_lowercase();
     // Managed Python child (mlx --spawn-server) must outlive serve.
@@ -899,7 +921,11 @@ async fn run_vision_proxy(
             let model = model.unwrap_or_else(|| vision_proxy::OLLAMA_DEFAULT_MODEL.to_string());
             let base_url = vision_base_url
                 .unwrap_or_else(|| vision_proxy::OLLAMA_DEFAULT_BASE_URL.to_string());
-            (Arc::new(OllamaUpstream::new(model, base_url)), UpstreamKind::Ollama)
+            let mut upstream = OllamaUpstream::new(model, base_url);
+            if let Some(collector) = &collector {
+                upstream = upstream.with_data_collector(collector.clone());
+            }
+            (Arc::new(upstream), UpstreamKind::Ollama)
         }
         "mlx" => {
             let base_url = vision_base_url
@@ -907,7 +933,11 @@ async fn run_vision_proxy(
             if spawn_server {
                 _python_child = Some(spawn_mlx_server(&base_url, server_script)?);
             }
-            (Arc::new(MlxUpstream::new(base_url)), UpstreamKind::Mlx)
+            let mut upstream = MlxUpstream::new(base_url);
+            if let Some(collector) = &collector {
+                upstream = upstream.with_data_collector(collector.clone());
+            }
+            (Arc::new(upstream), UpstreamKind::Mlx)
         }
         _other => anyhow::bail!(
             "unsupported upstream {upstream:?}; expected \"openai\", \"ollama\", or \"mlx\""

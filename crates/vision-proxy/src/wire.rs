@@ -13,7 +13,7 @@ pub struct ProposeRequest {
     pub context: Option<ProposeContext>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProposeContext {
     #[serde(default)]

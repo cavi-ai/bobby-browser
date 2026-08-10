@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
+use crate::data_collector::VisionDataCollector;
 use crate::upstream::{ExtractInput, ProposeInput, Upstream, UpstreamError};
 use crate::validate::{validate_extract, validate_proposal};
 use crate::wire::{ExtractResponse, ProposeResponse};
@@ -18,6 +20,7 @@ pub struct MlxUpstream {
     client: reqwest::Client,
     base_url: String,
     timeout: std::time::Duration,
+    data_collector: Option<Arc<VisionDataCollector>>,
 }
 
 impl MlxUpstream {
@@ -30,7 +33,13 @@ impl MlxUpstream {
             client: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             timeout,
+            data_collector: None,
         }
+    }
+
+    pub fn with_data_collector(mut self, collector: Arc<VisionDataCollector>) -> Self {
+        self.data_collector = Some(collector);
+        self
     }
 
     async fn post_json(&self, path: &str, body: &Value) -> Result<Value, UpstreamError> {
@@ -69,12 +78,36 @@ impl Upstream for MlxUpstream {
             "screenshotPng": input.screenshot_png_b64,
             "context": input.context,
         });
-        let value = self.post_json("/propose", &body).await?;
-        let proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
-            UpstreamError::Invalid(format!("proposal JSON does not match wire shape: {e}"))
-        })?;
-        validate_proposal(&proposal).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
-        Ok(proposal)
+        let result = self.do_propose(&input, &body).await;
+
+        if let Some(collector) = &self.data_collector {
+            match &result {
+                Ok(response) => collector.log_proposal(
+                    input.screenshot_png_b64.clone(),
+                    &input,
+                    Some(response.clone()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(DEFAULT_MODEL.to_string()),
+                ),
+                Err(_) => collector.log_proposal(
+                    input.screenshot_png_b64.clone(),
+                    &input,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("upstream error".into()),
+                    None,
+                    Some(DEFAULT_MODEL.to_string()),
+                ),
+            }
+        }
+
+        result
     }
 
     async fn extract(&self, input: ExtractInput) -> Result<ExtractResponse, UpstreamError> {
@@ -89,6 +122,21 @@ impl Upstream for MlxUpstream {
         })?;
         validate_extract(&response).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
         Ok(response)
+    }
+}
+
+impl MlxUpstream {
+    async fn do_propose(
+        &self,
+        _input: &ProposeInput,
+        body: &Value,
+    ) -> Result<ProposeResponse, UpstreamError> {
+        let value = self.post_json("/propose", body).await?;
+        let proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
+            UpstreamError::Invalid(format!("proposal JSON does not match wire shape: {e}"))
+        })?;
+        validate_proposal(&proposal).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
+        Ok(proposal)
     }
 }
 
