@@ -309,7 +309,7 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
     Ok(resolved)
 }
 
-fn preset(name: &str) -> Option<(String, VisionProviderConfig)> {
+pub(crate) fn preset(name: &str) -> Option<(String, VisionProviderConfig)> {
     let profile = match name {
         "openai" => VisionProviderConfig {
             base_url: "https://api.openai.com/v1".into(),

@@ -9,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
-use dialoguer::{theme::ColorfulTheme, MultiSelect};
+use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
 
 /// Agent host config dialect for `bobby init --emit`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -645,6 +645,15 @@ pub struct InstallOptions {
     pub extension: Option<PathBuf>,
     /// Copy `bobby` (+ sibling `mcp-gateway` / `acp-gateway`) onto a writable bin dir on PATH.
     pub cli: bool,
+    pub vision: bool,
+    pub no_vision: bool,
+    pub vision_provider: Option<String>,
+    pub vision_model: Option<String>,
+    pub download_vision_model: bool,
+    pub collect_training_data: bool,
+    pub no_collect_training_data: bool,
+    pub training_data_dir: PathBuf,
+    pub config: Option<PathBuf>,
     pub force: bool,
     pub yes: bool,
 }
@@ -660,7 +669,63 @@ fn use_install_defaults(options: &InstallOptions) -> bool {
         && !options.skill_openclaw
         && !options.companion
         && !options.cli
+        && !options.vision
+        && !options.no_vision
+        && options.vision_provider.is_none()
+        && options.vision_model.is_none()
+        && !options.download_vision_model
+        && !options.collect_training_data
+        && !options.no_collect_training_data
         && !options.force
+}
+
+const MLX_MODELS: [(&str, &str); 3] = [
+    ("Small (3B)", "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"),
+    ("Balanced (7B)", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"),
+    ("Large (32B)", "mlx-community/Qwen2.5-VL-32B-Instruct-4bit"),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisionInstallState {
+    enabled: bool,
+    provider: String,
+    model: String,
+    collect_training_data: bool,
+    training_data_dir: PathBuf,
+}
+
+impl Default for VisionInstallState {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: "ollama".into(),
+            model: crate::vision_connect::preset("ollama")
+                .expect("ollama preset")
+                .1
+                .model,
+            collect_training_data: false,
+            training_data_dir: "data/vision".into(),
+        }
+    }
+}
+
+impl VisionInstallState {
+    fn select_provider(&mut self, provider: &str) -> Result<()> {
+        let provider = provider.trim().to_ascii_lowercase();
+        let (_, profile) = crate::vision_connect::preset(&provider)
+            .ok_or_else(|| anyhow!("unsupported install vision provider {provider:?}"))?;
+        self.enabled = true;
+        self.provider = provider;
+        self.model = profile.model;
+        Ok(())
+    }
+
+    fn profile(&self) -> Result<config::VisionProviderConfig> {
+        let (_, mut profile) = crate::vision_connect::preset(&self.provider)
+            .ok_or_else(|| anyhow!("unsupported install vision provider {:?}", self.provider))?;
+        profile.model.clone_from(&self.model);
+        Ok(profile)
+    }
 }
 
 /// Prefer `~/.cargo/bin` when it is already on PATH (rustup users), else
@@ -740,6 +805,195 @@ fn remember_installed_cli(bobby: &Path) {
     });
 }
 
+fn hugging_face_cache_root() -> Result<PathBuf> {
+    if let Some(root) = std::env::var_os("HF_HOME") {
+        return Ok(PathBuf::from(root).join("hub"));
+    }
+    Ok(dirs::home_dir()
+        .context("home directory unavailable")?
+        .join(".cache/huggingface/hub"))
+}
+
+fn cached_hugging_face_model(model: &str) -> Result<bool> {
+    let model_dir =
+        hugging_face_cache_root()?.join(format!("models--{}", model.replace('/', "--")));
+    let snapshots = model_dir.join("snapshots");
+    let Ok(entries) = std::fs::read_dir(snapshots) else {
+        return Ok(false);
+    };
+    for entry in entries.flatten() {
+        let snapshot = entry.path();
+        if snapshot.join("config.json").is_file()
+            && snapshot.join("preprocessor_config.json").is_file()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn hugging_face_download_command(model: &str) -> Result<Command> {
+    for binary in ["hf", "huggingface-cli"] {
+        if let Some(path) = find_sidecar_binary(binary) {
+            let mut command = Command::new(path);
+            command.arg("download").arg(model);
+            return Ok(command);
+        }
+    }
+    anyhow::bail!("Hugging Face downloader not found; install huggingface_hub so hf is on PATH")
+}
+
+fn download_and_verify_mlx_model(model: &str) -> Result<()> {
+    let status = hugging_face_download_command(model)?
+        .status()
+        .with_context(|| format!("failed to download {model}"))?;
+    if !status.success() {
+        anyhow::bail!("Hugging Face download failed for {model} with {status}");
+    }
+    if !cached_hugging_face_model(model)? {
+        anyhow::bail!("download finished but no complete cached snapshot was found for {model}");
+    }
+    Ok(())
+}
+
+fn mlx_supported_host() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+fn configure_mlx_model_interactive(state: &mut VisionInstallState) -> Result<bool> {
+    if !mlx_supported_host() {
+        anyhow::bail!("MLX vision requires Apple Silicon macOS; choose Ollama on this host");
+    }
+    if cached_hugging_face_model(&state.model)? {
+        return Ok(true);
+    }
+    let already_downloaded = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt("Do you already have a compatible MLX vision model downloaded?")
+        .default(false)
+        .interact()?;
+    if already_downloaded {
+        let model = dialoguer::Input::<String>::with_theme(&ColorfulTheme::default())
+            .with_prompt("Hugging Face model id")
+            .default(state.model.clone())
+            .interact_text()?;
+        if !cached_hugging_face_model(&model)? {
+            anyhow::bail!("no complete Hugging Face cache snapshot found for {model}");
+        }
+        state.model = model;
+        return Ok(true);
+    }
+    let labels = [
+        format!("{} — {}", MLX_MODELS[0].0, MLX_MODELS[0].1),
+        format!("{} — {}", MLX_MODELS[1].0, MLX_MODELS[1].1),
+        format!("{} — {}", MLX_MODELS[2].0, MLX_MODELS[2].1),
+        "Back without downloading".to_owned(),
+    ];
+    let choice = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Download an MLX model (resumable Hugging Face cache)")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+    if choice == MLX_MODELS.len() {
+        return Ok(false);
+    }
+    let model = MLX_MODELS[choice].1;
+    if !Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Download {model}?"))
+        .default(false)
+        .interact()?
+    {
+        return Ok(false);
+    }
+    download_and_verify_mlx_model(model)?;
+    state.model = model.to_owned();
+    Ok(true)
+}
+
+fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
+    loop {
+        let training = if state.collect_training_data {
+            "on"
+        } else {
+            "off"
+        };
+        let labels = [
+            "Off".to_owned(),
+            "Ollama (recommended, portable)".to_owned(),
+            "MLX-VLM (Apple Silicon)".to_owned(),
+            "LM Studio".to_owned(),
+            "OpenAI".to_owned(),
+            format!("Training data collection: {training}"),
+            "Back".to_owned(),
+        ];
+        let default = match state.provider.as_str() {
+            "ollama" => 1,
+            "mlx" => 2,
+            "lmstudio" => 3,
+            "openai" => 4,
+            _ => 1,
+        };
+        match Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Vision setup")
+            .items(&labels)
+            .default(if state.enabled { default } else { 0 })
+            .interact()?
+        {
+            0 => {
+                state.enabled = false;
+                return Ok(true);
+            }
+            1 => {
+                state.select_provider("ollama")?;
+                return Ok(true);
+            }
+            2 => {
+                let previous = state.clone();
+                state.select_provider("mlx")?;
+                if configure_mlx_model_interactive(state)? {
+                    return Ok(true);
+                }
+                *state = previous;
+            }
+            3 => {
+                state.select_provider("lmstudio")?;
+                return Ok(true);
+            }
+            4 => {
+                state.select_provider("openai")?;
+                return Ok(true);
+            }
+            5 => state.collect_training_data = !state.collect_training_data,
+            6 => return Ok(false),
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn apply_vision_install(config_path: &Path, state: &VisionInstallState) -> Result<String> {
+    let profile = state.profile()?;
+    config::set_vision_install_state(
+        config_path,
+        state.enabled,
+        &state.provider,
+        &profile,
+        state.collect_training_data,
+        &state.training_data_dir,
+    )
+    .map_err(|error| anyhow!("{error}"))?;
+    Ok(format!(
+        "vision {} with {} / {} (training collection {}) in {}",
+        if state.enabled { "enabled" } else { "disabled" },
+        state.provider,
+        state.model,
+        if state.collect_training_data {
+            "on"
+        } else {
+            "off"
+        },
+        config_path.display()
+    ))
+}
+
 /// `bobby install`: the one-command setup. Non-interactive when flags name
 /// the work; otherwise a checklist the operator toggles.
 pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()> {
@@ -752,6 +1006,15 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         companion,
         extension,
         cli,
+        vision,
+        no_vision,
+        vision_provider,
+        vision_model,
+        download_vision_model,
+        collect_training_data,
+        no_collect_training_data,
+        training_data_dir,
+        config,
         force,
         yes,
     } = &options;
@@ -763,10 +1026,63 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let skill_openclaw = *skill_openclaw;
     let companion = *companion;
     let cli = *cli;
+    let vision = *vision;
+    let no_vision = *no_vision;
+    let download_vision_model = *download_vision_model;
+    let collect_training_data = *collect_training_data;
+    let no_collect_training_data = *no_collect_training_data;
     let force = *force;
     let yes = *yes;
     let project_root = std::env::current_dir()?;
     let mut items: Vec<InstallItem> = Vec::new();
+    let use_defaults = use_install_defaults(&options);
+    let vision_named = vision
+        || no_vision
+        || vision_provider.is_some()
+        || vision_model.is_some()
+        || download_vision_model
+        || collect_training_data
+        || no_collect_training_data;
+    let configure_vision = use_defaults || vision_named;
+    if no_vision && (vision_provider.is_some() || vision_model.is_some() || download_vision_model) {
+        anyhow::bail!("--no-vision cannot be combined with provider, model, or download flags");
+    }
+    if vision_model.is_some() && vision_provider.as_deref() != Some("mlx") {
+        anyhow::bail!("--vision-model currently requires --vision-provider mlx");
+    }
+    let mut vision_state = VisionInstallState {
+        enabled: !no_vision,
+        training_data_dir: training_data_dir.clone(),
+        ..VisionInstallState::default()
+    };
+    if let Some(provider) = vision_provider.as_deref() {
+        vision_state.select_provider(provider)?;
+    }
+    if let Some(model) = vision_model.as_deref() {
+        vision_state.model = model.to_owned();
+    }
+    if collect_training_data {
+        vision_state.collect_training_data = true;
+    } else if no_collect_training_data {
+        vision_state.collect_training_data = false;
+    }
+    let config_path = crate::resolve_config_path(config.clone());
+    if configure_vision && vision_state.provider == "mlx" {
+        if !mlx_supported_host() {
+            anyhow::bail!("MLX vision requires Apple Silicon macOS; choose Ollama on this host");
+        }
+        if !cached_hugging_face_model(&vision_state.model)? {
+            if !download_vision_model {
+                anyhow::bail!(
+                    "MLX model {} is not cached; pass --download-vision-model or run interactively",
+                    vision_state.model
+                );
+            }
+            download_and_verify_mlx_model(&vision_state.model)?;
+        }
+    } else if download_vision_model {
+        anyhow::bail!("--download-vision-model requires --vision-provider mlx");
+    }
 
     let credential_exists = bootstrap_path.exists();
     let credential_label = if credential_exists && !force {
@@ -782,7 +1098,6 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     };
     // Named flags (--host/--skill/--companion/--cli/--force) select only that
     // work. No named flags (interactive checklist, or --yes alone) uses defaults.
-    let use_defaults = use_install_defaults(&options);
 
     items.push(InstallItem {
         label: credential_label,
@@ -929,6 +1244,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         && !skill_openclaw
         && !companion
         && !cli
+        && !vision_named
         && !force;
     if interactive {
         if !std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -938,23 +1254,61 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
                 "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode|acp|openshell> --skill [--skill-claude] [--skill-openclaw] --cli --yes"
             );
         }
-        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-        let defaults: Vec<bool> = items.iter().map(|item| item.enabled).collect();
-        let Some(selected) = MultiSelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("bobby install — ↑/↓ move, space toggles, enter runs (esc quits)")
-            .items(&labels)
-            .defaults(&defaults)
-            .interact_opt()?
-        else {
+        loop {
+            let mut labels: Vec<String> = items.iter().map(|item| item.label.clone()).collect();
+            labels.push(format!(
+                "Vision: {}{}",
+                if vision_state.enabled {
+                    format!("{} / {}", vision_state.provider, vision_state.model)
+                } else {
+                    "off".to_owned()
+                },
+                if vision_state.collect_training_data {
+                    " (training collection on)"
+                } else {
+                    ""
+                }
+            ));
+            let mut defaults: Vec<bool> = items.iter().map(|item| item.enabled).collect();
+            defaults.push(vision_state.enabled);
+            let Some(selected) = MultiSelect::with_theme(&ColorfulTheme::default())
+                .with_prompt("bobby install — ↑/↓ move, space toggles, enter continues (esc quits)")
+                .items(&labels)
+                .defaults(&defaults)
+                .interact_opt()?
+            else {
+                println!("nothing changed");
+                return Ok(());
+            };
+            for (index, item) in items.iter_mut().enumerate() {
+                item.enabled = selected.contains(&index);
+            }
+            let vision_index = items.len();
+            if !selected.contains(&vision_index) {
+                vision_state.enabled = false;
+                break;
+            }
+            if choose_vision_interactive(&mut vision_state)? {
+                break;
+            }
+            // Provider-menu Back returns here with every checklist toggle and
+            // pending vision/training choice preserved.
+        }
+        if !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Apply this installation?")
+            .default(true)
+            .interact()?
+        {
             println!("nothing changed");
             return Ok(());
-        };
-        for (index, item) in items.iter_mut().enumerate() {
-            item.enabled = selected.contains(&index);
         }
     }
 
     let mut ran = 0;
+    if configure_vision || interactive {
+        println!("ok: {}", apply_vision_install(&config_path, &vision_state)?);
+        ran += 1;
+    }
     for item in items.iter().filter(|item| item.enabled) {
         let outcome = (item.run)()?;
         println!("ok: {outcome}");
@@ -1011,6 +1365,96 @@ mod install_tests {
             hosts: vec![HostKind::Claude],
             ..InstallOptions::default()
         }));
+        assert!(!use_install_defaults(&InstallOptions {
+            vision: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            no_vision: true,
+            ..InstallOptions::default()
+        }));
+    }
+
+    #[test]
+    fn vision_state_survives_back_off_and_reenable_transitions() {
+        let mut state = VisionInstallState::default();
+        state.select_provider("mlx").unwrap();
+        state.model = MLX_MODELS[1].1.into();
+        state.collect_training_data = true;
+        let before_back = state.clone();
+
+        // Returning to the main menu does not mutate pending submenu state.
+        assert_eq!(state, before_back);
+        state.enabled = false;
+        assert_eq!(state.provider, "mlx");
+        assert_eq!(state.model, MLX_MODELS[1].1);
+        assert!(state.collect_training_data);
+
+        state.enabled = true;
+        assert_eq!(state.provider, "mlx");
+        assert_eq!(state.model, MLX_MODELS[1].1);
+        assert!(state.collect_training_data);
+    }
+
+    #[test]
+    fn ollama_is_the_portable_install_default_and_three_mlx_choices_are_stable() {
+        let state = VisionInstallState::default();
+        assert!(state.enabled);
+        assert_eq!(state.provider, "ollama");
+        assert_eq!(state.model, "llava");
+        assert_eq!(
+            MLX_MODELS.map(|(_, model)| model),
+            [
+                "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+                "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+                "mlx-community/Qwen2.5-VL-32B-Instruct-4bit",
+            ]
+        );
+    }
+
+    #[test]
+    fn mlx_cache_detection_rejects_incomplete_and_accepts_complete_snapshot() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("HF_HOME");
+        unsafe { std::env::set_var("HF_HOME", home.path()) };
+        let model = MLX_MODELS[0].1;
+        let snapshot = home
+            .path()
+            .join("hub/models--mlx-community--Qwen2.5-VL-3B-Instruct-4bit/snapshots/abc");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), "{}").unwrap();
+        assert!(!cached_hugging_face_model(model).unwrap());
+        std::fs::write(snapshot.join("preprocessor_config.json"), "{}").unwrap();
+        assert!(cached_hugging_face_model(model).unwrap());
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HF_HOME", value) },
+            None => unsafe { std::env::remove_var("HF_HOME") },
+        }
+    }
+
+    #[test]
+    fn noninteractive_vision_only_install_writes_ollama_without_other_install_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let bootstrap_path = dir.path().join("bootstrap.env");
+        run_install(
+            &bootstrap_path,
+            InstallOptions {
+                vision: true,
+                yes: true,
+                config: Some(config_path.clone()),
+                training_data_dir: dir.path().join("training"),
+                ..InstallOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(!bootstrap_path.exists());
+        let loaded = config::AppConfig::load(&config_path).unwrap();
+        assert!(loaded.nodes.contains_key("vision"));
+        assert_eq!(loaded.vision.provider.as_deref(), Some("ollama"));
+        assert_eq!(loaded.vision.selected_provider().unwrap().1.model, "llava");
+        assert!(!loaded.vision.collect_training_data);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -191,6 +192,8 @@ impl ManagedVisionProxy {
         decision: &VisionChildDecision,
         profile: &VisionProviderConfig,
         token_env: &str,
+        collect_training_data: bool,
+        training_data_dir: &Path,
     ) -> Result<Self> {
         if !decision.should_spawn {
             anyhow::bail!("vision child spawn not requested: {}", decision.reason);
@@ -223,44 +226,13 @@ impl ManagedVisionProxy {
         let mut cmd = Command::new(exe);
         // vision-proxy validates BOBBY_VISION_TOKEN; copy from configurable token_env.
         cmd.env("BOBBY_VISION_TOKEN", &token_value);
-        cmd.arg("vision-proxy")
-            .arg("--bind")
-            .arg(decision.bind.to_string())
-            .arg("--path")
-            .arg(&decision.path);
-        // Detect provider type from base_url to select upstream.
-        let is_ollama = profile.base_url.contains("127.0.0.1:11434")
-            || profile.base_url.contains("localhost:11434");
-        let is_mlx = profile.base_url.contains("127.0.0.1:9101")
-            || profile.base_url.contains("localhost:9101");
-        if is_ollama {
-            cmd.arg("--upstream")
-                .arg("ollama")
-                .arg("--model")
-                .arg(&profile.model)
-                .arg("--vision-base-url")
-                .arg(&profile.base_url);
-        } else if is_mlx {
-            cmd.arg("--upstream")
-                .arg("mlx")
-                .arg("--vision-base-url")
-                .arg(&profile.base_url);
-        } else {
-            cmd.arg("--upstream")
-                .arg("openai")
-                .arg("--model")
-                .arg(&profile.model)
-                .arg("--vision-base-url")
-                .arg(&profile.base_url);
-            match &profile.api_key_env {
-                Some(name) => {
-                    cmd.arg("--api-key-env").arg(name);
-                }
-                None => {
-                    cmd.arg("--api-key-env").arg("");
-                }
-            }
-        }
+        configure_vision_proxy_command(
+            &mut cmd,
+            decision,
+            profile,
+            collect_training_data,
+            training_data_dir,
+        );
         // Inherit stderr so the child cannot fill a pipe and deadlock; discard
         // stdin/stdout (proxy is HTTP-only).
         cmd.stdin(Stdio::null())
@@ -277,6 +249,44 @@ impl ManagedVisionProxy {
         }
 
         Ok(Self { child })
+    }
+}
+
+fn configure_vision_proxy_command(
+    cmd: &mut Command,
+    decision: &VisionChildDecision,
+    profile: &VisionProviderConfig,
+    collect_training_data: bool,
+    training_data_dir: &Path,
+) {
+    cmd.arg("vision-proxy")
+        .arg("--bind")
+        .arg(decision.bind.to_string())
+        .arg("--path")
+        .arg(&decision.path);
+    let is_ollama = profile.base_url.contains("127.0.0.1:11434")
+        || profile.base_url.contains("localhost:11434");
+    let is_mlx =
+        profile.base_url.contains("127.0.0.1:9101") || profile.base_url.contains("localhost:9101");
+    if is_ollama {
+        cmd.arg("--upstream").arg("ollama");
+    } else if is_mlx {
+        cmd.arg("--upstream").arg("mlx").arg("--spawn-server");
+    } else {
+        cmd.arg("--upstream").arg("openai");
+    }
+    cmd.arg("--model")
+        .arg(&profile.model)
+        .arg("--vision-base-url")
+        .arg(&profile.base_url);
+    if !is_ollama && !is_mlx {
+        cmd.arg("--api-key-env")
+            .arg(profile.api_key_env.as_deref().unwrap_or(""));
+    }
+    if collect_training_data {
+        cmd.arg("--collect-training-data")
+            .arg("--training-data-dir")
+            .arg(training_data_dir);
     }
 }
 
@@ -300,6 +310,42 @@ mod tests {
             model: "gpt-4o".into(),
             api_key_env: Some("OPENAI_API_KEY".into()),
         }
+    }
+
+    #[test]
+    fn mlx_managed_proxy_uses_canonical_worker_model_and_training_switches() {
+        let decision = VisionChildDecision {
+            should_spawn: true,
+            bind: "127.0.0.1:9100".parse().unwrap(),
+            path: "/vision".into(),
+            reason: "test".into(),
+        };
+        let profile = VisionProviderConfig {
+            base_url: "http://127.0.0.1:9101".into(),
+            model: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit".into(),
+            api_key_env: None,
+        };
+        let mut command = Command::new("bobby");
+        configure_vision_proxy_command(
+            &mut command,
+            &decision,
+            &profile,
+            true,
+            Path::new("training"),
+        );
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--upstream", "mlx"]));
+        assert!(args.contains(&"--spawn-server".to_owned()));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--model", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",] }));
+        assert!(args.contains(&"--collect-training-data".to_owned()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--training-data-dir", "training"]));
     }
 
     fn loopback_config(endpoint: &str, with_provider: bool) -> AppConfig {

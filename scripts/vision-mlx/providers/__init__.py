@@ -31,7 +31,7 @@ from .ollama_provider import OllamaProvider, DEFAULT_BASE_URL as OLLAMA_URL, DEF
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PROVIDER = "mlx-vlm"
+DEFAULT_PROVIDER = "ollama"
 
 _PROVIDERS = {
     "mlx-vlm": MlxVlmProvider,

@@ -69,6 +69,18 @@ pub fn upsert_vision_platform(
         DocumentMut::new()
     };
 
+    apply_vision_platform(&mut doc, endpoint_url, token_env, provider, profile)?;
+    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)?;
+    Ok(())
+}
+
+fn apply_vision_platform(
+    doc: &mut DocumentMut,
+    endpoint_url: &str,
+    token_env: &str,
+    provider: &str,
+    profile: &VisionProviderConfig,
+) -> Result<(), ConfigWriteError> {
     let vision = ensure_table(doc.as_table_mut(), "vision")?;
     // Prefer [nodes.vision] for the HTTP endpoint; drop legacy dual-truth keys.
     vision.remove("endpoint_url");
@@ -91,9 +103,44 @@ pub fn upsert_vision_platform(
     node["kind"] = value("vision");
     node["endpoint_url"] = value(endpoint_url);
     node["token_env"] = value(token_env);
-
-    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)?;
     Ok(())
+}
+
+/// Persist installer-owned vision state while retaining configured provider
+/// profiles when vision is disabled. The active node is the sole on/off
+/// switch; provider/model choices remain available for reversible re-enable.
+pub fn set_vision_install_state(
+    path: &Path,
+    enabled: bool,
+    provider: &str,
+    profile: &VisionProviderConfig,
+    collect_training_data: bool,
+    training_data_dir: &Path,
+) -> Result<(), ConfigWriteError> {
+    let mut doc = if path.exists() {
+        std::fs::read_to_string(path)
+            .map_err(ConfigWriteError::Io)?
+            .parse::<DocumentMut>()
+            .map_err(ConfigWriteError::Parse)?
+    } else {
+        DocumentMut::new()
+    };
+    apply_vision_platform(
+        &mut doc,
+        DEFAULT_LOOPBACK_ENDPOINT,
+        DEFAULT_VISION_TOKEN_ENV,
+        provider,
+        profile,
+    )?;
+    let vision = ensure_table(doc.as_table_mut(), "vision")?;
+    vision["collect_training_data"] = value(collect_training_data);
+    vision["training_data_dir"] = value(training_data_dir.to_string_lossy().as_ref());
+    if !enabled {
+        if let Some(nodes) = doc.get_mut("nodes").and_then(Item::as_table_mut) {
+            nodes.remove("vision");
+        }
+    }
+    std::fs::write(path, doc.to_string()).map_err(ConfigWriteError::Io)
 }
 
 /// Upsert an ACP harness profile. Only the executable, arguments, and auth
@@ -206,6 +253,40 @@ mod tests {
         )
         .expect_err("non-table vision must fail");
         assert!(err.to_string().contains("table"));
+    }
+
+    #[test]
+    fn install_state_turns_node_off_and_back_on_without_losing_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let profile = VisionProviderConfig {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "llava".into(),
+            api_key_env: None,
+        };
+
+        set_vision_install_state(&path, false, "ollama", &profile, true, Path::new("train"))
+            .unwrap();
+        let off = AppConfig::load(&path).unwrap();
+        assert!(!off.nodes.contains_key("vision"));
+        assert_eq!(off.vision.provider.as_deref(), Some("ollama"));
+        assert_eq!(off.vision.selected_provider().unwrap().1.model, "llava");
+        assert!(off.vision.collect_training_data);
+        assert_eq!(off.vision.training_data_dir, Path::new("train"));
+
+        set_vision_install_state(
+            &path,
+            true,
+            "ollama",
+            &profile,
+            false,
+            Path::new("data/vision"),
+        )
+        .unwrap();
+        let on = AppConfig::load(&path).unwrap();
+        assert!(on.nodes.contains_key("vision"));
+        assert_eq!(on.vision.provider.as_deref(), Some("ollama"));
+        assert!(!on.vision.collect_training_data);
     }
 
     #[test]
