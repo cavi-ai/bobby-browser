@@ -93,6 +93,101 @@ where
 }
 
 #[tokio::test]
+async fn grow_documents_traps_corpus() -> TestResult<()> {
+    // Trap-mode pass over the documents journey: file input + upload +
+    // iframe preview, with modal and delayed-control variation per run.
+    // This is the layout family the adapter failed OOS on before trap
+    // diversity entered training (§4f/§4h of the whitepaper).
+    let mut collector = CorpusCollector::new();
+    for run_idx in 0..runs_per_journey() {
+        let seed = format!("documents-traps-{run_idx}");
+        let server = ScenarioServer::start(trap_config(&seed, run_idx)).await?;
+        let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
+        let step = |name: &str| format!("{name}_t{run_idx}");
+
+        if run_idx % 2 == 0 {
+            if runtime
+                .wait_visible("section[aria-label='Workflow interruption'] button")
+                .await
+                .is_ok()
+            {
+                collector
+                    .capture(
+                        &runtime,
+                        &GroundTruth::Click {
+                            selector: "section[aria-label='Workflow interruption'] button",
+                            purpose: "Dismiss the workflow interruption".into(),
+                            ordinal: None,
+                        },
+                        "documents-traps",
+                        &step("dismiss_interruption"),
+                    )
+                    .await?;
+                runtime
+                    .click(
+                        "section[aria-label='Workflow interruption'] button",
+                        false,
+                    )
+                    .await?;
+            }
+        }
+
+        let fixture = runtime.fixture_path("approved-upload.txt");
+        runtime
+            .wait_visible("input[aria-label='Customer document']")
+            .await?;
+        collector
+            .capture(
+                &runtime,
+                &GroundTruth::Click {
+                    selector: "input[aria-label='Customer document']",
+                    purpose: "Choose the customer document file".into(),
+                    ordinal: None,
+                },
+                "documents-traps",
+                &step("choose_file"),
+            )
+            .await?;
+        runtime
+            .upload("input[aria-label='Customer document']", &fixture)
+            .await?;
+
+        collector
+            .capture(
+                &runtime,
+                &GroundTruth::Click {
+                    selector: "form[aria-label='Upload customer document'] button",
+                    purpose: "Upload the chosen document".into(),
+                    ordinal: None,
+                },
+                "documents-traps",
+                &step("click_upload"),
+            )
+            .await?;
+        runtime
+            .click("form[aria-label='Upload customer document'] button", true)
+            .await?;
+        runtime.wait_visible("iframe[title^='Preview of']").await?;
+        runtime
+            .wait_in_frame_button("#document-preview", "#confirm-preview")
+            .await?;
+        runtime
+            .click_in_frame("#document-preview", "#confirm-preview")
+            .await?;
+        runtime.mark_completed(&format!("documents-traps-{run_idx}"))?;
+    }
+    let path = corpus_path("documents-traps");
+    collector.save(&path)?;
+    println!(
+        "wrote {} examples to {} ({} runs)",
+        collector.len(),
+        path.display(),
+        runs_per_journey()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn grow_customer_update_traps_corpus() -> TestResult<()> {
     // Layout diversity pass: Level 2 traps without CAPTCHA keys. Each run
     // flips a different trap combination (modal on/off, control delay), so
