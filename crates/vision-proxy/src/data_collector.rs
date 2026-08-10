@@ -108,6 +108,9 @@ impl VisionTrainingExample {
                 crate::wire::VisionAction::ExtractValue { value } => {
                     serde_json::json!({"kind": "extractValue", "value": value})
                 }
+                crate::wire::VisionAction::ClickCandidate { index } => {
+                    serde_json::json!({"kind": "clickCandidate", "index": index})
+                }
             };
             serde_json::json!({
                 "confidence": r.confidence,

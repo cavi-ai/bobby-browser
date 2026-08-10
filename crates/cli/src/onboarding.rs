@@ -11,6 +11,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
 use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
 
+use crate::vision_readiness::{cached_hugging_face_model, download_and_verify_mlx_model};
+
 /// Agent host config dialect for `bobby init --emit`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum EmitFormat {
@@ -805,57 +807,6 @@ fn remember_installed_cli(bobby: &Path) {
     });
 }
 
-fn hugging_face_cache_root() -> Result<PathBuf> {
-    if let Some(root) = std::env::var_os("HF_HOME") {
-        return Ok(PathBuf::from(root).join("hub"));
-    }
-    Ok(dirs::home_dir()
-        .context("home directory unavailable")?
-        .join(".cache/huggingface/hub"))
-}
-
-fn cached_hugging_face_model(model: &str) -> Result<bool> {
-    let model_dir =
-        hugging_face_cache_root()?.join(format!("models--{}", model.replace('/', "--")));
-    let snapshots = model_dir.join("snapshots");
-    let Ok(entries) = std::fs::read_dir(snapshots) else {
-        return Ok(false);
-    };
-    for entry in entries.flatten() {
-        let snapshot = entry.path();
-        if snapshot.join("config.json").is_file()
-            && snapshot.join("preprocessor_config.json").is_file()
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn hugging_face_download_command(model: &str) -> Result<Command> {
-    for binary in ["hf", "huggingface-cli"] {
-        if let Some(path) = find_sidecar_binary(binary) {
-            let mut command = Command::new(path);
-            command.arg("download").arg(model);
-            return Ok(command);
-        }
-    }
-    anyhow::bail!("Hugging Face downloader not found; install huggingface_hub so hf is on PATH")
-}
-
-fn download_and_verify_mlx_model(model: &str) -> Result<()> {
-    let status = hugging_face_download_command(model)?
-        .status()
-        .with_context(|| format!("failed to download {model}"))?;
-    if !status.success() {
-        anyhow::bail!("Hugging Face download failed for {model} with {status}");
-    }
-    if !cached_hugging_face_model(model)? {
-        anyhow::bail!("download finished but no complete cached snapshot was found for {model}");
-    }
-    Ok(())
-}
-
 fn mlx_supported_host() -> bool {
     cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
@@ -1033,6 +984,8 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let no_collect_training_data = *no_collect_training_data;
     let force = *force;
     let yes = *yes;
+    let readiness_requested =
+        vision_provider.is_some() || vision_model.is_some() || download_vision_model;
     let project_root = std::env::current_dir()?;
     let mut items: Vec<InstallItem> = Vec::new();
     let use_defaults = use_install_defaults(&options);
@@ -1314,6 +1267,24 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         println!("ok: {outcome}");
         ran += 1;
     }
+    if vision_state.enabled && (readiness_requested || interactive) {
+        let profile = vision_state.profile()?;
+        match crate::vision_readiness::check_provider_readiness(
+            &vision_state.provider,
+            &profile,
+            &crate::vision_readiness::ReadinessOptions {
+                timeout: std::time::Duration::from_secs(45),
+                allow_download: false,
+            },
+        )? {
+            crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
+                println!("ok: configured and readiness-tested {provider} / {model}");
+            }
+            outcome @ crate::vision_readiness::ReadinessOutcome::NeedsAction { .. } => {
+                anyhow::bail!("vision readiness: {}", outcome.detail());
+            }
+        }
+    }
     if ran == 0 {
         println!("nothing selected; nothing changed");
     } else {
@@ -1455,6 +1426,78 @@ mod install_tests {
         assert_eq!(loaded.vision.provider.as_deref(), Some("ollama"));
         assert_eq!(loaded.vision.selected_provider().unwrap().1.model, "llava");
         assert!(!loaded.vision.collect_training_data);
+    }
+
+    #[test]
+    fn vision_readiness_named_install_persists_selection_and_surfaces_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let error = run_install(
+            &dir.path().join("bootstrap.env"),
+            InstallOptions {
+                vision: true,
+                vision_provider: Some("openai".into()),
+                yes: true,
+                config: Some(config_path.clone()),
+                training_data_dir: dir.path().join("training"),
+                ..InstallOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("readiness"));
+        let loaded = config::AppConfig::load(&config_path).unwrap();
+        assert_eq!(loaded.vision.provider.as_deref(), Some("openai"));
+        assert_eq!(
+            loaded.vision.selected_provider().unwrap().1.model,
+            "gpt-4o-mini"
+        );
+    }
+
+    #[test]
+    fn unavailable_vision_does_not_prevent_selected_firefox_companion_install() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
+        std::fs::write(dist.path().join("background.js"), "//").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join("config.toml");
+        let previous_home = std::env::var_os("HOME");
+        let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            #[cfg(not(target_os = "macos"))]
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+        }
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(home.path().join("Library/Application Support")).unwrap();
+        let companion_dir = bobby_config_dir().unwrap().join("firefox-companion");
+
+        let result = run_install(
+            &home.path().join("bootstrap.env"),
+            InstallOptions {
+                companion: true,
+                extension: Some(dist.path().to_path_buf()),
+                vision_provider: Some("openai".into()),
+                yes: true,
+                config: Some(config_path),
+                training_data_dir: home.path().join("training"),
+                ..InstallOptions::default()
+            },
+        );
+
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+
+        assert!(result.unwrap_err().to_string().contains("readiness"));
+        assert!(companion_dir.join("manifest.json").is_file());
+        assert!(companion_dir.join("background.js").is_file());
     }
 
     #[test]

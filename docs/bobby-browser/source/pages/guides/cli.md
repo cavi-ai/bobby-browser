@@ -61,8 +61,22 @@ bootstrap presence, storage dirs, Firefox/Chromium on PATH, optional `/healthz`)
 | `--config <path>` | Same as `serve` |
 | `--bootstrap-env <path>` | Same as `serve` |
 | `--skip-health` | Do not probe `/healthz` (default: probe) |
+| `--fix` | Repair safe Bobby-owned state, readiness-test the selected provider, then run doctor again |
+| `--download-model` | With `--fix`, explicitly allow downloading the already-selected MLX model |
 
 Exit code `1` if any **fail** checks; warnings alone exit `0`.
+
+In an interactive terminal, `ok`, `warn`, and `fail` are green, yellow, and
+red. Repair results use cyan, green, yellow, or red according to outcome.
+Piped output and `NO_COLOR=1 bobby doctor` remain plain and keep the same text
+labels, so color is never required to understand a result.
+
+`--fix` is conservative and idempotent. It can heal an existing unrestricted
+bootstrap capability set, normalize the selected provider into Bobby's
+canonical vision node, and readiness-test that selected provider. It does not
+choose a provider/model, overwrite a custom endpoint, persist secrets, install
+system packages, or leave a daemon running. A missing MLX cache remains an
+action item unless `--download-model` gives explicit consent for the download.
 
 ### `bobby jobs`
 
@@ -103,6 +117,7 @@ gathers training data from gauntlet runs.
 
 ```bash
 bobby vision connect --yes --provider mlx
+bobby vision connect --yes --provider mlx --activate --download-model
 bobby vision connect --yes --backend acp --provider codex \
   --command codex --arg acp --auth advertised
 bobby vision login
@@ -110,6 +125,17 @@ bobby vision login
 
 `bobby install` also offers vision configuration during onboarding. Field
 reference: [Configuration](configuration.md#vision).
+
+An explicitly selected provider is persisted before a bounded readiness test.
+For MLX, Bobby loads the exact selected model through the same managed command
+used at runtime and stops the setup-time child after the probe. Ollama and LM
+Studio remain externally managed; onboarding reports how to start/load them
+when their configured endpoint is unavailable.
+
+`vision connect` remains configuration-only by default. Add `--activate` to
+load/readiness-test the selection immediately. For MLX, add
+`--download-model` only when Bobby may download the selected model if its cache
+is missing; that flag requires `--activate`.
 
 ### `bobby vision-proxy`
 

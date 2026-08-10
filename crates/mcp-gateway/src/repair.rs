@@ -24,6 +24,16 @@ pub(crate) fn reconciliation_repair() -> Value {
     repair(NEEDS_RECONCILIATION_ACTION)
 }
 
+pub(crate) fn candidate_limit_repair() -> Value {
+    repair("Narrow the target using role + accessibleName, label, testId, CSS, or ordinal, then retry once; the error lists the first bounded matches and the exact count/limit.")
+}
+
+pub(crate) fn browser_launch_repair() -> Value {
+    json!({
+        "action": "run `bobby doctor`; stop the process occupying the configured Firefox BiDi port or choose a free port, then retry session_create"
+    })
+}
+
 /// General repair for one `ErrorCode` or `InterfaceErrorCode` wire name
 /// (both serialize camelCase from the same vocabulary). Unknown codes get no
 /// hint rather than a guessed one.

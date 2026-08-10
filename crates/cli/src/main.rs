@@ -8,6 +8,7 @@ mod vision_child;
 mod vision_collect;
 mod vision_connect;
 mod vision_login;
+mod vision_readiness;
 
 use anyhow::{Context, Result};
 use companion_core::{
@@ -256,6 +257,12 @@ enum CliCommand {
         /// Skip probing GET /healthz on the configured bind address
         #[arg(long)]
         skip_health: bool,
+        /// Repair safe Bobby-owned setup issues, then run doctor again
+        #[arg(long)]
+        fix: bool,
+        /// Allow --fix to download the already-selected local MLX model
+        #[arg(long, requires = "fix")]
+        download_model: bool,
     },
     /// Submit / inspect / cancel broker jobs (`/v1/jobs`)
     Jobs {
@@ -320,7 +327,7 @@ struct VisionConnectArgs {
     /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Provider preset: openai, ollama, lmstudio, or custom
+    /// Provider preset: openai, ollama, lmstudio, mlx, or custom
     #[arg(long)]
     provider: Option<String>,
     /// Backend transport: direct or acp
@@ -347,6 +354,12 @@ struct VisionConnectArgs {
     /// Accept defaults without interactive prompts
     #[arg(long)]
     yes: bool,
+    /// Load/readiness-test the selected provider after writing config
+    #[arg(long)]
+    activate: bool,
+    /// Allow activation to download the already-selected MLX model
+    #[arg(long, requires = "activate")]
+    download_model: bool,
 }
 
 #[derive(clap::Args)]
@@ -371,6 +384,8 @@ impl From<VisionConnectArgs> for vision_connect::ConnectOpts {
             model: args.model,
             api_key_env: args.api_key_env,
             yes: args.yes,
+            activate: args.activate,
+            download_model: args.download_model,
         }
     }
 }
@@ -699,11 +714,26 @@ pub async fn run() -> Result<()> {
             config,
             bootstrap_env,
             skip_health,
+            fix,
+            download_model,
         } => {
-            let report = doctor::run_doctor(config, bootstrap_env, !skip_health)?;
-            report.render();
-            if report.failures() > 0 {
-                std::process::exit(1);
+            if fix {
+                let report = doctor::run_doctor_fix(doctor::DoctorFixOptions {
+                    config,
+                    bootstrap_env,
+                    check_health: !skip_health,
+                    download_model,
+                })?;
+                report.render();
+                if report.post_fix.failures() > 0 {
+                    std::process::exit(1);
+                }
+            } else {
+                let report = doctor::run_doctor(config, bootstrap_env, !skip_health)?;
+                report.render();
+                if report.failures() > 0 {
+                    std::process::exit(1);
+                }
             }
         }
         CliCommand::Jobs { command } => run_jobs(command)?,
@@ -887,7 +917,7 @@ fn prepare_vision_child(
     enforce_force_on_spawn(policy, &decision)?;
 
     let vision_child = if decision.should_spawn {
-        let (_, profile) = config
+        let (provider_name, profile) = config
             .vision
             .selected_provider()
             .context("no vision provider configured; run `bobby vision connect` first")?;
@@ -912,6 +942,7 @@ fn prepare_vision_child(
         }
         Some(ManagedVisionProxy::spawn_from_current_exe(
             &decision,
+            provider_name,
             profile,
             token_env,
             config.vision.collect_training_data,
@@ -1108,9 +1139,13 @@ fn spawn_mlx_server(
 fn find_vision_server_script() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     for ancestor in exe.ancestors().skip(1) {
-        let candidate = ancestor.join("scripts/vision-mlx/vision_server.py");
-        if candidate.is_file() {
-            return Ok(candidate);
+        for candidate in [
+            ancestor.join("scripts/vision-mlx/vision_server.py"),
+            ancestor.join("share/bobby-browser/scripts/vision-mlx/vision_server.py"),
+        ] {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
     }
     let cwd_candidate = PathBuf::from("scripts/vision-mlx/vision_server.py");
@@ -2183,7 +2218,8 @@ mod tests {
     use super::doctor::{
         check_bootstrap_expiry, check_vision_acp, check_vision_provider, check_vision_upstream_key,
         handshake_error_status, run_doctor, vision_auth_discovery_check,
-        vision_endpoint_unreachable_detail, DoctorReport, DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
+        vision_endpoint_unreachable_detail, DoctorColorMode, DoctorReport, DoctorStatus,
+        BOOTSTRAP_EXPIRY_WARN_DAYS,
     };
     use super::*;
     use auth_broker::{AuthCapabilities, AuthStrategy};
@@ -2217,6 +2253,140 @@ mod tests {
                 native_dialogs: false,
             },
         }
+    }
+
+    #[test]
+    fn doctor_render_plain_preserves_status_text_without_ansi() {
+        let mut report = DoctorReport::default();
+        report.ok("config", "loaded".to_string());
+        report.warn("model", "not loaded".to_string());
+        report.fail("health", "unreachable".to_string());
+
+        let mut output = Vec::new();
+        report
+            .render_to(&mut output, DoctorColorMode::Never)
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "[ok] config: loaded\n[warn] model: not loaded\n[fail] health: unreachable\ndoctor: 1 failure(s), 1 warning(s)\n"
+        );
+    }
+
+    #[test]
+    fn doctor_render_color_distinguishes_each_severity() {
+        let mut report = DoctorReport::default();
+        report.ok("config", "loaded".to_string());
+        report.warn("model", "not loaded".to_string());
+        report.fail("health", "unreachable".to_string());
+
+        let mut output = Vec::new();
+        report
+            .render_to(&mut output, DoctorColorMode::Always)
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("[\u{1b}[32mok\u{1b}[0m] config: loaded"));
+        assert!(output.contains("[\u{1b}[33mwarn\u{1b}[0m] model: not loaded"));
+        assert!(output.contains("[\u{1b}[31mfail\u{1b}[0m] health: unreachable"));
+    }
+
+    #[test]
+    fn doctor_render_color_keeps_zero_summary_counts_green() {
+        let mut report = DoctorReport::default();
+        report.ok("config", "loaded".to_string());
+        let mut output = Vec::new();
+
+        report
+            .render_to(&mut output, DoctorColorMode::Always)
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("\u{1b}[32m0 failure(s)\u{1b}[0m"));
+        assert!(output.contains("\u{1b}[32m0 warning(s)\u{1b}[0m"));
+    }
+
+    #[test]
+    fn doctor_cli_parses_fix_and_explicit_model_download() {
+        let cli = Cli::try_parse_from(["bobby", "doctor", "--fix", "--download-model"])
+            .expect("doctor repair flags should parse together");
+
+        match cli.command {
+            Some(CliCommand::Doctor {
+                fix,
+                download_model,
+                ..
+            }) => {
+                assert!(fix);
+                assert!(download_model);
+            }
+            _ => panic!("expected doctor command"),
+        }
+    }
+
+    #[test]
+    fn doctor_cli_rejects_model_download_without_fix() {
+        assert!(Cli::try_parse_from(["bobby", "doctor", "--download-model"]).is_err());
+    }
+
+    #[test]
+    fn vision_connect_cli_supports_explicit_activation_and_download_consent() {
+        let cli = Cli::try_parse_from([
+            "bobby",
+            "vision",
+            "connect",
+            "--yes",
+            "--provider",
+            "mlx",
+            "--activate",
+            "--download-model",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::Vision {
+                command: VisionCommands::Connect(args),
+            }) => {
+                assert!(args.activate);
+                assert!(args.download_model);
+            }
+            _ => panic!("expected vision connect"),
+        }
+        assert!(Cli::try_parse_from([
+            "bobby",
+            "vision",
+            "connect",
+            "--yes",
+            "--provider",
+            "mlx",
+            "--download-model",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn doctor_fix_normalizes_selected_vision_once_without_changing_model() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[vision]
+provider = "mlx"
+
+[vision.providers.mlx]
+base_url = "http://127.0.0.1:19101"
+model = "mlx-community/example-selected"
+"#,
+        )
+        .unwrap();
+
+        assert!(super::doctor::repair_vision_config(&config_path).unwrap());
+        let first = std::fs::read_to_string(&config_path).unwrap();
+        assert!(first.contains("mlx-community/example-selected"));
+        assert!(first.contains("[nodes.vision]"));
+
+        assert!(!super::doctor::repair_vision_config(&config_path).unwrap());
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), first);
     }
 
     #[tokio::test]

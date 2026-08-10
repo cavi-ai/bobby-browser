@@ -192,10 +192,29 @@ pixels** — do not conflate the two.
 1. Run `bobby vision connect` (interactive menu or `--yes --provider …`) to
    write `endpoint_url`, `token_env`, `provider`, and the matching
    `[vision.providers.*]` table.
+   Add `--activate` to load/readiness-test it immediately; MLX downloads also
+   require explicit `--download-model` consent.
 2. Export env vars the connect step printed (`BOBBY_VISION_TOKEN`, and
    `api_key_env` when the profile requires one).
 3. Start `bobby serve --vision` — on loopback, bobby auto-spawns
    `bobby vision-proxy` when the port is free.
+
+These are distinct states:
+
+- **configured**: provider, model, and endpoint are persisted;
+- **cached**: the selected local model files exist;
+- **readiness-tested**: Bobby proved the configured provider can be reached or
+  loaded during a bounded check;
+- **runtime-loaded**: a running Bobby command currently owns the managed MLX
+  worker;
+- **externally managed**: Ollama or LM Studio owns its own server lifecycle.
+
+Explicit install selection performs the readiness test. `bobby doctor --fix`
+can repeat it and normalize Bobby-owned configuration. MLX is started only for
+the readiness check and then stopped; normal `serve`, `mcp-stdio`, and
+`acp-stdio` invocations own its runtime lifetime. `doctor --fix` never starts a
+persistent daemon. Downloading a missing selected MLX model additionally
+requires `--download-model`.
 
 Manual `bobby vision-proxy` in a separate terminal remains valid when you want
 full control over the sidecar process.

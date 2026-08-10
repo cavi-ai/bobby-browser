@@ -203,6 +203,7 @@ pub fn validate_backend_result(
         VisionAction::Click { .. } => "click",
         VisionAction::TypeText { .. } => "typeText",
         VisionAction::ExtractValue { .. } => "extractValue",
+        VisionAction::ClickCandidate { .. } => "clickCandidate",
     };
     if !packet
         .allowed_actions
@@ -226,6 +227,18 @@ pub fn validate_backend_result(
             }
         }
         VisionAction::Click { .. } => return Err(VisionPacketError::CoordinateOutOfBounds),
+        VisionAction::ClickCandidate { index } => {
+            // The index must reference a candidate the prompt actually sent.
+            let sent = packet
+                .context
+                .as_ref()
+                .map(|c| c.candidates.len())
+                .unwrap_or(0);
+            if sent == 0 || index as usize >= sent {
+                return Err(VisionPacketError::CoordinateOutOfBounds);
+            }
+            VisionAction::ClickCandidate { index }
+        }
         other => other,
     };
     Ok(VisionProposal {
@@ -275,6 +288,13 @@ pub enum VisionAction {
     ExtractValue {
         value: String,
     },
+    /// Click the candidate at this index in the prompt's candidate list.
+    /// The runtime owns spatial grounding: the engine resolves the index to
+    /// the candidate it sent and clicks that element directly — no pixel
+    /// coordinates cross the wire.
+    ClickCandidate {
+        index: u32,
+    },
 }
 
 pub fn proposal_sha256(proposal: &VisionProposal) -> String {
@@ -293,6 +313,10 @@ pub fn proposal_sha256(proposal: &VisionProposal) -> String {
         VisionAction::ExtractValue { value } => {
             hasher.update(b"extract");
             hasher.update(value.as_bytes());
+        }
+        VisionAction::ClickCandidate { index } => {
+            hasher.update(b"clickCandidate");
+            hasher.update(index.to_le_bytes());
         }
     }
     hex::encode(hasher.finalize())

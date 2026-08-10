@@ -1,6 +1,7 @@
 //! `bobby doctor` checks and report rendering.
 
 use std::{
+    io::{IsTerminal, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -18,6 +19,189 @@ use crate::{
     resolve_config_path, SelectionSource,
 };
 
+pub(crate) fn repair_vision_config(path: &Path) -> Result<bool> {
+    let before = std::fs::read(path)
+        .with_context(|| format!("failed to read config from {}", path.display()))?;
+    let mut config = AppConfig::load(path)
+        .with_context(|| format!("failed to load config from {}", path.display()))?;
+    config::ensure_loopback_vision_defaults(&mut config.vision);
+    let Some((provider_name, profile)) = config
+        .vision
+        .selected_provider()
+        .map(|(name, profile)| (name.to_string(), profile.clone()))
+    else {
+        return Ok(false);
+    };
+    let endpoint_url = config
+        .vision
+        .endpoint_url
+        .as_deref()
+        .context("vision endpoint missing after normalization")?;
+    let token_env = config
+        .vision
+        .token_env
+        .as_deref()
+        .context("vision token env missing after normalization")?;
+    config::upsert_vision_platform(path, endpoint_url, token_env, &provider_name, &profile)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(std::fs::read(path)? != before)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DoctorFixStatus {
+    Fixed,
+    Noop,
+    NeedsAction,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DoctorFixAction {
+    pub(crate) status: DoctorFixStatus,
+    pub(crate) name: String,
+    pub(crate) detail: String,
+}
+
+pub(crate) struct DoctorFixOptions {
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) bootstrap_env: Option<PathBuf>,
+    pub(crate) check_health: bool,
+    pub(crate) download_model: bool,
+}
+
+pub(crate) struct DoctorFixReport {
+    pub(crate) actions: Vec<DoctorFixAction>,
+    pub(crate) post_fix: DoctorReport,
+}
+
+impl DoctorFixReport {
+    pub(crate) fn render(&self) {
+        let color = DoctorColorMode::Auto.enabled();
+        for action in &self.actions {
+            let label = match action.status {
+                DoctorFixStatus::Fixed => "fixed",
+                DoctorFixStatus::Noop => "unchanged",
+                DoctorFixStatus::NeedsAction => "action",
+                DoctorFixStatus::Failed => "failed",
+            };
+            let ansi = match action.status {
+                DoctorFixStatus::Fixed => "\x1b[36m",
+                DoctorFixStatus::Noop => "\x1b[32m",
+                DoctorFixStatus::NeedsAction => "\x1b[33m",
+                DoctorFixStatus::Failed => "\x1b[31m",
+            };
+            if color {
+                eprintln!("[{ansi}{label}\x1b[0m] {}: {}", action.name, action.detail);
+            } else {
+                eprintln!("[{label}] {}: {}", action.name, action.detail);
+            }
+        }
+        self.post_fix.render();
+    }
+}
+
+pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixReport> {
+    let config_path = resolve_config_path(options.config.clone());
+    let bootstrap_path = resolve_bootstrap_path(options.bootstrap_env.clone())?;
+    let mut actions = Vec::new();
+
+    if bootstrap_path.exists() {
+        match bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap_path) {
+            Ok(heal) => actions.push(DoctorFixAction {
+                status: if heal.changed() {
+                    DoctorFixStatus::Fixed
+                } else {
+                    DoctorFixStatus::Noop
+                },
+                name: "bootstrap".to_string(),
+                detail: if heal.changed() {
+                    "healed the existing unrestricted capability set".to_string()
+                } else {
+                    "existing bootstrap already uses current capabilities".to_string()
+                },
+            }),
+            Err(error) => actions.push(DoctorFixAction {
+                status: DoctorFixStatus::Failed,
+                name: "bootstrap".to_string(),
+                detail: error.to_string(),
+            }),
+        }
+    } else {
+        actions.push(DoctorFixAction {
+            status: DoctorFixStatus::NeedsAction,
+            name: "bootstrap".to_string(),
+            detail: format!(
+                "{} does not exist; run `bobby init` to create a credential",
+                bootstrap_path.display()
+            ),
+        });
+    }
+
+    if config_path.exists() {
+        match repair_vision_config(&config_path) {
+            Ok(changed) => actions.push(DoctorFixAction {
+                status: if changed {
+                    DoctorFixStatus::Fixed
+                } else {
+                    DoctorFixStatus::Noop
+                },
+                name: "vision-config".to_string(),
+                detail: if changed {
+                    "normalized the selected provider into the canonical vision node".to_string()
+                } else {
+                    "selected vision provider is already canonical".to_string()
+                },
+            }),
+            Err(error) => actions.push(DoctorFixAction {
+                status: DoctorFixStatus::Failed,
+                name: "vision-config".to_string(),
+                detail: error.to_string(),
+            }),
+        }
+
+        if let Ok(config) = AppConfig::load(&config_path) {
+            if let Some((provider_name, profile)) = config.vision.selected_provider() {
+                let readiness = crate::vision_readiness::check_provider_readiness(
+                    provider_name,
+                    profile,
+                    &crate::vision_readiness::ReadinessOptions {
+                        timeout: Duration::from_secs(45),
+                        allow_download: options.download_model,
+                    },
+                );
+                match readiness {
+                    Ok(crate::vision_readiness::ReadinessOutcome::Ready { provider, model }) => {
+                        actions.push(DoctorFixAction {
+                            status: DoctorFixStatus::Fixed,
+                            name: "vision-readiness".to_string(),
+                            detail: format!("loaded and readiness-tested {provider} model {model}"),
+                        });
+                    }
+                    Ok(outcome @ crate::vision_readiness::ReadinessOutcome::NeedsAction { .. }) => {
+                        actions.push(DoctorFixAction {
+                            status: DoctorFixStatus::NeedsAction,
+                            name: "vision-readiness".to_string(),
+                            detail: outcome.detail().to_string(),
+                        })
+                    }
+                    Err(error) => actions.push(DoctorFixAction {
+                        status: DoctorFixStatus::Failed,
+                        name: "vision-readiness".to_string(),
+                        detail: error.to_string(),
+                    }),
+                }
+            }
+        }
+    }
+
+    let post_fix = run_doctor(
+        Some(config_path),
+        Some(bootstrap_path),
+        options.check_health,
+    )?;
+    Ok(DoctorFixReport { actions, post_fix })
+}
+
 /// `bobby init` issues a 30-day credential, so a week is enough runway to
 /// renew before the gateway starts failing closed.
 pub(crate) const BOOTSTRAP_EXPIRY_WARN_DAYS: i64 = 7;
@@ -29,12 +213,38 @@ pub(crate) enum DoctorStatus {
     Fail,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum DoctorColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+impl DoctorColorMode {
+    fn enabled(self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal(),
+        }
+    }
+}
+
 impl DoctorStatus {
     fn label(self) -> &'static str {
         match self {
             DoctorStatus::Ok => "ok",
             DoctorStatus::Warn => "warn",
             DoctorStatus::Fail => "fail",
+        }
+    }
+
+    fn ansi(self) -> &'static str {
+        match self {
+            DoctorStatus::Ok => "\x1b[32m",
+            DoctorStatus::Warn => "\x1b[33m",
+            DoctorStatus::Fail => "\x1b[31m",
         }
     }
 }
@@ -93,20 +303,61 @@ impl DoctorReport {
         self.checks.iter().find(|check| check.name == name)
     }
 
-    pub(crate) fn render(&self) {
+    pub(crate) fn render_to(
+        &self,
+        writer: &mut dyn Write,
+        color_mode: DoctorColorMode,
+    ) -> std::io::Result<()> {
+        let color = color_mode.enabled();
         for check in &self.checks {
-            eprintln!(
-                "[{}] {}: {}",
-                check.status.label(),
-                check.name,
-                check.detail
-            );
+            if color {
+                writeln!(
+                    writer,
+                    "[{}{}\x1b[0m] {}: {}",
+                    check.status.ansi(),
+                    check.status.label(),
+                    check.name,
+                    check.detail
+                )?;
+            } else {
+                writeln!(
+                    writer,
+                    "[{}] {}: {}",
+                    check.status.label(),
+                    check.name,
+                    check.detail
+                )?;
+            }
         }
-        eprintln!(
-            "doctor: {} failure(s), {} warning(s)",
-            self.failures(),
-            self.warnings()
-        );
+        if color {
+            let failure_ansi = if self.failures() == 0 {
+                "\x1b[32m"
+            } else {
+                "\x1b[31m"
+            };
+            let warning_ansi = if self.warnings() == 0 {
+                "\x1b[32m"
+            } else {
+                "\x1b[33m"
+            };
+            writeln!(
+                writer,
+                "\x1b[1mdoctor:\x1b[0m {failure_ansi}{} failure(s)\x1b[0m, {warning_ansi}{} warning(s)\x1b[0m",
+                self.failures(),
+                self.warnings()
+            )
+        } else {
+            writeln!(
+                writer,
+                "doctor: {} failure(s), {} warning(s)",
+                self.failures(),
+                self.warnings()
+            )
+        }
+    }
+
+    pub(crate) fn render(&self) {
+        let _ = self.render_to(&mut std::io::stderr().lock(), DoctorColorMode::Auto);
     }
 }
 
@@ -692,28 +943,20 @@ pub(crate) fn run_doctor(
         for profile in &selection.firefox {
             match Url::parse(&profile.bidi_url) {
                 Ok(url) if matches!(url.scheme(), "ws" | "wss") => {
-                    let reachable = url
-                        .socket_addrs(|| Some(if url.scheme() == "wss" { 443 } else { 80 }))
-                        .map(|addrs| {
-                            addrs.iter().any(|addr| {
-                                std::net::TcpStream::connect_timeout(
-                                    addr,
-                                    Duration::from_millis(500),
-                                )
-                                .is_ok()
-                            })
-                        })
-                        .unwrap_or(false);
-                    if reachable {
-                        report.ok("firefox-bidi", format!("{} reachable", profile.bidi_url));
-                    } else {
-                        report.warn(
+                    match probe_firefox_bidi(&profile.bidi_url) {
+                        Ok(()) => report.ok(
+                            "firefox-bidi",
+                            format!("{} accepted a WebDriver BiDi handshake", profile.bidi_url),
+                        ),
+                        Err(error) => {
+                            report.warn(
                             "firefox-bidi",
                             format!(
-                                "{} not reachable (is Firefox running with --remote-debugging-port?)",
-                                profile.bidi_url
+                                "{} is not a Firefox WebDriver BiDi endpoint ({error:#}); another service may own the port",
+                                profile.bidi_url,
                             ),
                         );
+                        }
                     }
                 }
                 _ => {
@@ -1106,6 +1349,42 @@ pub(crate) fn run_doctor(
     Ok(report)
 }
 
+fn probe_firefox_bidi(endpoint: &str) -> Result<()> {
+    let url = Url::parse(endpoint).context("invalid WebDriver BiDi URL")?;
+    if url.scheme() != "ws" {
+        anyhow::bail!("doctor currently probes loopback ws:// BiDi endpoints only");
+    }
+    let host = url.host_str().context("BiDi URL has no host")?;
+    let port = url
+        .port_or_known_default()
+        .context("BiDi URL has no port")?;
+    let address = url
+        .socket_addrs(|| Some(port))?
+        .into_iter()
+        .next()
+        .context("BiDi host resolved to no addresses")?;
+    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let path = if url.path().is_empty() {
+        "/"
+    } else {
+        url.path()
+    };
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    )?;
+    let mut response = [0_u8; 4096];
+    let read = stream.read(&mut response)?;
+    let head = String::from_utf8_lossy(&response[..read]);
+    let status = head.lines().next().unwrap_or("empty response");
+    if !status.contains(" 101 ") {
+        anyhow::bail!("WebSocket handshake returned {status}");
+    }
+    Ok(())
+}
+
 fn probe_healthz(url: &str) -> Result<()> {
     let url = url.to_owned();
     match std::thread::spawn(move || probe_healthz_blocking(&url)).join() {
@@ -1153,4 +1432,28 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(_path: &Path) -> bool {
     true
+}
+
+#[cfg(test)]
+mod bidi_probe_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn firefox_bidi_probe_rejects_an_http_service_on_the_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        let error = probe_firefox_bidi(&format!("ws://{address}/session")).unwrap_err();
+        assert!(error.to_string().contains("404"), "{error:#}");
+        server.join().unwrap();
+    }
 }

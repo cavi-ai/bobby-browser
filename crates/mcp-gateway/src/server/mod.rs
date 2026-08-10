@@ -853,8 +853,15 @@ impl Server {
         // `needsReconciliation` always overrides the code's general repair:
         // retrying that outcome can double-apply a side effect.
         let status = value.get("status").and_then(Value::as_str);
+        let candidate_limit = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.starts_with("candidate limit exceeded:"));
         let repair = if status == Some("needsReconciliation") {
             Some(crate::repair::reconciliation_repair())
+        } else if candidate_limit {
+            Some(crate::repair::candidate_limit_repair())
         } else {
             value
                 .get("error")
@@ -1399,9 +1406,20 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
         ),
         None => format!("Runtime interface error: {code}"),
     };
+    let safe_diagnostic = interface_error
+        .message
+        .starts_with("browser launch failed:")
+        .then(|| interface_error.message.clone());
     interface_error.message = "runtime interface request failed".to_owned();
-    let repair = crate::repair::repair_for_code(&code);
+    let repair = if safe_diagnostic.is_some() {
+        Some(crate::repair::browser_launch_repair())
+    } else {
+        crate::repair::repair_for_code(&code)
+    };
     let mut data = json!({"interfaceError":interface_error});
+    if let Some(diagnostic) = safe_diagnostic {
+        data["diagnostic"] = json!(diagnostic);
+    }
     if let Some(repair) = repair {
         data["repair"] = repair;
     }

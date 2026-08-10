@@ -744,6 +744,11 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
 }
 
 fn map_runtime_error(ctx: &RequestContext, error: RuntimeError) -> InterfaceError {
+    if let RuntimeError::InvalidRequest(message) = &error {
+        if message.starts_with("browser launch failed:") {
+            return error_with(ctx, InterfaceErrorCode::InvalidRequest, message);
+        }
+    }
     let (code, message) = match error {
         RuntimeError::NotFound(_) => (
             InterfaceErrorCode::NotFound,

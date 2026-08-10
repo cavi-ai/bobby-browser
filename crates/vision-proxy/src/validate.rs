@@ -30,6 +30,7 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
         VisionAction::TypeText { .. } => Err(ValidateError::TypeTextTooLong),
         VisionAction::ExtractValue { value } if value.len() <= MAX_TEXT_BYTES => Ok(()),
         VisionAction::ExtractValue { .. } => Err(ValidateError::ExtractValueTooLong),
+        VisionAction::ClickCandidate { .. } => Ok(()),
     }
 }
 
