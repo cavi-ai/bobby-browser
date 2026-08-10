@@ -19,6 +19,7 @@ use crate::wire::{ExtractRequest, ProposeRequest};
 pub enum UpstreamKind {
     OpenAi,
     Ollama,
+    Mlx,
 }
 
 #[derive(Clone, Debug)]

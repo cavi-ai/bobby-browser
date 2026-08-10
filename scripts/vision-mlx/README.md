@@ -1,144 +1,89 @@
-# Bobby Vision Assist - Local MLX/Ollama Setup
+# Bobby Vision Assist - Canonical Provider Interface
 
 ## Overview
 
-This directory contains tools for running vision-language models locally on
-Apple Silicon for Bobby Browser's vision assist feature.
-
-## Quick Start
-
-### Option 1: Ollama (Recommended - Working Now)
-
-Ollama with llava:7b provides working vision assist on your M5 Max:
-
-```bash
-# Start the Ollama vision provider (normalizes output to Bobby's schema)
-python3 scripts/vision-mlx/ollama_vision.py --bind 127.0.0.1:9103
-
-# Or configure Bobby to use Ollama directly:
-bobby vision connect --provider ollama --yes
-```
-
-**Requirements:**
-- Ollama installed (`ollama pull llava:7b`)
-- Model loaded in Ollama (`ollama ps`)
-
-**Configuration:**
-| Env Var | Default | Description |
-|---|---|---|
-| `VISION_OLLAMA_MODEL` | `llava:7b` | Ollama model to use |
-| `VISION_OLLAMA_BIND` | `127.0.0.1:9103` | Bind address |
-| `VISION_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API URL |
-
-### Option 2: Pure MLX (Future - When Vision Support Lands)
-
-When MLX adds vision model support, use the pure MLX pipeline:
-
-```bash
-# Install dependencies
-pip3 install -r scripts/vision-mlx/requirements.txt
-
-# Start the MLX vision service
-python3 scripts/vision-mlx/vision_mlx.py --model qwen2-vl:7b --bind 127.0.0.1:9101
-```
-
-**Requirements:**
-- MLX with vision support (not yet available in MLX 0.31.3)
-- PyTorch + transformers for vision encoder fallback
-- ~14GB RAM for 7B model (quantized)
-
-**Configuration:**
-| Env Var | Default | Description |
-|---|---|---|
-| `VISION_MLX_MODEL` | `qwen2-vl:7b` | Model to load |
-| `VISION_MLX_BIND` | `127.0.0.1:9101` | Bind address |
-| `VISION_MLX_PRELOAD` | `false` | Preload model at startup |
-
-## Bobby Integration
-
-### CLI Configuration
-
-Configure Bobby to use Ollama:
-
-```bash
-# Direct provider (recommended)
-bobby vision connect --provider ollama --yes
-
-# Custom Ollama endpoint
-bobby vision connect --provider custom \
-    --base-url http://127.0.0.1:11434 \
-    --model llava:7b \
-    --yes
-```
-
-### Manual Proxy
-
-Run the vision proxy with Ollama upstream:
-
-```bash
-bobby vision-proxy --ollama --model llava:7b \
-    --ollama-base-url http://127.0.0.1:11434 \
-    --bind 127.0.0.1:9100
-```
+Bobby's vision assist uses a canonical provider interface. One interface,
+swappable backends — direct local MLX inference, Ollama, or LM Studio.
+The output schema matches the Rust `vision-proxy` wire format exactly.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ Bobby Browser Runtime                                       │
-│                                                             │
-│  Intent Engine → HttpVisionAssist → POST /propose          │
-│                    (screenshot + context)                    │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ HTTP
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Vision Provider (Local)                                     │
-│                                                             │
-│  ┌──────────────┐     ┌──────────────────┐                 │
-│  │ Ollama       │     │ MLX (Future)     │                 │
-│  │ llava:7b     │     │ Qwen2-VL 7B      │                 │
-│  │ (working)    │     │ (when MLX adds   │                 │
-│  │              │     │  vision support)  │                 │
-│  └──────────────┘     └──────────────────┘                 │
-│       │                       │                            │
-│       ▼                       ▼                            │
-│  Normalized to Bobby's      MLX text decoder             │
-│  VisionProposal schema      + PyTorch vision encoder     │
-└─────────────────────────────────────────────────────────────┘
+Bobby runtime → vision-proxy (Rust) → POST /propose
+                      │
+                      ▼
+              Canonical VisionProvider
+              ┌───────┬────────┬──────────┐
+              │mlx-vlm│ ollama │ lmstudio │
+              └───────┴────────┴──────────┘
 ```
 
-## Model Comparison
+`providers/base.py` defines the interface — `propose()` and `extract()` —
+mirroring the Rust `VisionAssist` trait and `wire.rs` schema:
 
-| Model | Speed | Accuracy | RAM | Status |
-|---|---|---|---|---|
-| llava:7b (Ollama) | ~2s | Medium | ~5GB | ✅ Working |
-| Qwen2-VL 7B (MLX) | ~1s | High | ~14GB | ⏳ Waiting |
-| gpt-4o (Cloud) | ~0.5s | High | N/A | ✅ Available |
+```json
+{"confidence": 0.0..1.0, "action": {"kind": "click"|"typeText"|"extractValue", ...}}
+```
 
-## Training Data Collection
+## Providers
 
-To fine-tune a model for Bobby's specific use case:
+| Provider | Backend | Speed (3B) | Setup |
+|---|---|---|---|
+| `mlx-vlm` (default) | Direct local inference via mlx-vlm on Metal | ~0.55s | `pip install mlx-vlm`, no server |
+| `ollama` | HTTP to local Ollama | ~2s | `ollama pull llava:7b` |
+| `lmstudio` | HTTP to LM Studio | ~1s | LM Studio server on :1234 |
 
-1. Run gauntlet tests with vision assist enabled
-2. Capture all vision proposals (input + output + outcome)
-3. Store as JSONL: `{image_b64, prompt, response, success, metadata}`
-4. Fine-tune with LoRA on the captured trajectories
+## Usage
 
-## Troubleshooting
+### Direct (Python)
 
-**Ollama not responding:**
+```python
+from providers import create_provider, ProposeRequest
+
+provider = create_provider("mlx-vlm")          # or "ollama", "lmstudio"
+resp = provider.propose(ProposeRequest(
+    purpose="Click OK button",
+    intent_kind="locate",
+    stuck="targetMissing",
+    screenshot_b64=png_b64,
+))
+# -> {"confidence": 0.95, "action": {"kind": "click", "x": 199.0, "y": 101.0}}
+```
+
+### Server
+
 ```bash
-ollama ps  # Check if model is loaded
-ollama pull llava:7b  # Pull if missing
+python vision_server.py --provider mlx-vlm --bind 127.0.0.1:9101
+VISION_PROVIDER=ollama python vision_server.py
 ```
 
-**Vision proxy not reachable:**
+### Configuration (env)
+
+| Env var | Default | Description |
+|---|---|---|
+| `VISION_PROVIDER` | `mlx-vlm` | Backend selection |
+| `VISION_MLX_MODEL` | `mlx-community/Qwen2.5-VL-3B-Instruct-4bit` | mlx-vlm model |
+| `VISION_OLLAMA_MODEL` | `llava:7b` | Ollama model |
+| `VISION_OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama URL |
+| `VISION_LMSTUDIO_MODEL` | `local-model` | LM Studio model |
+| `VISION_LMSTUDIO_BASE_URL` | `http://127.0.0.1:1234` | LM Studio URL |
+
+### Evaluation
+
 ```bash
-curl http://127.0.0.1:9100/propose  # Test endpoint
-bobby doctor  # Check vision route
+python eval_provider.py --provider mlx-vlm --input data/training_data.jsonl --limit 30
 ```
 
-**Model returns wrong schema:**
-- Check the prompt in `ollama_vision.py` is being used
-- Ensure Ollama model is llava:7b or similar vision model
+Latest results (Qwen2.5-VL-3B, synthetic data): 90% action accuracy, 0.55s avg latency.
+
+## Model response normalization
+
+Models emit coordinates variously — `{"x": N, "y": N}`, `{"coordinate": [N, N]}`,
+`{"position": {...}}`, or bare `"action": "click"` with sibling coordinate fields.
+`normalize_action()` maps all of these onto the canonical schema; unknown
+variants degrade to `{"kind": "click", "x": 0.0, "y": 0.0}` rather than failing.
+
+## Training data
+
+Collect with `bobby serve --vision --collect-training-data` (Rust) or generate
+synthetic data with `bobby_vision_collector.py --generate --num-examples 1000`.

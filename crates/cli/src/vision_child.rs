@@ -231,16 +231,26 @@ impl ManagedVisionProxy {
         // Detect provider type from base_url to select upstream.
         let is_ollama = profile.base_url.contains("127.0.0.1:11434")
             || profile.base_url.contains("localhost:11434");
+        let is_mlx = profile.base_url.contains("127.0.0.1:9101")
+            || profile.base_url.contains("localhost:9101");
         if is_ollama {
-            cmd.arg("--ollama")
+            cmd.arg("--upstream")
+                .arg("ollama")
                 .arg("--model")
                 .arg(&profile.model)
-                .arg("--ollama-base-url")
+                .arg("--vision-base-url")
+                .arg(&profile.base_url);
+        } else if is_mlx {
+            cmd.arg("--upstream")
+                .arg("mlx")
+                .arg("--vision-base-url")
                 .arg(&profile.base_url);
         } else {
-            cmd.arg("--model")
+            cmd.arg("--upstream")
+                .arg("openai")
+                .arg("--model")
                 .arg(&profile.model)
-                .arg("--openai-base-url")
+                .arg("--vision-base-url")
                 .arg(&profile.base_url);
             match &profile.api_key_env {
                 Some(name) => {
