@@ -68,25 +68,21 @@ impl std::error::Error for HarnessError {}
 async fn acquire_live_browser_lock() -> TestResult<std::fs::File> {
     let lock_path = repository_root().join("target/modern-gauntlet-browser.lock");
     tokio::task::spawn_blocking(move || -> TestResult<std::fs::File> {
-        use std::os::fd::AsRawFd;
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
 
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC)
-            .open(&lock_path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        options.mode(0o600).custom_flags(libc::O_CLOEXEC);
+        let file = options.open(&lock_path)?;
         // Separate Cargo test binaries share the same installed browser. Hold
         // one advisory lock for the runtime lifetime so one test cannot detach
         // another test's target while the workspace suite runs concurrently.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
+        file.lock()?;
         Ok(file)
     })
     .await?
