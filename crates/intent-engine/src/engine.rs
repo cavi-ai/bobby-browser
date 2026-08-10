@@ -2247,47 +2247,48 @@ async fn escalate_with_vision(
         .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
         .cloned()
         .collect();
-    let mut act_evidence = match execute_vision_action(page_id, browser, &proposal.action, &prompt_candidates).await {
-        Ok(evidence) => evidence,
-        Err(error) => {
-            record_escalation(
-                &corpus,
-                corpus_inputs.as_ref(),
-                &purpose,
-                intent_kind,
-                kind,
-                &proposal,
-                false,
-                "visionActFailed",
-                Some(format!("vision act failed: {}", error.message)),
-                None,
-            );
-            let mut evidence = base_evidence;
-            evidence.append(&mut screenshot_evidence);
-            evidence.push(intent_evidence(execution_record_with_path(
-                intent_kind,
-                purpose,
-                plan_summary,
-                candidates,
-                None,
-                format!("visionActFailed:{verification}"),
-                ResolutionDetails {
-                    path: IntentResolutionPath::VisionFallback,
-                    vision_proposal_sha256: Some(proposal_hash),
-                    artifact_ids: artifact_ids_from(&screenshot_evidence),
-                },
-            )));
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::VisionAssistFailed,
-                    message: format!("vision act failed: {}", error.message),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence,
-            };
-        }
-    };
+    let mut act_evidence =
+        match execute_vision_action(page_id, browser, &proposal.action, &prompt_candidates).await {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                record_escalation(
+                    &corpus,
+                    corpus_inputs.as_ref(),
+                    &purpose,
+                    intent_kind,
+                    kind,
+                    &proposal,
+                    false,
+                    "visionActFailed",
+                    Some(format!("vision act failed: {}", error.message)),
+                    None,
+                );
+                let mut evidence = base_evidence;
+                evidence.append(&mut screenshot_evidence);
+                evidence.push(intent_evidence(execution_record_with_path(
+                    intent_kind,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    None,
+                    format!("visionActFailed:{verification}"),
+                    ResolutionDetails {
+                        path: IntentResolutionPath::VisionFallback,
+                        vision_proposal_sha256: Some(proposal_hash),
+                        artifact_ids: artifact_ids_from(&screenshot_evidence),
+                    },
+                )));
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VisionAssistFailed,
+                        message: format!("vision act failed: {}", error.message),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence,
+                };
+            }
+        };
 
     let mut evidence = prior_evidence;
     evidence.append(&mut screenshot_evidence);
