@@ -1993,6 +1993,7 @@ async fn stuck_outcome_with_prior_evidence(
                     x: cached.x,
                     y: cached.y,
                 },
+                &[],
             )
             .await
             {
@@ -2238,7 +2239,15 @@ async fn escalate_with_vision(
         };
     }
 
-    let mut act_evidence = match execute_vision_action(page_id, browser, &proposal.action).await {
+    // The model indexes into the exact list the prompt carried: top 5
+    // candidates with both role and name. Resolve against that same view.
+    let prompt_candidates: Vec<types::CandidateEvidence> = candidates
+        .iter()
+        .take(5)
+        .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
+        .cloned()
+        .collect();
+    let mut act_evidence = match execute_vision_action(page_id, browser, &proposal.action, &prompt_candidates).await {
         Ok(evidence) => evidence,
         Err(error) => {
             record_escalation(
@@ -2378,9 +2387,53 @@ async fn execute_vision_action(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     action: &VisionAction,
+    prompt_candidates: &[types::CandidateEvidence],
 ) -> Result<Vec<Evidence>, CommandError> {
     match action {
         VisionAction::Click { x, y } => browser.click_xy(page_id, *x, *y).await,
+        VisionAction::ClickCandidate { index } => {
+            // The runtime owns spatial grounding: resolve the index against
+            // the exact candidate list the model saw, then click the element
+            // through the DOM path rather than by pixel.
+            let candidate = prompt_candidates
+                .get(*index as usize)
+                .ok_or_else(|| CommandError {
+                    code: ErrorCode::VisionAssistFailed,
+                    message: format!(
+                        "clickCandidate index {index} out of range ({} candidates)",
+                        prompt_candidates.len()
+                    ),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                })?;
+            let role = candidate.role.clone().ok_or_else(|| CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: format!("clickCandidate index {index} has no role"),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })?;
+            let name = candidate.name.clone().ok_or_else(|| CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: format!("clickCandidate index {index} has no name"),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })?;
+            browser
+                .click(
+                    page_id,
+                    &ClickCommand {
+                        selector: String::new(),
+                        target: Some(TargetSpec {
+                            role: Some(role),
+                            accessible_name: Some(name),
+                            ..TargetSpec::default()
+                        }),
+                        boundary: false,
+                        expected_url: None,
+                    },
+                )
+                .await
+        }
         VisionAction::TypeText { text } => {
             browser
                 .type_text(
