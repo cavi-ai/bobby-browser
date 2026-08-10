@@ -373,10 +373,7 @@ async fn submit_and_verify_wait_timeout_after_landed_click_is_not_a_resubmit_inv
     // duplicate the POST.
     assert_eq!(error.code, ErrorCode::VerificationFailed);
     assert!(!error.retryable);
-    assert!(
-        error.message.contains("submit click landed"),
-        "{error:?}"
-    );
+    assert!(error.message.contains("submit click landed"), "{error:?}");
     assert!(
         error.message.contains("Do not resubmit blindly"),
         "{error:?}"
@@ -386,7 +383,10 @@ async fn submit_and_verify_wait_timeout_after_landed_click_is_not_a_resubmit_inv
         Evidence::IntentExecution { record } => Some(record),
         _ => None,
     });
-    assert_eq!(record.expect("IntentExecution").verification, "verifyFailed");
+    assert_eq!(
+        record.expect("IntentExecution").verification,
+        "verifyFailed"
+    );
     let log = calls.lock().expect("call log");
     assert_eq!(log.clicks.len(), 1);
     assert_eq!(log.waits.len(), 1);

@@ -670,7 +670,9 @@ struct DocumentsPageProbe {
 
 #[allow(dead_code)]
 async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
-    let server = ScenarioServer::start(ScenarioConfig::seeded(seed)).await.unwrap();
+    let server = ScenarioServer::start(ScenarioConfig::seeded(seed))
+        .await
+        .unwrap();
     let root = tempfile::tempdir().unwrap();
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
@@ -744,7 +746,10 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         timeout_ms: 30_000,
     }))
     .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let form_snapshot = runtime
         .form_snapshot(&session.id, &page.id, None)
         .await
@@ -764,7 +769,10 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         paths: vec![fixture.to_string_lossy().into_owned()],
     }))
     .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let outcome = submit(PrimitiveCommand::Click(types::ClickCommand {
         selector: "form[aria-label='Upload customer document'] button".into(),
         target: None,
@@ -772,7 +780,10 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         expected_url: None,
     }))
     .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let outcome = submit(PrimitiveCommand::WaitFor(WaitForCommand {
         condition: WaitCondition::Element {
             target: Box::new(TargetSpec {
@@ -784,7 +795,10 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         timeout_ms: 15_000,
     }))
     .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     DocumentsPageProbe {
         server,
         runtime,
@@ -873,7 +887,10 @@ async fn a11y_snapshot_exposes_link_urls() {
         timeout_ms: 30_000,
     }))
     .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let outcome = submit(PrimitiveCommand::Click(types::ClickCommand {
         selector: "form[aria-label='Generate report'] button".into(),
         target: None,
@@ -881,7 +898,10 @@ async fn a11y_snapshot_exposes_link_urls() {
         expected_url: None,
     }))
     .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let outcome = submit(PrimitiveCommand::WaitFor(WaitForCommand {
         condition: WaitCondition::Text {
             target: Box::new(TargetSpec {
@@ -893,7 +913,10 @@ async fn a11y_snapshot_exposes_link_urls() {
         timeout_ms: 30_000,
     }))
     .await;
-    assert!(matches!(outcome, CommandOutcome::Completed { .. }), "{outcome:?}");
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
 
     let outcome = submit(PrimitiveCommand::AccessibilitySnapshot(
         types::AccessibilitySnapshotCommand { max_nodes: None },
@@ -930,10 +953,7 @@ async fn a11y_snapshot_exposes_link_urls() {
                     .is_some_and(|name| name.contains("atlas-operations.csv"))
         })
         .expect("download link missing from a11y snapshot");
-    let url = link
-        .url
-        .as_deref()
-        .expect("download link carries no url");
+    let url = link.url.as_deref().expect("download link carries no url");
     assert!(
         url.contains("/api/reports/") && url.ends_with("/download"),
         "unexpected link url: {url}"
@@ -994,7 +1014,10 @@ async fn a11y_snapshot_descends_into_iframes() {
             && node.role.as_deref() == Some("button")
     });
     let confirm = confirm.expect("in-frame confirm button missing from a11y snapshot");
-    let target = confirm.target.as_ref().expect("confirm button has no target");
+    let target = confirm
+        .target
+        .as_ref()
+        .expect("confirm button has no target");
     assert!(
         !target.frame_path.is_empty(),
         "in-frame target must carry its frame hop: {target:?}"
@@ -1035,5 +1058,10 @@ async fn a11y_snapshot_descends_into_iframes() {
         .wait_for_preview_confirmation()
         .await
         .expect("in-frame activation did not land");
-    probe.runtime.sessions.delete(&probe.session_id).await.unwrap();
+    probe
+        .runtime
+        .sessions
+        .delete(&probe.session_id)
+        .await
+        .unwrap();
 }

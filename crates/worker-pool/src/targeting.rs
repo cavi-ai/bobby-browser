@@ -436,15 +436,15 @@ fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
 /// snapshot's `Iframe` nodes carry. The snapshot uses these to map each child
 /// frame back to its element and stamp in-frame targets with a re-resolvable
 /// hop.
-pub(crate) async fn main_frame_iframe_candidates(page: &Page) -> Result<Vec<Candidate>, CommandError> {
+pub(crate) async fn main_frame_iframe_candidates(
+    page: &Page,
+) -> Result<Vec<Candidate>, CommandError> {
     let scope_id = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
     let raw = collect_candidates(page, None, &[], scope_id).await?;
     Ok(raw
         .into_iter()
         .map(into_candidate)
-        .filter(|candidate| {
-            candidate.role.as_deref() == Some("iframe") && candidate.state.attached
-        })
+        .filter(|candidate| candidate.role.as_deref() == Some("iframe") && candidate.state.attached)
         .collect())
 }
 

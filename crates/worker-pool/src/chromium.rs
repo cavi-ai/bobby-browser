@@ -1685,8 +1685,7 @@ impl BrowserWorker for ChromiumWorker {
         // their targets carry the frame hop control_action can re-resolve.
         let emitted = count_a11y_nodes(&nodes);
         if emitted < max_nodes {
-            truncated |=
-                descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
+            truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
         }
         Ok(vec![Evidence::AccessibilitySnapshot {
             page_id: page_id.clone(),
@@ -3137,14 +3136,15 @@ async fn descend_a11y_iframes(
         let candidate = iframes
             .iter()
             .find(|candidate| {
-                frame_name.as_ref().is_some_and(|name| {
-                    candidate.attributes.get("name") == Some(name)
-                }) || frame_url.as_ref().is_some_and(|url| {
-                    candidate
-                        .attributes
-                        .get("src")
-                        .is_some_and(|src| url == src || url.ends_with(src))
-                })
+                frame_name
+                    .as_ref()
+                    .is_some_and(|name| candidate.attributes.get("name") == Some(name))
+                    || frame_url.as_ref().is_some_and(|url| {
+                        candidate
+                            .attributes
+                            .get("src")
+                            .is_some_and(|src| url == src || url.ends_with(src))
+                    })
             })
             .or(if iframes.len() == 1 {
                 iframes.first()
@@ -3322,6 +3322,12 @@ fn compact_ax_tree(
             return None;
         }
         *budget -= 1;
+        // Only links: the AX `url` property also lands on the root web
+        // area, where it is the document URL — which for a data: page
+        // embeds the whole document, secrets included.
+        let url = (role.as_deref() == Some("link"))
+            .then(|| property_text(node, "url"))
+            .flatten();
         Some(types::AccessibilityNode {
             role,
             name,
@@ -3334,7 +3340,7 @@ fn compact_ax_tree(
             invalid: property_text(node, "invalid").map(|value| value != "false"),
             checked: property_bool(node, "checked"),
             autocomplete,
-            url: property_text(node, "url"),
+            url,
             value_min: property_text(node, "valuemin"),
             value_max: property_text(node, "valuemax"),
             children,
