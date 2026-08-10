@@ -110,6 +110,9 @@ struct WorkflowStartFailure {
     workflow_id: types::WorkflowId,
     navigation_outcome: Option<types::CommandOutcome>,
     cleanup: CleanupResult,
+    /// The underlying error that drove the failure (`code: message`), so an
+    /// opaque `pageOpenFailed` never reaches an agent without its cause.
+    detail: Option<String>,
 }
 
 impl Server {
@@ -234,6 +237,7 @@ impl Server {
             Some(binding.workflow_id.clone()),
             types::PrimitiveCommand::AccessibilitySnapshot(types::AccessibilitySnapshotCommand {
                 max_nodes: Some(max_nodes),
+                target: None,
             }),
         );
         let observation_outcome = match self.submit_envelope(submit_context, envelope).await {
@@ -404,6 +408,7 @@ impl Server {
                 workflow_id,
                 navigation_outcome,
                 cleanup: cleanup.result().clone(),
+                detail: None,
             };
             return cleanup
                 .acknowledge_after(self.workflow_start_failure_response(id, failure))
@@ -432,6 +437,7 @@ impl Server {
                     workflow_id: workflow_id.clone(),
                     navigation_outcome: navigation_outcome.clone(),
                     cleanup: CleanupResult::conservative("workflowSupervisorLost"),
+                    detail: None,
                 },
             )
             .await;
@@ -482,6 +488,7 @@ impl Server {
                     workflow_id,
                     navigation_outcome,
                     cleanup: cleanup.result().clone(),
+                    detail: None,
                 };
                 cleanup
                     .acknowledge_after(self.workflow_start_failure_response(id, failure))
@@ -521,6 +528,7 @@ impl Server {
                     workflow_id,
                     navigation_outcome,
                     cleanup: cleanup.result().clone(),
+                    detail: None,
                 };
                 cleanup
                     .acknowledge_after(self.workflow_start_failure_response(id, failure))
@@ -547,6 +555,7 @@ impl Server {
                 "page":failure.page,
                 "navigationOutcome":failure.navigation_outcome,
                 "reason":failure.reason,
+                "detail":failure.detail,
                 "pageClosed":failure.cleanup.page_closed,
                 "sessionDeleted":failure.cleanup.session_deleted,
                 "cleanupErrorCode":failure.cleanup.error_code
@@ -596,7 +605,15 @@ async fn supervise_start(
         .await
     {
         Ok(page) => page,
-        Err(_) => {
+        Err(error) => {
+            let detail = format!(
+                "{}: {}",
+                serde_json::to_value(error.code)
+                    .ok()
+                    .and_then(|code| code.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| format!("{:?}", error.code)),
+                error.message
+            );
             let cleanup = cleanup_workflow(
                 &runtime,
                 &handle,
@@ -612,6 +629,7 @@ async fn supervise_start(
                 workflow_id,
                 navigation_outcome: None,
                 cleanup: cleanup.clone(),
+                detail: Some(detail),
             };
             deliver_terminal(setup_sender, failure, &correlation_id).await;
             return;
@@ -681,6 +699,7 @@ async fn supervise_start(
                 workflow_id,
                 navigation_outcome: Some(outcome),
                 cleanup: cleanup.clone(),
+                detail: None,
             };
             deliver_terminal(setup_sender, failure, &correlation_id).await;
             return;
@@ -810,6 +829,7 @@ async fn finish_generation_change(
         workflow_id,
         navigation_outcome,
         cleanup: cleanup.clone(),
+        detail: None,
     };
     deliver_terminal(setup_sender, failure, &correlation_id).await;
 }
@@ -1667,6 +1687,7 @@ mod tests {
                 workflow_id,
                 navigation_outcome,
                 cleanup: cleanup.result().clone(),
+                detail: None,
             };
             cleanup
                 .acknowledge_after(

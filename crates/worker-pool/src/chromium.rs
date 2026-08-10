@@ -1668,6 +1668,50 @@ impl BrowserWorker for ChromiumWorker {
         command: &types::AccessibilitySnapshotCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
+        let max_nodes = command
+            .max_nodes
+            .unwrap_or(DEFAULT_A11Y_MAX_NODES)
+            .clamp(1, MAX_A11Y_NODES) as usize;
+        if let Some(target) = &command.target {
+            // Scoped: resolve the target, fetch the AX tree of the frame it
+            // lives in, and compact only its subtree.
+            let resolved = {
+                let mut browser = self.browser.lock().await;
+                let browser = browser.as_mut().ok_or_else(closed_error)?;
+                crate::targeting::resolve_target(page_id, &page, "", Some(target), Some(browser))
+                    .await?
+            };
+            let backend_id = resolved.backend_node_id(&page).await?;
+            let params = match resolved.frame_id() {
+                Some(frame_id) => {
+                    chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
+                        .frame_id(frame_id.clone())
+                        .build()
+                }
+                None => {
+                    chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default()
+                }
+            };
+            let result = page.execute(params).await.map_err(command_failed)?.result;
+            let root_id = result
+                .nodes
+                .iter()
+                .find(|node| node.backend_dom_node_id.as_ref() == Some(&backend_id))
+                .map(|node| node.node_id.clone())
+                .ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::TargetNotFound,
+                        "resolved target has no accessibility node",
+                    )
+                })?;
+            let (nodes, truncated) =
+                compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
+            return Ok(vec![Evidence::AccessibilitySnapshot {
+                page_id: page_id.clone(),
+                nodes,
+                truncated,
+            }]);
+        }
         let result = page
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
@@ -1675,10 +1719,6 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .result;
-        let max_nodes = command
-            .max_nodes
-            .unwrap_or(DEFAULT_A11Y_MAX_NODES)
-            .clamp(1, MAX_A11Y_NODES) as usize;
         let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
         // The main-frame AX tree stops at `Iframe` nodes; descend one level
         // (cap 8, same-process frames) so in-frame controls are visible and
@@ -3200,6 +3240,16 @@ fn compact_ax_tree(
     raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
     max_nodes: usize,
 ) -> (Vec<types::AccessibilityNode>, bool) {
+    compact_ax_tree_from(raw, max_nodes, None)
+}
+
+/// `forced_root` scopes the output to the subtree rooted at that AX node id
+/// (a scoped `a11y_snapshot`); `None` compacts the whole tree.
+fn compact_ax_tree_from(
+    raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+    max_nodes: usize,
+    forced_root: Option<&str>,
+) -> (Vec<types::AccessibilityNode>, bool) {
     use chromiumoxide::cdp::browser_protocol::accessibility::AxNode;
     use std::collections::HashMap;
 
@@ -3351,15 +3401,18 @@ fn compact_ax_tree(
         lifted.push(node);
     }
 
-    let roots: Vec<&str> = raw
-        .iter()
-        .filter(|node| {
-            node.parent_id
-                .as_ref()
-                .is_none_or(|parent| !by_id.contains_key(parent.as_ref()))
-        })
-        .map(|node| node.node_id.as_ref())
-        .collect();
+    let roots: Vec<&str> = match forced_root {
+        Some(root) => vec![root],
+        None => raw
+            .iter()
+            .filter(|node| {
+                node.parent_id
+                    .as_ref()
+                    .is_none_or(|parent| !by_id.contains_key(parent.as_ref()))
+            })
+            .map(|node| node.node_id.as_ref())
+            .collect(),
+    };
     let mut roots_built: Vec<types::AccessibilityNode> = Vec::new();
     for root in &roots {
         if let Some(mut node) = build(root, &by_id, &mut budget, 0) {
@@ -3371,7 +3424,7 @@ fn compact_ax_tree(
             }
         }
     }
-    let truncated = budget == 0 && raw.len() > max_nodes;
+    let truncated = budget == 0 && (forced_root.is_some() || raw.len() > max_nodes);
     super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals);
     (roots_built, truncated)
 }

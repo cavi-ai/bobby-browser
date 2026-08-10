@@ -104,6 +104,7 @@ impl Server {
                     types::PrimitiveCommand::AccessibilitySnapshot(
                         types::AccessibilitySnapshotCommand {
                             max_nodes: input.max_nodes,
+                            target: input.target,
                         },
                     ),
                 );

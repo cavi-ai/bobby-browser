@@ -102,6 +102,7 @@ impl CorpusCollector {
             .submit(PrimitiveCommand::AccessibilitySnapshot(
                 AccessibilitySnapshotCommand {
                     max_nodes: Some(1024),
+                    target: None,
                 },
             ))
             .await?;

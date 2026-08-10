@@ -30,6 +30,9 @@ pub struct ResolvedTarget {
     native: Option<Element>,
     locator: JsLocator,
     execution_page: Option<Page>,
+    /// The frame the resolved element lives in; `None` for the main frame.
+    /// The a11y snapshot's scoped mode fetches that frame's AX tree.
+    frame_id: Option<chromiumoxide::cdp::browser_protocol::page::FrameId>,
     pub evidence: Evidence,
 }
 
@@ -78,6 +81,34 @@ pub struct FormControlValidity {
 impl ResolvedTarget {
     fn execution_page<'a>(&'a self, fallback: &'a Page) -> &'a Page {
         self.execution_page.as_ref().unwrap_or(fallback)
+    }
+
+    /// The frame holding the resolved element, when it is not the main frame.
+    pub(crate) fn frame_id(&self) -> Option<&chromiumoxide::cdp::browser_protocol::page::FrameId> {
+        self.frame_id.as_ref()
+    }
+
+    /// The element's backend DOM node id, for correlating with AX tree nodes
+    /// (`AxNode.backend_dom_node_id`).
+    pub(crate) async fn backend_node_id(
+        &self,
+        page: &Page,
+    ) -> Result<chromiumoxide::cdp::browser_protocol::dom::BackendNodeId, CommandError> {
+        if let Some(element) = &self.native {
+            return Ok(element.backend_node_id);
+        }
+        let expression = locator_expression(&self.locator, "return el")?;
+        let object_id =
+            resolve_object_id_scoped(self.execution_page(page), &self.locator.scope, expression)
+                .await?;
+        Ok(self
+            .execution_page(page)
+            .execute(DescribeNodeParams::builder().object_id(object_id).build())
+            .await
+            .map_err(cdp_error)?
+            .result
+            .node
+            .backend_node_id)
     }
 
     /// The center of the target's border box, for CDP mouse input. `None`
@@ -795,6 +826,7 @@ pub async fn resolve_target_with_visibility(
                 id: String::new(),
             },
             execution_page: None,
+            frame_id: None,
             evidence: selector_evidence(page_id, selector),
         });
     };
@@ -851,11 +883,16 @@ pub async fn resolve_target_with_visibility(
     };
     let mut frame_trace = scope.frame_trace;
     frame_trace.push(evidence);
+    let main_frame = page.mainframe().await.map_err(cdp_error)?;
     Ok(ResolvedTarget {
         native,
         locator,
         execution_page: (scope.execution_page.target_id() != page.target_id())
             .then_some(scope.execution_page),
+        frame_id: match &main_frame {
+            Some(main) if *main == scope.frame_id => None,
+            _ => Some(scope.frame_id),
+        },
         evidence: Evidence::Resolution {
             target: Box::new(target.clone()),
             fingerprint: Box::new(fingerprint),
@@ -1063,7 +1100,7 @@ fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
     Ok(format!(
         r#"let n=0,out=[];
 const labelledBy=el=>(el.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>el.ownerDocument.getElementById(id)?.innerText?.trim()||'').filter(Boolean).join(' ')||null;
-const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
+const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName==='FORM')return 'form';if(el.tagName==='DIALOG')return 'dialog';if(el.tagName==='MAIN')return 'main';if(el.tagName==='NAV')return 'navigation';if(el.tagName==='SECTION'&&(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')))return 'region';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
 const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>x.innerText.trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||el.innerText?.trim()||null;const attributes={{}};for(const a of el.attributes)if(['name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
     ))
 }

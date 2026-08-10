@@ -567,6 +567,11 @@ pub struct ActivatePageCommand {
 #[serde(rename_all = "camelCase")]
 pub struct AccessibilitySnapshotCommand {
     pub max_nodes: Option<u32>,
+    /// Scope the tree to the subtree rooted at this target (e.g. the form or
+    /// dialog being worked on) instead of paying for the whole page on every
+    /// re-read. Accepts the same shape as `wait_for` targets.
+    #[serde(default)]
+    pub target: Option<TargetSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
