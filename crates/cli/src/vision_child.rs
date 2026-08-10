@@ -254,7 +254,7 @@ impl ManagedVisionProxy {
     }
 }
 
-fn configure_vision_proxy_command(
+pub(crate) fn configure_vision_proxy_command(
     cmd: &mut Command,
     decision: &VisionChildDecision,
     provider_name: &str,

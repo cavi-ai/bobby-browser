@@ -27,6 +27,8 @@ pub struct ConnectOpts {
     pub model: Option<String>,
     pub api_key_env: Option<String>,
     pub yes: bool,
+    pub activate: bool,
+    pub download_model: bool,
 }
 
 impl Default for ConnectOpts {
@@ -42,6 +44,8 @@ impl Default for ConnectOpts {
             model: None,
             api_key_env: None,
             yes: false,
+            activate: false,
+            download_model: false,
         }
     }
 }
@@ -55,6 +59,9 @@ struct ResolvedProfile {
 pub fn connect(opts: ConnectOpts) -> Result<()> {
     let config_path = crate::resolve_config_path(opts.config.clone());
     if opts.backend.eq_ignore_ascii_case("acp") {
+        if opts.activate || opts.download_model {
+            anyhow::bail!("--activate is available only for direct vision providers");
+        }
         let name = opts
             .provider
             .as_deref()
@@ -102,6 +109,10 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
         resolve_interactive(&opts)?
     };
 
+    if opts.download_model && resolved.provider_name != "mlx" {
+        anyhow::bail!("--download-model requires --provider mlx");
+    }
+
     upsert_vision_platform(
         &config_path,
         LOOPBACK_ENDPOINT,
@@ -116,6 +127,24 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
         config_path.display()
     );
     print_env_hints(&resolved)?;
+
+    if opts.activate {
+        match crate::vision_readiness::check_provider_readiness(
+            &resolved.provider_name,
+            &resolved.profile,
+            &crate::vision_readiness::ReadinessOptions {
+                timeout: Duration::from_secs(45),
+                allow_download: opts.download_model,
+            },
+        )? {
+            crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
+                println!("Loaded and readiness-tested {provider} model {model}");
+            }
+            outcome @ crate::vision_readiness::ReadinessOutcome::NeedsAction { .. } => {
+                anyhow::bail!("vision activation: {}", outcome.detail());
+            }
+        }
+    }
 
     if !opts.yes {
         smoke_probe_upstream(&resolved.profile.base_url);
