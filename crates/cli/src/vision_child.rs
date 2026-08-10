@@ -350,6 +350,36 @@ mod tests {
             .any(|pair| pair == ["--training-data-dir", "training"]));
     }
 
+    #[test]
+    fn provider_identity_survives_a_nondefault_base_url() {
+        let decision = VisionChildDecision {
+            should_spawn: true,
+            bind: "127.0.0.1:9100".parse().unwrap(),
+            path: "/vision".into(),
+            reason: "test".into(),
+        };
+        let profile = VisionProviderConfig {
+            base_url: "http://127.0.0.1:19101".into(),
+            model: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit".into(),
+            api_key_env: None,
+        };
+        let mut command = Command::new("bobby");
+        configure_vision_proxy_command(
+            &mut command,
+            &decision,
+            "mlx",
+            &profile,
+            false,
+            Path::new("training"),
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--upstream", "mlx"]));
+        assert!(args.contains(&"--spawn-server".to_owned()));
+    }
+
     fn loopback_config(endpoint: &str, with_provider: bool) -> AppConfig {
         AppConfig {
             vision: VisionConfig {

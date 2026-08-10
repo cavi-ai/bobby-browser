@@ -67,6 +67,28 @@ fn equivalent_candidates_fail_closed_with_ranked_evidence() {
 }
 
 #[test]
+fn candidate_limit_error_reports_count_limit_matches_and_repair() {
+    let candidates = vec![
+        candidate("first", "Resume", true),
+        candidate("second", "Resume", true),
+        candidate("third", "Resume", true),
+    ];
+    let policy = ResolutionPolicy {
+        max_candidates: 2,
+        ..ResolutionPolicy::default()
+    };
+    let error = resolve_candidates(&target("Resume"), &candidates, &policy).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("3 candidates"), "{message}");
+    assert!(message.contains("limit 2"), "{message}");
+    assert!(
+        message.contains("first") && message.contains("second"),
+        "{message}"
+    );
+    assert!(message.contains("Narrow the target"), "{message}");
+}
+
+#[test]
 fn explicit_ordinal_and_best_match_are_auditable() {
     let candidates = vec![
         candidate("first", "Continue", true),

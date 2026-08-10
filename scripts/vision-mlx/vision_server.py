@@ -85,7 +85,7 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
-    provider = create_provider(args.provider)
+    provider = create_provider(args.provider, model=args.model)
     log.info("provider: %s", provider.name)
 
     host, port = args.bind.split(":")

@@ -49,6 +49,7 @@ class BobbyBrowser < Formula
     bin.install "bobby"
     bin.install "mcp-gateway" if File.exist?("mcp-gateway")
     bin.install "acp-gateway" if File.exist?("acp-gateway")
+    (share/"bobby-browser/scripts").install "scripts/vision-mlx"
   end
 
   test do

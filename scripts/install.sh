@@ -81,6 +81,13 @@ for bin in mcp-gateway acp-gateway; do
   fi
 done
 
+vision_share="$(dirname "$INSTALL_DIR")/share/bobby-browser/scripts"
+if [[ -d "${src_dir}/scripts/vision-mlx" ]]; then
+  mkdir -p "$vision_share"
+  cp -R "${src_dir}/scripts/vision-mlx" "$vision_share/vision-mlx"
+  echo "install.sh: installed ${vision_share}/vision-mlx"
+fi
+
 if ! command -v bobby >/dev/null 2>&1; then
   echo "install.sh: add ${INSTALL_DIR} to PATH, then run: bobby doctor" >&2
 else

@@ -1139,9 +1139,13 @@ fn spawn_mlx_server(
 fn find_vision_server_script() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     for ancestor in exe.ancestors().skip(1) {
-        let candidate = ancestor.join("scripts/vision-mlx/vision_server.py");
-        if candidate.is_file() {
-            return Ok(candidate);
+        for candidate in [
+            ancestor.join("scripts/vision-mlx/vision_server.py"),
+            ancestor.join("share/bobby-browser/scripts/vision-mlx/vision_server.py"),
+        ] {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
     }
     let cwd_candidate = PathBuf::from("scripts/vision-mlx/vision_server.py");

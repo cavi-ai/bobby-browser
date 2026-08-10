@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use context_store::{
     ContextStore, ControlContext, FormContext, IntentStats, PageContext, SiteContext,
 };
+use intent_engine::{VisionAssist, VisionProposal, VisionProposeRequest};
 use sdk_core::RuntimeService;
 use types::{
     CommandError, CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, PageId,
@@ -19,6 +20,17 @@ use worker_pool::{BrowserWorker, WorkerFactory};
 
 struct CountingFactory(Arc<AtomicUsize>);
 struct Worker(WorkerId);
+struct InjectedVision;
+
+#[async_trait]
+impl VisionAssist for InjectedVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        unreachable!("session creation must not invoke the provider")
+    }
+}
 
 #[async_trait]
 impl WorkerFactory for CountingFactory {
@@ -101,6 +113,35 @@ async fn build_with_worker_factory_consumes_the_injected_factory() {
         .unwrap();
 
     assert_eq!(launches.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn injected_vision_assist_counts_as_a_configured_provider() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config::AppConfig::default();
+    config.storage.journal_path = root.path().join("commands.jsonl");
+    config.storage.checkpoints_dir = root.path().join("checkpoints");
+    config.browser.artifacts_dir = root.path().join("artifacts");
+
+    let runtime = RuntimeService::build_with_worker_factory_and_vision_assist(
+        &config,
+        Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0)))),
+        Arc::new(InjectedVision),
+    )
+    .await
+    .unwrap();
+
+    runtime
+        .create_session(CreateSessionRequest {
+            profile: "injected-vision".into(),
+            proxy: None,
+            execution_policy: types::ExecutionPolicy {
+                vision_assist: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("an injected vision provider satisfies the explicit opt-in");
 }
 
 #[tokio::test]

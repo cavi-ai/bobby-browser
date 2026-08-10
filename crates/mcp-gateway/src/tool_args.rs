@@ -318,6 +318,7 @@ page_scoped_args!(WaitForArgs {
 page_scoped_args!(UploadFilesArgs {
     selector: Option<String>,
     target: Option<types::TargetSpec>,
+    control_id: Option<String>,
     paths: Vec<String>,
 });
 
@@ -529,7 +530,7 @@ pub(crate) struct PromptGetArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::WorkflowObserveArgs;
+    use super::{UploadFilesArgs, WorkflowObserveArgs};
 
     #[test]
     fn workflow_observe_goal_limit_counts_unicode_scalars_not_utf8_bytes() {
@@ -542,5 +543,18 @@ mod tests {
         };
         assert!(parse("é".repeat(256)).goal_within_scalar_bound());
         assert!(!parse("é".repeat(257)).goal_within_scalar_bound());
+    }
+
+    #[test]
+    fn upload_files_accepts_form_snapshot_control_id() {
+        let args = serde_json::from_value::<UploadFilesArgs>(serde_json::json!({
+            "sessionId":"00000000-0000-0000-0000-000000000001",
+            "pageId":"00000000-0000-0000-0000-000000000002",
+            "controlId":"control-4",
+            "paths":["/allowed/resume.pdf"]
+        }))
+        .expect("controlId upload arguments parse");
+        assert_eq!(args.control_id.as_deref(), Some("control-4"));
+        assert!(args.selector.is_none() && args.target.is_none());
     }
 }

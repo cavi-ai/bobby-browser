@@ -355,6 +355,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "pageId": id(),
                 "selector": string(1, MAX_STRING_BYTES),
                 "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                "controlId": string(1, 128),
                 "paths": array(string(1, 4096), 16)
             }),
             vec!["sessionId", "pageId", "paths"],

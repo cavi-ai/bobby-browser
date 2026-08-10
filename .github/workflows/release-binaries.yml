@@ -66,6 +66,8 @@ jobs:
           STAGE="bobby-browser-${VERSION}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
           OUT="target/${{ matrix.target }}/release"
           mkdir -p "$STAGE"
+          mkdir -p "$STAGE/scripts"
+          cp -R scripts/vision-mlx "$STAGE/scripts/vision-mlx"
           if [[ "${{ matrix.asset_os }}" == "windows" ]]; then
             cp "$OUT/bobby.exe" "$STAGE/bobby.exe"
             cp "$OUT/mcp-gateway.exe" "$STAGE/mcp-gateway.exe"
@@ -86,6 +88,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f "${STAGE_DIR}/scripts/vision-mlx/vision_server.py"
+          test -f "${STAGE_DIR}/scripts/vision-mlx/providers/__init__.py"
           if [[ "${{ matrix.asset_os }}" == "windows" ]]; then
             "./${STAGE_DIR}/bobby.exe" --help
             "./${STAGE_DIR}/mcp-gateway.exe" --help >/dev/null || true
