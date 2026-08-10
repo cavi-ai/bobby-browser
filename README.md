@@ -114,8 +114,16 @@ Verify, then (companion path) start Firefox and Pair once:
 
 ```bash
 bobby doctor          # config, credential, storage, browsers, MCP handshake
+bobby doctor --fix    # repair safe Bobby-owned state, then re-check
 make firefox-start    # Bobby profile + --remote-debugging-port=9222; then Pair
 ```
+
+Doctor uses green/yellow/red status labels in a terminal and stable plain text
+when piped or when `NO_COLOR` is set. Add `--download-model` to `doctor --fix`
+only when you explicitly want Bobby to fetch the already-selected MLX model.
+To configure and load-check a selected MLX model directly, run
+`bobby vision connect --yes --provider mlx --model <id> --activate`; add
+`--download-model` only when the CLI may fetch a missing cache.
 
 Local agents already point at `bobby mcp-stdio` from install — no daemon.
 Optional HTTP / CDP:
