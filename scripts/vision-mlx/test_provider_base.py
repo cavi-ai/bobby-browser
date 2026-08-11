@@ -9,16 +9,41 @@ from providers.base import ProposeRequest, ProposeResponse, VisionProvider
 
 
 class VisionProviderNormalizationTests(unittest.TestCase):
-    def test_string_actions_preserve_established_sibling_payloads_only(self):
-        for raw, expected in (
-            ({"confidence": 0.8, "action": "click", "x": 4, "y": 5}, {"kind": "click", "x": 4.0, "y": 5.0}),
-            ({"confidence": 0.8, "action": "typeText", "text": "hello"}, {"kind": "typeText", "text": "hello"}),
-            ({"confidence": 0.8, "action": "extractValue", "value": "title"}, {"kind": "extractValue", "value": "title"}),
-        ):
-            with self.subTest(action=raw["action"]):
+    def test_string_actions_preserve_all_supported_sibling_payload_aliases(self):
+        cases = []
+        for action in ("click", "left_click", "leftClick", "mouse_click", "press"):
+            for payload in (
+                {"x": 4, "y": 5},
+                {"coordinate": [4, 5]},
+                {"coordinates": [4, 5]},
+                {"position": {"x": 4, "y": 5}},
+                {"clickX": 4, "clickY": 5},
+            ):
+                cases.append(({"action": action, **payload}, {"kind": "click", "x": 4.0, "y": 5.0}))
+        for action in ("typeText", "type", "inputText", "enterText", "text"):
+            for payload in ({"text": "hello"}, {"value": "hello"}):
+                cases.append(({"action": action, **payload}, {"kind": "typeText", "text": "hello"}))
+        for action in ("extractValue", "extract", "read", "getValue"):
+            for payload in ({"value": "title"}, {"text": "title"}):
+                cases.append(({"action": action, **payload}, {"kind": "extractValue", "value": "title"}))
+        for index, action in enumerate(("clickCandidate", "typeIntoCandidate", "extractFromCandidate")):
+            cases.append(({"action": action, "index": index}, {"kind": action, "index": index}))
+        for payload, expected in cases:
+            raw = {"confidence": 0.8, **payload}
+            with self.subTest(action=raw["action"], fields=tuple(payload)):
                 response = VisionProvider.normalize_response(raw)
                 self.assertEqual(response.action, expected)
                 response.validate()
+
+    def test_string_action_sibling_whitelist_rejects_unknown_fields_without_echo(self):
+        secret = "runtime-secret-string-action-field"
+        for kind in ("click", "typeText", "extractValue", "clickCandidate"):
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(ValueError, "unknown vision response fields") as error:
+                    VisionProvider.normalize_response(
+                        {"confidence": 0.8, "action": kind, "unknown": secret}
+                    )
+                self.assertNotIn(secret, str(error.exception))
 
     def test_request_and_action_unknown_fields_fail_closed_without_echoing_values(self):
         secret = "runtime-secret-provider-field"

@@ -263,21 +263,9 @@ class VisionProvider(ABC):
             # the correct abstention path.
             kind = "click"
             action = {"kind": kind, "x": 0.0, "y": 0.0}
-        if kind in ("left_click", "leftClick", "mouse_click", "press"):
-            kind = "click"
-        elif kind in ("type", "inputText", "enterText", "text"):
-            kind = "typeText"
-        elif kind in ("extract", "read", "getValue"):
-            kind = "extractValue"
+        kind = cls._canonical_action_kind(kind)
 
-        allowed_fields = {
-            "click": {"kind", "x", "y", "clickX", "clickY", "coordinate", "coordinates", "position"},
-            "typeText": {"kind", "text", "value"},
-            "extractValue": {"kind", "value", "text"},
-            "clickCandidate": {"kind", "index"},
-            "typeIntoCandidate": {"kind", "index"},
-            "extractFromCandidate": {"kind", "index"},
-        }.get(kind)
+        allowed_fields = cls._allowed_action_fields(kind)
         if allowed_fields is not None and set(action) - allowed_fields:
             raise ValueError("unknown vision action fields")
 
@@ -304,6 +292,33 @@ class VisionProvider(ABC):
             normalized["value"] = str(action.get("value", action.get("text", "")))
         return normalized
 
+    @staticmethod
+    def _canonical_action_kind(kind: str) -> str:
+        return {
+            "left_click": "click",
+            "leftClick": "click",
+            "mouse_click": "click",
+            "press": "click",
+            "type": "typeText",
+            "inputText": "typeText",
+            "enterText": "typeText",
+            "text": "typeText",
+            "extract": "extractValue",
+            "read": "extractValue",
+            "getValue": "extractValue",
+        }.get(kind, kind)
+
+    @staticmethod
+    def _allowed_action_fields(kind: str):
+        return {
+            "click": {"kind", "x", "y", "clickX", "clickY", "coordinate", "coordinates", "position"},
+            "typeText": {"kind", "text", "value"},
+            "extractValue": {"kind", "value", "text"},
+            "clickCandidate": {"kind", "index"},
+            "typeIntoCandidate": {"kind", "index"},
+            "extractFromCandidate": {"kind", "index"},
+        }.get(kind)
+
     @classmethod
     def normalize_response(cls, raw: dict) -> ProposeResponse:
         """Normalize a parsed model response into the canonical schema."""
@@ -312,16 +327,8 @@ class VisionProvider(ABC):
         action = raw.get("action", {})
         sibling_fields = set()
         if isinstance(action, str):
-            canonical = {
-                "left_click": "click", "leftClick": "click", "mouse_click": "click", "press": "click",
-                "type": "typeText", "inputText": "typeText", "enterText": "typeText", "text": "typeText",
-                "extract": "extractValue", "read": "extractValue", "getValue": "extractValue",
-            }.get(action, action)
-            sibling_fields = {
-                "click": {"x", "y"},
-                "typeText": {"text"},
-                "extractValue": {"value"},
-            }.get(canonical, set())
+            canonical = cls._canonical_action_kind(action)
+            sibling_fields = (cls._allowed_action_fields(canonical) or {"kind"}) - {"kind"}
         if set(raw) - {"confidence", "action"} - sibling_fields:
             raise ValueError("unknown vision response fields")
 
