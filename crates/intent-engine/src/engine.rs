@@ -1707,6 +1707,7 @@ async fn resolve_extract_field(
                 browser,
                 vision,
                 field,
+                &candidates,
                 StuckKind::TargetMissing,
                 ErrorCode::TargetNotFound,
             )
@@ -1718,6 +1719,7 @@ async fn resolve_extract_field(
                 browser,
                 vision,
                 field,
+                &candidates,
                 StuckKind::TargetAmbiguous,
                 ErrorCode::TargetAmbiguous,
             )
@@ -1730,14 +1732,15 @@ async fn resolve_extract_field(
     }
 }
 
-/// Vision-proposed value for a field the deterministic resolver could not place, under the
-/// same double-gate rule as every other vision fallback. Success never touches the page:
-/// the proposal's text becomes the field value.
+/// Vision fallback for a field the deterministic resolver could not place, under the same
+/// double-gate rule as every other vision fallback. Success never touches the page: legacy
+/// providers can propose a value, while candidate-index proposals select a runtime-owned value.
 async fn escalate_extract_field_with_vision(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     field: &ExtractFieldPlan,
+    candidates: &[Candidate],
     stuck: StuckKind,
     deterministic_fallback_code: ErrorCode,
 ) -> Vec<Evidence> {
@@ -1782,13 +1785,33 @@ async fn escalate_extract_field_with_vision(
         }
     };
 
+    // The provider sees only structural prompt candidates. Keep the matching full DOM
+    // candidates in this exact bounded order so an index can be resolved locally without
+    // recollecting or accepting provider-authored text.
+    let prompt_window = candidates
+        .iter()
+        .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut context = vision.prompt_context.clone();
+    let block = context.get_or_insert_with(crate::VisionPromptContext::default);
+    block.candidates = prompt_window
+        .iter()
+        .map(|candidate| crate::VisionPromptCandidate {
+            role: candidate.role.clone().expect("filtered role"),
+            name: candidate.name.clone().expect("filtered name"),
+            ordinal: None,
+        })
+        .collect();
+
     let proposal = match assist
         .propose(VisionProposeRequest {
             purpose: field.purpose.clone(),
             intent_kind: "extract".to_owned(),
             screenshot_png: png,
             stuck,
-            context: vision.prompt_context.clone(),
+            context,
         })
         .await
     {
@@ -1805,6 +1828,14 @@ async fn escalate_extract_field_with_vision(
     let value = match &proposal.action {
         VisionAction::ExtractValue { value } if proposal.confidence >= VISION_CONFIDENCE_FLOOR => {
             Some(value.clone())
+        }
+        VisionAction::ExtractFromCandidate { index }
+            if proposal.confidence >= VISION_CONFIDENCE_FLOOR =>
+        {
+            usize::try_from(*index)
+                .ok()
+                .and_then(|index| prompt_window.get(index))
+                .and_then(|candidate| extract_value_from_candidate(&field.value, candidate))
         }
         _ => None,
     };

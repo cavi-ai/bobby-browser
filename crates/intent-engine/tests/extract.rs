@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use dom_engine::{Candidate, CandidateState};
 use intent_engine::{
     IntentBrowser, IntentEngine, IntentOutcome, VisionAction, VisionAssist, VisionContext,
-    VisionProposal, VisionProposeRequest,
+    VisionPromptCandidate, VisionPromptContext, VisionProposal, VisionProposeRequest,
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
@@ -98,16 +98,22 @@ impl IntentBrowser for FakeBrowser {
 
 struct FakeVision {
     proposal: VisionProposal,
+    requests: Arc<Mutex<Vec<VisionProposeRequest>>>,
 }
 
 #[async_trait]
 impl VisionAssist for FakeVision {
-    async fn propose(
-        &self,
-        _request: VisionProposeRequest,
-    ) -> Result<VisionProposal, CommandError> {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        self.requests.lock().expect("requests").push(request);
         Ok(self.proposal.clone())
     }
+}
+
+fn fake_vision(proposal: VisionProposal) -> Arc<FakeVision> {
+    Arc::new(FakeVision {
+        proposal,
+        requests: Arc::default(),
+    })
 }
 
 fn unsupported(op: &str) -> CommandError {
@@ -135,6 +141,18 @@ fn candidate(name: &str, text: &str, attributes: BTreeMap<String, String>) -> Ca
             enabled: true,
         },
         frame_path: Vec::new(),
+    }
+}
+
+fn candidate_with_role(
+    role: &str,
+    name: &str,
+    text: &str,
+    attributes: BTreeMap<String, String>,
+) -> Candidate {
+    Candidate {
+        role: Some(role.into()),
+        ..candidate(name, text, attributes)
     }
 }
 
@@ -323,12 +341,10 @@ async fn extract_escalates_missing_field_to_vision_and_uses_the_proposed_value()
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![]]))),
         screenshot_png: b"png".to_vec(),
     };
-    let assist = Arc::new(FakeVision {
-        proposal: VisionProposal {
-            confidence: 0.9,
-            action: VisionAction::ExtractValue {
-                value: "Ada Lovelace".into(),
-            },
+    let assist = fake_vision(VisionProposal {
+        confidence: 0.9,
+        action: VisionAction::ExtractValue {
+            value: "Ada Lovelace".into(),
         },
     });
     let page_id = PageId::new();
@@ -381,12 +397,10 @@ async fn extract_reports_field_missing_when_vision_confidence_is_below_floor() {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![]]))),
         screenshot_png: b"png".to_vec(),
     };
-    let assist = Arc::new(FakeVision {
-        proposal: VisionProposal {
-            confidence: 0.1,
-            action: VisionAction::ExtractValue {
-                value: "guess".into(),
-            },
+    let assist = fake_vision(VisionProposal {
+        confidence: 0.1,
+        action: VisionAction::ExtractValue {
+            value: "guess".into(),
         },
     });
     let page_id = PageId::new();
@@ -461,4 +475,231 @@ async fn extract_resolved_field_with_absent_attribute_reports_value_none_without
     assert_eq!(*value, None, "candidate resolved but has no href attribute");
     assert_eq!(*error_code, None);
     assert_eq!(*resolution_path, IntentResolutionPath::Deterministic);
+}
+
+#[tokio::test]
+async fn extract_from_candidate_reads_the_exact_provider_selected_candidate_for_each_value_kind() {
+    let mut primary_attributes = BTreeMap::new();
+    primary_attributes.insert("href".to_owned(), "/accounts/primary".to_owned());
+    primary_attributes.insert("data-account".to_owned(), "primary".to_owned());
+    let mut secondary_attributes = BTreeMap::new();
+    secondary_attributes.insert("href".to_owned(), "/accounts/secondary".to_owned());
+    secondary_attributes.insert("data-account".to_owned(), "secondary".to_owned());
+    let candidates = vec![
+        candidate_with_role(
+            "link",
+            "Primary account",
+            "Account runtime-primary-text",
+            primary_attributes,
+        ),
+        candidate_with_role(
+            "link",
+            "Secondary account",
+            "Account runtime-secondary-text",
+            secondary_attributes,
+        ),
+    ];
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([
+            candidates.clone(),
+            candidates.clone(),
+            candidates,
+        ]))),
+        screenshot_png: b"png".to_vec(),
+    };
+    let assist = fake_vision(VisionProposal {
+        confidence: 0.9,
+        action: VisionAction::ExtractFromCandidate { index: 1 },
+    });
+    let page_id = PageId::new();
+    let outcome = IntentEngine::execute(
+        &extract(vec![
+            field("text", "Account", ExtractValueKind::Text),
+            field("href", "Account", ExtractValueKind::Href),
+            field(
+                "attribute",
+                "Account",
+                ExtractValueKind::Attribute {
+                    attribute: "data-account".into(),
+                },
+            ),
+        ]),
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist.clone()),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: Some(VisionPromptContext {
+                url: Some("https://example.test/accounts".into()),
+                candidates: vec![VisionPromptCandidate {
+                    role: "link".into(),
+                    name: "Stale account".into(),
+                    ordinal: None,
+                }],
+                recent_command_kinds: vec!["locate".into()],
+            }),
+            corpus: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    let expected_prompt_candidates =
+        vec![("link", "Primary account"), ("link", "Secondary account")];
+    let requests = assist.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 3);
+    for request in requests.iter() {
+        let context = request.context.as_ref().expect("candidate context");
+        assert_eq!(
+            context.url.as_deref(),
+            Some("https://example.test/accounts")
+        );
+        assert_eq!(context.recent_command_kinds, ["locate"]);
+        assert_eq!(
+            context
+                .candidates
+                .iter()
+                .map(|candidate| (candidate.role.as_str(), candidate.name.as_str()))
+                .collect::<Vec<_>>(),
+            expected_prompt_candidates
+        );
+    }
+
+    for (field_name, expected_value) in [
+        ("text", "Account runtime-secondary-text"),
+        ("href", "/accounts/secondary"),
+        ("attribute", "secondary"),
+    ] {
+        let Evidence::Extraction {
+            value,
+            resolution_path,
+            error_code,
+            ..
+        } = find_extraction(&evidence, field_name)
+        else {
+            unreachable!()
+        };
+        assert_eq!(value.as_deref(), Some(expected_value));
+        assert_eq!(*resolution_path, IntentResolutionPath::VisionFallback);
+        assert_eq!(*error_code, None);
+    }
+}
+
+#[tokio::test]
+async fn extract_from_candidate_out_of_range_reports_vision_assist_failed() {
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([ambiguous_extract_candidates()]))),
+        screenshot_png: b"png".to_vec(),
+    };
+    let outcome = execute_vision_extract(
+        &browser,
+        fake_vision(VisionProposal {
+            confidence: 0.9,
+            action: VisionAction::ExtractFromCandidate { index: 2 },
+        }),
+    )
+    .await;
+
+    assert_vision_assist_failed(&outcome);
+}
+
+#[tokio::test]
+async fn extract_from_candidate_without_role_or_name_reports_vision_assist_failed() {
+    let role_missing = candidate("role-missing", "Account role missing", BTreeMap::new());
+    let mut name_missing = candidate_with_role(
+        "link",
+        "name-missing",
+        "Account name missing",
+        BTreeMap::new(),
+    );
+    name_missing.name = None;
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![
+            role_missing,
+            name_missing,
+        ]]))),
+        screenshot_png: b"png".to_vec(),
+    };
+    let outcome = execute_vision_extract(
+        &browser,
+        fake_vision(VisionProposal {
+            confidence: 0.9,
+            action: VisionAction::ExtractFromCandidate { index: 0 },
+        }),
+    )
+    .await;
+
+    assert_vision_assist_failed(&outcome);
+}
+
+#[tokio::test]
+async fn extract_type_into_candidate_reports_vision_assist_failed() {
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([ambiguous_extract_candidates()]))),
+        screenshot_png: b"png".to_vec(),
+    };
+    let outcome = execute_vision_extract(
+        &browser,
+        fake_vision(VisionProposal {
+            confidence: 0.9,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        }),
+    )
+    .await;
+
+    assert_vision_assist_failed(&outcome);
+}
+
+fn ambiguous_extract_candidates() -> Vec<Candidate> {
+    vec![
+        candidate_with_role(
+            "link",
+            "Primary account",
+            "Account primary",
+            BTreeMap::new(),
+        ),
+        candidate_with_role(
+            "link",
+            "Secondary account",
+            "Account secondary",
+            BTreeMap::new(),
+        ),
+    ]
+}
+
+async fn execute_vision_extract(browser: &FakeBrowser, assist: Arc<FakeVision>) -> IntentOutcome {
+    IntentEngine::execute(
+        &extract(vec![field("account", "Account", ExtractValueKind::Text)]),
+        &PageId::new(),
+        browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await
+}
+
+fn assert_vision_assist_failed(outcome: &IntentOutcome) {
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    let Evidence::Extraction {
+        value, error_code, ..
+    } = find_extraction(evidence, "account")
+    else {
+        unreachable!()
+    };
+    assert_eq!(*value, None);
+    assert_eq!(*error_code, Some(ErrorCode::VisionAssistFailed));
 }
