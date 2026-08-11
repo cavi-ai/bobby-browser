@@ -14,6 +14,12 @@ pub struct ControlActionEvidence {
     pub state: crate::FormControlState,
     pub validity: crate::FormControlValidity,
     pub node_replaced: bool,
+    /// Controls that appeared because of this action (conditional fields,
+    /// e.g. a billing-cycle select revealed by a plan choice). Read this
+    /// before re-snapshotting: the targets are passable to `control_action`
+    /// verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revealed_controls: Vec<crate::forms::RevealedControl>,
 }
 
 /// Semantic target for accessibility-based commands (role + accessible name).

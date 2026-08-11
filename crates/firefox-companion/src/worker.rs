@@ -2944,14 +2944,43 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 true,
             )
         })?;
+        let mut action_evidence = worker_pool::control_action_evidence(
+            &control,
+            &command.action,
+            false,
+            committed.as_deref(),
+        )?;
+        // Conditional fields: controls that exist only after this action,
+        // surfaced so the agent need not re-snapshot to discover them.
+        let before_targets: Vec<&types::FormControlTarget> = snapshot
+            .forms
+            .iter()
+            .flat_map(|form| form.controls.iter())
+            .chain(snapshot.unowned_controls.iter())
+            .filter_map(|control| control.target.as_ref())
+            .collect();
+        action_evidence.revealed_controls = after
+            .forms
+            .iter()
+            .flat_map(|form| form.controls.iter())
+            .chain(after.unowned_controls.iter())
+            .filter(|control| {
+                control.target.as_ref().is_some_and(|target| {
+                    !before_targets
+                        .iter()
+                        .any(|before| worker_pool::target_specs_equivalent(before, target))
+                })
+            })
+            .take(8)
+            .map(|control| types::RevealedControl {
+                control_kind: control.control_kind,
+                accessible_name: control.accessible_name.clone(),
+                target: control.target.clone(),
+            })
+            .collect();
         Ok(vec![
             Evidence::ControlAction {
-                action: worker_pool::control_action_evidence(
-                    &control,
-                    &command.action,
-                    false,
-                    committed.as_deref(),
-                )?,
+                action: action_evidence,
             },
             self.evidence(InteractionPath::EngineNative),
         ])

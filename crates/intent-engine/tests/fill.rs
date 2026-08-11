@@ -154,6 +154,7 @@ impl IntentBrowser for FakeBrowser {
                     described_by: Vec::new(),
                 },
                 node_replaced: false,
+                revealed_controls: Vec::new(),
             },
         }])
     }
