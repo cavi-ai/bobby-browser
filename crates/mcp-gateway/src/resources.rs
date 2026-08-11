@@ -732,6 +732,11 @@ tools most likely to produce it.
 - `waitConditionTimedOut` -- the awaited page condition didn't hold before
   the call's timeout. Repair: confirm the condition via `inspect`, then
   retry with a longer timeout.
+- `expectedStatePreSatisfied` -- `intent_submit_and_verify` only: the
+  expected text/element/value state already held before the submit ran, so
+  a post-act pass would prove nothing (the matcher hit static page copy).
+  The click was not performed. Repair: strengthen `expectedState` to
+  content that only appears after the submit, then resubmit.
 - `screenshotCaptureFailed` -- either the underlying browser capture call
   (screenshot or PDF print) failed at the driver level, or the captured
   bytes failed to write to the local artifact store afterward. Repair:

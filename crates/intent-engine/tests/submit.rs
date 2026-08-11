@@ -389,5 +389,100 @@ async fn submit_and_verify_wait_timeout_after_landed_click_is_not_a_resubmit_inv
     );
     let log = calls.lock().expect("call log");
     assert_eq!(log.clicks.len(), 1);
-    assert_eq!(log.waits.len(), 1);
+    // Element conditions get a pre-check wait plus the post-act wait.
+    assert_eq!(log.waits.len(), 2);
+}
+
+#[tokio::test]
+async fn submit_and_verify_refuses_a_pre_satisfied_expected_state_without_clicking() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_state = WaitForCommand {
+        condition: WaitCondition::Text {
+            target: Box::new(TargetSpec {
+                role: Some("main".into()),
+                ..TargetSpec::default()
+            }),
+            matcher: TextMatch::Contains("verify it in the embedded preview".into()),
+        },
+        timeout_ms: 5_000,
+    };
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Confirm")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        click_error: None,
+        wait_evidence: vec![Evidence::Wait {
+            condition: expected_state.condition.clone(),
+            elapsed_ms: 0,
+            observations: 1,
+            excluded_classes: Vec::new(),
+            observed: None,
+        }],
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Confirm", Some("button"), expected_state),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::ExpectedStatePreSatisfied);
+    assert!(!error.retryable);
+    assert!(error.message.contains("already held"), "{error:?}");
+    let record = evidence.iter().find_map(|item| match item {
+        Evidence::IntentExecution { record } => Some(record),
+        _ => None,
+    });
+    assert_eq!(
+        record.expect("IntentExecution").verification,
+        "verifyPreSatisfied"
+    );
+    let log = calls.lock().expect("call log");
+    assert!(log.clicks.is_empty(), "no click may fire: {:?}", log.clicks);
+    assert_eq!(log.waits.len(), 1, "only the pre-check wait");
+}
+
+#[tokio::test]
+async fn submit_and_verify_skips_the_pre_check_for_url_conditions() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_state = thanks_wait();
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: vec![Evidence::Element {
+            selector: "#Submit".into(),
+            text: None,
+        }],
+        click_error: None,
+        wait_evidence: vec![Evidence::Wait {
+            condition: expected_state.condition.clone(),
+            elapsed_ms: 2,
+            observations: 1,
+            excluded_classes: Vec::new(),
+            observed: None,
+        }],
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit", Some("button"), expected_state),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "url conditions legitimately pre-hold: {outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks.len(), 1);
+    assert_eq!(log.waits.len(), 1, "no pre-check wait for url conditions");
 }
