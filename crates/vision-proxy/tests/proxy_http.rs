@@ -352,6 +352,47 @@ async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
         VisionAction::TypeIntoCandidate { index: 1 },
         VisionAction::ExtractFromCandidate { index: 1 },
     ] {
+        let (intent_kind, context) = match &expected {
+            VisionAction::TypeIntoCandidate { .. } => (
+                "fill",
+                intent_engine::VisionPromptContext {
+                    url: None,
+                    candidates: vec![
+                        intent_engine::VisionPromptCandidate {
+                            role: "textbox".into(),
+                            name: "First name".into(),
+                            ordinal: Some(0),
+                        },
+                        intent_engine::VisionPromptCandidate {
+                            role: "textbox".into(),
+                            name: "Last name".into(),
+                            ordinal: Some(1),
+                        },
+                    ],
+                    recent_command_kinds: vec!["fill".into()],
+                },
+            ),
+            VisionAction::ExtractFromCandidate { .. } => (
+                "extract",
+                intent_engine::VisionPromptContext {
+                    url: None,
+                    candidates: vec![
+                        intent_engine::VisionPromptCandidate {
+                            role: "textbox".into(),
+                            name: "First name".into(),
+                            ordinal: Some(0),
+                        },
+                        intent_engine::VisionPromptCandidate {
+                            role: "textbox".into(),
+                            name: "Last name".into(),
+                            ordinal: Some(1),
+                        },
+                    ],
+                    recent_command_kinds: vec!["extract".into()],
+                },
+            ),
+            _ => unreachable!("only candidate actions are exercised"),
+        };
         let upstream = Arc::new(MockUpstream::new(
             ProposeResponse {
                 confidence: 0.77,
@@ -381,10 +422,10 @@ async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
         let proposal = assist
             .propose(VisionProposeRequest {
                 purpose: "Continue".into(),
-                intent_kind: "locate".into(),
+                intent_kind: intent_kind.into(),
                 screenshot_png: b"png-bytes".to_vec(),
                 stuck: StuckKind::TargetMissing,
-                context: None,
+                context: Some(context),
             })
             .await
             .unwrap();

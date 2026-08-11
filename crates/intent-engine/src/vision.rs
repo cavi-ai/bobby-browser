@@ -251,7 +251,7 @@ pub fn validate_backend_result(
     })
 }
 
-fn validate_candidate_index(
+pub(crate) fn validate_candidate_index(
     context: Option<&VisionPromptContext>,
     index: u32,
 ) -> Result<(), VisionPacketError> {
