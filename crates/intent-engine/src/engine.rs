@@ -2483,9 +2483,9 @@ async fn execute_vision_action(
                 text: payload.text.clone(),
                 clear_first: payload.clear_first,
             };
-            verify_fill(&value, &evidence).map_err(|message| CommandError {
+            verify_fill(&value, &evidence).map_err(|_| CommandError {
                 code: ErrorCode::VerificationFailed,
-                message,
+                message: "typeIntoCandidate verification failed".into(),
                 layer: ErrorLayer::Page,
                 retryable: false,
             })?;
@@ -2551,9 +2551,16 @@ fn prompt_candidate_target(
         layer: ErrorLayer::Page,
         retryable: false,
     })?;
+    let ordinal = prompt_candidates
+        .iter()
+        .take(index as usize)
+        .filter(|prior| prior.role.as_deref() == Some(role.as_str()))
+        .filter(|prior| prior.name.as_deref() == Some(name.as_str()))
+        .count();
     Ok(TargetSpec {
         role: Some(role),
         accessible_name: Some(name),
+        ordinal: Some(ordinal),
         ..TargetSpec::default()
     })
 }

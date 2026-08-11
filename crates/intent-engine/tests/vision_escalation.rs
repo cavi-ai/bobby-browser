@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use intent_engine::{
     IntentBrowser, IntentEngine, IntentOutcome, VisionAction, VisionAssist, VisionContext,
-    VisionProposal, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
+    VisionCorpus, VisionProposal, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, Evidence, FillIntent,
@@ -274,9 +274,75 @@ async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_prov
             .and_then(|target| target.accessible_name.as_deref()),
         Some("Contact field")
     );
+    assert_eq!(
+        calls[0].target.as_ref().and_then(|target| target.ordinal),
+        Some(1),
+        "candidate index 1 must become ordinal 1 among duplicate semantic identities"
+    );
     assert_eq!(calls[0].value, "runtime secret");
     assert!(calls[0].clear_first);
     assert_eq!(click_xy_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn type_into_candidate_verification_failure_redacts_runtime_text_from_corpus_and_error() {
+    const SECRET: &str = "phase17-corpus-secret-7e6e2e77";
+    let assist = Arc::new(FakeVision {
+        called: Arc::new(AtomicBool::new(false)),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        },
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("primary-email", "textbox", "Contact field"),
+            form_candidate("work-email", "textbox", "Contact field"),
+        ],
+        type_text_evidence: vec![Evidence::Element {
+            selector: "#primary-email".into(),
+            text: Some("not-the-runtime-value".into()),
+        }],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let dir = tempfile::tempdir().expect("temp corpus directory");
+    let corpus = VisionCorpus::new(dir.path()).expect("vision corpus");
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Contact field",
+            "textbox",
+            FillValue::Text {
+                text: SECRET.into(),
+                clear_first: true,
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: Some(corpus),
+        },
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected verification failure, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+    assert!(!error.message.contains(SECRET));
+    assert!(!format!("{evidence:?}").contains(SECRET));
+
+    let corpus = std::fs::read_to_string(dir.path().join("vision-corpus.jsonl"))
+        .expect("recorded corpus entry");
+    assert!(!corpus.contains(SECRET));
+    assert!(corpus.contains("typeIntoCandidate verification failed"));
 }
 
 #[tokio::test]
