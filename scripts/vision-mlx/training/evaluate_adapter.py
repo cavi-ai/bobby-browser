@@ -26,7 +26,12 @@ import sys
 import time
 from pathlib import Path
 
-from mlx_finetune import build_completion, build_prompt, normalize_corpus_example
+from mlx_finetune import (
+    build_completion,
+    build_prompt,
+    normalize_corpus_example,
+    supervised_examples,
+)
 
 SUPPORTED_ACTION_KINDS = {
     "click",
@@ -96,7 +101,7 @@ def parse_v1_response(text: str, n_candidates: int) -> int | None:
 
 
 def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
-    examples = [normalize_corpus_example(example) for example in examples]
+    examples = supervised_examples(examples)
     from mlx_lm.generate import generate
 
     predictions = []
@@ -389,7 +394,7 @@ def main():
     from fine_tune_vision import FineTuneConfig, VisionEvaluator
 
     with open(args.input, "r") as f:
-        examples = [normalize_corpus_example(json.loads(line)) for line in f if line.strip()]
+        examples = supervised_examples([json.loads(line) for line in f if line.strip()])
     if args.limit:
         examples = examples[: args.limit]
     print(f"Evaluating {len(examples)} examples on {args.model}"

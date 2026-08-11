@@ -128,6 +128,16 @@ def normalize_corpus_example(example: dict) -> dict:
     return normalized
 
 
+def supervised_examples(examples: list) -> list:
+    """Exclude diagnostic failure records from supervised model paths."""
+    supervised = []
+    for example in examples:
+        normalized = normalize_corpus_example(example)
+        if normalized.get("success") is not False:
+            supervised.append(normalized)
+    return supervised
+
+
 def selected_index(example: dict):
     """Read the corpus boundary explicitly (Rust camelCase or legacy snake_case)."""
     camel = example.get("targetIndex")
@@ -188,10 +198,8 @@ def load_examples(path: str) -> list:
     with open(path, "r") as f:
         for line in f:
             if line.strip():
-                example = normalize_corpus_example(json.loads(line))
-                if example.get("success") is not False:
-                    examples.append(example)
-    return examples
+                examples.append(json.loads(line))
+    return supervised_examples(examples)
 
 
 def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: int, schema: str = "coords") -> dict:

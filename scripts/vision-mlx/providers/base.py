@@ -309,9 +309,21 @@ class VisionProvider(ABC):
         """Normalize a parsed model response into the canonical schema."""
         if not isinstance(raw, dict):
             raw = {"action": raw}
-        if set(raw) - {"confidence", "action"}:
-            raise ValueError("unknown vision response fields")
         action = raw.get("action", {})
+        sibling_fields = set()
+        if isinstance(action, str):
+            canonical = {
+                "left_click": "click", "leftClick": "click", "mouse_click": "click", "press": "click",
+                "type": "typeText", "inputText": "typeText", "enterText": "typeText", "text": "typeText",
+                "extract": "extractValue", "read": "extractValue", "getValue": "extractValue",
+            }.get(action, action)
+            sibling_fields = {
+                "click": {"x", "y"},
+                "typeText": {"text"},
+                "extractValue": {"value"},
+            }.get(canonical, set())
+        if set(raw) - {"confidence", "action"} - sibling_fields:
+            raise ValueError("unknown vision response fields")
 
         # Model may emit "action": "click" with coordinate fields as siblings
         if isinstance(action, str):

@@ -9,6 +9,17 @@ from providers.base import ProposeRequest, ProposeResponse, VisionProvider
 
 
 class VisionProviderNormalizationTests(unittest.TestCase):
+    def test_string_actions_preserve_established_sibling_payloads_only(self):
+        for raw, expected in (
+            ({"confidence": 0.8, "action": "click", "x": 4, "y": 5}, {"kind": "click", "x": 4.0, "y": 5.0}),
+            ({"confidence": 0.8, "action": "typeText", "text": "hello"}, {"kind": "typeText", "text": "hello"}),
+            ({"confidence": 0.8, "action": "extractValue", "value": "title"}, {"kind": "extractValue", "value": "title"}),
+        ):
+            with self.subTest(action=raw["action"]):
+                response = VisionProvider.normalize_response(raw)
+                self.assertEqual(response.action, expected)
+                response.validate()
+
     def test_request_and_action_unknown_fields_fail_closed_without_echoing_values(self):
         secret = "runtime-secret-provider-field"
         with self.assertRaisesRegex(ValueError, "invalid propose request fields") as error:

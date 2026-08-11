@@ -2,6 +2,8 @@ import json
 import pathlib
 import sys
 import tempfile
+import types
+from unittest.mock import patch
 import unittest
 
 
@@ -10,6 +12,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from evaluate_adapter import (
     calibration_metrics,
     element_accuracy,
+    generate_predictions,
     parse_prediction,
     parse_v1_response,
     v1_metrics,
@@ -18,6 +21,30 @@ from mlx_finetune import build_completion, build_prompt, load_examples
 
 
 class MixedActionEvaluationTests(unittest.TestCase):
+    def test_generate_predictions_skips_diagnostics_before_prompt_and_completion(self):
+        diagnostic = {"success": False, "targetIndex": 1, "modelResponse": {"action": {"kind": "typeIntoCandidate", "index": 1}}}
+        successful = {
+            "success": True,
+            "purpose": "Choose B",
+            "intentKind": "locate",
+            "stuck": "targetAmbiguous",
+            "targetIndex": 1,
+            "contextCandidates": [
+                {"role": "button", "name": "A"},
+                {"role": "button", "name": "B"},
+            ],
+            "modelResponse": {"confidence": 0.9, "action": {"kind": "clickCandidate", "index": 1}},
+        }
+        fake_generate_module = types.ModuleType("mlx_lm.generate")
+        fake_generate_module.generate = lambda *args, **kwargs: '{"confidence":0.9,"action":{"kind":"clickCandidate","index":1}}'
+        fake_package = types.ModuleType("mlx_lm")
+        tokenizer = types.SimpleNamespace(apply_chat_template=lambda *args, **kwargs: "prompt")
+        with patch.dict(sys.modules, {"mlx_lm": fake_package, "mlx_lm.generate": fake_generate_module}):
+            predictions = generate_predictions(object(), tokenizer, [diagnostic, successful], 8, "candidate")
+        self.assertEqual(len(predictions), 1)
+        self.assertEqual(predictions[0]["example_idx"], 0)
+        self.assertIn("clickCandidate", predictions[0]["target"])
+
     def test_failed_candidate_records_are_not_supervised(self):
         for stage in ("visionRejectionFloor", "visionActFailed"):
             record = {"success": False, "outcomeStage": stage, "targetIndex": 1, "modelResponse": {"confidence": 0.1, "action": {"kind": "typeIntoCandidate", "index": 1}}}
