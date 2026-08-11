@@ -130,17 +130,34 @@ class MlxV1Provider(VisionProvider):
         # Chat-template the prompt for the instruct model.
         tokenizer = self._tokenizer
         if hasattr(tokenizer, "apply_chat_template"):
-            return tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+            try:
+                return tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                return tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
         return prompt
 
     @staticmethod
     def _parse_index(text: str) -> Optional[int]:
-        """Parse a bare integer from the response, tolerating whitespace."""
-        token = text.split()[0] if text.split() else ""
+        """Parse a bare integer from the response.
+
+        Tolerates whitespace and an empty instruct thinking block
+        (``<think>...</think>``) wrapping the index, which adapters trained
+        on thinking-enabled templates emit even when the answer itself is a
+        bare index.
+        """
+        import re
+
+        stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        token = stripped.split()[0] if stripped.split() else ""
         token = token.strip().strip(".,")
         try:
             return int(token)
