@@ -3,7 +3,8 @@ use std::time::Duration;
 use acp_client::{AcpClientError, AcpHarnessClient, AcpVisionAssist};
 use auth_broker::AuthStrategy;
 use intent_engine::{
-    StuckKind, VisionAssist, VisionImageRegion, VisionProposeRequest, VisionTaskPacket,
+    StuckKind, VisionAction, VisionAssist, VisionImageRegion, VisionProposeRequest,
+    VisionTaskPacket,
 };
 
 fn packet() -> VisionTaskPacket {
@@ -64,6 +65,38 @@ async fn one_task_uses_one_child_and_closes_it() {
     assert_eq!(reply.result.evidence_digest, "a".repeat(64));
     let lifecycle = std::fs::read_to_string(log).expect("lifecycle log");
     assert_eq!(lifecycle.lines().collect::<Vec<_>>(), ["new", "close"]);
+}
+
+#[tokio::test]
+async fn harness_decodes_candidate_actions_from_snake_case_acp_results() {
+    for (mode, expected) in [
+        (
+            "type-into-candidate",
+            VisionAction::TypeIntoCandidate { index: 1 },
+        ),
+        (
+            "extract-from-candidate",
+            VisionAction::ExtractFromCandidate { index: 1 },
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log = temp.path().join("lifecycle.log");
+        let reply = client_for_mode(&log, mode)
+            .delegate(packet())
+            .await
+            .expect("candidate action reply");
+        assert!(matches!(
+            (expected, reply.result.action),
+            (
+                VisionAction::TypeIntoCandidate { index: 1 },
+                VisionAction::TypeIntoCandidate { index: 1 }
+            ) | (
+                VisionAction::ExtractFromCandidate { index: 1 },
+                VisionAction::ExtractFromCandidate { index: 1 }
+            )
+        ));
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "new\nclose\n");
+    }
 }
 
 #[tokio::test]

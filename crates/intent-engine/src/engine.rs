@@ -2469,6 +2469,15 @@ async fn execute_vision_action(
             layer: ErrorLayer::Page,
             retryable: false,
         }),
+        VisionAction::TypeIntoCandidate { .. } | VisionAction::ExtractFromCandidate { .. } => {
+            Err(CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: "candidate-grounded vision action is not executable in this workflow"
+                    .into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })
+        }
     }
 }
 

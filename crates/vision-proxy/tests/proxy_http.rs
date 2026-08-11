@@ -343,3 +343,64 @@ async fn http_vision_assist_contract_over_bound_proxy() {
     ));
     assert_eq!(upstream.propose_calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
+    use intent_engine::{HttpVisionAssist, StuckKind, VisionAssist, VisionProposeRequest};
+
+    for expected in [
+        VisionAction::TypeIntoCandidate { index: 1 },
+        VisionAction::ExtractFromCandidate { index: 1 },
+    ] {
+        let upstream = Arc::new(MockUpstream::new(
+            ProposeResponse {
+                confidence: 0.77,
+                action: expected.clone(),
+            },
+            ExtractResponse {
+                value: serde_json::json!(null),
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = router(AppState {
+            path: "/vision".to_string(),
+            bearer_token: "contract-token".to_string(),
+            upstream: upstream.clone(),
+        });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let assist = HttpVisionAssist::new(
+            format!("http://{addr}/vision"),
+            Some("contract-token".into()),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        let proposal = assist
+            .propose(VisionProposeRequest {
+                purpose: "Continue".into(),
+                intent_kind: "locate".into(),
+                screenshot_png: b"png-bytes".to_vec(),
+                stuck: StuckKind::TargetMissing,
+                context: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(proposal.confidence, 0.77);
+        match (expected, proposal.action) {
+            (
+                VisionAction::TypeIntoCandidate { index: expected },
+                intent_engine::VisionAction::TypeIntoCandidate { index: actual },
+            )
+            | (
+                VisionAction::ExtractFromCandidate { index: expected },
+                intent_engine::VisionAction::ExtractFromCandidate { index: actual },
+            ) => assert_eq!(actual, expected),
+            (_, actual) => panic!("unexpected mapped action: {actual:?}"),
+        }
+        assert_eq!(upstream.propose_calls.load(Ordering::SeqCst), 1);
+    }
+}

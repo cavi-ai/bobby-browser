@@ -31,6 +31,9 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
         VisionAction::ExtractValue { value } if value.len() <= MAX_TEXT_BYTES => Ok(()),
         VisionAction::ExtractValue { .. } => Err(ValidateError::ExtractValueTooLong),
         VisionAction::ClickCandidate { .. } => Ok(()),
+        VisionAction::TypeIntoCandidate { .. } | VisionAction::ExtractFromCandidate { .. } => {
+            Ok(())
+        }
     }
 }
 
@@ -76,6 +79,18 @@ mod tests {
             action: VisionAction::Click { x: 12.0, y: 34.0 },
         };
         assert!(validate_proposal(&ok).is_ok());
+    }
+
+    #[test]
+    fn candidate_actions_round_trip_with_camel_case_provider_tags() {
+        for json in [
+            r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":1}}"#,
+            r#"{"confidence":0.9,"action":{"kind":"extractFromCandidate","index":1}}"#,
+        ] {
+            let proposal: ProposeResponse = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&proposal).unwrap(), json);
+            assert!(validate_proposal(&proposal).is_ok());
+        }
     }
 
     #[test]

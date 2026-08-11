@@ -58,6 +58,12 @@ pub enum VisionAction {
     ClickCandidate {
         index: u32,
     },
+    TypeIntoCandidate {
+        index: u32,
+    },
+    ExtractFromCandidate {
+        index: u32,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
