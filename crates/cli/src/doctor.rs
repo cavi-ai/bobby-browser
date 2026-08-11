@@ -1535,8 +1535,13 @@ mod bidi_probe_tests {
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 2048];
-            let _ = stream.read(&mut request).unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut chunk = [0_u8; 256];
+                let read = stream.read(&mut chunk).unwrap();
+                assert_ne!(read, 0, "probe closed before completing the handshake");
+                request.extend_from_slice(&chunk[..read]);
+            }
             stream
                 .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
