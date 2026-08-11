@@ -1,10 +1,10 @@
 use std::{
-    fs, io,
+    io,
     path::{Component, Path, PathBuf},
 };
 
 #[cfg(unix)]
-use std::{ffi::OsString, fs::File, io::Read, os::unix::fs::MetadataExt};
+use std::{ffi::OsString, fs, fs::File, io::Read, os::unix::fs::MetadataExt};
 
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
@@ -16,8 +16,11 @@ use thiserror::Error;
 use crate::security::security_catalog;
 use crate::{
     evaluate, security_catalog_sha256, CertificationVerdict, GateResult, GateStatus, ManifestError,
-    PolicyError, ProcessRunner, ReleaseManifest, SecurityGate,
+    PolicyError, ProcessRunner, SecurityGate,
 };
+
+#[cfg(unix)]
+use crate::ReleaseManifest;
 
 #[cfg(unix)]
 use crate::persistence::{
@@ -443,8 +446,8 @@ pub const fn failure_exit_code(error: &CliError) -> i32 {
     }
 }
 
+#[cfg(unix)]
 struct ValidatedPaths {
-    #[cfg(unix)]
     manifest: OpenedManifest,
     output: PathBuf,
 }
@@ -531,11 +534,6 @@ fn validate_distinct_paths(cli: &Cli, repo_root: &Path) -> Result<ValidatedPaths
     })
 }
 
-#[cfg(not(unix))]
-fn validate_distinct_paths(_: &Cli, _: &Path) -> Result<ValidatedPaths, CliError> {
-    Err(CliError::UnsupportedPlatform)
-}
-
 #[cfg(unix)]
 fn absolute_path(path: &Path, base: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -609,6 +607,7 @@ fn prepare_output_target(paths: &ValidatedPaths) -> Result<OutputTarget, CliErro
     }
 }
 
+#[cfg(unix)]
 pub async fn run_security<R>(
     cli: &Cli,
     repo_root: &Path,
@@ -618,27 +617,32 @@ where
     R: ProcessRunner,
 {
     let mut paths = validate_distinct_paths(cli, repo_root)?;
-    #[cfg(unix)]
     let manifest_bytes = paths.manifest.read_bounded()?;
-    #[cfg(not(unix))]
-    return Err(CliError::UnsupportedPlatform);
     let manifest = ReleaseManifest::from_slice(&manifest_bytes)?;
     let manifest_sha256 = hex::encode(Sha256::digest(&manifest_bytes));
-    #[cfg(unix)]
     let output_target = prepare_output_target(&paths)?;
 
     let results = gate.run(repo_root, &manifest).await;
     let verdict = evaluate(&["security"], &results)?;
     let bundle = CertificationBundle::try_new(manifest_sha256, results, verdict)?;
-    #[cfg(unix)]
     bundle.write_json_to_target_with_io(
         &output_target,
         manifest.security.max_output_bytes,
         &OsBundlePersistenceIo,
     )?;
-    #[cfg(not(unix))]
-    return Err(CliError::UnsupportedPlatform);
     Ok(bundle)
+}
+
+#[cfg(not(unix))]
+pub async fn run_security<R>(
+    _cli: &Cli,
+    _repo_root: &Path,
+    _gate: &SecurityGate<R>,
+) -> Result<CertificationBundle, CliError>
+where
+    R: ProcessRunner,
+{
+    Err(CliError::UnsupportedPlatform)
 }
 
 pub fn summary_lines(bundle: &CertificationBundle) -> Vec<String> {

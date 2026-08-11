@@ -33,7 +33,7 @@ use firefox_companion::selection::{
 };
 use std::{
     future::Future,
-    net::{SocketAddr, TcpStream},
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -761,7 +761,7 @@ pub async fn run() -> Result<()> {
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
             VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
-            VisionCommands::Status { config } => vision_status(config)?,
+            VisionCommands::Status { config } => vision_status(config).await?,
             VisionCommands::Start { config } => run_configured_vision_service(config).await?,
             VisionCommands::Collect {
                 output,
@@ -795,6 +795,7 @@ pub async fn run() -> Result<()> {
                 collect_training_data,
                 training_data_dir,
                 api_key_env,
+                endpoint_url: None,
             })
             .await?;
         }
@@ -1010,6 +1011,7 @@ struct VisionProxyRunArgs {
     collect_training_data: bool,
     training_data_dir: String,
     api_key_env: Option<String>,
+    endpoint_url: Option<String>,
 }
 
 fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionProxyRunArgs> {
@@ -1047,16 +1049,49 @@ fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionPro
         collect_training_data: config.vision.collect_training_data,
         training_data_dir: config.vision.training_data_dir.display().to_string(),
         api_key_env: profile.api_key_env.clone(),
+        endpoint_url: Some(url.to_string()),
     })
 }
 
-fn vision_status(config_cli: Option<PathBuf>) -> Result<()> {
+enum VisionServiceState {
+    Running,
+    Stopped,
+    Unknown,
+    Unreachable,
+}
+
+async fn probe_vision_service(endpoint: &str) -> VisionServiceState {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(750))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return VisionServiceState::Unreachable,
+    };
+    match client.get(endpoint).send().await {
+        Ok(response)
+            if response.status().is_success()
+                && response
+                    .headers()
+                    .get("x-bobby-vision")
+                    .is_some_and(|value| value == "ready") =>
+        {
+            VisionServiceState::Running
+        }
+        Ok(_) => VisionServiceState::Unknown,
+        Err(error) if error.is_connect() => VisionServiceState::Stopped,
+        Err(_) => VisionServiceState::Unreachable,
+    }
+}
+
+async fn vision_status(config_cli: Option<PathBuf>) -> Result<()> {
     let args = configured_vision_proxy_args(config_cli)?;
-    let address: SocketAddr = args
-        .bind
-        .parse()
-        .context("vision bind address is invalid")?;
-    let running = TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok();
+    let state = probe_vision_service(
+        args.endpoint_url
+            .as_deref()
+            .context("configured vision endpoint is missing")?,
+    )
+    .await;
     println!(
         "vision-config: {} / {}",
         args.upstream,
@@ -1064,10 +1099,11 @@ fn vision_status(config_cli: Option<PathBuf>) -> Result<()> {
     );
     println!(
         "vision-service: {} at http://{}{}",
-        if running {
-            "running"
-        } else {
-            "stopped (starts on demand)"
+        match state {
+            VisionServiceState::Running => "running",
+            VisionServiceState::Stopped => "stopped (starts on demand)",
+            VisionServiceState::Unknown => "occupied by an unknown service",
+            VisionServiceState::Unreachable => "unreachable",
         },
         args.bind,
         args.path
@@ -1094,6 +1130,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         collect_training_data,
         training_data_dir,
         api_key_env,
+        endpoint_url: _,
     } = args;
     let bind: SocketAddr = bind.parse().context("invalid --bind address")?;
     let bearer_token = require_vision_proxy_bearer()?;
@@ -3344,13 +3381,11 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         );
         let root = tempfile::tempdir().unwrap();
         let config = doctor_config_fixture(root.path());
+        let bootstrap = root.path().join("bootstrap.env");
+        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
 
-        let report = run_doctor(
-            Some(config),
-            Some(root.path().join("missing-bootstrap.env")),
-            false,
-        )
-        .unwrap();
+        let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
 
         assert_eq!(report.failures(), 0, "{:?}", report.checks);
         assert_eq!(report.check("config").unwrap().status, DoctorStatus::Ok);
@@ -3361,6 +3396,14 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         assert_eq!(
             report.check("engine-satisfiability").unwrap().status,
             DoctorStatus::Ok
+        );
+        assert!(
+            !report
+                .check("mcp-handshake")
+                .unwrap()
+                .detail
+                .contains("deferred until Firefox"),
+            "Chromium-only installs must still validate the MCP gateway"
         );
         assert_eq!(
             report.check("artifacts-dir").unwrap().status,
@@ -3719,6 +3762,22 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         let root = tempfile::tempdir().unwrap();
         let bootstrap = root.path().join("bootstrap.env");
         let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            r#"[vision]
+provider = "lmstudio"
+
+[vision.providers.lmstudio]
+base_url = "http://127.0.0.1:1234/v1"
+model = "local-model"
+
+[nodes.vision]
+kind = "vision"
+endpoint_url = "http://127.0.0.1:9100/vision"
+token_env = "BOBBY_VISION_TOKEN"
+"#,
+        )
+        .unwrap();
 
         let report = run_doctor_fix(DoctorFixOptions {
             config: Some(config),
@@ -3741,6 +3800,11 @@ endpoint_url = "http://127.0.0.1:8080/propose"
                 DoctorFixStatus::Fixed
             );
         }
+        assert_eq!(
+            report.post_fix.check("vision-token").unwrap().status,
+            DoctorStatus::Ok,
+            "post-fix doctor must read the token beside --bootstrap-env"
+        );
     }
 
     #[test]
