@@ -63,6 +63,21 @@ pub fn init(
     Ok(ObservabilityGuard { _private: () })
 }
 
+/// Stdio-safe init for the MCP stdio gateways: stdout is the protocol
+/// channel there, so the only safe sink is stderr. Honors `RUST_LOG`; a
+/// missing or unparseable directive disables logging rather than failing
+/// startup, since this gate must never take the gateway down with it.
+pub fn init_stdio() -> Option<ObservabilityGuard> {
+    let directive = std::env::var("RUST_LOG").ok()?;
+    let filter = EnvFilter::try_new(&directive).ok()?;
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .ok()?;
+    Some(ObservabilityGuard { _private: () })
+}
+
 pub mod test_support {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use tracing_subscriber::prelude::*;

@@ -274,20 +274,139 @@ impl PageRuntime {
         let remaining = (envelope.deadline - Utc::now())
             .to_std()
             .unwrap_or(StdDuration::ZERO);
+        let mut lease_slot = Some(lease);
         let mut execution = match tokio::time::timeout(
             remaining,
-            self.adaptive.execute(&envelope, &lease, page_state, &gate),
+            self.adaptive.execute(
+                &envelope,
+                lease_slot.as_ref().expect("lease before first execution"),
+                page_state.clone(),
+                &gate,
+            ),
         )
         .await
         {
             Ok(Ok(execution)) => execution,
             Ok(Err(failure)) => {
-                return self
-                    .finish_failure(
-                        &envelope,
-                        classify_failure(&envelope, failure.error, failure.evidence),
-                    )
-                    .await;
+                // A killed browser (SIGKILL under host pressure, reset CDP
+                // socket) otherwise wedges every later call on the session at
+                // a permanent "browser page is not open". Revive once: retire
+                // the dead worker, relaunch, reopen the page at its last URL.
+                // Replayable commands retry transparently; anything else fails
+                // with the revival noted so the *next* call lands on a live
+                // page. The runtime already validated the page id, so a
+                // page_missing here means the worker lost it, not a bad call.
+                let browser_died = worker_pool::is_dead_worker_error(&failure.error)
+                    || (page_state.is_some()
+                        && failure.error.message == "browser page is not open");
+                let mut revived_execution = None;
+                if browser_died && page_state.is_some() {
+                    let page = page_state.clone().expect("checked above");
+                    let lease = lease_slot.take().expect("lease before revive");
+                    let failed_worker_id = lease.worker_id();
+                    drop(lease);
+                    let _ = workers
+                        .invalidate_session_if_worker(&envelope.session_id, &failed_worker_id)
+                        .await;
+                    if let Ok(revived) = workers.lease(envelope.session_id.clone()).await {
+                        let _ = revived
+                            .worker()
+                            .set_fingerprint_enabled(gate.fingerprint)
+                            .await;
+                        let _ = revived
+                            .worker()
+                            .set_humanization_enabled(gate.humanize)
+                            .await;
+                        if revived.worker().open_page(page.id.clone()).await.is_ok() {
+                            if let Some(url) = &page.url {
+                                let _ = revived
+                                    .worker()
+                                    .navigate(
+                                        &page.id,
+                                        &types::NavigateCommand {
+                                            url: url.clone(),
+                                            wait_until: types::WaitUntil::Interactive,
+                                            timeout_ms: 15_000,
+                                        },
+                                    )
+                                    .await;
+                            }
+                            if envelope.command.class() == types::CommandClass::Replayable {
+                                let remaining = (envelope.deadline - Utc::now())
+                                    .to_std()
+                                    .unwrap_or(StdDuration::ZERO);
+                                match tokio::time::timeout(
+                                    remaining,
+                                    self.adaptive
+                                        .execute(&envelope, &revived, Some(page), &gate),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(retry_execution)) => {
+                                        revived_execution = Some(retry_execution);
+                                        lease_slot = Some(revived);
+                                    }
+                                    Ok(Err(retry_failure)) => {
+                                        return self
+                                            .finish_failure(
+                                                &envelope,
+                                                classify_failure(
+                                                    &envelope,
+                                                    retry_failure.error,
+                                                    retry_failure.evidence,
+                                                ),
+                                            )
+                                            .await;
+                                    }
+                                    Err(_) => {
+                                        return self
+                                            .finish_failure(
+                                                &envelope,
+                                                classify_failure(
+                                                    &envelope,
+                                                    CommandError {
+                                                        code: ErrorCode::DeadlineExceeded,
+                                                        message: "command did not finish before its envelope deadline".into(),
+                                                        layer: ErrorLayer::Workflow,
+                                                        retryable: true,
+                                                    },
+                                                    Vec::new(),
+                                                ),
+                                            )
+                                        .await;
+                                    }
+                                }
+                            } else {
+                                return self
+                                    .finish_failure(
+                                        &envelope,
+                                        classify_failure(
+                                            &envelope,
+                                            CommandError {
+                                                code: ErrorCode::TargetDetached,
+                                                message: "the browser process was killed; a fresh browser was launched and the page reloaded to its last URL — inspect current state and re-issue the command".into(),
+                                                layer: ErrorLayer::Driver,
+                                                retryable: false,
+                                            },
+                                            failure.evidence,
+                                        ),
+                                    )
+                                .await;
+                            }
+                        }
+                    }
+                }
+                match revived_execution {
+                    Some(revived_execution) => revived_execution,
+                    None => {
+                        return self
+                            .finish_failure(
+                                &envelope,
+                                classify_failure(&envelope, failure.error, failure.evidence),
+                            )
+                            .await;
+                    }
+                }
             }
             Err(_) => {
                 return self
@@ -385,7 +504,9 @@ impl PageRuntime {
                     );
                 }
             }
-            if let Err(error) = lease
+            if let Err(error) = lease_slot
+                .as_ref()
+                .expect("lease survives to state commit")
                 .worker()
                 .commit_http_state(
                     envelope.page_id.as_ref().expect("validated page id"),
@@ -475,7 +596,14 @@ impl PageRuntime {
             return journal_failure(&envelope, error, true);
         }
         self.observe_durable_phase(CommandPhase::Verifying).await;
-        match self.verify(&envelope, &lease, evidence).await {
+        match self
+            .verify(
+                &envelope,
+                lease_slot.as_ref().expect("lease survives to verify"),
+                evidence,
+            )
+            .await
+        {
             Ok(evidence) => {
                 self.promote_outcome(&envelope, &evidence, true).await;
                 if let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(_)) = &envelope.command

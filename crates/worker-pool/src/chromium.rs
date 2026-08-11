@@ -146,12 +146,26 @@ impl WorkerFactory for ChromiumWorkerFactory {
             .get_mut_child()
             .and_then(|child| child.as_mut_inner().id())
             .and_then(|pid| register_chrome_pid(&self.pid_registry_dir, &worker_id, pid));
+        // Watch the CDP event stream: its end is the first observable moment
+        // of a browser death (OOM kill, self-exit, external reaper). Log it
+        // with the session/worker ids so "receiver is gone" stops being the
+        // first symptom anyone sees.
+        let handler_session = session_id.clone();
+        let handler_worker = worker_id.clone();
         let handler_task = tokio::spawn(async move {
+            let mut end_detail = "stream exhausted".to_owned();
             while let Some(event) = handler.next().await {
-                if event.is_err() {
+                if let Err(error) = event {
+                    end_detail = format!("stream error: {error}");
                     break;
                 }
             }
+            tracing::info!(
+                session_id = %handler_session.0,
+                worker_id = %handler_worker.0,
+                detail = %end_detail,
+                "browser CDP event stream ended"
+            );
         });
 
         let behavioral_config = BehavioralConfig::default().sanitize();

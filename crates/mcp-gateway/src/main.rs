@@ -17,6 +17,10 @@ const MAX_BEARER_BYTES: usize = 505;
 
 #[tokio::main]
 async fn main() {
+    // Stdout is the protocol channel, so the gateway can never use the
+    // standard observability init; stderr logging activates only when the
+    // operator sets RUST_LOG.
+    let _telemetry = observability::init_stdio();
     if let Err(error) = run().await {
         eprintln!("mcp gateway failed: {error}");
         std::process::exit(1);
