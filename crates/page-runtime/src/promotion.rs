@@ -125,29 +125,43 @@ impl ContextPromotion {
             return None;
         }
         let site_context = self.store.site(&site).await?;
-        // Tie-refusal makes iteration order irrelevant: two same-score
-        // controls answer `None` wherever they were remembered.
+        // Ladder first, validation record second: the name-match ladder
+        // (exact 1.0, role+name 0.9, fuzzy ≤0.8) decides which controls match
+        // best; the validation weight only breaks ties between equal matches.
+        // That keeps the pinned ladder semantics — a fuzzy match never beats
+        // an exact one — while more-verified and more-recent entries win the
+        // match they tied on. Full ties (same match, same record) still
+        // refuse, so iteration order stays irrelevant.
+        let today = day_since_epoch(chrono::Utc::now());
         let controls = site_context
             .pages
             .values()
             .flat_map(|page| page.forms.values())
             .flat_map(|form| form.controls.iter());
-        let mut best: Option<(f32, &context_store::ControlContext)> = None;
+        let mut best: Option<(f32, f32, &context_store::ControlContext)> = None;
         let mut tied = false;
         for control in controls {
             let Some(score) = score_remembered(&needle, control) else {
                 continue;
             };
+            let weight = validation_weight(control, today);
             match &best {
-                Some((current, _)) if *current > score => {}
-                Some((current, _)) if (*current - score).abs() < f32::EPSILON => tied = true,
+                Some((current, current_weight, _)) if *current > score => {}
+                Some((current, current_weight, _)) if (*current - score).abs() < f32::EPSILON => {
+                    if (*current_weight - weight).abs() < f32::EPSILON {
+                        tied = true;
+                    } else if weight > *current_weight {
+                        best = Some((score, weight, control));
+                        tied = false;
+                    }
+                }
                 _ => {
-                    best = Some((score, control));
+                    best = Some((score, weight, control));
                     tied = false;
                 }
             }
         }
-        let (confidence, control) = best?;
+        let (confidence, _, control) = best?;
         if tied || confidence < crate::CONTEXT_CONFIDENCE_FLOOR {
             return None;
         }
@@ -283,6 +297,37 @@ fn score_remembered(needle: &str, control: &context_store::ControlContext) -> Op
     crate::context::fuzzy_score(needle, &name)
 }
 
+/// Recency-frequency weight for a remembered control, used to break ladder
+/// ties: entries that verified more often and more recently outrank stale or
+/// failing ones. Aggregates the control's per-intent stats (the recall
+/// question carries no intent kind). Validation count boosts with
+/// diminishing returns; failures drag down; verification recency decays on
+/// a 30-day half-life with a floor at half weight so old-but-good entries
+/// still compete.
+fn validation_weight(control: &context_store::ControlContext, today: u32) -> f32 {
+    let mut successes: u64 = 0;
+    let mut failures: u64 = 0;
+    let mut newest_day: Option<u32> = None;
+    for stats in control.intents.values() {
+        successes += stats.success_count;
+        failures += stats.failure_count;
+        if let Some(day) = stats.last_verified_day {
+            newest_day = Some(newest_day.map_or(day, |newest| newest.max(day)));
+        }
+    }
+    let total = successes + failures;
+    if total == 0 {
+        return 1.0;
+    }
+    let validation_boost = 1.0 + (successes as f32).ln_1p();
+    let reliability = successes as f32 / (total as f32 + 1.0);
+    let recency = match newest_day {
+        Some(day) => 0.5_f32.powi(today.saturating_sub(day) as i32 / 30),
+        None => 0.5,
+    };
+    validation_boost * reliability * (0.5 + 0.5 * recency)
+}
+
 fn apply_outcome(stats: &mut IntentStats, success: bool, source: RecordSource) {
     if success {
         stats.success_count += 1;
@@ -343,6 +388,8 @@ fn templated(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::page_pattern;
+    use context_store::{ControlContext, IntentStats};
+    use std::collections::BTreeMap;
 
     #[test]
     fn page_patterns_strip_query_and_template_parameters() {
@@ -364,5 +411,76 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(page_pattern(input).as_deref(), *expected, "input: {input}");
         }
+    }
+
+    fn control(name: &str, successes: u64, failures: u64, last_day: Option<u32>) -> ControlContext {
+        let mut intents = BTreeMap::new();
+        intents.insert(
+            "locate".to_string(),
+            IntentStats {
+                success_count: successes,
+                failure_count: failures,
+                last_verified_day: last_day,
+                source: None,
+            },
+        );
+        ControlContext {
+            role: "button".into(),
+            accessible_name: name.into(),
+            ordinal: None,
+            form_membership: "page".into(),
+            intents,
+        }
+    }
+
+    #[test]
+    fn more_validated_entries_carry_more_weight() {
+        let today = 20_000;
+        let fresh = control("Save", 5, 0, Some(today));
+        let thin = control("Save", 0, 0, None);
+        let fresh_weight = super::validation_weight(&fresh, today);
+        let thin_weight = super::validation_weight(&thin, today);
+        assert!(
+            fresh_weight > thin_weight,
+            "validated {fresh_weight} must beat unvalidated {thin_weight}"
+        );
+    }
+
+    #[test]
+    fn recently_verified_entries_carry_more_weight() {
+        let today = 20_000;
+        let recent = control("Save", 3, 0, Some(today));
+        let stale = control("Save", 3, 0, Some(today - 120));
+        let recent_weight = super::validation_weight(&recent, today);
+        let stale_weight = super::validation_weight(&stale, today);
+        assert!(
+            recent_weight > stale_weight,
+            "recent {recent_weight} must beat stale {stale_weight}"
+        );
+    }
+
+    #[test]
+    fn failures_drag_the_weight_down() {
+        let today = 20_000;
+        let clean = control("Save", 4, 0, Some(today));
+        let flaky = control("Save", 4, 4, Some(today));
+        let clean_weight = super::validation_weight(&clean, today);
+        let flaky_weight = super::validation_weight(&flaky, today);
+        assert!(
+            clean_weight > flaky_weight,
+            "clean {clean_weight} must beat flaky {flaky_weight}"
+        );
+    }
+
+    #[test]
+    fn unrecorded_controls_keep_the_plain_match_score() {
+        // No stats: the weight is exactly 1.0 and the ladder score is
+        // untouched, so the pinned match ladder (1.0 / 0.9 / fuzzy) is
+        // preserved for controls with no validation record.
+        let today = 20_000;
+        let bare = control("Save", 0, 0, None);
+        assert_eq!(super::validation_weight(&bare, today), 1.0);
+        let score = super::score_remembered("save", &bare).unwrap();
+        assert_eq!(score, 1.0);
     }
 }
