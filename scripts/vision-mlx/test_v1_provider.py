@@ -48,3 +48,11 @@ class MlxV1ProviderTests(unittest.TestCase):
 
                 self.assertEqual(response.confidence, 0.0)
                 self.assertEqual(response.action, {"kind": "clickCandidate", "index": 0})
+
+    def test_explicit_negative_index_abstains(self):
+        parsed = MlxV1Provider._parse_index("-1")
+        response = MlxV1Provider()._response_for_index(request("fill"), parsed)
+
+        self.assertEqual(parsed, -1)
+        self.assertEqual(response.confidence, 0.0)
+        self.assertEqual(response.action, {"kind": "clickCandidate", "index": 0})

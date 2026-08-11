@@ -25,7 +25,8 @@ class VisionProviderNormalizationTests(unittest.TestCase):
     def test_candidate_grounded_actions_require_only_a_non_negative_integer_index(self):
         for kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
             with self.subTest(kind=kind):
-                ProposeResponse(0.9, {"kind": kind, "index": 1}).validate()
+                for index in (0, 1):
+                    ProposeResponse(0.9, {"kind": kind, "index": index}).validate()
 
                 for index in (True, 1.5, -1, None):
                     with self.subTest(index=index):
@@ -34,6 +35,15 @@ class VisionProviderNormalizationTests(unittest.TestCase):
 
                 with self.assertRaises(ValueError):
                     ProposeResponse(0.9, {"kind": kind, "index": 1, "text": "secret"}).validate()
+
+                with self.assertRaises(ValueError):
+                    ProposeResponse(0.9, {"kind": kind}).validate()
+
+                with self.assertRaises(ValueError):
+                    ProposeResponse(
+                        0.9,
+                        {"kind": kind, "index": 0, "clear_first": True},
+                    ).validate()
 
     def test_candidate_grounded_normalization_preserves_only_the_index(self):
         for kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):

@@ -289,4 +289,44 @@ mod tests {
         assert_eq!(example.intent_kind, "locate");
         assert!(example.image_hash.is_some());
     }
+
+    #[test]
+    fn candidate_actions_are_collected_as_index_only() {
+        let input = ProposeInput {
+            purpose: "select the target".into(),
+            intent_kind: "fill".into(),
+            stuck: "targetMissing".into(),
+            screenshot_png_b64: "dGVzdA==".into(),
+            context: None,
+        };
+
+        for action in [
+            crate::wire::VisionAction::TypeIntoCandidate { index: 0 },
+            crate::wire::VisionAction::ExtractFromCandidate { index: 1 },
+        ] {
+            let example = VisionTrainingExample::new(
+                "dGVzdA==".into(),
+                &input,
+                Some(ProposeResponse {
+                    confidence: 0.9,
+                    action,
+                }),
+                None,
+                None,
+                Some(true),
+                None,
+                None,
+                None,
+            );
+            let action = &example.model_response.expect("response")["action"];
+            assert!(matches!(
+                action["kind"].as_str(),
+                Some("typeIntoCandidate" | "extractFromCandidate")
+            ));
+            assert!(action["index"].is_u64());
+            assert!(action.get("text").is_none());
+            assert!(action.get("value").is_none());
+            assert!(action.get("clear_first").is_none());
+        }
+    }
 }
