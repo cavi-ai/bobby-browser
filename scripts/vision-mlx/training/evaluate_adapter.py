@@ -109,7 +109,19 @@ def generate_predictions(model, tokenizer, examples: list, max_tokens: int, sche
         start = time.time()
         prompt = build_prompt(example, schema)
         messages = [{"role": "user", "content": prompt}]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        template_kwargs = {"tokenize": False, "add_generation_prompt": True}
+        if schema == "v1":
+            # The v1 wire is a bare index; the instruct template's thinking
+            # channel would emit an empty <think> wrapper and break strict
+            # decoders. Qwen3 supports suppressing it at the template.
+            try:
+                text = tokenizer.apply_chat_template(
+                    messages, enable_thinking=False, **template_kwargs
+                )
+            except TypeError:
+                text = tokenizer.apply_chat_template(messages, **template_kwargs)
+        else:
+            text = tokenizer.apply_chat_template(messages, **template_kwargs)
         try:
             output = generate(model, tokenizer, prompt=text, max_tokens=max_tokens, verbose=False)
             if schema == "v1":

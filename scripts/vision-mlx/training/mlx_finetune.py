@@ -96,6 +96,12 @@ def build_v1_prompt(example: dict) -> str:
     """The BOBBY-VISION/1 wire format: stable prefix + varying block."""
     example = normalize_corpus_example(example)
     block = f"TASK: {example['purpose']}"
+    # The intent's role hint narrows the candidate space ("Submit the form"
+    # -> the button), exactly as LocateIntent.hints.role carries in
+    # production. Emitted only when present.
+    hint_role = example.get("hint_role")
+    if hint_role:
+        block += f"\nHINT: role={hint_role}"
     if example.get("context_url"):
         block += f"\nPAGE: {example['context_url']}"
     candidates = example.get("context_candidates") or []
