@@ -155,6 +155,57 @@ fn read_records(dir: &std::path::Path) -> Vec<serde_json::Value> {
 }
 
 #[tokio::test]
+async fn candidate_grounded_corpus_actions_are_index_only() {
+    for action in [
+        VisionAction::TypeIntoCandidate { index: 1 },
+        VisionAction::ExtractFromCandidate { index: 1 },
+    ] {
+        let assist = Arc::new(FakeVision {
+            proposal: VisionProposal {
+                confidence: 0.10,
+                action,
+            },
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let corpus = VisionCorpus::new(dir.path()).unwrap();
+        let outcome = IntentEngine::execute(
+            &unresolvable_locate(),
+            &PageId::new(),
+            &FakeBrowser {
+                candidates: vec![
+                    candidate("button", "Continue"),
+                    candidate("button", "Cancel"),
+                ],
+                resolved_at_point: None,
+                element_at_point_called: Arc::new(AtomicBool::new(false)),
+            },
+            &VisionContext {
+                session_ok: true,
+                capability_ok: true,
+                assist: Some(assist),
+                proposals: None,
+                defer_escalation: false,
+                prompt_context: None,
+                corpus: Some(corpus),
+            },
+        )
+        .await;
+        assert!(matches!(outcome, IntentOutcome::Failed { .. }));
+
+        let records = read_records(dir.path());
+        assert!(records[0].get("targetIndex").is_none());
+        let action = &records[0]["modelResponse"]["action"];
+        assert!(matches!(
+            action["kind"].as_str(),
+            Some("typeIntoCandidate" | "extractFromCandidate")
+        ));
+        assert_eq!(action["index"], 1);
+        assert!(action.get("text").is_none());
+        assert!(action.get("value").is_none());
+    }
+}
+
+#[tokio::test]
 async fn completed_escalation_writes_a_corpus_record_with_target_index() {
     let assist = Arc::new(FakeVision {
         proposal: VisionProposal {

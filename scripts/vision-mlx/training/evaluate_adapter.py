@@ -26,7 +26,12 @@ import sys
 import time
 from pathlib import Path
 
-from mlx_finetune import build_completion, build_prompt
+from mlx_finetune import (
+    build_completion,
+    build_prompt,
+    normalize_corpus_example,
+    supervised_examples,
+)
 
 SUPPORTED_ACTION_KINDS = {
     "click",
@@ -96,6 +101,7 @@ def parse_v1_response(text: str, n_candidates: int) -> int | None:
 
 
 def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
+    examples = supervised_examples(examples)
     from mlx_lm.generate import generate
 
     predictions = []
@@ -130,6 +136,7 @@ def generate_predictions(model, tokenizer, examples: list, max_tokens: int, sche
 
 
 def target_bbox(example: dict) -> dict | None:
+    example = normalize_corpus_example(example)
     idx = example.get("target_index")
     candidates = example.get("context_candidates") or []
     if idx is None or idx >= len(candidates):
@@ -152,6 +159,7 @@ def element_accuracy(predictions: list, examples: list) -> dict:
     coords typeText: the sole textbox is implied; text is scored as payload
     coords extractValue: the returned value identifies the unique target and payload
     """
+    examples = [normalize_corpus_example(example) for example in examples]
     scored = 0
     correct = 0
     content_scored = 0
@@ -163,19 +171,27 @@ def element_accuracy(predictions: list, examples: list) -> dict:
             continue
         action = pred.get("action", {})
         kind = action.get("kind")
-        target = e.get("target_index")
-        target_action = e.get("model_response", {}).get("action", {})
+        target = e.get("targetIndex", e.get("target_index"))
+        target_action = e.get("modelResponse", e.get("model_response", {})).get("action", {})
         expected_kind = target_action.get("kind")
-        canonical_kind = {
+        canonicalize = lambda value: {
             "clickCandidate": "click",
+            "click_candidate": "click",
             "typeIntoCandidate": "typeText",
+            "type_into_candidate": "typeText",
             "extractFromCandidate": "extractValue",
-        }.get(kind, kind)
+            "extract_from_candidate": "extractValue",
+        }.get(value, value)
+        canonical_kind = canonicalize(kind)
+        expected_kind = canonicalize(expected_kind)
 
         if kind in (
             "clickCandidate",
+            "click_candidate",
             "typeIntoCandidate",
+            "type_into_candidate",
             "extractFromCandidate",
+            "extract_from_candidate",
             "click",
             "typeText",
             "extractValue",
@@ -186,14 +202,11 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         target_correct = False
         payload_required = False
         payload_correct = False
-        if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+        if kind in ("clickCandidate", "click_candidate", "typeIntoCandidate", "type_into_candidate", "extractFromCandidate", "extract_from_candidate"):
             if target is None:
                 continue
             scored += 1
             target_correct = action.get("index") == target
-            if kind == "typeIntoCandidate":
-                payload_required = True
-                payload_correct = action.get("text") == target_action.get("text")
         elif kind == "click":
             bbox = target_bbox(e)
             if bbox is None:
@@ -267,6 +280,7 @@ def calibration_metrics(predictions: list, examples: list) -> dict:
     - selective: accuracy/coverage at each confidence threshold
     - separation: mean confidence of correct vs incorrect predictions
     """
+    examples = [normalize_corpus_example(example) for example in examples]
     pairs = []
     for p, e in zip(predictions, examples):
         pred = p.get("prediction")
@@ -320,6 +334,7 @@ def v1_metrics(predictions: list, examples: list) -> dict:
     the model abstains (-1). Also reports abstention precision/recall — the
     routing signal confidence could not provide.
     """
+    examples = [normalize_corpus_example(example) for example in examples]
     answered_scored = 0
     answered_correct = 0
     pos_total = 0
@@ -379,7 +394,7 @@ def main():
     from fine_tune_vision import FineTuneConfig, VisionEvaluator
 
     with open(args.input, "r") as f:
-        examples = [json.loads(line) for line in f if line.strip()]
+        examples = supervised_examples([json.loads(line) for line in f if line.strip()])
     if args.limit:
         examples = examples[: args.limit]
     print(f"Evaluating {len(examples)} examples on {args.model}"

@@ -9,9 +9,7 @@ use crate::wire::{ExtractResponse, ProposeResponse};
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_MODEL: &str = "gpt-4o";
 
-const PROPOSE_SYSTEM: &str = "Return only JSON matching bobby propose response: \
-{\"confidence\":0..1,\"action\":{\"kind\":\"click\"|\"typeText\"|\"extractValue\",...}}. \
-Click coordinates are CSS pixels of the screenshot.";
+const PROPOSE_SYSTEM: &str = "Return only JSON matching bobby propose response. When candidates are listed, select only by zero-based index: use clickCandidate for locate/submitAndVerify/follow/dismissObstruction, typeIntoCandidate for fill/type, and extractFromCandidate for extract. Candidate actions contain only kind and index. Never emit typed or extracted values. Without candidates, legacy click/typeText/extractValue actions remain supported. Click coordinates are CSS pixels of the screenshot.";
 
 const EXTRACT_SYSTEM: &str = "Return only JSON {\"value\": <json matching the caller schema>}.";
 
@@ -258,5 +256,18 @@ mod tests {
             parse_json_content(r#"{"confidence":0.5,"action":{"kind":"click","x":1.0,"y":2.0}}"#)
                 .unwrap();
         assert_eq!(v["confidence"], serde_json::json!(0.5));
+    }
+
+    #[test]
+    fn prompt_requires_index_only_intent_compatible_candidate_actions() {
+        for required in [
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+            "zero-based index",
+            "Never emit typed or extracted values",
+        ] {
+            assert!(PROPOSE_SYSTEM.contains(required), "missing {required}");
+        }
     }
 }

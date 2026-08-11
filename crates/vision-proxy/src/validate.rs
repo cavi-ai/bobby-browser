@@ -16,6 +16,10 @@ pub enum ValidateError {
     TypeTextTooLong,
     #[error("vision extract value exceeded its bound")]
     ExtractValueTooLong,
+    #[error("candidate action is incompatible with the request intent")]
+    CandidateIntentMismatch,
+    #[error("candidate action index is outside the request candidate list")]
+    CandidateIndexOutOfRange,
 }
 
 pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError> {
@@ -31,7 +35,42 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
         VisionAction::ExtractValue { value } if value.len() <= MAX_TEXT_BYTES => Ok(()),
         VisionAction::ExtractValue { .. } => Err(ValidateError::ExtractValueTooLong),
         VisionAction::ClickCandidate { .. } => Ok(()),
+        VisionAction::TypeIntoCandidate { .. } | VisionAction::ExtractFromCandidate { .. } => {
+            Ok(())
+        }
     }
+}
+
+pub fn validate_proposal_for_request(
+    proposal: &ProposeResponse,
+    intent_kind: &str,
+    candidate_count: usize,
+) -> Result<(), ValidateError> {
+    validate_proposal(proposal)?;
+    let (index, compatible) = match proposal.action {
+        VisionAction::ClickCandidate { index } => (
+            Some(index),
+            matches!(
+                intent_kind,
+                "locate" | "submitAndVerify" | "follow" | "dismissObstruction"
+            ),
+        ),
+        VisionAction::TypeIntoCandidate { index } => {
+            (Some(index), matches!(intent_kind, "fill" | "type"))
+        }
+        VisionAction::ExtractFromCandidate { index } => (Some(index), intent_kind == "extract"),
+        _ => (None, true),
+    };
+    if !compatible {
+        return Err(ValidateError::CandidateIntentMismatch);
+    }
+    if let Some(index) = index {
+        let index = usize::try_from(index).map_err(|_| ValidateError::CandidateIndexOutOfRange)?;
+        if candidate_count == 0 || index >= candidate_count {
+            return Err(ValidateError::CandidateIndexOutOfRange);
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_extract(response: &ExtractResponse) -> Result<(), ValidateError> {
@@ -76,6 +115,18 @@ mod tests {
             action: VisionAction::Click { x: 12.0, y: 34.0 },
         };
         assert!(validate_proposal(&ok).is_ok());
+    }
+
+    #[test]
+    fn candidate_actions_round_trip_with_camel_case_provider_tags() {
+        for json in [
+            r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":1}}"#,
+            r#"{"confidence":0.9,"action":{"kind":"extractFromCandidate","index":1}}"#,
+        ] {
+            let proposal: ProposeResponse = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&proposal).unwrap(), json);
+            assert!(validate_proposal(&proposal).is_ok());
+        }
     }
 
     #[test]

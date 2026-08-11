@@ -169,3 +169,99 @@ fn no_context_packet_is_identical_to_before() {
     assert_eq!(packet.purpose, with.purpose);
     assert_eq!(packet.evidence_digest, with.evidence_digest);
 }
+
+#[test]
+fn validator_requires_candidate_actions_to_reference_the_sent_candidate_window() {
+    let mut packet_input = input("fill or extract a field".into());
+    packet_input.allowed_actions = vec![
+        "click_candidate".into(),
+        "type_into_candidate".into(),
+        "extract_from_candidate".into(),
+    ];
+    packet_input.context = Some(intent_engine::VisionPromptContext {
+        url: None,
+        candidates: vec![
+            intent_engine::VisionPromptCandidate {
+                role: "textbox".into(),
+                name: "First name".into(),
+                ordinal: Some(0),
+            },
+            intent_engine::VisionPromptCandidate {
+                role: "textbox".into(),
+                name: "Last name".into(),
+                ordinal: Some(1),
+            },
+        ],
+        recent_command_kinds: vec!["fill".into()],
+    });
+    let packet = compile_vision_packet(packet_input, VisionContextBudget::default()).unwrap();
+
+    for action in [
+        VisionAction::ClickCandidate { index: 1 },
+        VisionAction::TypeIntoCandidate { index: 1 },
+        VisionAction::ExtractFromCandidate { index: 1 },
+    ] {
+        let proposal = validate_backend_result(
+            &packet,
+            VisionBackendResult {
+                confidence: 0.9,
+                action: action.clone(),
+                evidence_digest: packet.evidence_digest.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            (action, proposal.action),
+            (
+                VisionAction::ClickCandidate { index: 1 },
+                VisionAction::ClickCandidate { index: 1 }
+            ) | (
+                VisionAction::TypeIntoCandidate { index: 1 },
+                VisionAction::TypeIntoCandidate { index: 1 }
+            ) | (
+                VisionAction::ExtractFromCandidate { index: 1 },
+                VisionAction::ExtractFromCandidate { index: 1 }
+            )
+        ));
+    }
+
+    for action in [
+        VisionAction::ClickCandidate { index: 2 },
+        VisionAction::TypeIntoCandidate { index: 2 },
+        VisionAction::ExtractFromCandidate { index: 2 },
+    ] {
+        assert_eq!(
+            validate_backend_result(
+                &packet,
+                VisionBackendResult {
+                    confidence: 0.9,
+                    action,
+                    evidence_digest: packet.evidence_digest.clone(),
+                },
+            )
+            .unwrap_err(),
+            VisionPacketError::CandidateIndexOutOfBounds
+        );
+    }
+
+    let mut no_candidates = packet.clone();
+    no_candidates.context = None;
+    for action in [
+        VisionAction::ClickCandidate { index: 0 },
+        VisionAction::TypeIntoCandidate { index: 0 },
+        VisionAction::ExtractFromCandidate { index: 0 },
+    ] {
+        assert_eq!(
+            validate_backend_result(
+                &no_candidates,
+                VisionBackendResult {
+                    confidence: 0.9,
+                    action,
+                    evidence_digest: no_candidates.evidence_digest.clone(),
+                },
+            )
+            .unwrap_err(),
+            VisionPacketError::CandidateIndexOutOfBounds
+        );
+    }
+}

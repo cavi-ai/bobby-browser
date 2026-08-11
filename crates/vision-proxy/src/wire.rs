@@ -34,14 +34,14 @@ pub struct ProposeContextCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProposeResponse {
     pub confidence: f32,
     pub action: VisionAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum VisionAction {
     Click {
         x: f64,
@@ -58,6 +58,12 @@ pub enum VisionAction {
     ClickCandidate {
         index: u32,
     },
+    TypeIntoCandidate {
+        index: u32,
+    },
+    ExtractFromCandidate {
+        index: u32,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,7 +75,7 @@ pub struct ExtractRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractResponse {
     pub value: serde_json::Value,
 }

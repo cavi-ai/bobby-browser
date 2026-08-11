@@ -33,6 +33,13 @@ V1_PREFIX = """BOBBY-VISION/1
 ROLE: element selector for a browser automation runtime
 RULES: reply with ONLY the index of the element that satisfies the task. No text, no JSON, no explanation. If nothing fits, reply -1."""
 
+ACTION_BY_INTENT = {
+    "fill": "typeIntoCandidate",
+    "type": "typeIntoCandidate",
+    "extract": "extractFromCandidate",
+}
+CLICK_INTENT_KINDS = frozenset(("locate", "submitAndVerify", "follow", "dismissObstruction"))
+
 
 class MlxV1Provider(VisionProvider):
     name = "v1"
@@ -55,6 +62,11 @@ class MlxV1Provider(VisionProvider):
         log.info("Model loaded.")
 
     def propose(self, request: ProposeRequest) -> ProposeResponse:
+        text = self._generate_index(request)
+        index = self._parse_index(text.strip())
+        return self._response_for_index(request, index)
+
+    def _generate_index(self, request: ProposeRequest) -> str:
         self._ensure_loaded()
         from mlx_lm import generate
 
@@ -68,22 +80,35 @@ class MlxV1Provider(VisionProvider):
             sampler=make_sampler(temp=0.0),
             verbose=False,
         )
-        text = response if isinstance(response, str) else getattr(response, "text", str(response))
-        index = self._parse_index(text.strip())
+        return response if isinstance(response, str) else getattr(response, "text", str(response))
+
+    def _response_for_index(
+        self, request: ProposeRequest, index: Optional[int]
+    ) -> ProposeResponse:
         n_candidates = len(request.context.candidates) if request.context else 0
 
-        if index is None or index < 0 or index >= max(n_candidates, 1):
+        action_kind = ACTION_BY_INTENT.get(request.intent_kind)
+        if action_kind is None:
+            if request.intent_kind not in CLICK_INTENT_KINDS:
+                return self._abstention()
+            action_kind = "clickCandidate"
+
+        if index is None or index < 0 or index >= n_candidates:
             # Abstain (or out-of-range noise treated as abstention, per the
             # wire contract): zero confidence fails the runtime floor, which
             # is the fallback path.
-            return ProposeResponse(
-                confidence=0.0,
-                action={"kind": "clickCandidate", "index": 0},
-            )
+            return self._abstention()
 
         return ProposeResponse(
             confidence=0.95,
-            action={"kind": "clickCandidate", "index": index},
+            action={"kind": action_kind, "index": index},
+        )
+
+    @staticmethod
+    def _abstention() -> ProposeResponse:
+        return ProposeResponse(
+            confidence=0.0,
+            action={"kind": "clickCandidate", "index": 0},
         )
 
     def extract(self, schema: dict, content: str, purpose: Optional[str]) -> dict:

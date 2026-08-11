@@ -180,11 +180,7 @@ impl intent_engine::VisionAssist for AcpVisionAssist {
         let (width, height) = png_dimensions(&request.screenshot_png)
             .ok_or_else(|| vision_error("vision screenshot is not a valid bounded PNG"))?;
         let digest = hex::encode(Sha256::digest(&request.screenshot_png));
-        let allowed_actions = match request.intent_kind.as_str() {
-            "extract" => vec!["extract_value".to_owned()],
-            "fill" | "type" => vec!["click".to_owned(), "type_text".to_owned()],
-            _ => vec!["click".to_owned()],
-        };
+        let allowed_actions = allowed_actions_for_intent(&request.intent_kind);
         let packet = intent_engine::compile_vision_packet(
             intent_engine::VisionPacketInput {
                 purpose: request.purpose,
@@ -213,6 +209,14 @@ impl intent_engine::VisionAssist for AcpVisionAssist {
             .map_err(|error| vision_error(&error.to_string()))?;
         intent_engine::validate_backend_result(&packet, reply.result)
             .map_err(|error| vision_error(&error.to_string()))
+    }
+}
+
+fn allowed_actions_for_intent(intent_kind: &str) -> Vec<String> {
+    match intent_kind {
+        "extract" => vec!["extract_from_candidate".into(), "extract_value".into()],
+        "fill" | "type" => vec!["type_into_candidate".into(), "type_text".into()],
+        _ => vec!["click_candidate".into(), "click".into()],
     }
 }
 
@@ -367,7 +371,7 @@ fn build_prompt(packet: &VisionTaskPacket) -> Vec<ContentBlock> {
         })),
         "responseSchema": {
             "confidence": "number 0..1",
-            "action": { "kind": "click|type_text|extract_value" },
+            "action": { "kind": "click|click_candidate|type_text|type_into_candidate|extract_value|extract_from_candidate" },
             "evidenceDigest": "same digest supplied above"
         },
         "rules": [
@@ -387,7 +391,7 @@ fn build_prompt(packet: &VisionTaskPacket) -> Vec<ContentBlock> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WireResult {
     confidence: f32,
     action: WireAction,
@@ -395,11 +399,14 @@ struct WireResult {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireAction {
     Click { x: f64, y: f64 },
     TypeText { text: String },
     ExtractValue { value: String },
+    ClickCandidate { index: u32 },
+    TypeIntoCandidate { index: u32 },
+    ExtractFromCandidate { index: u32 },
 }
 
 fn decode_result(raw: &str) -> Result<VisionBackendResult, AcpClientError> {
@@ -409,6 +416,9 @@ fn decode_result(raw: &str) -> Result<VisionBackendResult, AcpClientError> {
         WireAction::Click { x, y } => VisionAction::Click { x, y },
         WireAction::TypeText { text } => VisionAction::TypeText { text },
         WireAction::ExtractValue { value } => VisionAction::ExtractValue { value },
+        WireAction::ClickCandidate { index } => VisionAction::ClickCandidate { index },
+        WireAction::TypeIntoCandidate { index } => VisionAction::TypeIntoCandidate { index },
+        WireAction::ExtractFromCandidate { index } => VisionAction::ExtractFromCandidate { index },
     };
     Ok(VisionBackendResult {
         confidence: wire.confidence,
@@ -464,5 +474,64 @@ fn classify_authentication_error(
         AcpClientError::Transport(format!(
             "ACP advertised authentication failed for {message}"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_candidate_actions_from_the_snake_case_acp_contract() {
+        let type_into = decode_result(
+            r#"{"confidence":0.9,"action":{"kind":"type_into_candidate","index":1},"evidenceDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            type_into.action,
+            VisionAction::TypeIntoCandidate { index: 1 }
+        ));
+
+        let extract_from = decode_result(
+            r#"{"confidence":0.9,"action":{"kind":"extract_from_candidate","index":1},"evidenceDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            extract_from.action,
+            VisionAction::ExtractFromCandidate { index: 1 }
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_acp_action_fields_without_echoing_values() {
+        let secret = "runtime-secret-acp-field";
+        let raw = format!(
+            r#"{{"confidence":0.9,"action":{{"kind":"type_into_candidate","index":1,"text":"{secret}"}},"evidenceDigest":"digest"}}"#
+        );
+        let error = decode_result(&raw).unwrap_err().to_string();
+        assert!(!error.contains(secret));
+    }
+
+    #[test]
+    fn candidate_actions_are_advertised_only_for_compatible_intents() {
+        assert_eq!(
+            allowed_actions_for_intent("extract"),
+            vec![
+                "extract_from_candidate".to_owned(),
+                "extract_value".to_owned()
+            ]
+        );
+        assert_eq!(
+            allowed_actions_for_intent("fill"),
+            vec!["type_into_candidate".to_owned(), "type_text".to_owned()]
+        );
+        assert_eq!(
+            allowed_actions_for_intent("type"),
+            vec!["type_into_candidate".to_owned(), "type_text".to_owned()]
+        );
+        assert_eq!(
+            allowed_actions_for_intent("submit"),
+            vec!["click_candidate".to_owned(), "click".to_owned()]
+        );
     }
 }

@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::auth;
 use crate::upstream::{ExtractInput, ProposeInput, Upstream, UpstreamError};
-use crate::validate::{validate_extract, validate_proposal, ValidateError};
+use crate::validate::{validate_extract, validate_proposal_for_request, ValidateError};
 use crate::wire::{ExtractRequest, ProposeRequest};
 
 /// Upstream provider type for the vision proxy.
@@ -95,6 +95,11 @@ async fn handle_propose(state: &AppState, body: Value) -> Response {
         Err(error) => return bad_request(&error.to_string()),
     };
 
+    let intent_kind = request.intent_kind.clone();
+    let candidate_count = request
+        .context
+        .as_ref()
+        .map_or(0, |context| context.candidates.len());
     let input = ProposeInput {
         purpose: request.purpose,
         intent_kind: request.intent_kind,
@@ -108,7 +113,7 @@ async fn handle_propose(state: &AppState, body: Value) -> Response {
         Err(error) => return bad_gateway(upstream_error_message(error)),
     };
 
-    if let Err(error) = validate_proposal(&proposal) {
+    if let Err(error) = validate_proposal_for_request(&proposal, &intent_kind, candidate_count) {
         return bad_gateway(validate_error_message(error));
     }
 

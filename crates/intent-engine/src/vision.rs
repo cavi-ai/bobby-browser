@@ -124,6 +124,8 @@ pub enum VisionPacketError {
     EvidenceMismatch,
     #[error("vision result action is not allowed for this task")]
     ActionNotAllowed,
+    #[error("vision candidate action index is outside the supplied candidate window")]
+    CandidateIndexOutOfBounds,
     #[error("vision click coordinates are outside the supplied crop")]
     CoordinateOutOfBounds,
     #[error("vision result confidence is below the execution floor")]
@@ -201,9 +203,11 @@ pub fn validate_backend_result(
     }
     let action_name = match &result.action {
         VisionAction::Click { .. } => "click",
-        VisionAction::TypeText { .. } => "typeText",
-        VisionAction::ExtractValue { .. } => "extractValue",
-        VisionAction::ClickCandidate { .. } => "clickCandidate",
+        VisionAction::TypeText { .. } => "type_text",
+        VisionAction::ExtractValue { .. } => "extract_value",
+        VisionAction::ClickCandidate { .. } => "click_candidate",
+        VisionAction::TypeIntoCandidate { .. } => "type_into_candidate",
+        VisionAction::ExtractFromCandidate { .. } => "extract_from_candidate",
     };
     if !packet
         .allowed_actions
@@ -228,16 +232,16 @@ pub fn validate_backend_result(
         }
         VisionAction::Click { .. } => return Err(VisionPacketError::CoordinateOutOfBounds),
         VisionAction::ClickCandidate { index } => {
-            // The index must reference a candidate the prompt actually sent.
-            let sent = packet
-                .context
-                .as_ref()
-                .map(|c| c.candidates.len())
-                .unwrap_or(0);
-            if sent == 0 || index as usize >= sent {
-                return Err(VisionPacketError::CoordinateOutOfBounds);
-            }
+            validate_candidate_index(packet.context.as_ref(), index)?;
             VisionAction::ClickCandidate { index }
+        }
+        VisionAction::TypeIntoCandidate { index } => {
+            validate_candidate_index(packet.context.as_ref(), index)?;
+            VisionAction::TypeIntoCandidate { index }
+        }
+        VisionAction::ExtractFromCandidate { index } => {
+            validate_candidate_index(packet.context.as_ref(), index)?;
+            VisionAction::ExtractFromCandidate { index }
         }
         other => other,
     };
@@ -245,6 +249,17 @@ pub fn validate_backend_result(
         confidence: result.confidence,
         action,
     })
+}
+
+pub(crate) fn validate_candidate_index(
+    context: Option<&VisionPromptContext>,
+    index: u32,
+) -> Result<(), VisionPacketError> {
+    let candidate_count = context.map_or(0, |context| context.candidates.len());
+    if candidate_count == 0 || index as usize >= candidate_count {
+        return Err(VisionPacketError::CandidateIndexOutOfBounds);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +310,16 @@ pub enum VisionAction {
     ClickCandidate {
         index: u32,
     },
+    /// Fill the candidate at this index with a runtime-only value. The model
+    /// can choose the structural target but cannot receive or return its text.
+    TypeIntoCandidate {
+        index: u32,
+    },
+    /// Extract from the candidate at this index. The runtime obtains the
+    /// value locally; the provider response carries only the target index.
+    ExtractFromCandidate {
+        index: u32,
+    },
 }
 
 pub fn proposal_sha256(proposal: &VisionProposal) -> String {
@@ -316,6 +341,14 @@ pub fn proposal_sha256(proposal: &VisionProposal) -> String {
         }
         VisionAction::ClickCandidate { index } => {
             hasher.update(b"clickCandidate");
+            hasher.update(index.to_le_bytes());
+        }
+        VisionAction::TypeIntoCandidate { index } => {
+            hasher.update(b"typeIntoCandidate");
+            hasher.update(index.to_le_bytes());
+        }
+        VisionAction::ExtractFromCandidate { index } => {
+            hasher.update(b"extractFromCandidate");
             hasher.update(index.to_le_bytes());
         }
     }

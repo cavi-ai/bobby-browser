@@ -9,6 +9,9 @@ Action kinds match `crates/vision-proxy/src/wire.rs`:
     - {"kind": "click", "x": f64, "y": f64}        CSS pixels in the screenshot
     - {"kind": "typeText", "text": str}
     - {"kind": "extractValue", "value": str}
+    - {"kind": "clickCandidate", "index": int}
+    - {"kind": "typeIntoCandidate", "index": int}
+    - {"kind": "extractFromCandidate", "index": int}
 
 Providers are swappable via `create_provider()`: mlx-vlm (direct local
 inference), ollama, lmstudio, or openai — same interface, different backend.
@@ -47,6 +50,12 @@ class VisionContext:
     def from_dict(cls, data: Optional[dict]) -> "VisionContext":
         if not data:
             return cls()
+        unknown = set(data) - {"url", "candidates", "recentCommandKinds"}
+        if unknown:
+            raise ValueError("unknown vision context fields")
+        for candidate in data.get("candidates", []):
+            if set(candidate) - {"role", "name", "ordinal"}:
+                raise ValueError("unknown vision candidate fields")
         return cls(
             url=data.get("url"),
             candidates=[
@@ -72,6 +81,8 @@ class ProposeRequest:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProposeRequest":
+        if set(data) != {"purpose", "intentKind", "stuck", "screenshotPng", "context"} and set(data) != {"purpose", "intentKind", "stuck", "screenshotPng"}:
+            raise ValueError("invalid propose request fields")
         return cls(
             purpose=data["purpose"],
             intent_kind=data["intentKind"],
@@ -92,17 +103,32 @@ class ProposeResponse:
     def validate(self) -> None:
         if not (0.0 <= self.confidence <= 1.0):
             raise ValueError(f"confidence out of range: {self.confidence}")
+        if not isinstance(self.action, dict):
+            raise ValueError("action must be an object")
         kind = self.action.get("kind")
-        if kind not in ("click", "typeText", "extractValue", "clickCandidate"):
+        candidate_kinds = (
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+        )
+        if kind not in ("click", "typeText", "extractValue", *candidate_kinds):
             raise ValueError(f"invalid action kind: {kind}")
         if kind == "click":
+            if set(self.action) != {"kind", "x", "y"}:
+                raise ValueError("click must contain only kind, x, and y")
             x, y = self.action.get("x"), self.action.get("y")
             if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
                 raise ValueError(f"click coordinates not finite: x={x}, y={y}")
-        if kind == "clickCandidate":
+        if kind in candidate_kinds:
+            if set(self.action) != {"kind", "index"}:
+                raise ValueError(f"{kind} must contain only kind and index")
             index = self.action.get("index")
-            if not isinstance(index, int) or index < 0:
-                raise ValueError(f"clickCandidate index invalid: {index}")
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                raise ValueError(f"{kind} index invalid: {index}")
+        if kind in ("typeText", "extractValue"):
+            field = "text" if kind == "typeText" else "value"
+            if set(self.action) != {"kind", field}:
+                raise ValueError(f"{kind} must contain only kind and {field}")
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +159,9 @@ class VisionProvider(ABC):
         '{"confidence": 0.0..1.0, "action": {"kind": "click", "x": number, "y": number}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "typeText", "text": string}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "extractValue", "value": string}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": integer}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "typeIntoCandidate", "index": integer}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "extractFromCandidate", "index": integer}}\n'
         "Click coordinates are CSS pixels relative to the screenshot image. "
         "Do not include markdown fences, comments, or any text outside the JSON object."
     )
@@ -234,12 +263,11 @@ class VisionProvider(ABC):
             # the correct abstention path.
             kind = "click"
             action = {"kind": kind, "x": 0.0, "y": 0.0}
-        if kind in ("left_click", "leftClick", "mouse_click", "press"):
-            kind = "click"
-        elif kind in ("type", "inputText", "enterText", "text"):
-            kind = "typeText"
-        elif kind in ("extract", "read", "getValue"):
-            kind = "extractValue"
+        kind = cls._canonical_action_kind(kind)
+
+        allowed_fields = cls._allowed_action_fields(kind)
+        if allowed_fields is not None and set(action) - allowed_fields:
+            raise ValueError("unknown vision action fields")
 
         normalized = {"kind": kind}
         if kind == "click":
@@ -258,9 +286,38 @@ class VisionProvider(ABC):
             normalized["y"] = float(y if y is not None else 0.0)
         elif kind == "typeText":
             normalized["text"] = str(action.get("text", action.get("value", "")))
+        elif kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+            normalized["index"] = action.get("index")
         else:
             normalized["value"] = str(action.get("value", action.get("text", "")))
         return normalized
+
+    @staticmethod
+    def _canonical_action_kind(kind: str) -> str:
+        return {
+            "left_click": "click",
+            "leftClick": "click",
+            "mouse_click": "click",
+            "press": "click",
+            "type": "typeText",
+            "inputText": "typeText",
+            "enterText": "typeText",
+            "text": "typeText",
+            "extract": "extractValue",
+            "read": "extractValue",
+            "getValue": "extractValue",
+        }.get(kind, kind)
+
+    @staticmethod
+    def _allowed_action_fields(kind: str):
+        return {
+            "click": {"kind", "x", "y", "clickX", "clickY", "coordinate", "coordinates", "position"},
+            "typeText": {"kind", "text", "value"},
+            "extractValue": {"kind", "value", "text"},
+            "clickCandidate": {"kind", "index"},
+            "typeIntoCandidate": {"kind", "index"},
+            "extractFromCandidate": {"kind", "index"},
+        }.get(kind)
 
     @classmethod
     def normalize_response(cls, raw: dict) -> ProposeResponse:
@@ -268,12 +325,18 @@ class VisionProvider(ABC):
         if not isinstance(raw, dict):
             raw = {"action": raw}
         action = raw.get("action", {})
+        sibling_fields = set()
+        if isinstance(action, str):
+            canonical = cls._canonical_action_kind(action)
+            sibling_fields = (cls._allowed_action_fields(canonical) or {"kind"}) - {"kind"}
+        if set(raw) - {"confidence", "action"} - sibling_fields:
+            raise ValueError("unknown vision response fields")
 
         # Model may emit "action": "click" with coordinate fields as siblings
         if isinstance(action, str):
             action = {
                 "kind": action,
-                **{k: raw[k] for k in ("x", "y", "coordinate", "coordinates", "position", "clickX", "clickY", "text", "value") if k in raw},
+                **{k: raw[k] for k in ("x", "y", "coordinate", "coordinates", "position", "clickX", "clickY", "text", "value", "index") if k in raw},
             }
 
         abstained = (

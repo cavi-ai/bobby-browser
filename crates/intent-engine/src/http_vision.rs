@@ -46,6 +46,8 @@ enum ActionBody {
     TypeText { text: String },
     ExtractValue { value: String },
     ClickCandidate { index: u32 },
+    TypeIntoCandidate { index: u32 },
+    ExtractFromCandidate { index: u32 },
 }
 
 impl HttpVisionAssist {
@@ -152,8 +154,8 @@ impl VisionAssist for HttpVisionAssist {
             purpose: &request.purpose,
             intent_kind: &request.intent_kind,
             stuck: stuck_name(request.stuck),
-            screenshot_png: BASE64.encode(request.screenshot_png),
-            context: request.context,
+            screenshot_png: BASE64.encode(&request.screenshot_png),
+            context: request.context.clone(),
         };
         let mut call = self
             .client
@@ -198,12 +200,40 @@ impl VisionAssist for HttpVisionAssist {
                 return Err(provider_error("vision extract value exceeded its bound"));
             }
             ActionBody::ClickCandidate { index } => VisionAction::ClickCandidate { index },
+            ActionBody::TypeIntoCandidate { index } => {
+                validate_candidate_action(&request, index, "typeIntoCandidate")?;
+                VisionAction::TypeIntoCandidate { index }
+            }
+            ActionBody::ExtractFromCandidate { index } => {
+                validate_candidate_action(&request, index, "extractFromCandidate")?;
+                VisionAction::ExtractFromCandidate { index }
+            }
         };
         Ok(VisionProposal {
             confidence: proposal.confidence,
             action,
         })
     }
+}
+
+fn validate_candidate_action(
+    request: &VisionProposeRequest,
+    index: u32,
+    action_kind: &str,
+) -> Result<(), CommandError> {
+    let compatible = match action_kind {
+        "typeIntoCandidate" => matches!(request.intent_kind.as_str(), "fill" | "type"),
+        "extractFromCandidate" => request.intent_kind == "extract",
+        _ => false,
+    };
+    if !compatible {
+        return Err(provider_error(format!(
+            "vision {action_kind} action is incompatible with intent {}",
+            request.intent_kind
+        )));
+    }
+    crate::vision::validate_candidate_index(request.context.as_ref(), index)
+        .map_err(|error| provider_error(error.to_string()))
 }
 
 fn stuck_name(stuck: StuckKind) -> &'static str {
@@ -260,6 +290,56 @@ fn provider_error(message: impl Into<String>) -> CommandError {
 mod tests {
     use super::*;
     use crate::StructuredExtractor;
+
+    fn candidate_context(count: usize) -> crate::VisionPromptContext {
+        crate::VisionPromptContext {
+            url: Some("https://example.test/form".into()),
+            candidates: (0..count)
+                .map(|index| crate::VisionPromptCandidate {
+                    role: "textbox".into(),
+                    name: format!("Field {index}"),
+                    ordinal: Some(index as u32),
+                })
+                .collect(),
+            recent_command_kinds: vec!["fill".into()],
+        }
+    }
+
+    async fn propose_candidate_action(
+        body: &'static str,
+        intent_kind: &str,
+        context: Option<crate::VisionPromptContext>,
+    ) -> Result<VisionProposal, CommandError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0_u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let assist = HttpVisionAssist::new(
+            format!("http://{address}/propose"),
+            None,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assist
+            .propose(VisionProposeRequest {
+                purpose: "fill or extract a field".into(),
+                intent_kind: intent_kind.into(),
+                screenshot_png: b"png".to_vec(),
+                stuck: StuckKind::TargetMissing,
+                context,
+            })
+            .await
+    }
 
     #[test]
     fn endpoint_must_be_https_or_loopback() {
@@ -360,5 +440,89 @@ mod tests {
             proposal.action,
             VisionAction::Click { x: 12.0, y: 34.0 }
         ));
+    }
+
+    #[tokio::test]
+    async fn candidate_actions_require_a_bounded_request_context() {
+        for (body, intent_kind, context) in [
+            (
+                r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":0}}"#,
+                "fill",
+                None,
+            ),
+            (
+                r#"{"confidence":0.9,"action":{"kind":"extractFromCandidate","index":0}}"#,
+                "extract",
+                Some(candidate_context(0)),
+            ),
+            (
+                r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":1}}"#,
+                "type",
+                Some(candidate_context(1)),
+            ),
+        ] {
+            let error = propose_candidate_action(body, intent_kind, context)
+                .await
+                .expect_err("candidate actions need an in-range prompt candidate");
+            assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_actions_map_only_compatible_intents() {
+        let type_for_fill = propose_candidate_action(
+            r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":0}}"#,
+            "fill",
+            Some(candidate_context(1)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            type_for_fill.action,
+            VisionAction::TypeIntoCandidate { index: 0 }
+        ));
+
+        let type_for_type = propose_candidate_action(
+            r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":0}}"#,
+            "type",
+            Some(candidate_context(1)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            type_for_type.action,
+            VisionAction::TypeIntoCandidate { index: 0 }
+        ));
+
+        let extract = propose_candidate_action(
+            r#"{"confidence":0.9,"action":{"kind":"extractFromCandidate","index":0}}"#,
+            "extract",
+            Some(candidate_context(1)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            extract.action,
+            VisionAction::ExtractFromCandidate { index: 0 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn candidate_actions_reject_incompatible_intents() {
+        for (body, intent_kind) in [
+            (
+                r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":0}}"#,
+                "extract",
+            ),
+            (
+                r#"{"confidence":0.9,"action":{"kind":"extractFromCandidate","index":0}}"#,
+                "fill",
+            ),
+        ] {
+            let error = propose_candidate_action(body, intent_kind, Some(candidate_context(1)))
+                .await
+                .expect_err("candidate action must match the intent kind");
+            assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+        }
     }
 }

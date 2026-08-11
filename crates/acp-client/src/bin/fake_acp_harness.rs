@@ -132,6 +132,18 @@ async fn main() -> agent_client_protocol::Result<()> {
                         "evidenceDigest": "b".repeat(64),
                     })
                     .to_string(),
+                    "type-into-candidate" => serde_json::json!({
+                        "confidence": 0.98,
+                        "action": { "kind": "type_into_candidate", "index": 1 },
+                        "evidenceDigest": digest,
+                    })
+                    .to_string(),
+                    "extract-from-candidate" => serde_json::json!({
+                        "confidence": 0.98,
+                        "action": { "kind": "extract_from_candidate", "index": 1 },
+                        "evidenceDigest": digest,
+                    })
+                    .to_string(),
                     _ => serde_json::json!({
                         "confidence": 0.98,
                         "action": { "kind": "click", "x": 11.0, "y": 12.0 },

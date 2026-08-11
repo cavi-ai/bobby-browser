@@ -216,34 +216,7 @@ impl GauntletDataCollector {
                 context: None, // Would need to extract from context
             },
             example.model_response.as_ref().and_then(|r| {
-                // Convert to ProposeResponse
-                let action = match r.get("action") {
-                    Some(action) => match action.get("kind") {
-                        Some(kind) if kind.as_str() == Some("click") => {
-                            let x = action.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            let y = action.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                            Some(VisionAction::Click { x, y })
-                        }
-                        Some(kind) if kind.as_str() == Some("typeText") => {
-                            let text = action
-                                .get("text")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            Some(VisionAction::TypeText { text })
-                        }
-                        Some(kind) if kind.as_str() == Some("extractValue") => {
-                            let value = action
-                                .get("value")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            Some(VisionAction::ExtractValue { value })
-                        }
-                        _ => None,
-                    },
-                    None => None,
-                };
+                let action = r.get("action").and_then(parse_model_action);
                 let confidence = r.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
                 action.map(|a| ProposeResponse {
                     confidence,
@@ -303,6 +276,53 @@ impl GauntletDataCollector {
     }
 }
 
+fn parse_model_action(action: &serde_json::Value) -> Option<VisionAction> {
+    let kind = action.get("kind")?.as_str()?;
+    match kind {
+        "click" => Some(VisionAction::Click {
+            x: action
+                .get("x")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0),
+            y: action
+                .get("y")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0),
+        }),
+        "typeText" => Some(VisionAction::TypeText {
+            text: action
+                .get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }),
+        "extractValue" => Some(VisionAction::ExtractValue {
+            value: action
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }),
+        "clickCandidate" => Some(VisionAction::ClickCandidate {
+            index: candidate_index(action)?,
+        }),
+        "typeIntoCandidate" => Some(VisionAction::TypeIntoCandidate {
+            index: candidate_index(action)?,
+        }),
+        "extractFromCandidate" => Some(VisionAction::ExtractFromCandidate {
+            index: candidate_index(action)?,
+        }),
+        _ => None,
+    }
+}
+
+fn candidate_index(action: &serde_json::Value) -> Option<u32> {
+    action
+        .get("index")?
+        .as_u64()
+        .and_then(|index| u32::try_from(index).ok())
+}
+
 /// Run the training data collection CLI command.
 pub fn run_collect(
     output: String,
@@ -349,6 +369,98 @@ pub fn run_collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_action_parser_requires_a_u32_index() {
+        for (kind, expected) in [
+            ("clickCandidate", VisionAction::ClickCandidate { index: 7 }),
+            (
+                "typeIntoCandidate",
+                VisionAction::TypeIntoCandidate { index: 7 },
+            ),
+            (
+                "extractFromCandidate",
+                VisionAction::ExtractFromCandidate { index: 7 },
+            ),
+        ] {
+            let action = serde_json::json!({"kind": kind, "index": 7});
+            let actual = parse_model_action(&action).expect("valid candidate action");
+            assert!(matches!(
+                (expected, actual),
+                (
+                    VisionAction::ClickCandidate { index: 7 },
+                    VisionAction::ClickCandidate { index: 7 }
+                ) | (
+                    VisionAction::TypeIntoCandidate { index: 7 },
+                    VisionAction::TypeIntoCandidate { index: 7 }
+                ) | (
+                    VisionAction::ExtractFromCandidate { index: 7 },
+                    VisionAction::ExtractFromCandidate { index: 7 }
+                )
+            ));
+        }
+
+        for index in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            assert!(parse_model_action(&serde_json::json!({
+                "kind": "typeIntoCandidate",
+                "index": index,
+            }))
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn collector_writes_candidate_actions_to_the_secondary_dataset() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut collector = GauntletDataCollector::new(CollectConfig {
+            output_dir: temp.path().join("vision"),
+            flush_interval_ms: 0,
+            ..CollectConfig::default()
+        })
+        .unwrap();
+        for kind in [
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+        ] {
+            collector
+                .collect_example(
+                    "dGVzdA==".into(),
+                    "target field".into(),
+                    "fill".into(),
+                    "targetMissing".into(),
+                    None,
+                    Some(serde_json::json!({
+                        "confidence": 0.9,
+                        "action": {"kind": kind, "index": 7},
+                    })),
+                    true,
+                    "journey".into(),
+                    "step".into(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let records = std::fs::read_to_string(temp.path().join("vision/training_data.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        for (record, kind) in records.iter().zip([
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+        ]) {
+            assert_eq!(record["model_response"]["action"]["kind"], kind);
+            assert_eq!(record["model_response"]["action"]["index"], 7);
+        }
+    }
 
     #[test]
     fn test_example_creation() {

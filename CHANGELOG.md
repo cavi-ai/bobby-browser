@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Candidate-grounded fill and extraction actions are index-only: typed values remain inside the runtime, and extraction reads the value from the selected DOM candidate.
+
 ## 0.8.0 - 2026-08-10
 
 ### Added
