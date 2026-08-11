@@ -16,6 +16,7 @@ by journey into train/test files for exactly that:
 import argparse
 import json
 from collections import Counter
+from pathlib import Path
 
 
 def main():
@@ -38,8 +39,10 @@ def main():
     train = [r for r in rows if r.get("journey") != args.holdout]
     test = [r for r in rows if r.get("journey") == args.holdout]
 
-    train_path = f"{args.out_dir}/oos_train.jsonl"
-    test_path = f"{args.out_dir}/oos_test.jsonl"
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    train_path = out_dir / "oos_train.jsonl"
+    test_path = out_dir / "oos_test.jsonl"
     with open(train_path, "w") as f:
         for r in train:
             f.write(json.dumps(r) + "\n")

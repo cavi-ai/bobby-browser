@@ -113,6 +113,7 @@ class VisionProvider(ABC):
     """Canonical interface all vision backends implement."""
 
     name: str = "abstract"
+    ABSTENTION_ACTION_KINDS = frozenset(("terminate", "abort", "refuse", "none", "noop"))
 
     @abstractmethod
     def propose(self, request: ProposeRequest) -> ProposeResponse:
@@ -227,7 +228,7 @@ class VisionProvider(ABC):
             action = {"kind": "click"}
 
         kind = action.get("kind", "click")
-        if kind in ("terminate", "abort", "refuse", "none", "noop"):
+        if kind in cls.ABSTENTION_ACTION_KINDS:
             # Model abstained: emit a zero-coordinate click; the low
             # confidence (prefilled 0.0) fails the runtime floor, which is
             # the correct abstention path.
@@ -275,8 +276,12 @@ class VisionProvider(ABC):
                 **{k: raw[k] for k in ("x", "y", "coordinate", "coordinates", "position", "clickX", "clickY", "text", "value") if k in raw},
             }
 
+        abstained = (
+            isinstance(action, dict)
+            and action.get("kind") in cls.ABSTENTION_ACTION_KINDS
+        )
         normalized_action = cls.normalize_action(action)
-        confidence = float(raw.get("confidence", 0.5))
+        confidence = 0.0 if abstained else float(raw.get("confidence", 0.5))
         confidence = max(0.0, min(1.0, confidence))
         response = ProposeResponse(confidence=confidence, action=normalized_action)
         response.validate()
