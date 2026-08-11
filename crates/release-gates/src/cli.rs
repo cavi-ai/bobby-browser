@@ -16,8 +16,11 @@ use thiserror::Error;
 use crate::security::security_catalog;
 use crate::{
     evaluate, security_catalog_sha256, CertificationVerdict, GateResult, GateStatus, ManifestError,
-    PolicyError, ProcessRunner, ReleaseManifest, SecurityGate,
+    PolicyError, ProcessRunner, SecurityGate,
 };
+
+#[cfg(unix)]
+use crate::ReleaseManifest;
 
 #[cfg(unix)]
 use crate::persistence::{
@@ -443,8 +446,8 @@ pub const fn failure_exit_code(error: &CliError) -> i32 {
     }
 }
 
+#[cfg(unix)]
 struct ValidatedPaths {
-    #[cfg(unix)]
     manifest: OpenedManifest,
     output: PathBuf,
 }
@@ -529,11 +532,6 @@ fn validate_distinct_paths(cli: &Cli, repo_root: &Path) -> Result<ValidatedPaths
         manifest,
         output: canonical_output,
     })
-}
-
-#[cfg(not(unix))]
-fn validate_distinct_paths(_: &Cli, _: &Path) -> Result<ValidatedPaths, CliError> {
-    Err(CliError::UnsupportedPlatform)
 }
 
 #[cfg(unix)]
