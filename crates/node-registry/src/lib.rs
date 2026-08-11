@@ -200,6 +200,35 @@ impl NodeRegistry {
         })
     }
 
+    /// The single vision node name when exactly one is registered, else
+    /// `None`. A session that enables `visionAssist` without naming a node
+    /// resolves this default; zero or multiple registered nodes stay
+    /// fail-closed, so the default never redirects a session to a provider
+    /// that is ambiguous.
+    pub fn default_vision_node_name(&self) -> Option<&str> {
+        if let Some(node) = self.nodes.get(LEGACY_VISION_NODE) {
+            if node.kind == NodeKind::Vision
+                && self.nodes.len() == 1
+                && self.acp_profiles.is_empty()
+            {
+                return Some(LEGACY_VISION_NODE);
+            }
+        }
+        let vision_nodes: Vec<&str> = self
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.kind == NodeKind::Vision)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if vision_nodes.len() == 1 && self.acp_profiles.is_empty() {
+            return vision_nodes.first().copied();
+        }
+        if self.nodes.is_empty() && self.acp_profiles.len() == 1 {
+            return self.acp_profiles.keys().next().map(String::as_str);
+        }
+        None
+    }
+
     /// Builds a vision provider for the named node.
     ///
     /// There is deliberately no default-provider branch: a session that names
@@ -326,6 +355,43 @@ mod tests {
         assert_eq!(name, LEGACY_VISION_NODE);
         assert!(node.endpoint_url.contains("8080"));
         assert!(registry.http_structured_extractor().is_some());
+    }
+
+    #[test]
+    fn default_vision_node_resolves_a_single_legacy_entry() {
+        let mut config = AppConfig::default();
+        config.vision.endpoint_url = Some("http://127.0.0.1:9100/vision".to_owned());
+        let registry = NodeRegistry::from_config(&config);
+        assert_eq!(
+            registry.default_vision_node_name(),
+            Some(LEGACY_VISION_NODE),
+            "a lone [vision] endpoint must default-resolve for unnamed sessions"
+        );
+    }
+
+    #[test]
+    fn default_vision_node_resolves_a_single_named_entry() {
+        let registry = registry(&[(
+            "local",
+            node(NodeKind::Vision, "http://127.0.0.1:9100/vision"),
+        )]);
+        assert_eq!(registry.default_vision_node_name(), Some("local"));
+    }
+
+    #[test]
+    fn default_vision_node_stays_closed_with_zero_or_multiple() {
+        let empty = registry(&[]);
+        assert_eq!(empty.default_vision_node_name(), None);
+
+        let multi = registry(&[
+            ("a", node(NodeKind::Vision, "http://127.0.0.1:9100/a")),
+            ("b", node(NodeKind::Vision, "http://127.0.0.1:9101/b")),
+        ]);
+        assert_eq!(
+            multi.default_vision_node_name(),
+            None,
+            "multiple vision nodes must not default-pick one"
+        );
     }
 
     #[test]

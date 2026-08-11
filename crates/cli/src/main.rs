@@ -890,7 +890,7 @@ async fn run_broker_serve(
             engine: config::BrowserEngineConfig::Firefox,
             profile_id: Some(profile_id),
         } => Some(profile_id.clone()),
-        _ => None,
+        _ => config.context.profile.clone(),
     };
     if durable_profile_id.is_some() && config.context.dir.is_none() {
         config.context.dir = Some(

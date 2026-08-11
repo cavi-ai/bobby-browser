@@ -510,9 +510,20 @@ impl RuntimeService {
         // Fail closed on every negative path: no name, an unknown name, or a
         // name of the wrong kind all make the intent engine decline the
         // escalation. No branch substitutes a different node for the one the
-        // session asked for.
+        // session asked for. The one permitted convenience: an unnamed node
+        // resolves only when exactly one vision node is registered — the
+        // default never picks between providers.
         let vision_node = match policy.vision_node.as_deref() {
-            None => NodeSelection::NotRequested,
+            None => match self.nodes.default_vision_node_name() {
+                Some(name) => match self.nodes.vision(name) {
+                    Ok(provider) => NodeSelection::Resolved(provider),
+                    Err(error) => {
+                        tracing::warn!(node = %name, %error, "node.vision.default_unresolved");
+                        NodeSelection::Unresolved
+                    }
+                },
+                None => NodeSelection::NotRequested,
+            },
             Some(name) => match self.nodes.vision(name) {
                 Ok(provider) => NodeSelection::Resolved(provider),
                 Err(error) => {

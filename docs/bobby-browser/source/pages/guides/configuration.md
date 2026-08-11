@@ -272,6 +272,13 @@ profile, and on `vision-upstream-key` when a profile's `api_key_env` is unset.
 
 `[vision]` is the single-provider form. `[nodes]` supersedes it — see below.
 
+When exactly one vision node is configured — whether written as `[vision]`
+alone (the registry synthesizes the node from `endpoint_url`) or as a single
+`[nodes.<name>]` entry — a session with `executionPolicy.visionAssist=true`
+resolves it without naming `visionNode`. Zero or multiple registered nodes
+stay fail-closed: an unnamed session never escalates to an ambiguous choice,
+and `visionNode` always wins when set.
+
 ## `[nodes.<name>]`
 
 Named, separately addressable nodes. A session picks one by name through

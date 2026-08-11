@@ -26,6 +26,26 @@ use types::{ContextAnswer, ContextAnswerSource, Evidence, IntentResolutionPath, 
 /// membership from incomplete evidence.
 const PAGE_LEVEL_FORM: &str = "page";
 
+/// Roles an operator can act on. Landmarks (main, navigation, region,
+/// article) are structure, not controls; promoting them fills the domain
+/// memory with entries nothing can click.
+const PROMOTABLE_ROLES: [&str; 10] = [
+    "button",
+    "link",
+    "textbox",
+    "combobox",
+    "listbox",
+    "checkbox",
+    "radio",
+    "tab",
+    "menuitem",
+    "searchbox",
+];
+
+fn is_promotable_role(role: &str) -> bool {
+    PROMOTABLE_ROLES.contains(&role)
+}
+
 pub struct ContextPromotion {
     store: ContextStore,
 }
@@ -67,9 +87,17 @@ impl ContextPromotion {
         });
         let control = match resolution {
             Some(target) => control_from_target(target),
-            None if !success => record.candidates.first().and_then(|candidate| {
+            None if !success => record.candidates.iter().find_map(|candidate| {
+                // Only interactive roles promote: a failed run's near-miss
+                // list can lead with a landmark (main/region) whose "name"
+                // is page text; that is structure, not a control, and it
+                // must never enter durable memory.
+                let role = candidate.role.clone()?;
+                if !is_promotable_role(&role) {
+                    return None;
+                }
                 Some(ControlContext {
-                    role: candidate.role.clone()?,
+                    role,
                     accessible_name: candidate.name.clone()?,
                     ordinal: None,
                     form_membership: PAGE_LEVEL_FORM.to_string(),
@@ -339,8 +367,12 @@ fn apply_outcome(stats: &mut IntentStats, success: bool, source: RecordSource) {
 }
 
 fn control_from_target(target: &TargetSpec) -> Option<ControlContext> {
+    let role = target.role.clone()?;
+    if !is_promotable_role(&role) {
+        return None;
+    }
     Some(ControlContext {
-        role: target.role.clone()?,
+        role,
         accessible_name: target.accessible_name.clone()?,
         ordinal: target.ordinal.map(|ordinal| ordinal as u32),
         form_membership: PAGE_LEVEL_FORM.to_string(),

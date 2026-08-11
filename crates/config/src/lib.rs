@@ -149,6 +149,13 @@ pub struct ContextConfig {
     /// Days a control record is kept without a successful verification.
     #[serde(default = "default_context_ttl_days")]
     pub ttl_days: u32,
+    /// Promotion identity for engine selections without one of their own.
+    /// A Firefox exact selection supplies its paired profile id; managed
+    /// engines (disposable Chromium) have none, so without this no run
+    /// strengthens the domain memory. When set, verified outcomes promote
+    /// under this profile regardless of engine.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 const fn default_context_ttl_days() -> u32 {

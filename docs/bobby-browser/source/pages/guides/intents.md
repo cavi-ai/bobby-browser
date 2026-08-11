@@ -347,7 +347,8 @@ bobby vision connect --yes --backend acp --provider codex \
 ```
 
 Both are configured in [Configuration](configuration.md#vision). A session
-picks a named node with `executionPolicy.visionNode`.
+picks a named node with `executionPolicy.visionNode`; with exactly one
+configured vision node, `visionAssist=true` resolves it without naming one.
 
 ## Vision provider
 

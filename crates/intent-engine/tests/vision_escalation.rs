@@ -193,6 +193,281 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
 }
 
 #[tokio::test]
+async fn pixel_click_resolving_outside_the_candidate_set_fails_closed() {
+    fn candidate(name: &str) -> dom_engine::Candidate {
+        dom_engine::Candidate {
+            id: format!("btn-{name}"),
+            css: Some(format!("[data-name=\"{name}\"]")),
+            test_id: None,
+            role: Some("button".into()),
+            name: Some(name.into()),
+            label: None,
+            text: name.into(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        }
+    }
+
+    struct ResolvingBrowser {
+        inner: FakeBrowser,
+        resolved: Option<(String, String)>,
+    }
+
+    #[async_trait]
+    impl IntentBrowser for ResolvingBrowser {
+        async fn collect_candidates(
+            &self,
+            page_id: &PageId,
+            target: &TargetSpec,
+        ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+            self.inner.collect_candidates(page_id, target).await
+        }
+        async fn click(
+            &self,
+            page_id: &PageId,
+            command: &ClickCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.click(page_id, command).await
+        }
+        async fn click_xy(
+            &self,
+            page_id: &PageId,
+            x: f64,
+            y: f64,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.click_xy(page_id, x, y).await
+        }
+        async fn type_text(
+            &self,
+            page_id: &PageId,
+            command: &TypeTextCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.type_text(page_id, command).await
+        }
+        async fn upload_files(
+            &self,
+            page_id: &PageId,
+            command: &UploadFilesCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.upload_files(page_id, command).await
+        }
+        async fn wait_for(
+            &self,
+            page_id: &PageId,
+            command: &WaitForCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.wait_for(page_id, command).await
+        }
+        async fn capture_screenshot(
+            &self,
+            page_id: &PageId,
+            command: &CaptureScreenshotCommand,
+        ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+            self.inner.capture_screenshot(page_id, command).await
+        }
+        async fn element_at_point(
+            &self,
+            _page_id: &PageId,
+            _x: f64,
+            _y: f64,
+        ) -> Result<Option<(String, String)>, CommandError> {
+            Ok(self.resolved.clone())
+        }
+    }
+
+    // Ask for a link; the page has buttons, so the escalation carries the
+    // button candidates. The pixel click resolves to a link that was never
+    // in the prompt — the runtime must refuse it.
+    let locate_link = IntentCommand::Locate(LocateIntent {
+        purpose: "Continue to checkout".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+    });
+
+    let assist = Arc::new(FakeVision {
+        called: Arc::new(AtomicBool::new(false)),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::Click { x: 10.0, y: 10.0 },
+        },
+    });
+    let browser = ResolvingBrowser {
+        inner: FakeBrowser {
+            candidates: vec![candidate("Continue"), candidate("Cancel")],
+            screenshot_png: b"png".to_vec(),
+            ..FakeBrowser::default()
+        },
+        resolved: Some(("link".into(), "About".into())),
+    };
+
+    let outcome = IntentEngine::execute(
+        &locate_link,
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+    assert!(
+        error.message.contains("not among the proposed candidates"),
+        "unexpected error: {}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn pixel_click_resolving_into_the_candidate_set_completes() {
+    fn candidate(name: &str) -> dom_engine::Candidate {
+        dom_engine::Candidate {
+            id: format!("btn-{name}"),
+            css: Some(format!("[data-name=\"{name}\"]")),
+            test_id: None,
+            role: Some("button".into()),
+            name: Some(name.into()),
+            label: None,
+            text: name.into(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        }
+    }
+
+    struct ResolvingBrowser {
+        inner: FakeBrowser,
+        resolved: Option<(String, String)>,
+    }
+
+    #[async_trait]
+    impl IntentBrowser for ResolvingBrowser {
+        async fn collect_candidates(
+            &self,
+            page_id: &PageId,
+            target: &TargetSpec,
+        ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+            self.inner.collect_candidates(page_id, target).await
+        }
+        async fn click(
+            &self,
+            page_id: &PageId,
+            command: &ClickCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.click(page_id, command).await
+        }
+        async fn click_xy(
+            &self,
+            page_id: &PageId,
+            x: f64,
+            y: f64,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.click_xy(page_id, x, y).await
+        }
+        async fn type_text(
+            &self,
+            page_id: &PageId,
+            command: &TypeTextCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.type_text(page_id, command).await
+        }
+        async fn upload_files(
+            &self,
+            page_id: &PageId,
+            command: &UploadFilesCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.upload_files(page_id, command).await
+        }
+        async fn wait_for(
+            &self,
+            page_id: &PageId,
+            command: &WaitForCommand,
+        ) -> Result<Vec<Evidence>, CommandError> {
+            self.inner.wait_for(page_id, command).await
+        }
+        async fn capture_screenshot(
+            &self,
+            page_id: &PageId,
+            command: &CaptureScreenshotCommand,
+        ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+            self.inner.capture_screenshot(page_id, command).await
+        }
+        async fn element_at_point(
+            &self,
+            _page_id: &PageId,
+            _x: f64,
+            _y: f64,
+        ) -> Result<Option<(String, String)>, CommandError> {
+            Ok(self.resolved.clone())
+        }
+    }
+
+    let locate_link = IntentCommand::Locate(LocateIntent {
+        purpose: "Continue to checkout".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            ..IntentHints::default()
+        },
+    });
+
+    let assist = Arc::new(FakeVision {
+        called: Arc::new(AtomicBool::new(false)),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::Click { x: 10.0, y: 10.0 },
+        },
+    });
+    let browser = ResolvingBrowser {
+        inner: FakeBrowser {
+            candidates: vec![candidate("Continue"), candidate("Cancel")],
+            screenshot_png: b"png".to_vec(),
+            ..FakeBrowser::default()
+        },
+        resolved: Some(("button".into(), "Continue".into())),
+    };
+
+    let outcome = IntentEngine::execute(
+        &locate_link,
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { .. } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+}
+
+#[tokio::test]
 async fn click_candidate_proposal_clicks_the_referenced_element() {
     fn candidate(name: &str) -> dom_engine::Candidate {
         dom_engine::Candidate {

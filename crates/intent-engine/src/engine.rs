@@ -432,8 +432,16 @@ async fn execute_locate(
             best_match_authorized,
         } => {
             let fingerprint = fingerprint(page_id, &candidate);
+            // The evidence target names the RESOLVED element, not the request:
+            // a role-only hint ("button") resolves to a control with a name,
+            // and durable promotion keys on that identity.
+            let resolved_target = TargetSpec {
+                role: candidate.role.clone().or(target.role.clone()),
+                accessible_name: candidate.name.clone().or(target.accessible_name.clone()),
+                ..target.clone()
+            };
             let resolution = Evidence::Resolution {
-                target: Box::new(target),
+                target: Box::new(resolved_target),
                 fingerprint: Box::new(fingerprint),
                 candidates: vec![evidence.clone()],
                 best_match_authorized,
@@ -2304,6 +2312,62 @@ async fn escalate_with_vision(
             .flatten(),
         _ => None,
     };
+    // Pixel-click verification: when the page answered element_at_point and
+    // the prompt carried candidates, the clicked element must be one the
+    // model was shown. A confidently-wrong click (footer link instead of the
+    // target) resolves outside the candidate set and fails closed instead of
+    // completing. Unresolvable points (worker can't answer) keep the prior
+    // behavior: the corpus records None and the intent completes.
+    if let VisionAction::Click { .. } = &proposal.action {
+        if let (Some(resolved_element), false) = (&resolved, prompt_candidates.is_empty()) {
+            let corpus_candidates: Vec<crate::CorpusCandidate> = prompt_candidates
+                .iter()
+                .filter_map(|c| {
+                    Some(crate::CorpusCandidate {
+                        role: c.role.clone()?,
+                        name: c.name.clone()?,
+                    })
+                })
+                .collect();
+            if crate::corpus::match_resolved(&corpus_candidates, resolved_element).is_none() {
+                let mut evidence = evidence;
+                record_escalation(
+                    &corpus,
+                    corpus_inputs.as_ref(),
+                    &purpose,
+                    intent_kind,
+                    kind,
+                    &proposal,
+                    false,
+                    "visionActFailed",
+                    Some("clicked element was not among the proposed candidates".to_owned()),
+                    Some(resolved_element.clone()),
+                );
+                evidence.push(intent_evidence(execution_record_with_path(
+                    intent_kind,
+                    purpose,
+                    plan_summary,
+                    candidates,
+                    None,
+                    "visionActFailed:clickedOutsideCandidates",
+                    ResolutionDetails {
+                        path: IntentResolutionPath::VisionFallback,
+                        vision_proposal_sha256: Some(proposal_hash),
+                        artifact_ids,
+                    },
+                )));
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VisionAssistFailed,
+                        message: "vision act failed: clicked element was not among the proposed candidates".into(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence,
+                };
+            }
+        }
+    }
     record_escalation(
         &corpus,
         corpus_inputs.as_ref(),

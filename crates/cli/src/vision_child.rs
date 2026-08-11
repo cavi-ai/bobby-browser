@@ -251,10 +251,7 @@ impl ManagedVisionProxy {
             if is_port_accepting(decision.bind) {
                 break;
             }
-            if let Some(status) = child
-                .try_wait()
-                .context("vision-proxy child wait failed")?
-            {
+            if let Some(status) = child.try_wait().context("vision-proxy child wait failed")? {
                 anyhow::bail!("vision-proxy child exited early with {status}");
             }
             if std::time::Instant::now() > deadline {
