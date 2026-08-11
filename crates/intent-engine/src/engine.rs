@@ -1083,6 +1083,46 @@ async fn execute_submit_and_verify(
         boundary: true,
         expected_url: expected_url_from_wait(&expected_state),
     };
+    // If a text/element/value expected-state already holds before the click,
+    // a post-act pass proves nothing — the matcher hit static page copy and
+    // the agent would trust a submit that may never have landed. Url,
+    // document, and networkQuiet states legitimately pre-hold, so they skip
+    // this check. Fail without clicking.
+    if matches!(
+        expected_state.condition,
+        WaitCondition::Text { .. } | WaitCondition::Element { .. } | WaitCondition::Value { .. }
+    ) {
+        let pre_check = WaitForCommand {
+            condition: expected_state.condition.clone(),
+            timeout_ms: 750,
+        };
+        if browser.wait_for(page_id, &pre_check).await.is_ok() {
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::ExpectedStatePreSatisfied,
+                    message: format!(
+                        "the expected post-state ({}) already held before the submit ran; \
+                         the matcher likely hits static page copy. Strengthen expectedState \
+                         to content that only appears after the submit",
+                        wait_condition_kind(&expected_state.condition)
+                    ),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: vec![
+                    resolution,
+                    intent_evidence(execution_record(
+                        "submitAndVerify",
+                        purpose,
+                        plan_summary,
+                        vec![candidate_evidence],
+                        None,
+                        "verifyPreSatisfied",
+                    )),
+                ],
+            };
+        }
+    }
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
         Err(error) if post_navigation_context_loss(&error) => {

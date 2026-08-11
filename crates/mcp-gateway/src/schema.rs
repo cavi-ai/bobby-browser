@@ -2217,7 +2217,8 @@ fn error_code() -> Value {
         "screenshotCaptureFailed","networkPolicyDenied","httpResponseTooLarge",
         "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
         "intentCompileFailed","intentActionMismatch","obstructionSuspected",
-        "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds"
+        "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds",
+        "expectedStatePreSatisfied"
     ]})
 }
 

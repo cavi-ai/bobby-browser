@@ -611,6 +611,9 @@ pub enum ErrorCode {
     ObstructionSuspected,
     VisionAssistDenied,
     VisionAssistFailed,
+    // `submitAndVerify`'s expected state already held before the submit ran,
+    // so a post-act pass would prove nothing (static-copy matcher).
+    ExpectedStatePreSatisfied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
