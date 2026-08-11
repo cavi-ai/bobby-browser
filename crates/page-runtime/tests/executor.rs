@@ -34,6 +34,9 @@ enum DriverMode {
     StateConflict,
     CommitFail,
     CommitPause,
+    /// First launch's page commands fail with a dead-browser error;
+    /// replacements are healthy. Exercises command-path revival.
+    DeadWorkerCommands,
 }
 
 struct RecordingJournal {
@@ -162,6 +165,14 @@ impl BrowserWorker for FakeWorker {
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:inspect".into());
+        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         if matches!(self.mode, DriverMode::SlowInspect) {
             tokio::time::sleep(StdDuration::from_secs(30)).await;
         }
@@ -203,6 +214,14 @@ impl BrowserWorker for FakeWorker {
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:click".into());
+        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         if matches!(self.mode, DriverMode::FailClick) {
             return Err(driver_failure());
         }
@@ -233,6 +252,14 @@ impl BrowserWorker for FakeWorker {
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:type_text".into());
+        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         Ok(vec![Evidence::Element {
             selector: command.selector.clone(),
             text: Some(command.value.clone()),
@@ -278,6 +305,14 @@ impl BrowserWorker for FakeWorker {
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:wait_for".into());
+        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         if matches!(self.mode, DriverMode::WaitTimeout) {
             return Err(CommandError {
                 code: ErrorCode::WaitConditionTimedOut,
@@ -573,13 +608,15 @@ impl WorkerFactory for DeadThenFailFactory {
 #[async_trait]
 impl WorkerFactory for FakeFactory {
     async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
-        // DeadOnOpen: only the first launch is dead; replacements are healthy,
-        // so a revived session can open pages again.
-        let mode = if matches!(self.mode, DriverMode::DeadOnOpen)
-            && self
-                .launches
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                > 0
+        // DeadOnOpen/DeadWorkerCommands: only the first launch is dead;
+        // replacements are healthy, so a revived session can open pages again.
+        let mode = if matches!(
+            self.mode,
+            DriverMode::DeadOnOpen | DriverMode::DeadWorkerCommands
+        ) && self
+            .launches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            > 0
         {
             DriverMode::Succeed
         } else {
@@ -1726,7 +1763,7 @@ async fn download_url_materializes_requested_file_below_downloads_root() {
     let (runtime, session, page, _events, root) = adaptive_runtime(DriverMode::Succeed).await;
     let destination = root.path().join("downloads/atlas-operations.csv");
 
-    completed_evidence(
+    let evidence = completed_evidence(
         runtime
             .execute(envelope(
                 session,
@@ -1740,6 +1777,11 @@ async fn download_url_materializes_requested_file_below_downloads_root() {
             ))
             .await,
     );
+    let saved_to = evidence.iter().find_map(|item| match item {
+        Evidence::Download { saved_to, .. } => saved_to.clone(),
+        _ => None,
+    });
+    assert_eq!(saved_to.as_deref(), Some("atlas-operations.csv"));
 
     assert_eq!(
         std::fs::read(destination).unwrap(),
@@ -2259,6 +2301,7 @@ async fn recovery_never_replays_a_durable_prepared_download() {
         path: "abc".into(),
         bytes: 1,
         sha256: "abc".into(),
+        saved_to: None,
     }];
     let journal = Arc::new(RecoveryJournal {
         records: vec![JournalRecord {
@@ -2340,6 +2383,7 @@ async fn recovery_finalizes_a_durable_staged_download_before_reconciliation() {
             path: artifact_id.clone(),
             bytes: 16,
             sha256: sha256.clone(),
+            saved_to: None,
         }],
         artifact_id: Some(artifact_id.clone()),
         artifact_sha256: Some(sha256),
@@ -2514,6 +2558,126 @@ async fn terminal_policy_denial_never_calls_chromium() {
     assert!(matches!(outcome, CommandOutcome::Completed { .. }));
     let events = events.lock().await;
     assert!(!events.contains(&"http:state".to_string()));
+}
+
+#[tokio::test]
+async fn a_dead_browser_revives_and_replays_a_replayable_command() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let launches = std::sync::atomic::AtomicUsize::new(0);
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::DeadWorkerCommands,
+            launches: launches.into(),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    let page = runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page.id.clone(),
+            PrimitiveCommand::WaitFor(WaitForCommand {
+                condition: WaitCondition::NetworkQuiet {
+                    idle_ms: 100,
+                    max_in_flight: 0,
+                    ignore_url_substrings: Vec::new(),
+                    ignore_resource_types: Vec::new(),
+                    ignore_long_lived: false,
+                },
+                timeout_ms: 5_000,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "replayable command must retry transparently after revival: {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_dead_browser_revive_reports_state_loss_for_mutating_commands() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::DeadWorkerCommands,
+            launches: Default::default(),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    let page = runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser");
+
+    // The mutating command hits the dead worker, and the revival must say
+    // so instead of pretending the act happened.
+    let outcome = runtime
+        .execute(envelope(
+            session.clone(),
+            page.id.clone(),
+            PrimitiveCommand::TypeText(TypeTextCommand {
+                selector: "#field".into(),
+                target: None,
+                value: "hello".into(),
+                clear_first: false,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    let CommandOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetDetached);
+    assert!(
+        error.message.contains("browser process was killed"),
+        "{error:?}"
+    );
+
+    // The session is not wedged: the next command lands on the revived page.
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page.id.clone(),
+            PrimitiveCommand::WaitFor(WaitForCommand {
+                condition: WaitCondition::NetworkQuiet {
+                    idle_ms: 100,
+                    max_in_flight: 0,
+                    ignore_url_substrings: Vec::new(),
+                    ignore_resource_types: Vec::new(),
+                    ignore_long_lived: false,
+                },
+                timeout_ms: 5_000,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "the revived session must keep serving commands: {outcome:?}"
+    );
 }
 
 #[tokio::test]

@@ -2398,6 +2398,7 @@ dependencies = [
  "interface-core",
  "jsonschema",
  "network-engine",
+ "observability",
  "page-runtime",
  "schemars 1.2.2",
  "sdk-core",

@@ -112,6 +112,7 @@ impl BrowserWorker for ScreenshotWorker {
             path: self.download_path.to_string_lossy().into_owned(),
             bytes: DOWNLOAD_BYTES.len() as u64,
             sha256: hex::encode(Sha256::digest(DOWNLOAD_BYTES)),
+            saved_to: None,
         }])
     }
     async fn close_page_command(

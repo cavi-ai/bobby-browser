@@ -300,6 +300,7 @@ async fn adaptive_http() {
                 path,
                 bytes,
                 sha256,
+                ..
             } => {
                 assert_eq!(filename, "workflow-fixture.bin");
                 assert_eq!(*bytes, 20);

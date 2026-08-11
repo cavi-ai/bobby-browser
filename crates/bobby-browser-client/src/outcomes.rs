@@ -286,6 +286,11 @@ pub enum Evidence {
         path: String,
         bytes: u64,
         sha256: String,
+        /// Where the file landed below the configured downloads root, when a
+        /// `saveAs` destination was requested. Relative on purpose: enough to
+        /// verify the landing, never an absolute host path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        saved_to: Option<String>,
     },
     Configuration {
         name: String,
@@ -465,8 +470,14 @@ impl Evidence {
                     *path = format!("upload://evidence/{index}");
                 }
             }
-            Self::Download { path, sha256, .. } => {
+            Self::Download {
+                path,
+                sha256,
+                saved_to,
+                ..
+            } => {
                 *path = format!("artifact://sha256/{sha256}");
+                *saved_to = None;
             }
             Self::BrowserExecution { .. } => {}
             Self::IntentExecution { .. } => {}

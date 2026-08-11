@@ -1,13 +1,14 @@
 {
   "bobby": {
-    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability). Starts on toolset full via BOBBY_MCP_TOOLSET so agents skip toolset_select + most ToolSearch round-trips.",
+    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability). Runs the default explore toolset \u2014 the standard loop needs no toolset_select since the base-controls batch.",
     "mcpServers": {
       "bobby": {
         "command": "${BOBBY_MCP_COMMAND}",
-        "args": ["mcp-stdio"],
+        "args": [
+          "mcp-stdio"
+        ],
         "env": {
           "AUTOMATION_RUNTIME_BROWSER_SELECTION": "{\"preference\":{\"mode\":\"exact\",\"engine\":\"chromium\"}}",
-          "BOBBY_MCP_TOOLSET": "full",
           "BOBBY_BROWSER_CONFIG": "${BOBBY_GAUNTLET_CONFIG}"
         }
       }
@@ -18,7 +19,10 @@
     "mcpServers": {
       "playwright": {
         "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest"]
+        "args": [
+          "-y",
+          "@playwright/mcp@latest"
+        ]
       }
     }
   },
@@ -27,7 +31,10 @@
     "mcpServers": {
       "chrome-devtools": {
         "command": "npx",
-        "args": ["-y", "chrome-devtools-mcp@latest"]
+        "args": [
+          "-y",
+          "chrome-devtools-mcp@latest"
+        ]
       }
     }
   },
