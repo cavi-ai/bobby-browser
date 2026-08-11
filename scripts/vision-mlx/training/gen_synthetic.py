@@ -135,6 +135,7 @@ def make_example(rng: random.Random, i: int, negative: bool = False) -> dict:
         "context_url": f"https://example.com/{rng.choice(JOURNEYS)}/page{i}",
         "context_candidates": candidates,
         "target_index": target_index,
+        "hint_role": target["role"],
         "model_response": {
             "confidence": confidence,
             "action": action,
