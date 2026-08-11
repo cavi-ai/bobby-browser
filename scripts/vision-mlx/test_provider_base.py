@@ -5,10 +5,18 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from providers.base import ProposeResponse, VisionProvider
+from providers.base import ProposeRequest, ProposeResponse, VisionProvider
 
 
 class VisionProviderNormalizationTests(unittest.TestCase):
+    def test_request_and_action_unknown_fields_fail_closed_without_echoing_values(self):
+        secret = "runtime-secret-provider-field"
+        with self.assertRaisesRegex(ValueError, "invalid propose request fields") as error:
+            ProposeRequest.from_dict({"purpose": "p", "intentKind": "fill", "stuck": "s", "screenshotPng": "x", "text": secret})
+        self.assertNotIn(secret, str(error.exception))
+        with self.assertRaises(ValueError):
+            ProposeResponse(0.9, {"kind": "typeIntoCandidate", "index": 0, "text": secret}).validate()
+
     def test_abstention_actions_force_zero_confidence(self):
         for kind in ("terminate", "abort", "refuse", "none", "noop"):
             with self.subTest(kind=kind):
@@ -45,15 +53,13 @@ class VisionProviderNormalizationTests(unittest.TestCase):
                         {"kind": kind, "index": 0, "clear_first": True},
                     ).validate()
 
-    def test_candidate_grounded_normalization_preserves_only_the_index(self):
+    def test_candidate_grounded_normalization_rejects_unknown_payload_fields(self):
         for kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
             with self.subTest(kind=kind):
-                self.assertEqual(
+                with self.assertRaises(ValueError):
                     VisionProvider.normalize_action(
                         {"kind": kind, "index": 1, "text": "secret", "value": "secret"}
-                    ),
-                    {"kind": kind, "index": 1},
-                )
+                    )
 
 
 if __name__ == "__main__":

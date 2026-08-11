@@ -13,11 +13,7 @@ use crate::wire::{ExtractResponse, ProposeResponse};
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_MODEL: &str = "llava:7b";
 
-const PROPOSE_SYSTEM: &str = "You are a vision assistant for a browser automation agent. \
-    Analyze the screenshot and return ONLY valid JSON matching this schema: \
-    {\"confidence\": 0.0..1.0, \"action\": {\"kind\": \"click\" | \"typeText\" | \"extractValue\", ...}}. \
-    Click coordinates are CSS pixels relative to the screenshot image. \
-    Do not include markdown fences, comments, or any text outside the JSON object.";
+const PROPOSE_SYSTEM: &str = "You are a vision assistant for a browser automation agent. Return ONLY valid JSON. When candidates are listed, select only by zero-based index: clickCandidate for locate/submitAndVerify/follow/dismissObstruction, typeIntoCandidate for fill/type, extractFromCandidate for extract. Candidate actions contain only kind and index; never emit typed or extracted values. Without candidates, click/typeText/extractValue remain supported. Click coordinates are CSS pixels relative to the screenshot image. Do not include markdown fences, comments, or text outside JSON.";
 
 const EXTRACT_SYSTEM: &str = "Return only JSON {\"value\": <json matching the caller schema>}.";
 
@@ -299,5 +295,18 @@ mod tests {
             parse_json_content(r#"{"confidence":0.5,"action":{"kind":"click","x":1.0,"y":2.0}}"#)
                 .unwrap();
         assert_eq!(v["confidence"], serde_json::json!(0.5));
+    }
+
+    #[test]
+    fn prompt_requires_index_only_intent_compatible_candidate_actions() {
+        for required in [
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+            "zero-based index",
+            "never emit typed or extracted values",
+        ] {
+            assert!(PROPOSE_SYSTEM.contains(required), "missing {required}");
+        }
     }
 }

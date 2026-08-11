@@ -50,6 +50,12 @@ class VisionContext:
     def from_dict(cls, data: Optional[dict]) -> "VisionContext":
         if not data:
             return cls()
+        unknown = set(data) - {"url", "candidates", "recentCommandKinds"}
+        if unknown:
+            raise ValueError("unknown vision context fields")
+        for candidate in data.get("candidates", []):
+            if set(candidate) - {"role", "name", "ordinal"}:
+                raise ValueError("unknown vision candidate fields")
         return cls(
             url=data.get("url"),
             candidates=[
@@ -75,6 +81,8 @@ class ProposeRequest:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProposeRequest":
+        if set(data) != {"purpose", "intentKind", "stuck", "screenshotPng", "context"} and set(data) != {"purpose", "intentKind", "stuck", "screenshotPng"}:
+            raise ValueError("invalid propose request fields")
         return cls(
             purpose=data["purpose"],
             intent_kind=data["intentKind"],
@@ -95,6 +103,8 @@ class ProposeResponse:
     def validate(self) -> None:
         if not (0.0 <= self.confidence <= 1.0):
             raise ValueError(f"confidence out of range: {self.confidence}")
+        if not isinstance(self.action, dict):
+            raise ValueError("action must be an object")
         kind = self.action.get("kind")
         candidate_kinds = (
             "clickCandidate",
@@ -104,6 +114,8 @@ class ProposeResponse:
         if kind not in ("click", "typeText", "extractValue", *candidate_kinds):
             raise ValueError(f"invalid action kind: {kind}")
         if kind == "click":
+            if set(self.action) != {"kind", "x", "y"}:
+                raise ValueError("click must contain only kind, x, and y")
             x, y = self.action.get("x"), self.action.get("y")
             if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
                 raise ValueError(f"click coordinates not finite: x={x}, y={y}")
@@ -113,6 +125,10 @@ class ProposeResponse:
             index = self.action.get("index")
             if isinstance(index, bool) or not isinstance(index, int) or index < 0:
                 raise ValueError(f"{kind} index invalid: {index}")
+        if kind in ("typeText", "extractValue"):
+            field = "text" if kind == "typeText" else "value"
+            if set(self.action) != {"kind", field}:
+                raise ValueError(f"{kind} must contain only kind and {field}")
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +269,17 @@ class VisionProvider(ABC):
             kind = "typeText"
         elif kind in ("extract", "read", "getValue"):
             kind = "extractValue"
+
+        allowed_fields = {
+            "click": {"kind", "x", "y", "clickX", "clickY", "coordinate", "coordinates", "position"},
+            "typeText": {"kind", "text", "value"},
+            "extractValue": {"kind", "value", "text"},
+            "clickCandidate": {"kind", "index"},
+            "typeIntoCandidate": {"kind", "index"},
+            "extractFromCandidate": {"kind", "index"},
+        }.get(kind)
+        if allowed_fields is not None and set(action) - allowed_fields:
+            raise ValueError("unknown vision action fields")
 
         normalized = {"kind": kind}
         if kind == "click":

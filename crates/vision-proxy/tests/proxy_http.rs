@@ -345,6 +345,55 @@ async fn http_vision_assist_contract_over_bound_proxy() {
 }
 
 #[tokio::test]
+async fn candidate_action_is_rejected_when_request_context_or_intent_does_not_authorize_it() {
+    for (intent, context, action) in [
+        (
+            "fill",
+            r#"{"candidates":[]}"#,
+            VisionAction::TypeIntoCandidate { index: 0 },
+        ),
+        (
+            "fill",
+            r#"{"candidates":[{"role":"textbox","name":"Email"}]}"#,
+            VisionAction::TypeIntoCandidate { index: 1 },
+        ),
+        (
+            "extract",
+            r#"{"candidates":[{"role":"textbox","name":"Email"}]}"#,
+            VisionAction::TypeIntoCandidate { index: 0 },
+        ),
+    ] {
+        let upstream = Arc::new(MockUpstream::new(
+            ProposeResponse {
+                confidence: 0.9,
+                action,
+            },
+            ExtractResponse {
+                value: serde_json::json!(null),
+            },
+        ));
+        let mut app = test_app(upstream);
+        let body = format!(
+            r#"{{"purpose":"p","intentKind":"{intent}","stuck":"s","screenshotPng":"abc","context":{context}}}"#
+        );
+        let (status, response) = post(&mut app, Some("test-token"), &body).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{response}");
+    }
+}
+
+#[test]
+fn provider_response_rejects_unknown_fields_without_echoing_values() {
+    let secret = "runtime-secret-unknown-field";
+    let raw = format!(
+        r#"{{"confidence":0.9,"action":{{"kind":"typeIntoCandidate","index":0,"text":"{secret}"}}}}"#
+    );
+    let error = serde_json::from_str::<ProposeResponse>(&raw)
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains(secret));
+}
+
+#[tokio::test]
 async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
     use intent_engine::{HttpVisionAssist, StuckKind, VisionAssist, VisionProposeRequest};
 

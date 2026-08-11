@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use dom_engine::{Candidate, CandidateState};
 use intent_engine::{
     IntentBrowser, IntentEngine, IntentOutcome, VisionAction, VisionAssist, VisionContext,
-    VisionPromptCandidate, VisionPromptContext, VisionProposal, VisionProposeRequest,
+    VisionCorpus, VisionPromptCandidate, VisionPromptContext, VisionProposal, VisionProposeRequest,
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
@@ -707,6 +707,46 @@ async fn extract_from_candidate_out_of_range_reports_vision_assist_failed() {
     .await;
 
     assert_vision_assist_failed(&outcome);
+}
+
+#[tokio::test]
+async fn successful_candidate_extraction_records_index_without_runtime_value() {
+    let secret = "runtime-extracted-secret-4f91";
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![candidate_with_role(
+            "link",
+            "Account",
+            secret,
+            BTreeMap::new(),
+        )]]))),
+        screenshot_png: b"png".to_vec(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = IntentEngine::execute(
+        &extract(vec![field("account", "Account", ExtractValueKind::Text)]),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(fake_vision(VisionProposal {
+                confidence: 0.9,
+                action: VisionAction::ExtractFromCandidate { index: 0 },
+            })),
+            corpus: Some(VisionCorpus::new(dir.path()).unwrap()),
+            ..VisionContext::default()
+        },
+    )
+    .await;
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    let line = std::fs::read_to_string(dir.path().join("vision-corpus.jsonl")).unwrap();
+    assert!(!line.contains(secret));
+    let record: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(record["targetIndex"], 0);
+    assert_eq!(
+        record["modelResponse"]["action"],
+        serde_json::json!({"kind":"extractFromCandidate","index":0})
+    );
 }
 
 #[tokio::test]

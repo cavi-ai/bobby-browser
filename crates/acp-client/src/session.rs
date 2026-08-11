@@ -391,7 +391,7 @@ fn build_prompt(packet: &VisionTaskPacket) -> Vec<ContentBlock> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WireResult {
     confidence: f32,
     action: WireAction,
@@ -399,7 +399,7 @@ struct WireResult {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireAction {
     Click { x: f64, y: f64 },
     TypeText { text: String },
@@ -500,6 +500,16 @@ mod tests {
             extract_from.action,
             VisionAction::ExtractFromCandidate { index: 1 }
         ));
+    }
+
+    #[test]
+    fn rejects_unknown_acp_action_fields_without_echoing_values() {
+        let secret = "runtime-secret-acp-field";
+        let raw = format!(
+            r#"{{"confidence":0.9,"action":{{"kind":"type_into_candidate","index":1,"text":"{secret}"}},"evidenceDigest":"digest"}}"#
+        );
+        let error = decode_result(&raw).unwrap_err().to_string();
+        assert!(!error.contains(secret));
     }
 
     #[test]

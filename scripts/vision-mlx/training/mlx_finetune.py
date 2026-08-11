@@ -67,6 +67,7 @@ CANDIDATE_SYSTEM_PROMPT = (
 
 
 def build_prompt(example: dict, schema: str = "coords") -> str:
+    example = normalize_corpus_example(example)
     if schema == "v1":
         return build_v1_prompt(example)
     user_text = f"purpose: {example['purpose']}\nintentKind: {example['intent_kind']}\nstuck: {example['stuck']}"
@@ -93,6 +94,7 @@ RULES: reply with ONLY the index of the element that satisfies the task. No text
 
 def build_v1_prompt(example: dict) -> str:
     """The BOBBY-VISION/1 wire format: stable prefix + varying block."""
+    example = normalize_corpus_example(example)
     block = f"TASK: {example['purpose']}"
     if example.get("context_url"):
         block += f"\nPAGE: {example['context_url']}"
@@ -105,28 +107,67 @@ def build_v1_prompt(example: dict) -> str:
 
 def build_v1_completion(example: dict) -> str:
     """Bare index ground truth; -1 when the example has no valid target."""
-    index = example.get("target_index")
+    index = selected_index(example)
     return str(-1 if index is None else index)
 
 
+def normalize_corpus_example(example: dict) -> dict:
+    """Normalize the serialized Rust corpus schema without guessing payload fields."""
+    normalized = dict(example)
+    for camel, snake in (
+        ("intentKind", "intent_kind"),
+        ("contextUrl", "context_url"),
+        ("contextCandidates", "context_candidates"),
+        ("targetIndex", "target_index"),
+        ("modelResponse", "model_response"),
+    ):
+        if camel in example and snake in example and example[camel] != example[snake]:
+            raise ValueError(f"conflicting {camel}/{snake} fields")
+        if camel in example:
+            normalized[snake] = example[camel]
+    return normalized
+
+
+def selected_index(example: dict):
+    """Read the corpus boundary explicitly (Rust camelCase or legacy snake_case)."""
+    camel = example.get("targetIndex")
+    snake = example.get("target_index")
+    if camel is not None and snake is not None and camel != snake:
+        raise ValueError("conflicting target index fields")
+    return camel if camel is not None else snake
+
+
+def model_response(example: dict) -> dict:
+    camel = example.get("modelResponse")
+    snake = example.get("model_response")
+    if camel is not None and snake is not None and camel != snake:
+        raise ValueError("conflicting model response fields")
+    return camel if camel is not None else (snake or {})
+
+
 def build_completion(example: dict, schema: str = "coords") -> str:
+    example = normalize_corpus_example(example)
     if schema == "v1":
         return build_v1_completion(example)
     if schema == "candidate":
-        confidence = example.get("model_response", {}).get("confidence", 0.5)
-        index = example.get("target_index", 0)
-        action = example.get("model_response", {}).get("action", {})
+        response = model_response(example)
+        confidence = response.get("confidence", 0.5)
+        index = selected_index(example)
+        if index is None:
+            index = 0
+        action = response.get("action", {})
         kind = action.get("kind", "click")
-        if kind == "typeText":
+        if kind in ("typeText", "type_into_candidate", "typeIntoCandidate"):
             out_action = {"kind": "typeIntoCandidate", "index": index}
-        elif kind == "extractValue":
+        elif kind in ("extractValue", "extract_from_candidate", "extractFromCandidate"):
             out_action = {"kind": "extractFromCandidate", "index": index}
         else:
             out_action = {"kind": "clickCandidate", "index": index}
         return json.dumps({"confidence": confidence, "action": out_action})
 
-    action = example.get("model_response", {}).get("action", {})
-    confidence = example.get("model_response", {}).get("confidence", 0.5)
+    response = model_response(example)
+    action = response.get("action", {})
+    confidence = response.get("confidence", 0.5)
     kind = action.get("kind")
 
     if kind == "click":
@@ -145,7 +186,7 @@ def load_examples(path: str) -> list:
     with open(path, "r") as f:
         for line in f:
             if line.strip():
-                examples.append(json.loads(line))
+                examples.append(normalize_corpus_example(json.loads(line)))
     return examples
 
 

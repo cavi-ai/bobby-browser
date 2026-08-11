@@ -16,6 +16,10 @@ pub enum ValidateError {
     TypeTextTooLong,
     #[error("vision extract value exceeded its bound")]
     ExtractValueTooLong,
+    #[error("candidate action is incompatible with the request intent")]
+    CandidateIntentMismatch,
+    #[error("candidate action index is outside the request candidate list")]
+    CandidateIndexOutOfRange,
 }
 
 pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError> {
@@ -35,6 +39,38 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
             Ok(())
         }
     }
+}
+
+pub fn validate_proposal_for_request(
+    proposal: &ProposeResponse,
+    intent_kind: &str,
+    candidate_count: usize,
+) -> Result<(), ValidateError> {
+    validate_proposal(proposal)?;
+    let (index, compatible) = match proposal.action {
+        VisionAction::ClickCandidate { index } => (
+            Some(index),
+            matches!(
+                intent_kind,
+                "locate" | "submitAndVerify" | "follow" | "dismissObstruction"
+            ),
+        ),
+        VisionAction::TypeIntoCandidate { index } => {
+            (Some(index), matches!(intent_kind, "fill" | "type"))
+        }
+        VisionAction::ExtractFromCandidate { index } => (Some(index), intent_kind == "extract"),
+        _ => (None, true),
+    };
+    if !compatible {
+        return Err(ValidateError::CandidateIntentMismatch);
+    }
+    if let Some(index) = index {
+        let index = usize::try_from(index).map_err(|_| ValidateError::CandidateIndexOutOfRange)?;
+        if candidate_count == 0 || index >= candidate_count {
+            return Err(ValidateError::CandidateIndexOutOfRange);
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_extract(response: &ExtractResponse) -> Result<(), ValidateError> {

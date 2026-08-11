@@ -12,7 +12,7 @@ from evaluate_adapter import (
     parse_v1_response,
     v1_metrics,
 )
-from mlx_finetune import build_completion
+from mlx_finetune import build_completion, build_prompt
 
 
 class MixedActionEvaluationTests(unittest.TestCase):
@@ -54,6 +54,32 @@ class MixedActionEvaluationTests(unittest.TestCase):
             completion["action"], {"kind": "typeIntoCandidate", "index": 1}
         )
         self.assertNotIn("runtime secret", json.dumps(completion))
+
+    def test_production_camel_case_record_flows_to_completion_and_evaluator(self):
+        record = {
+            "purpose": "Fill email",
+            "intent_kind": "fill",
+            "stuck": "targetAmbiguous",
+            "targetIndex": 1,
+            "contextCandidates": [
+                {"role": "textbox", "name": "First"},
+                {"role": "textbox", "name": "Email"},
+            ],
+            "modelResponse": {"confidence": 0.9, "action": {"kind": "typeIntoCandidate", "index": 1}},
+        }
+        completion = json.loads(build_completion(record, schema="candidate"))
+        prompt = build_prompt(record, schema="candidate")
+        result = element_accuracy([{"prediction": completion}], [record])
+        self.assertIn("candidates", prompt)
+        self.assertEqual(completion["action"], {"kind": "typeIntoCandidate", "index": 1})
+        self.assertEqual(result["correct"], 1)
+
+    def test_snake_case_candidate_kind_is_canonicalized_symmetrically(self):
+        example = {"target_index": 0, "model_response": {"action": {"kind": "extract_from_candidate", "index": 0}}}
+        completion = json.loads(build_completion(example, schema="candidate"))
+        result = element_accuracy([{"prediction": completion}], [example])
+        self.assertEqual(completion["action"], {"kind": "extractFromCandidate", "index": 0})
+        self.assertEqual(result["correct"], 1)
 
     def test_wrong_action_kind_cannot_receive_element_credit(self):
         predictions = [{"prediction": {"action": {"kind": "typeText", "text": "Save"}}}]

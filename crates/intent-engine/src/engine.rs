@@ -1805,6 +1805,7 @@ async fn escalate_extract_field_with_vision(
         })
         .collect();
 
+    let screenshot_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
     let proposal = match assist
         .propose(VisionProposeRequest {
             purpose: field.purpose.clone(),
@@ -1840,6 +1841,55 @@ async fn escalate_extract_field_with_vision(
         _ => None,
     };
     let error_code = value.is_none().then_some(ErrorCode::VisionAssistFailed);
+
+    if let Some(corpus) = &vision.corpus {
+        let context_candidates = prompt_window
+            .iter()
+            .map(|candidate| crate::CorpusCandidate {
+                role: candidate.role.clone().expect("filtered role"),
+                name: candidate.name.clone().expect("filtered name"),
+            })
+            .collect::<Vec<_>>();
+        if !context_candidates.is_empty() {
+            let target_index = match proposal.action {
+                VisionAction::ExtractFromCandidate { index } if value.is_some() => {
+                    usize::try_from(index)
+                        .ok()
+                        .filter(|index| *index < context_candidates.len())
+                }
+                _ => None,
+            };
+            corpus.record(&crate::CorpusRecord {
+                image_b64: screenshot_b64,
+                purpose: field.purpose.clone(),
+                intent_kind: "extract".into(),
+                stuck: stuck_label(stuck).into(),
+                context_url: vision
+                    .prompt_context
+                    .as_ref()
+                    .and_then(|context| context.url.clone()),
+                context_candidates,
+                target_index,
+                resolved_element: None,
+                model_response: crate::corpus::CorpusModelResponse {
+                    confidence: proposal.confidence,
+                    action: crate::corpus::raw_action(&proposal.action),
+                },
+                success: value.is_some(),
+                journey: "production".into(),
+                step: "extract".into(),
+                outcome_stage: if value.is_some() {
+                    "visionFallback"
+                } else {
+                    "visionActFailed"
+                }
+                .into(),
+                error_message: value
+                    .is_none()
+                    .then(|| "candidate extraction failed".into()),
+            });
+        }
+    }
 
     let mut evidence = screenshot_evidence;
     evidence.push(Evidence::Extraction {
@@ -2428,9 +2478,16 @@ fn record_escalation(
         return;
     }
     let resolved_element = resolved.map(|(role, name)| crate::ResolvedElement { role, name });
-    let target_index = resolved_element.as_ref().and_then(|element| {
-        crate::corpus::match_resolved(candidates, &(element.role.clone(), element.name.clone()))
-    });
+    let target_index = match proposal.action {
+        VisionAction::ClickCandidate { index }
+        | VisionAction::TypeIntoCandidate { index }
+        | VisionAction::ExtractFromCandidate { index } => usize::try_from(index)
+            .ok()
+            .filter(|index| *index < candidates.len()),
+        _ => resolved_element.as_ref().and_then(|element| {
+            crate::corpus::match_resolved(candidates, &(element.role.clone(), element.name.clone()))
+        }),
+    };
     corpus.record(&crate::CorpusRecord {
         image_b64: image_b64.clone(),
         purpose: purpose.clone().unwrap_or_default(),

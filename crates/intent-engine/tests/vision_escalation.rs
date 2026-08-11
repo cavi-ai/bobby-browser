@@ -226,6 +226,7 @@ async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_prov
         screenshot_png: b"png".to_vec(),
         ..FakeBrowser::default()
     };
+    let dir = tempfile::tempdir().expect("temp corpus directory");
 
     let outcome = IntentEngine::execute(
         &fill(
@@ -245,7 +246,7 @@ async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_prov
             proposals: None,
             defer_escalation: false,
             prompt_context: None,
-            corpus: None,
+            corpus: Some(VisionCorpus::new(dir.path()).expect("vision corpus")),
         },
     )
     .await;
@@ -282,6 +283,10 @@ async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_prov
     assert_eq!(calls[0].value, "runtime secret");
     assert!(calls[0].clear_first);
     assert_eq!(click_xy_calls.load(Ordering::SeqCst), 0);
+    let corpus = std::fs::read_to_string(dir.path().join("vision-corpus.jsonl")).unwrap();
+    assert!(!corpus.contains("runtime secret"));
+    let record: serde_json::Value = serde_json::from_str(corpus.trim()).unwrap();
+    assert_eq!(record["targetIndex"], 1);
 }
 
 #[tokio::test]

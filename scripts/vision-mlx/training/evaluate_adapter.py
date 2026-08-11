@@ -163,19 +163,27 @@ def element_accuracy(predictions: list, examples: list) -> dict:
             continue
         action = pred.get("action", {})
         kind = action.get("kind")
-        target = e.get("target_index")
-        target_action = e.get("model_response", {}).get("action", {})
+        target = e.get("targetIndex", e.get("target_index"))
+        target_action = e.get("modelResponse", e.get("model_response", {})).get("action", {})
         expected_kind = target_action.get("kind")
-        canonical_kind = {
+        canonicalize = lambda value: {
             "clickCandidate": "click",
+            "click_candidate": "click",
             "typeIntoCandidate": "typeText",
+            "type_into_candidate": "typeText",
             "extractFromCandidate": "extractValue",
-        }.get(kind, kind)
+            "extract_from_candidate": "extractValue",
+        }.get(value, value)
+        canonical_kind = canonicalize(kind)
+        expected_kind = canonicalize(expected_kind)
 
         if kind in (
             "clickCandidate",
+            "click_candidate",
             "typeIntoCandidate",
+            "type_into_candidate",
             "extractFromCandidate",
+            "extract_from_candidate",
             "click",
             "typeText",
             "extractValue",
@@ -186,7 +194,7 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         target_correct = False
         payload_required = False
         payload_correct = False
-        if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+        if kind in ("clickCandidate", "click_candidate", "typeIntoCandidate", "type_into_candidate", "extractFromCandidate", "extract_from_candidate"):
             if target is None:
                 continue
             scored += 1
