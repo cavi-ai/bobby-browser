@@ -75,7 +75,17 @@ class MlxVlmProvider(VisionProvider):
             )
             raw_text = prefill + (result.text if hasattr(result, "text") else str(result))
             log.debug("model raw output: %s", raw_text)
-            raw = self.parse_json_content(raw_text)
+            try:
+                raw = self.parse_json_content(raw_text)
+            except (ValueError, KeyError) as error:
+                # Malformed model output degrades to a clean abstain: zero
+                # confidence fails the runtime floor, which is the designed
+                # fallback — a 500 here would read as provider failure.
+                log.warning("unparseable model output, abstaining: %s", error)
+                return ProposeResponse(
+                    confidence=0.0,
+                    action={"kind": "click", "x": 0.0, "y": 0.0},
+                )
             log.debug("parsed: %s", raw)
             return self.normalize_response(raw)
         finally:

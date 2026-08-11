@@ -243,11 +243,26 @@ impl ManagedVisionProxy {
 
         let mut child = cmd.spawn().context("failed to spawn vision-proxy child")?;
 
-        std::thread::sleep(Duration::from_millis(250));
-        if !is_port_accepting(decision.bind) {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("vision-proxy did not become reachable on {}", decision.bind);
+        // Probe with a deadline, not a single shot: on a loaded machine the
+        // child's exec + bind can exceed 250ms, and the mlx path also spawns
+        // the Python canonical server behind it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if is_port_accepting(decision.bind) {
+                break;
+            }
+            if let Some(status) = child
+                .try_wait()
+                .context("vision-proxy child wait failed")?
+            {
+                anyhow::bail!("vision-proxy child exited early with {status}");
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("vision-proxy did not become reachable on {}", decision.bind);
+            }
+            std::thread::sleep(Duration::from_millis(250));
         }
 
         Ok(Self { child })
