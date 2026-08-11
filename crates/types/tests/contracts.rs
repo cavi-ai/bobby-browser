@@ -1487,6 +1487,7 @@ fn control_action_validates_bounds_and_evidence_round_trips() {
                 described_by: Vec::new(),
             },
             node_replaced: false,
+            revealed_controls: Vec::new(),
         },
     };
     let value = serde_json::to_value(&evidence).unwrap();

@@ -1311,12 +1311,41 @@ impl BrowserWorker for ChromiumWorker {
                 "form control was replaced or detached after dispatch",
             )
         })?;
-        let evidence = crate::control_action_evidence(
+        let mut evidence = crate::control_action_evidence(
             &after_control,
             &command.action,
             false,
             committed.as_deref(),
         )?;
+        // Conditional fields: controls that exist only after this action
+        // (a plan select revealing a billing-cycle select). Surfacing them
+        // here saves the agent a blind re-snapshot to discover them.
+        let before_targets: Vec<&types::FormControlTarget> = before
+            .forms
+            .iter()
+            .flat_map(|form| form.controls.iter())
+            .chain(before.unowned_controls.iter())
+            .filter_map(|control| control.target.as_ref())
+            .collect();
+        evidence.revealed_controls = after
+            .forms
+            .iter()
+            .flat_map(|form| form.controls.iter())
+            .chain(after.unowned_controls.iter())
+            .filter(|control| {
+                control.target.as_ref().is_some_and(|target| {
+                    !before_targets
+                        .iter()
+                        .any(|before| crate::target_specs_equivalent(before, target))
+                })
+            })
+            .take(8)
+            .map(|control| types::RevealedControl {
+                control_kind: control.control_kind,
+                accessible_name: control.accessible_name.clone(),
+                target: control.target.clone(),
+            })
+            .collect();
         Ok(vec![Evidence::ControlAction { action: evidence }])
     }
 

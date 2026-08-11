@@ -44,6 +44,20 @@ pub struct FormControlTarget {
     pub shadow_path: Vec<SemanticTargetSegment>,
 }
 
+/// A form control that an action revealed (conditional field). Emitted on
+/// `ControlActionEvidence` so an agent learns about fields that did not
+/// exist at snapshot time without re-snapshotting the whole page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevealedControl {
+    pub control_kind: FormControlKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessible_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<FormControlTarget>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]

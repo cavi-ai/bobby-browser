@@ -591,6 +591,7 @@ pub fn control_action_evidence(
         state: control.state.clone(),
         validity: control.validity.clone(),
         node_replaced,
+        revealed_controls: Vec::new(),
     })
 }
 

@@ -810,6 +810,126 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_reports_revealed_conditional_controls() {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("revealed-controls"))
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
+    let config = AppConfig {
+        cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            shutdown_timeout_ms: 10_000,
+        },
+        browser: BrowserConfig {
+            executable: Some(chrome_executable()),
+            profiles_dir: root.path().join("profiles"),
+            headless: true,
+            max_active: 8,
+            upload_roots: vec![fixture.parent().unwrap().to_path_buf()],
+            downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
+        },
+        storage: StorageConfig {
+            journal_path: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+        },
+        interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
+        context: Default::default(),
+        nodes: Default::default(),
+    };
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "revealed-controls".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let submit = |command: PrimitiveCommand| {
+        runtime.submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(command),
+        })
+    };
+    let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
+        url: server.application_url("/onboarding"),
+        wait_until: WaitUntil::Interactive,
+        timeout_ms: 30_000,
+    }))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+
+    // Selecting the growth plan reveals the Billing cycle select, which does
+    // not exist in the snapshot taken beforehand.
+    let outcome = submit(PrimitiveCommand::ControlAction(
+        types::ControlActionCommand {
+            target: types::FormControlTarget {
+                role: "combobox".into(),
+                accessible_name: "Plan".into(),
+                ordinal: None,
+                frame_path: Vec::new(),
+                shadow_path: Vec::new(),
+            },
+            action: types::ControlAction::SelectOne {
+                value: "growth".into(),
+            },
+        },
+    ))
+    .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("plan select failed: {outcome:?}");
+    };
+    let revealed = evidence.iter().find_map(|item| match item {
+        types::Evidence::ControlAction { action } => Some(action.revealed_controls.clone()),
+        _ => None,
+    });
+    let revealed = revealed.expect("control action evidence");
+    let billing = revealed
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("Billing cycle"));
+    let billing = billing.unwrap_or_else(|| {
+        panic!("Billing cycle select missing from revealed controls: {revealed:?}")
+    });
+    let target = billing.target.as_ref().expect("revealed control target");
+    assert_eq!(target.role, "combobox");
+    runtime.sessions.delete(&session.id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn a11y_snapshot_exposes_link_urls() {
     let server = ScenarioServer::start(ScenarioConfig::seeded("a11y-link-urls"))
         .await
