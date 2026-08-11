@@ -309,6 +309,8 @@ class VisionProvider(ABC):
         """Normalize a parsed model response into the canonical schema."""
         if not isinstance(raw, dict):
             raw = {"action": raw}
+        if set(raw) - {"confidence", "action"}:
+            raise ValueError("unknown vision response fields")
         action = raw.get("action", {})
 
         # Model may emit "action": "click" with coordinate fields as siblings

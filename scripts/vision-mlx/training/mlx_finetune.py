@@ -147,6 +147,8 @@ def model_response(example: dict) -> dict:
 
 def build_completion(example: dict, schema: str = "coords") -> str:
     example = normalize_corpus_example(example)
+    if example.get("success") is False:
+        raise ValueError("unsuccessful corpus records are diagnostics, not supervised examples")
     if schema == "v1":
         return build_v1_completion(example)
     if schema == "candidate":
@@ -186,7 +188,9 @@ def load_examples(path: str) -> list:
     with open(path, "r") as f:
         for line in f:
             if line.strip():
-                examples.append(normalize_corpus_example(json.loads(line)))
+                example = normalize_corpus_example(json.loads(line))
+                if example.get("success") is not False:
+                    examples.append(example)
     return examples
 
 

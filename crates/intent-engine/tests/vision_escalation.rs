@@ -348,6 +348,9 @@ async fn type_into_candidate_verification_failure_redacts_runtime_text_from_corp
         .expect("recorded corpus entry");
     assert!(!corpus.contains(SECRET));
     assert!(corpus.contains("typeIntoCandidate verification failed"));
+    let record: serde_json::Value = serde_json::from_str(corpus.trim()).unwrap();
+    assert_eq!(record["success"], false);
+    assert!(record.get("targetIndex").is_none());
 }
 
 #[tokio::test]

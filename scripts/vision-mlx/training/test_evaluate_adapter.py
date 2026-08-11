@@ -1,21 +1,33 @@
 import json
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from evaluate_adapter import (
+    calibration_metrics,
     element_accuracy,
     parse_prediction,
     parse_v1_response,
     v1_metrics,
 )
-from mlx_finetune import build_completion, build_prompt
+from mlx_finetune import build_completion, build_prompt, load_examples
 
 
 class MixedActionEvaluationTests(unittest.TestCase):
+    def test_failed_candidate_records_are_not_supervised(self):
+        for stage in ("visionRejectionFloor", "visionActFailed"):
+            record = {"success": False, "outcomeStage": stage, "targetIndex": 1, "modelResponse": {"confidence": 0.1, "action": {"kind": "typeIntoCandidate", "index": 1}}}
+            with self.assertRaisesRegex(ValueError, "not supervised"):
+                build_completion(record, schema="candidate")
+            with tempfile.NamedTemporaryFile("w+", suffix=".jsonl") as corpus:
+                corpus.write(json.dumps(record) + "\n")
+                corpus.flush()
+                self.assertEqual(load_examples(corpus.name), [])
+
     def test_candidate_typing_scores_the_selected_target_without_content(self):
         predictions = [
             {"prediction": {"action": {"kind": "typeIntoCandidate", "index": 1}}}
@@ -73,6 +85,22 @@ class MixedActionEvaluationTests(unittest.TestCase):
         self.assertIn("candidates", prompt)
         self.assertEqual(completion["action"], {"kind": "typeIntoCandidate", "index": 1})
         self.assertEqual(result["correct"], 1)
+
+    def test_production_camel_case_record_scores_calibration_and_v1_positive(self):
+        record = {
+            "success": True,
+            "targetIndex": 1,
+            "contextCandidates": [
+                {"role": "button", "name": "A"},
+                {"role": "button", "name": "B"},
+            ],
+            "modelResponse": {"confidence": 0.9, "action": {"kind": "clickCandidate", "index": 1}},
+        }
+        prediction = {"prediction": {"confidence": 0.9, "action": {"kind": "clickCandidate", "index": 1}}}
+        self.assertEqual(calibration_metrics([prediction], [record])["scored"], 1)
+        v1 = v1_metrics([{"prediction": {"action": {"kind": "v1", "index": 1}}}], [record])
+        self.assertEqual(v1["positive_examples"], 1)
+        self.assertEqual(v1["element_accuracy"], 1.0)
 
     def test_snake_case_candidate_kind_is_canonicalized_symmetrically(self):
         example = {"target_index": 0, "model_response": {"action": {"kind": "extract_from_candidate", "index": 0}}}

@@ -2481,9 +2481,13 @@ fn record_escalation(
     let target_index = match proposal.action {
         VisionAction::ClickCandidate { index }
         | VisionAction::TypeIntoCandidate { index }
-        | VisionAction::ExtractFromCandidate { index } => usize::try_from(index)
-            .ok()
-            .filter(|index| *index < candidates.len()),
+        | VisionAction::ExtractFromCandidate { index }
+            if success =>
+        {
+            usize::try_from(index)
+                .ok()
+                .filter(|index| *index < candidates.len())
+        }
         _ => resolved_element.as_ref().and_then(|element| {
             crate::corpus::match_resolved(candidates, &(element.role.clone(), element.name.clone()))
         }),

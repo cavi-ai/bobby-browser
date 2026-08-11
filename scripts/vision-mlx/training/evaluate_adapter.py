@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-from mlx_finetune import build_completion, build_prompt
+from mlx_finetune import build_completion, build_prompt, normalize_corpus_example
 
 SUPPORTED_ACTION_KINDS = {
     "click",
@@ -96,6 +96,7 @@ def parse_v1_response(text: str, n_candidates: int) -> int | None:
 
 
 def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
+    examples = [normalize_corpus_example(example) for example in examples]
     from mlx_lm.generate import generate
 
     predictions = []
@@ -130,6 +131,7 @@ def generate_predictions(model, tokenizer, examples: list, max_tokens: int, sche
 
 
 def target_bbox(example: dict) -> dict | None:
+    example = normalize_corpus_example(example)
     idx = example.get("target_index")
     candidates = example.get("context_candidates") or []
     if idx is None or idx >= len(candidates):
@@ -152,6 +154,7 @@ def element_accuracy(predictions: list, examples: list) -> dict:
     coords typeText: the sole textbox is implied; text is scored as payload
     coords extractValue: the returned value identifies the unique target and payload
     """
+    examples = [normalize_corpus_example(example) for example in examples]
     scored = 0
     correct = 0
     content_scored = 0
@@ -272,6 +275,7 @@ def calibration_metrics(predictions: list, examples: list) -> dict:
     - selective: accuracy/coverage at each confidence threshold
     - separation: mean confidence of correct vs incorrect predictions
     """
+    examples = [normalize_corpus_example(example) for example in examples]
     pairs = []
     for p, e in zip(predictions, examples):
         pred = p.get("prediction")
@@ -325,6 +329,7 @@ def v1_metrics(predictions: list, examples: list) -> dict:
     the model abstains (-1). Also reports abstention precision/recall — the
     routing signal confidence could not provide.
     """
+    examples = [normalize_corpus_example(example) for example in examples]
     answered_scored = 0
     answered_correct = 0
     pos_total = 0
@@ -384,7 +389,7 @@ def main():
     from fine_tune_vision import FineTuneConfig, VisionEvaluator
 
     with open(args.input, "r") as f:
-        examples = [json.loads(line) for line in f if line.strip()]
+        examples = [normalize_corpus_example(json.loads(line)) for line in f if line.strip()]
     if args.limit:
         examples = examples[: args.limit]
     print(f"Evaluating {len(examples)} examples on {args.model}"

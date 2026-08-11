@@ -192,7 +192,9 @@ async fn candidate_grounded_corpus_actions_are_index_only() {
         .await;
         assert!(matches!(outcome, IntentOutcome::Failed { .. }));
 
-        let action = &read_records(dir.path())[0]["modelResponse"]["action"];
+        let records = read_records(dir.path());
+        assert!(records[0].get("targetIndex").is_none());
+        let action = &records[0]["modelResponse"]["action"];
         assert!(matches!(
             action["kind"].as_str(),
             Some("typeIntoCandidate" | "extractFromCandidate")

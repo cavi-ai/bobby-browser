@@ -16,6 +16,9 @@ class VisionProviderNormalizationTests(unittest.TestCase):
         self.assertNotIn(secret, str(error.exception))
         with self.assertRaises(ValueError):
             ProposeResponse(0.9, {"kind": "typeIntoCandidate", "index": 0, "text": secret}).validate()
+        with self.assertRaisesRegex(ValueError, "unknown vision response fields") as error:
+            VisionProvider.normalize_response({"confidence": 0.9, "action": {"kind": "clickCandidate", "index": 0}, "text": secret})
+        self.assertNotIn(secret, str(error.exception))
 
     def test_abstention_actions_force_zero_confidence(self):
         for kind in ("terminate", "abort", "refuse", "none", "noop"):
