@@ -900,7 +900,7 @@ async fn run_broker_serve(
                 .join("context"),
         );
     }
-    let factory = compose_worker_factory(&config, selection)?;
+    let factory = firefox_companion::selection::compose_worker_factory_warm(&config, selection)?;
     match durable_profile_id {
         Some(profile_id) => {
             broker::serve_with_context_promotion(config, startup, factory, profile_id).await?
@@ -1247,24 +1247,12 @@ fn spawn_mlx_server(
 
     let mut child = cmd.spawn().context("failed to spawn vision_server.py")?;
 
-    // Wait for readiness: probe the bind for up to 30s (model load is slow).
-    let addr: SocketAddr = bind.parse().context("invalid mlx server bind")?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
-            break;
-        }
-        if let Some(status) = child.try_wait().context("mlx server wait failed")? {
-            anyhow::bail!("vision_server.py exited early with {status}");
-        }
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("vision_server.py did not become reachable on {addr}");
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
+    // Do not wait for readiness here: the caller (bobby serve) probes the
+    // proxy's own bind on a deadline, and blocking on Python startup (inter-
+    // preter + mlx imports) can exceed it. The proxy binds immediately; a
+    // request that lands before the server is up gets a 502, which the
+    // intent engine treats as a retryable provider failure.
+    let _ = &mut child;
     Ok(ManagedPythonServer { child })
 }
 
